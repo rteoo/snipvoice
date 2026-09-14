@@ -83,6 +83,7 @@ if ! "$PYTHON" -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_nati
     exit 1
 fi
 VOICE_COLLECT_ARGS=(--collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native)
+sh "$REPO_DIR/source/native/build_macos_capture.sh"
 "$PYTHON" -m PyInstaller --noconfirm --clean --windowed --onedir \
     --distpath "$STAGING_ROOT" \
     --workpath "$WORK_ROOT/build" \
@@ -93,6 +94,7 @@ VOICE_COLLECT_ARGS=(--collect-all sounddevice --collect-all soxr --copy-metadata
     --add-data "$REPO_DIR/source/snipvoice.ico:." \
     --add-data "$REPO_DIR/THIRD_PARTY_NOTICES.md:." \
     --add-data "$REPO_DIR/LICENSE:." \
+    --add-binary "$REPO_DIR/source/native/bin/snipvoice-capture:native/bin" \
     --hidden-import pystray._darwin \
     "${VOICE_COLLECT_ARGS[@]}" \
     --exclude-module torch \
@@ -135,10 +137,12 @@ plutil -replace SnipvoiceReleaseChannel -string "$RELEASE_CHANNEL" \
     "$STAGED_APP/Contents/Info.plist" 2>/dev/null \
     || plutil -insert SnipvoiceReleaseChannel -string "$RELEASE_CHANNEL" \
         "$STAGED_APP/Contents/Info.plist"
-plutil -replace NSMicrophoneUsageDescription -string "O Snipvoice usa o microfone só para o ditado local, e só quando a entrada por voz está ligada." \
+plutil -replace NSMicrophoneUsageDescription -string "O Snipvoice usa o microfone para ditado e gravações locais iniciadas por você." \
     "$STAGED_APP/Contents/Info.plist" 2>/dev/null \
-    || plutil -insert NSMicrophoneUsageDescription -string "O Snipvoice usa o microfone só para o ditado local, e só quando a entrada por voz está ligada." \
+    || plutil -insert NSMicrophoneUsageDescription -string "O Snipvoice usa o microfone para ditado e gravações locais iniciadas por você." \
         "$STAGED_APP/Contents/Info.plist"
+plutil -insert NSAudioCaptureUsageDescription -string "O Snipvoice captura o áudio do sistema em gravações locais iniciadas por você." \
+    "$STAGED_APP/Contents/Info.plist"
 
 SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
 if [[ -z "$SIGN_IDENTITY" ]] \
@@ -178,6 +182,11 @@ fi
 
 if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --voice-runtime-probe; then
     echo "The staged voice runtime probe failed. dist left unchanged." >&2
+    exit 1
+fi
+
+if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --meeting-capture-probe; then
+    echo "The staged capture helper probe failed. dist left unchanged." >&2
     exit 1
 fi
 
