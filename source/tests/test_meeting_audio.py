@@ -80,6 +80,27 @@ class MeetingAudioTests(unittest.TestCase):
         self.assertIsNotNone(capture._process.poll())
 
     @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_missing_or_boolean_generation_is_rejected(self):
+        for generation in (None, True):
+            value = "{'type':'ready','version':1}" if generation is None else "{'type':'ready','version':1,'generation':True}"
+            capture = self.fake_helper("emit(" + value + ")\ntime.sleep(10)\n")
+            with self.subTest(generation=generation), self.assertRaises(MeetingAudioError):
+                capture.start(MeetingSettings(), 1)
+            self.assertIsNotNone(capture._process.poll())
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_terminal_frame_with_error_exit_is_not_completed(self):
+        capture = self.fake_helper("emit({'type':'ready','version':1,'generation':2})\n"
+                                   "sys.stdin.readline()\nemit({'type':'stopped','generation':2})\nsys.exit(3)\n")
+        capture.start(MeetingSettings(), 2)
+        capture.command("stop")
+        capture.read_event(timeout=2)
+        with self.assertRaises(MeetingAudioError) as caught:
+            capture.stop()
+        self.assertFalse(caught.exception.resource_live)
+        self.assertIsNotNone(capture._process.poll())
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
     def test_unexpected_eof_is_not_a_successful_stop(self):
         capture = self.fake_helper("emit({'type':'ready','version':1,'generation':2})\ntime.sleep(.1)\n")
         capture.start(MeetingSettings(), 2)
