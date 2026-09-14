@@ -524,9 +524,6 @@ class MeetingStore:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def _journal_records(self, session_id):
-        return list(self._iter_journal_records(session_id))
-
     def _iter_journal_records(self, session_id):
         path = os.path.join(self._session_dir(session_id), JOURNAL_NAME)
         try:
@@ -811,21 +808,6 @@ class MeetingStore:
         metadata["duration"] = max(float(metadata.get("duration", 0.0)), end)
 
     @staticmethod
-    def _duration_from_events(events):
-        duration = 0.0
-        for event in events:
-            try:
-                end = float(event.get("timestamp", 0.0))
-                if event.get("type") == "audio":
-                    end += event["frames"] / event["rate"]
-                elif isinstance(event.get("duration"), (int, float)):
-                    end += max(0.0, float(event["duration"]))
-                duration = max(duration, end)
-            except (TypeError, ValueError, ZeroDivisionError):
-                continue
-        return duration
-
-    @staticmethod
     def _event_end(event):
         end = float(event.get("timestamp", 0.0))
         if event.get("type") == "audio":
@@ -833,42 +815,6 @@ class MeetingStore:
         elif isinstance(event.get("duration"), (int, float)):
             end += max(0.0, float(event["duration"]))
         return end
-
-    def _tracks_from_records(self, records):
-        tracks = {}
-        for record in records:
-            event = record["event"]
-            if event.get("type") != "audio":
-                continue
-            track = tracks.setdefault(
-                event["track"],
-                {"rate": event["rate"], "channels": event["channels"], "segments": []},
-            )
-            segment_path = record.get("segment")
-            segments = track["segments"]
-            if not segments or segments[-1]["path"] != segment_path:
-                segments.append(
-                    {
-                        "index": len(segments),
-                        "path": segment_path,
-                        "start": event["timestamp"],
-                        "duration": 0.0,
-                        "bytes": 0,
-                        "frames": 0,
-                        "events": 0,
-                        "rate": event["rate"],
-                        "channels": event["channels"],
-                    }
-                )
-            segment = segments[-1]
-            segment["bytes"] += int(record.get("length", 0))
-            segment["frames"] += event["frames"]
-            segment["duration"] += event["frames"] / event["rate"]
-            segment["end"] = event["timestamp"] + event["frames"] / event["rate"]
-            segment["events"] += 1
-            track["rate"] = event["rate"]
-            track["channels"] = event["channels"]
-        return tracks
 
     @staticmethod
     def _revision(metadata, revision_id):
