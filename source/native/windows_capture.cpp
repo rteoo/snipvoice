@@ -446,7 +446,8 @@ void capture(Session& session, Selection selected) {
             ComPtr<IAudioCaptureClient> input;
             check(client->GetService(IID_PPV_ARGS(input.GetAddressOf())), "Open WASAPI capture service");
             session.event("source_changed", ",\"track\":" + quote(selected.name())
-                + ",\"endpoint_id\":" + quote(utf8(id)), selected.track);
+                + ",\"endpoint_id\":" + quote(utf8(id))
+                + ",\"timestamp\":" + number(session.now()), selected.track);
             if (!previous.empty()) session.gap(selected.track, session.now(), "default_endpoint_changed");
             previous = id;
             bool running = !session.paused;

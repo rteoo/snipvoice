@@ -260,13 +260,13 @@ private func validateFormat(_ format: AudioStreamBasicDescription) throws {
     let planar = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
     let sampleBytes = Int(format.mBytesPerFrame) / (planar ? 1 : max(channels, 1))
     guard format.mFormatID == kAudioFormatLinearPCM, channels >= 1, channels <= 8,
-          format.mSampleRate.isFinite, format.mSampleRate >= 8000, format.mSampleRate <= 384000,
+          format.mSampleRate.isFinite, format.mSampleRate >= 8000, format.mSampleRate <= 192000,
           format.mSampleRate.rounded() == format.mSampleRate,
           [8, 16, 24, 32, 64].contains(bits), sampleBytes >= bits / 8, sampleBytes <= 8,
           (floating ? (bits == 32 || bits == 64) : bits <= 32),
           (!floating || sampleBytes == bits / 8),
           format.mBytesPerFrame % UInt32(planar ? 1 : channels) == 0 else {
-        throw CaptureError("The selected audio device uses an unsupported native PCM format. Choose a device with 1–8 PCM channels at an integer rate between 8 and 384 kHz.")
+        throw CaptureError("The selected audio device uses an unsupported native PCM format. Choose a device with 1–8 PCM channels at an integer rate between 8 and 192 kHz.")
     }
 }
 

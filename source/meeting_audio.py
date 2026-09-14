@@ -18,7 +18,9 @@ QUEUE_BLOCKS = 4
 
 
 class MeetingAudioError(RuntimeError):
-    pass
+    def __init__(self, message, resource_live=False):
+        super().__init__(message)
+        self.resource_live = resource_live
 
 
 def _read_exact(stream, size):
@@ -114,7 +116,9 @@ class NativeCapture:
         try:
             while True:
                 event, payload = read_frame(self._process.stdout)
-                if event.get("generation", self._generation) != self._generation:
+                generation = event.get("generation")
+                if (not isinstance(generation, int) or isinstance(generation, bool)
+                        or generation < 0 or generation != self._generation):
                     raise MeetingAudioError("O capturador enviou uma sessão antiga.")
                 if not self._ready.is_set():
                     if event["type"] != "ready" or event.get("version") != VERSION:
@@ -191,10 +195,13 @@ class NativeCapture:
         if self._reader is not None:
             self._reader.join(2)
             if self._reader.is_alive():
-                raise MeetingAudioError("O capturador ainda está encerrando; aguarde antes de gravar novamente.")
+                raise MeetingAudioError("O capturador ainda está encerrando; aguarde antes de gravar novamente.",
+                                        resource_live=True)
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
+        if process.returncode and not force:
+            raise MeetingAudioError("O capturador encerrou com erro; o áudio parcial foi preservado.")
 
     def _query(self, argument):
         process = self._spawn([argument])
