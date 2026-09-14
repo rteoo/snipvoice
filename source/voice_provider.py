@@ -29,7 +29,7 @@ class VoiceProvider:
     def is_ready(self):
         return False
 
-    def prepare(self, profile, language, progress=None, cancel_event=None):
+    def prepare(self, profile, language, progress=None, cancel_event=None, allow_download=True):
         raise VoiceRuntimeError("Provedor de voz indisponível.")
 
     def unload(self):
@@ -112,17 +112,24 @@ class LocalVoiceProvider(VoiceProvider):
             cancel_event=cancel_event,
         )
 
-    def prepare(self, profile, language, progress=None, cancel_event=None):
+    def prepare(self, profile, language, progress=None, cancel_event=None, allow_download=True):
         if not self.available():
             raise VoiceRuntimeError(
                 "O runtime transcribe.cpp não está instalado. "
                 "A voz fica desligada até o pacote nativo estar disponível."
             )
-        path = self.download_profile(
-            profile,
-            progress=progress,
-            cancel_event=cancel_event,
-        )
+        if allow_download:
+            path = self.download_profile(
+                profile, progress=progress, cancel_event=cancel_event,
+            )
+        else:
+            entry = catalog_entry(profile)
+            path = self._installed_path(entry, self.cache_dir) if entry is not None else None
+            if path is None:
+                raise VoiceModelError(
+                    "Modelo local ausente ou inválido. Importe um arquivo verificado "
+                    "ou baixe o modelo explicitamente nas configurações."
+                )
         if cancel_event is not None and cancel_event.is_set():
             return
         self.backend.load(path, profile, language)
