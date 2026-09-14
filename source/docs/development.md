@@ -20,3 +20,11 @@ No installer is produced or installed merely by creating the fork. Live
 microphone-to-paste, cancellation, device-loss, final-word resampling, denied
 permissions, stale target, upgrade/uninstall, and macOS TCC/signing behavior need
 physical desktop proof. Do not promote beta based only on offline tests or CI.
+
+Offline meetings add owned Windows/macOS capture helpers built by
+`source/native/build_windows_capture.bat` and
+`source/native/build_macos_capture.sh`. Existing native toolchains are required;
+the package scripts compile/bundle these helpers and run the non-recording
+`--meeting-capture-probe` before promotion. The meeting workspace shares the
+existing GUI root and keeps new device/disk/inference work on workers.
+See [implementation validation and open hardware gates](offline-meeting-validation.md).
