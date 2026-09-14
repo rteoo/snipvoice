@@ -1,0 +1,2 @@
+# Development-only tools; runtime and release dependencies stay in the other files.
+ruff==0.16.3
