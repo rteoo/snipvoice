@@ -1,0 +1,6 @@
+target-version = "py312"
+include = ["source/**/*.py", "source/**/*.pyw"]
+extend-exclude = ["source/tests/tmp", "build", "dist", "installer/Output"]
+
+[lint]
+select = ["F401", "F811", "F821"]
