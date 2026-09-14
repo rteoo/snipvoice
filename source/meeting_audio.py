@@ -57,6 +57,7 @@ def read_frame(stream):
                 or not math.isfinite(stamp) or stamp < 0
                 or event.get("track") not in ("microphone", "system")
                 or not isinstance(event.get("sequence"), int)
+                or isinstance(event["sequence"], bool)
                 or event["sequence"] < 0):
             raise MeetingAudioError("Formato ou relógio de captura inválido.")
     elif payload:

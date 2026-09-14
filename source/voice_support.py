@@ -1987,6 +1987,7 @@ class VoiceController:
                 if self._unload_pending or self._unload_in_progress:
                     raise VoiceRuntimeError("O modelo de ditado ainda está encerrando.")
             self._provider.unload()
+            self._stop_monitor()
             return token
         except Exception:
             with self._lock:
@@ -2014,9 +2015,9 @@ class VoiceController:
         try:
             self._provider.prepare(self.settings.profile, self.settings.language,
                                    cancel_event=self._cancel, allow_download=False)
-        except (VoiceRuntimeError, VoiceModelError) as exc:
+        except Exception as exc:
             with self._lock:
-                if generation != self._session_generation:
+                if generation != self._session_generation or self._shutdown.is_set():
                     return
                 self._state = STATE_UNAVAILABLE
                 self._load_error = str(exc)
