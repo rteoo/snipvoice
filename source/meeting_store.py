@@ -216,7 +216,6 @@ class MeetingStore:
             raise ValueError("A busca deve ser texto.")
         if not isinstance(status, str):
             raise ValueError("O filtro de estado é inválido.")
-        entries = []
         if limit == 0:
             return []
         try:
@@ -279,10 +278,12 @@ class MeetingStore:
             except (TypeError, ValueError) as exc:
                 raise ValueError("Os marcadores da reunião são inválidos.") from exc
         with self._lock:
-            metadata = self._active_metadata(session_id)
+            metadata = copy.deepcopy(self._active_metadata(session_id))
             metadata.update(copy.deepcopy(fields))
             metadata["updated_at"] = _utc_timestamp()
             self._checkpoint_session(session_id, metadata)
+            if session_id in self._active:
+                self._active[session_id] = metadata
             return True
 
     # -- Bounded readers and transcripts ---------------------------------
@@ -349,9 +350,11 @@ class MeetingStore:
                 self._active[session_id] = metadata
             return copy.deepcopy(value)
 
-    def begin_revision(self, session_id, profile, language):
+    def begin_revision(self, session_id, profile, language, status="processing"):
         if not isinstance(profile, str) or not isinstance(language, str):
             raise ValueError("O perfil e o idioma da revisão são obrigatórios.")
+        if status not in {"processing", "pending"}:
+            raise ValueError("O estado inicial da revisão é inválido.")
         with self._lock:
             metadata = self._active_metadata(session_id)
             revision_id = time.strftime("%Y%m%d-%H%M%S", time.localtime()) + "-" + uuid.uuid4().hex[:8]
@@ -359,7 +362,7 @@ class MeetingStore:
                 "id": revision_id,
                 "profile": profile,
                 "language": language,
-                "status": "processing",
+                "status": status,
                 "segments": 0,
                 "created_at": _utc_timestamp(),
                 "error": None,
@@ -396,7 +399,7 @@ class MeetingStore:
             self._checkpoint_session(session_id, metadata)
 
     def finish_revision(self, session_id, revision, status="completed", error=None):
-        if status not in {"completed", "failed", "cancelled"}:
+        if status not in {"completed", "failed", "cancelled", "superseded"}:
             raise ValueError("O estado da revisão é inválido.")
         with self._lock:
             metadata = self._active_metadata(session_id)

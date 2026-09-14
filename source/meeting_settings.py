@@ -76,3 +76,18 @@ def resolve_meeting_settings(value):
     return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),
                            resolve_selection(data.get("meeting_system")), hotkey,
                            profile, language, model.strip())
+
+
+def validate_hotkey_conflicts(settings):
+    """Separate selective listeners must never suppress overlapping voice chords."""
+    meeting = resolve_meeting_settings(settings)
+    if not meeting.hotkey:
+        return
+    chord = parse_chord(meeting.hotkey)
+    from voice_hotkey import DEFAULT_DICTATION_HOTKEY, DEFAULT_COMMAND_HOTKEY
+    for name, default in (("voice_hotkey", DEFAULT_DICTATION_HOTKEY),
+                          ("voice_command_hotkey", DEFAULT_COMMAND_HOTKEY)):
+        other = parse_chord(settings.get(name, default))
+        if chord.key == other.key and (chord.modifiers <= other.modifiers
+                                       or other.modifiers <= chord.modifiers):
+            raise ValueError("O atalho de gravação se sobrepõe a um atalho de ditado ou comando.")
