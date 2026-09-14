@@ -26,6 +26,11 @@ def run_voice_runtime_probe_if_requested(argv=None):
 
 run_voice_runtime_probe_if_requested()
 
+if "--meeting-capture-probe" in sys.argv[1:]:
+    from meeting_audio import NativeCapture
+    NativeCapture().self_test()
+    raise SystemExit(0)
+
 import platform_support
 platform_support.pin_tray_backend()
 
@@ -46,6 +51,8 @@ import ui_theme
 from voice_dispatch import VoiceTarget
 from voice_indicator import VoiceStatusIndicator
 from voice_support import VoiceController
+from meeting_support import MeetingController
+from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "0.1.0"
 RELEASE_CHANNEL = "beta"
@@ -105,6 +112,9 @@ class Snipvoice:
         self._notification_lock = threading.Lock()
         self._notification_times = {}
         self.voice = None
+        self.meeting_window = None
+        self._meeting_monitor = None
+        self._settings_lock = threading.RLock()
         self.snippets = {}
         self.trigger_index = compile_trigger_index({}, set())
         self._load_commands()
@@ -120,6 +130,45 @@ class Snipvoice:
             history_dir=os.path.join(self.data_dir, "voice-history"),
         )
         self.voice.bind_library(lambda: self.snippets, lambda: self.trigger_index)
+        self.meetings = MeetingController(os.path.join(self.data_dir, "meetings"),
+                                          self.voice, notify=self.notify_error)
+
+    def open_meetings(self, icon=None, item=None):
+        self.gui.submit(self._show_meetings)
+
+    def _show_meetings(self, root):
+        if self.meeting_window is not None and self.meeting_window.winfo_exists():
+            self.meeting_window.deiconify()
+            self.meeting_window.lift()
+            return
+        from meeting_gui import open_meeting_window
+        self.meeting_window = open_meeting_window(
+            root, self.meetings, lambda: dict(self.settings), self._persist_voice_settings,
+            on_settings_changed=lambda: self.task_runner.start(
+                self._rebuild_meeting_monitor, name="meeting-hotkey"))
+
+    def _rebuild_meeting_monitor(self):
+        # Called from the GUI worker after persistence; listener construction stays off Tk.
+        from voice_hotkey import VoiceHotkeyMonitor, parse_chord
+        with self._settings_lock:
+            if self._meeting_monitor is not None:
+                self._meeting_monitor.stop()
+                self._meeting_monitor = None
+            if self._quitting.is_set():
+                return
+            try:
+                validate_hotkey_conflicts(self.settings)
+                settings = resolve_meeting_settings(self.settings)
+                if not settings.hotkey:
+                    return
+                chord = parse_chord(settings.hotkey)
+                monitor = VoiceHotkeyMonitor(chord, chord,
+                    on_press=lambda mode: self.meetings.toggle(settings),
+                    on_release=lambda mode: None)
+                monitor.start()
+                self._meeting_monitor = monitor
+            except Exception:
+                self.notify_error("Atalho de gravação indisponível. Revise os atalhos nas configurações.")
 
     def _load_commands(self):
         path = os.path.join(self.data_dir, "commands.json")
@@ -255,6 +304,11 @@ class Snipvoice:
         self.task_runner.start(self._shutdown, name="voice-shutdown")
 
     def _shutdown(self):
+        with self._settings_lock:
+            if self._meeting_monitor is not None:
+                self._meeting_monitor.stop()
+                self._meeting_monitor = None
+        self.meetings.shutdown()
         self.voice.shutdown()
         self.gui.submit(lambda root: self._close_settings_window())
         self.gui.stop()
@@ -271,6 +325,7 @@ class Snipvoice:
         if platform_support.tk_runs_on_main_thread():
             platform_support.hide_dock_icon()
         menu = pystray.Menu(
+            pystray.MenuItem("Gravações e reuniões…", self.open_meetings),
             pystray.MenuItem(self._voice_menu_label, self.toggle_voice, checked=self._voice_menu_checked),
             pystray.MenuItem("Configurar voz…", self.open_voice_settings, default=True),
             pystray.MenuItem("Recarregar comandos", self.reload_commands),
@@ -284,6 +339,7 @@ class Snipvoice:
             tray_image = image.copy()
         self.icon = pystray.Icon("snipvoice", tray_image, APP_DISPLAY_NAME, menu,
                                  **platform_support.tray_icon_options())
+        self.task_runner.start(self._rebuild_meeting_monitor, name="meeting-hotkey")
         if show_settings:
             self.open_voice_settings()
         if platform_support.tk_runs_on_main_thread():
@@ -316,14 +372,16 @@ class Snipvoice:
 
 
     def _persist_voice_settings(self, payload):
-        current = load_settings(self.settings_file)
-        if not isinstance(current, dict):
-            current = {}
-        current.update(payload)
-        if save_settings(self.settings_file, current):
-            self.settings.update(payload)
-            return True
-        return False
+        with self._settings_lock:
+            current = load_settings(self.settings_file)
+            if not isinstance(current, dict):
+                current = {}
+            current.update(payload)
+            validate_hotkey_conflicts(current)
+            if save_settings(self.settings_file, current):
+                self.settings.update(payload)
+                return True
+            return False
 
 
     def _voice_menu_label(self, _text=None):
@@ -895,12 +953,20 @@ class Snipvoice:
                     "Baixar modelo de voz", warning, parent=owner
                 ):
                     return
-            self.voice.apply_options(
-                profile=profile,
-                language=language.get(),
-                hotkey=dictation_chord.spec,
-                command_hotkey=command_chord.spec,
-            )
+            with self._settings_lock:
+                candidate = dict(self.settings, voice_hotkey=dictation_chord.spec,
+                                 voice_command_hotkey=command_chord.spec)
+                try:
+                    validate_hotkey_conflicts(candidate)
+                except ValueError as exc:
+                    messagebox.showerror("Atalhos em conflito", str(exc), parent=owner)
+                    return
+                self.voice.apply_options(
+                    profile=profile,
+                    language=language.get(),
+                    hotkey=dictation_chord.spec,
+                    command_hotkey=command_chord.spec,
+                )
             if not self.voice.is_enabled():
                 self.voice.enable()
             self.refresh_tray_menu()

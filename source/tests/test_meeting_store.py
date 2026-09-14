@@ -158,6 +158,15 @@ class MeetingStoreTests(unittest.TestCase):
                 self.store.save_summary(self.session, {"summary": "novo", "revision": "r2"})
         self.assertEqual(self.store.get(self.session)["summary"]["summary"], "anterior")
 
+    def test_reviewed_summary_and_notes_survive_regeneration_and_failed_save(self):
+        self.store.update(self.session, notes="notes", reviewed_summary="manual review")
+        self.store.save_summary(self.session, {"summary": "generated"})
+        self.assertEqual(self.store.get(self.session)["reviewed_summary"], "manual review")
+        with mock.patch("meeting_store.write_json_atomic", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.store.update(self.session, notes="unsaved")
+        self.assertEqual(self.store.get(self.session)["notes"], "notes")
+
     def test_invalid_paths_and_unknown_schema_are_rejected_read_only(self):
         with self.assertRaises(ValueError):
             self.store.get("../outside")

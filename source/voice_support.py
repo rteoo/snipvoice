@@ -557,6 +557,8 @@ class VoiceController:
                 and candidate.command_hotkey == previous.command_hotkey
             )
             self.settings = candidate
+        if not hotkeys_same:
+            self._stop_monitor()
         self._persist()
         if runtime_same and hotkeys_same:
             if candidate.enabled and self.state == STATE_UNAVAILABLE:

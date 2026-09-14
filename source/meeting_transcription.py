@@ -76,7 +76,7 @@ class MeetingTranscriber:
             if revision_item is None:
                 self._lock.release()
                 raise ValueError("A revisão de transcrição não foi encontrada.")
-            if revision_item.get("status") not in {"processing", "pending"}:
+            if revision_item.get("status") not in {"processing", "pending", "failed", "cancelled"}:
                 self._lock.release()
                 raise ValueError("A revisão de transcrição já foi encerrada.")
             if revision_item.get("profile") != profile or revision_item.get("language") != language:
@@ -93,7 +93,7 @@ class MeetingTranscriber:
                         segment = dict(segment, revision=revision)
                         self.store.add_transcript(session_id, revision, segment)
                         completed_ids.add(segment["id"])
-                self.store.finish_revision(session_id, previous, "failed",
+                self.store.finish_revision(session_id, previous, "superseded",
                                            "Retomada em uma nova revisão; os resultados originais foram preservados.")
             except Exception:
                 self._lock.release()
@@ -254,7 +254,7 @@ def transcribe_meeting(
         metadata = store.get(session_id)
         for item in reversed(metadata.get("revisions", [])):
             if (
-                item.get("status") in {"processing", "pending"}
+                item.get("status") in {"processing", "pending", "failed", "cancelled"}
                 and item.get("profile") == profile
                 and item.get("language") == language
             ):

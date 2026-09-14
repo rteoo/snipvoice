@@ -184,6 +184,9 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     if metadata.get("summary"):
         line("\nResumo local editável:")
         line(json.dumps(metadata["summary"], ensure_ascii=False))
+    if metadata.get("reviewed_summary"):
+        line("\nResumo revisado manualmente:")
+        line(metadata["reviewed_summary"])
 
 
 def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=None):
