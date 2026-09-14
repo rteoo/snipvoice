@@ -9,4 +9,5 @@ dist/
 installer/Output/
 source/tests/tmp/
 .venv/
+source/native/bin/
 *.DS_Store
