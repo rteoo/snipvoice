@@ -11,6 +11,24 @@ from voice_runtime import FakeAsrBackend, VoiceRuntimeError
 
 
 class VoiceProviderTests(unittest.TestCase):
+    def test_installed_only_preparation_never_downloads(self):
+        backend = FakeAsrBackend()
+        download = mock.Mock()
+        provider = LocalVoiceProvider("unused", backend=backend, download=download,
+                                      installed_path=lambda entry, directory: "local.gguf")
+        provider.prepare("balanced", "auto", allow_download=False)
+        self.assertEqual(backend.loaded_path, "local.gguf")
+        download.assert_not_called()
+
+    def test_missing_installed_only_model_is_actionable(self):
+        from voice_models import VoiceModelError
+        download = mock.Mock()
+        provider = LocalVoiceProvider("unused", backend=FakeAsrBackend(), download=download,
+                                      installed_path=lambda entry, directory: None)
+        with self.assertRaises(VoiceModelError):
+            provider.prepare("balanced", "auto", allow_download=False)
+        download.assert_not_called()
+
     def test_base_provider_is_unavailable(self):
         provider = VoiceProvider()
         self.assertFalse(provider.available())

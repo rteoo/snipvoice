@@ -429,6 +429,50 @@ def _write_manifest(entry, cache_dir, digest, verified_stat=None):
         raise
 
 
+def import_local_model(profile_or_id, source, cache_dir, cancel_event=None, progress=None):
+    """Import only exact catalog bytes without network access or another app's cache."""
+    entry = resolve_entry(profile_or_id)
+    if entry is None:
+        raise VoiceModelError("Modelo não pertence ao catálogo do Snipvoice.")
+    if not os.path.isfile(source) or os.path.getsize(source) != entry["size_bytes"]:
+        raise VoiceModelError("O arquivo não tem o tamanho esperado para este modelo.")
+    destination = model_path(cache_dir, entry)
+    _ensure_parent(destination)
+    if _free_bytes(os.path.dirname(destination)) < entry["size_bytes"]:
+        raise VoiceModelError("Não há espaço para importar o modelo com segurança.")
+    fd, temporary = tempfile.mkstemp(prefix="model-import-", suffix=".partial",
+                                     dir=os.path.dirname(destination))
+    try:
+        digest = hashlib.sha256()
+        count = 0
+        with os.fdopen(fd, "wb") as output, open(source, "rb") as input_file:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise VoiceModelError("Importação do modelo cancelada.")
+                chunk = input_file.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                count += len(chunk)
+                if count > entry["size_bytes"]:
+                    raise VoiceModelError("O arquivo do modelo mudou durante a importação.")
+                output.write(chunk)
+                digest.update(chunk)
+                if progress is not None:
+                    progress(count, entry["size_bytes"])
+            output.flush()
+            os.fsync(output.fileno())
+        if count != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
+            raise VoiceModelError("A assinatura SHA-256 do modelo não corresponde ao catálogo.")
+        if cancel_event is not None and cancel_event.is_set():
+            raise VoiceModelError("Importação do modelo cancelada.")
+        os.replace(temporary, destination)
+        _write_manifest(entry, cache_dir, digest.hexdigest())
+        return destination
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
 def delete_model(entry, cache_dir):
     """Remove only the catalog-owned directory for ``entry``."""
     target = os.path.abspath(model_dir(cache_dir, entry))
