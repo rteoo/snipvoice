@@ -203,6 +203,7 @@ class VoiceController:
         self._unload_in_progress = False
         self._clear_disable_after_unload = False
         self._disable_requested = False
+        self._meeting_token = None
         self._stream_worker_events = {}
         self.last_outcome = None
         for warning in warnings:
@@ -381,6 +382,9 @@ class VoiceController:
 
     def status_label(self):
         with self._lock:
+            if self._meeting_token is not None:
+                return "Entrada por voz (ocupada pela gravação)"
+        with self._lock:
             if self._model_download_active:
                 if self._download_total:
                     percent = min(100, int(100 * self._download_done / self._download_total))
@@ -437,7 +441,8 @@ class VoiceController:
             self._emit_status()
             return False
         with self._lock:
-            if self._model_download_active or self._state == STATE_LOADING:
+            if (self._meeting_token is not None or self._model_download_active
+                    or self._state == STATE_LOADING):
                 return False
             self._model_download_active = True
             self._model_download_profile = profile
@@ -480,7 +485,8 @@ class VoiceController:
         """Retry saved audio without pasting into a potentially stale target."""
         with self._lock:
             if (
-                self._state != STATE_IDLE
+                self._meeting_token is not None
+                or self._state != STATE_IDLE
                 or self._capture_starting
                 or not self.settings.enabled
             ):
@@ -539,7 +545,7 @@ class VoiceController:
         for warning in warnings:
             self._log(warning)
         with self._lock:
-            if self._disable_requested:
+            if self._disable_requested or self._meeting_token is not None:
                 return
             previous = self.settings
             runtime_same = (
@@ -655,7 +661,7 @@ class VoiceController:
             )
             return
         with self._lock:
-            if self._disable_requested:
+            if self._disable_requested or self._meeting_token is not None:
                 return
             if self._model_download_active:
                 blocked_by_download = True
@@ -737,7 +743,8 @@ class VoiceController:
             return False
         with self._lock:
             if (
-                self._disable_requested
+                self._meeting_token is not None
+                or self._disable_requested
                 or not self.settings.enabled
                 or self._state != STATE_IDLE
                 or self._capture_starting
@@ -1942,6 +1949,9 @@ class VoiceController:
 
     def delete_active_model(self):
         """Disable voice, then remove only the catalog directory of the profile."""
+        with self._lock:
+            if self._meeting_token is not None:
+                return False
         profile = self.settings.profile
         self.disable()
         with self._unload_lock:
@@ -1955,6 +1965,71 @@ class VoiceController:
             return False
         self._provider.delete_profile(profile)
         return True
+
+
+    def reserve_for_meeting(self):
+        """Temporarily close admission and unload dictation without persisting disable."""
+        token = object()
+        with self._lock:
+            if (self._shutdown.is_set() or self._meeting_token is not None
+                    or self._disable_requested or self._model_download_active
+                    or self._state not in (STATE_IDLE, STATE_UNAVAILABLE)
+                    or self._capture_starting):
+                raise VoiceRuntimeError("Aguarde a entrada por voz terminar antes de gravar.")
+            self._meeting_token = token
+            previous_state = self._state
+            self._state = STATE_UNAVAILABLE
+        self._emit_status()
+        try:
+            if not self._join_workers(_SHUTDOWN_JOIN_SECONDS):
+                raise VoiceRuntimeError("A entrada por voz ainda está encerrando.")
+            with self._unload_lock:
+                if self._unload_pending or self._unload_in_progress:
+                    raise VoiceRuntimeError("O modelo de ditado ainda está encerrando.")
+            self._provider.unload()
+            return token
+        except Exception:
+            with self._lock:
+                if self._meeting_token is token:
+                    self._meeting_token = None
+                    self._state = previous_state
+            self._emit_status()
+            raise
+
+    def release_meeting(self, token):
+        with self._lock:
+            if self._meeting_token is not token:
+                return
+            self._meeting_token = None
+            restore = self.settings.enabled and not self._shutdown.is_set()
+            self._state = STATE_LOADING if restore else STATE_UNAVAILABLE
+            generation = self._session_generation
+            if restore:
+                self._cancel.clear()
+        self._emit_status()
+        if restore:
+            self._start_worker(self._restore_after_meeting_worker, generation, name="voice-restore")
+
+    def _restore_after_meeting_worker(self, generation):
+        try:
+            self._provider.prepare(self.settings.profile, self.settings.language,
+                                   cancel_event=self._cancel, allow_download=False)
+        except (VoiceRuntimeError, VoiceModelError) as exc:
+            with self._lock:
+                if generation != self._session_generation:
+                    return
+                self._state = STATE_UNAVAILABLE
+                self._load_error = str(exc)
+            self._notify(str(exc), key="voice-restore")
+            self._emit_status()
+            return
+        with self._lock:
+            if (generation != self._session_generation or self._shutdown.is_set()
+                    or not self.settings.enabled):
+                return
+            self._state = STATE_IDLE
+        self._start_monitor()
+        self._emit_status()
 
 
 def _flatten(chunk):
