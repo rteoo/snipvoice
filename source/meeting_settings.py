@@ -1,0 +1,93 @@
+"""Validated recording settings, independent of push-to-talk preferences."""
+
+from dataclasses import dataclass
+
+from voice_catalog import DEFAULT_PROFILE, LANGUAGE_AUTO, is_selectable_profile, is_known_language
+from voice_hotkey import parse_chord
+
+SOURCES = ("both", "microphone", "system")
+
+
+@dataclass(frozen=True)
+class EndpointSelection:
+    mode: str = "default"
+    endpoint_id: str = ""
+    default_role: str = "multimedia"
+
+    def payload(self):
+        return {"mode": self.mode, "endpoint_id": self.endpoint_id,
+                "default_role": self.default_role}
+
+    def argument(self):
+        return self.endpoint_id if self.mode == "manual" else "default:" + self.default_role
+
+
+def resolve_selection(value):
+    if not isinstance(value, dict):
+        return EndpointSelection()
+    role = value.get("default_role", "multimedia")
+    if role not in ("multimedia", "communications"):
+        role = "multimedia"
+    if value.get("mode") != "manual":
+        return EndpointSelection(default_role=role)
+    endpoint = value.get("endpoint_id")
+    if (not isinstance(endpoint, str) or not endpoint.strip()
+            or len(endpoint) > 1024 or any(ord(c) < 32 for c in endpoint)):
+        raise ValueError("Selecione novamente o dispositivo de áudio manual.")
+    return EndpointSelection("manual", endpoint, role)
+
+
+@dataclass(frozen=True)
+class MeetingSettings:
+    sources: str = "both"
+    microphone: EndpointSelection = EndpointSelection()
+    system: EndpointSelection = EndpointSelection()
+    hotkey: str = ""
+    profile: str = DEFAULT_PROFILE
+    language: str = LANGUAGE_AUTO
+    summary_model: str = ""
+
+    def payload(self):
+        return {"meeting_sources": self.sources,
+                "meeting_microphone": self.microphone.payload(),
+                "meeting_system": self.system.payload(), "meeting_hotkey": self.hotkey,
+                "meeting_profile": self.profile, "meeting_language": self.language,
+                "meeting_summary_model": self.summary_model}
+
+
+def resolve_meeting_settings(value):
+    data = value if isinstance(value, dict) else {}
+    sources = data.get("meeting_sources", "both")
+    if sources not in SOURCES:
+        raise ValueError("Escolha microfone, áudio do sistema ou ambos.")
+    hotkey = data.get("meeting_hotkey", "")
+    if not isinstance(hotkey, str):
+        raise ValueError("O atalho de gravação é inválido.")
+    hotkey = parse_chord(hotkey).spec if hotkey.strip() else ""
+    profile = data.get("meeting_profile", DEFAULT_PROFILE)
+    if not is_selectable_profile(profile):
+        raise ValueError("Selecione um modelo local disponível para gravações.")
+    language = data.get("meeting_language", LANGUAGE_AUTO)
+    if not is_known_language(language):
+        raise ValueError("Selecione um idioma de transcrição válido.")
+    model = data.get("meeting_summary_model", "")
+    if not isinstance(model, str) or len(model) > 256 or any(ord(c) < 32 for c in model):
+        raise ValueError("O nome do modelo local de resumo é inválido.")
+    return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),
+                           resolve_selection(data.get("meeting_system")), hotkey,
+                           profile, language, model.strip())
+
+
+def validate_hotkey_conflicts(settings):
+    """Separate selective listeners must never suppress overlapping voice chords."""
+    meeting = resolve_meeting_settings(settings)
+    if not meeting.hotkey:
+        return
+    chord = parse_chord(meeting.hotkey)
+    from voice_hotkey import DEFAULT_DICTATION_HOTKEY, DEFAULT_COMMAND_HOTKEY
+    for name, default in (("voice_hotkey", DEFAULT_DICTATION_HOTKEY),
+                          ("voice_command_hotkey", DEFAULT_COMMAND_HOTKEY)):
+        other = parse_chord(settings.get(name, default))
+        if chord.key == other.key and (chord.modifiers <= other.modifiers
+                                       or other.modifiers <= chord.modifiers):
+            raise ValueError("O atalho de gravação se sobrepõe a um atalho de ditado ou comando.")

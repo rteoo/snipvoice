@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.log
+*.spec
+.ruff_cache/
+.pytest_cache/
+build/
+dist/
+installer/Output/
+source/tests/tmp/
+.venv/
+source/native/bin/
+*.DS_Store
