@@ -16,7 +16,10 @@ from clean_ffmpeg_runtime import (  # noqa: E402
 
 def fake_av(*, configuration=None, license_name="LGPL version 2.1 or later"):
     configuration = configuration or " ".join(
-        (*sorted(REQUIRED_FLAGS), f"--enable-demuxer={','.join(sorted(REQUIRED_DEMUXERS))}")
+        (
+            *sorted(REQUIRED_FLAGS),
+            f"--enable-demuxer='{','.join(sorted(REQUIRED_DEMUXERS))}'",
+        )
     )
     metadata = {
         name: {"configuration": configuration, "license": license_name}

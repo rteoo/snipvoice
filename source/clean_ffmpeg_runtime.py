@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import shlex
 
 
 REQUIRED_FLAGS = {
@@ -63,7 +64,7 @@ def verify_clean_ffmpeg_runtime(av_module=None) -> None:
     if not licenses or any(not license_name.startswith("LGPL") for license_name in licenses):
         raise RuntimeError(f"Bundled FFmpeg is not LGPL: {sorted(licenses)}")
     enabled_demuxers = set()
-    for token in configuration.split():
+    for token in shlex.split(configuration):
         if token.startswith("--enable-demuxer="):
             enabled_demuxers.update(token.split("=", 1)[1].split(","))
     missing_demuxers = REQUIRED_DEMUXERS - enabled_demuxers
