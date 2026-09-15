@@ -376,12 +376,13 @@ class ControllerTests(unittest.TestCase):
             self.controller.set_language("en-US")
             self.assertEqual(self.controller.state, STATE_LOADING)
             release.set()
-            for thread in runner.threads:
-                thread.join(1.0)
-            self.assertFalse(any(thread.is_alive() for thread in runner.threads))
+            self.assertTrue(self.controller._join_workers(1.0))
             self.assertEqual(self.controller.state, STATE_IDLE)
             start_monitor.assert_called_once_with()
 
+        for thread in runner.threads:
+            thread.join(1.0)
+        self.assertFalse(any(thread.is_alive() for thread in runner.threads))
         self.assertEqual(self.controller.history_entry(recording.record_id)["status"], "cancelled")
         self.assertEqual(copied, [])
         self.assertEqual(
