@@ -1,6 +1,6 @@
 # Development
 
-Snipvoice source is `0.1.0` on the `beta` channel. It has no published release.
+Snipvoice source is `1.0.0` on the `stable` channel.
 Runtime dependencies and native voice dependencies remain in separate manifests.
 Use an existing interpreter; do not implicitly update host tooling or packages.
 
@@ -15,11 +15,14 @@ macOS: `./build_release_macos.sh`, optionally with an existing `PYTHON` interpre
 or `CODESIGN_IDENTITY`. Both builds stage first and probe the complete native
 runtime before promoting. Installer identity, shortcuts, mutex, bundle identifier,
 logs, user data, and default cache belong to Snipvoice independently of Sniptype.
+PyInstaller is pinned separately in `requirements-build.txt`; source-only installs
+do not need the packaging tool.
 
-No installer is produced or installed merely by creating the fork. Live
+Live
 microphone-to-paste, cancellation, device-loss, final-word resampling, denied
 permissions, stale target, upgrade/uninstall, and macOS TCC/signing behavior need
-physical desktop proof. Do not promote beta based only on offline tests or CI.
+physical desktop proof. Hosted bundles are unsigned or ad-hoc signed and must not
+be represented as notarized or publisher-signed.
 
 Offline meetings add owned Windows/macOS capture helpers built by
 `source/native/build_windows_capture.bat` and
