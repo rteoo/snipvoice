@@ -130,7 +130,7 @@ def summarize_meeting(store, session_id, model, cancel_event=None):
         raise ValueError("Selecione um modelo de resumo do catálogo do Snipvoice.")
     model_file = summary_model_path(model)
     if model_file is None:
-        raise ValueError("Baixe o modelo selecionado na aba Resumo local antes de gerar o resumo.")
+        raise ValueError("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo.")
     context = min(MAX_CONTEXT, entry["context_length"])
     # Reserve 1536 tokens for instructions, JSON schema overhead and generated text.
     budget = context - 1536

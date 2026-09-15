@@ -400,19 +400,42 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         def open_settings(shared_root):
             self.app._show_voice_settings(shared_root)
+            self.app.manager_window.update_idletasks()
             notebook = self.app._manager_notebook
             selected = notebook.select()
-            return notebook.tab(selected, "text"), _notebook_titles(self.app.manager_window)
+            labels = {
+                str(widget.cget("text"))
+                for widget in _descendants(self.app.manager_window)
+                if isinstance(widget, tk.Label)
+            }
+            return (
+                notebook.tab(selected, "text"),
+                _notebook_titles(self.app.manager_window),
+                str(notebook.cget("style")),
+                labels,
+                (
+                    self.app.manager_window.winfo_width(),
+                    self.app.manager_window.winfo_height(),
+                ),
+            )
 
-        title, titles = self._on_gui(open_settings)
+        title, titles, notebook_style, labels, manager_size = self._on_gui(open_settings)
         self.assertIn("Voz", title)
+        self.assertEqual(notebook_style, "Manager.TNotebook")
+        self.assertGreaterEqual(manager_size[0], 900)
+        self.assertGreaterEqual(manager_size[1], 700)
+        self.assertLessEqual(manager_size[0], 1120)
+        self.assertLessEqual(manager_size[1], 820)
+        self.assertIn("Processamento local", labels)
+        self.assertIn("Modelo e idioma", labels)
+        self.assertIn("Atalhos", labels)
         self.assertEqual(
             titles,
             [
                 "Voz",
-                "Gravar e configurar",
-                "Biblioteca e transcrição",
-                "Resumo local",
+                "Gravação",
+                "Biblioteca",
+                "Resumo",
             ],
         )
 
@@ -435,8 +458,30 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         reused, title, top_levels = self._on_gui(select_recording)
         self.assertTrue(reused)
-        self.assertEqual(title, "Gravar e configurar")
+        self.assertEqual(title, "Gravação")
         self.assertEqual(top_levels, 1)
+
+    def test_recording_level_meters_fit_inside_the_manager_viewport(self):
+        _ensure_voice(self.app)
+
+        def measure(shared_root):
+            with mock.patch.object(tk.Misc, "winfo_screenwidth", return_value=1024), \
+                    mock.patch.object(tk.Misc, "winfo_screenheight", return_value=768):
+                self.app._show_meetings(shared_root)
+            manager = self.app.manager_window
+            manager.geometry("1024x749+0+0")
+            manager.update_idletasks()
+            tab = self.app._manager_recording_tab
+            meters = self.app._manager_meeting_view.meters.values()
+            visible_bottom = tab.winfo_rooty() + tab.winfo_height()
+            controls_bottom = max(
+                meter.winfo_rooty() + meter.winfo_height()
+                for meter in meters
+            )
+            return controls_bottom, visible_bottom
+
+        controls_bottom, visible_bottom = self._on_gui(measure)
+        self.assertLessEqual(controls_bottom, visible_bottom)
 
     def test_voice_tab_absent_when_controller_missing(self):
         self.app.voice = None
@@ -455,9 +500,9 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             titles,
             [
                 "Diagnóstico",
-                "Gravar e configurar",
-                "Biblioteca e transcrição",
-                "Resumo local",
+                "Gravação",
+                "Biblioteca",
+                "Resumo",
             ],
         )
         self.assertIsNone(self.app._manager_voice_refresher)

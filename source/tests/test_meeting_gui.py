@@ -364,7 +364,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIs(view.notebook, notebook)
             self.assertEqual(
                 titles,
-                ["Gravar e configurar", "Biblioteca e transcrição", "Resumo local"],
+                ["Gravação", "Biblioteca", "Resumo"],
             )
         finally:
             view.close_without_prompt(destroy=False)

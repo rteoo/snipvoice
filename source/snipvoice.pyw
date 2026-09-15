@@ -242,14 +242,54 @@ class Snipvoice:
         window = tk.Toplevel(root)
         self.manager_window = window
         window.title(APP_DISPLAY_NAME)
-        window.geometry("1120x820")
-        window.minsize(920, 700)
+        geometry, min_width, min_height = ui.manager_window_size
+        window.geometry(geometry)
+        window.minsize(min_width, min_height)
         window.configure(bg=ui.surface)
         self._set_window_icon(window)
-        ui_theme.apply_ttk_theme(ttk.Style(window))
-        notebook = ttk.Notebook(window)
+        style = ttk.Style(window)
+        ui_theme.apply_ttk_theme(style)
+        ui_theme.configure_manager_styles(style, ui)
+
+        header = tk.Frame(window, bg=ui.surface, padx=ui.space_xl, pady=ui.space_lg)
+        header.pack(fill=tk.X)
+        identity = tk.Frame(header, bg=ui.surface)
+        identity.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            identity,
+            text=APP_DISPLAY_NAME,
+            font=ui.font(16, "bold"),
+            bg=ui.surface,
+            fg=ui.text_strong,
+        ).pack(anchor="w")
+        tk.Label(
+            identity,
+            text="Ditado, gravações, transcrições e resumos no seu computador",
+            font=ui.font(9),
+            bg=ui.surface,
+            fg=ui.text_muted,
+        ).pack(anchor="w", pady=(ui.space_xs, 0))
+        privacy = tk.Frame(
+            header, padx=ui.space_md, pady=ui.space_sm, **ui.card_options()
+        )
+        privacy.pack(side=tk.RIGHT, padx=(ui.space_lg, 0))
+        tk.Label(
+            privacy,
+            text="Processamento local",
+            font=ui.font(9, "bold"),
+            bg=ui.card,
+            fg=ui.success,
+        ).pack()
+        tk.Frame(window, bg=ui.divider, height=1).pack(fill=tk.X)
+
+        notebook = ttk.Notebook(window, style="Manager.TNotebook")
         self._manager_notebook = notebook
-        notebook.pack(fill=tk.BOTH, expand=True)
+        notebook.pack(
+            fill=tk.BOTH,
+            expand=True,
+            padx=ui.space_xl,
+            pady=(ui.space_md, ui.space_lg),
+        )
         tab = tk.Frame(notebook, bg=ui.surface)
         self._manager_voice_tab = tab
         if self.voice is None:
@@ -270,7 +310,14 @@ class Snipvoice:
         self._manager_recording_tab = meeting_view.recording_tab
         self._manager_library_tab = meeting_view.library_tab
         window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
-        center_on_screen(window)
+        window_width, window_height = (int(value) for value in geometry.split("x"))
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        window_width = min(window_width, screen_width)
+        window_height = min(window_height, screen_height)
+        x = max(0, (screen_width - window_width) // 2)
+        y = max(0, (screen_height - window_height) // 2)
+        window.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     def _close_settings_window(self, force=False):
         meeting_view = self._manager_meeting_view
@@ -778,15 +825,29 @@ class Snipvoice:
         profile_buttons = []
         download_buttons = []
 
-        tk.Label(
+        models_card = tk.Frame(
             parent,
-            text="Modelos baixados sob demanda. Nada é enviado para a nuvem.",
+            padx=ui.space_lg,
+            pady=ui.space_md,
+            **ui.card_options(),
+        )
+        models_card.pack(fill=tk.X, pady=(0, ui.space_md))
+        tk.Label(
+            models_card,
+            text="Modelo e idioma",
+            font=ui.font(11, "bold"),
+            bg=ui.card,
+            fg=ui.text_strong,
+        ).pack(anchor="w")
+        tk.Label(
+            models_card,
+            text="Baixe somente os modelos que quiser usar. O áudio permanece neste computador.",
             font=ui.font(9),
-            bg=ui.surface,
-            fg=ui.text,
+            bg=ui.card,
+            fg=ui.text_muted,
             wraplength=wrap,
             justify="left",
-        ).pack(anchor="w", pady=(8, 8))
+        ).pack(anchor="w", pady=(ui.space_xs, ui.space_sm))
 
         def profile_label(entry):
             installed = voice_models.model_is_installed(entry, self.voice.cache_dir)
@@ -825,8 +886,8 @@ class Snipvoice:
                     button.configure(text="Baixar", state=tk.NORMAL)
 
         for entry in visible:
-            row = tk.Frame(parent, bg=ui.surface)
-            row.pack(fill=tk.X, anchor="w", pady=4)
+            row = tk.Frame(models_card, bg=ui.card)
+            row.pack(fill=tk.X, anchor="w", pady=ui.space_xs)
             button = tk.Radiobutton(
                 row,
                 text=profile_label(entry),
@@ -835,7 +896,7 @@ class Snipvoice:
                 anchor="w",
                 justify="left",
                 wraplength=wrap - 110,
-                **ui.checkbutton_colors(ui.surface),
+                **ui.checkbutton_colors(ui.card),
             )
             button.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor="w")
             profile_buttons.append((button, entry))
@@ -849,12 +910,12 @@ class Snipvoice:
             download_button.pack(side=tk.RIGHT, padx=(8, 0))
             download_buttons.append((download_button, entry))
 
-        lang_row = tk.Frame(parent, bg=ui.surface)
-        lang_row.pack(anchor="w", pady=(8, 4))
+        lang_row = tk.Frame(models_card, bg=ui.card)
+        lang_row.pack(anchor="w", pady=(ui.space_sm, 0))
         language_label = tk.Label(
             lang_row,
             text="Idioma:",
-            bg=ui.surface,
+            bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
         )
@@ -871,7 +932,7 @@ class Snipvoice:
                 text=language_labels.get(lang, lang),
                 variable=language,
                 value=lang,
-                **ui.checkbutton_colors(ui.surface),
+                **ui.checkbutton_colors(ui.card),
             )
             button.pack(side=tk.LEFT, padx=4)
             language_buttons[lang] = button
@@ -894,44 +955,56 @@ class Snipvoice:
             button.configure(command=update_language_options)
         selected.trace_add("write", update_language_options)
 
-        shortcut_frame = tk.Frame(parent, bg=ui.surface)
-        shortcut_frame.pack(fill=tk.X, pady=(8, 4))
+        shortcut_frame = tk.Frame(
+            parent,
+            padx=ui.space_lg,
+            pady=ui.space_md,
+            **ui.card_options(),
+        )
+        shortcut_frame.pack(fill=tk.X, pady=(0, ui.space_md))
         shortcut_frame.grid_columnconfigure(1, weight=1)
         tk.Label(
             shortcut_frame,
+            text="Atalhos",
+            bg=ui.card,
+            fg=ui.text_strong,
+            font=ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_sm))
+        tk.Label(
+            shortcut_frame,
             text="Ditado (segure para falar):",
-            bg=ui.surface,
+            bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
-        ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
         tk.Entry(
             shortcut_frame,
             textvariable=hotkey,
             font=ui.font(9),
             width=28,
             **ui.entry_colors(),
-        ).grid(row=0, column=1, sticky="ew", pady=3)
+        ).grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
             text="Comando por voz:",
-            bg=ui.surface,
+            bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
-        ).grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
         tk.Entry(
             shortcut_frame,
             textvariable=command_hotkey,
             font=ui.font(9),
             width=28,
             **ui.entry_colors(),
-        ).grid(row=1, column=1, sticky="ew", pady=3)
+        ).grid(row=2, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
             text="Formato: ctrl+alt+space, ctrl+shift+f8, etc.",
-            bg=ui.surface,
+            bg=ui.card,
             fg=ui.text_muted,
             font=ui.font(8),
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         def refresh_form():
             refresh_profile_labels()
@@ -1039,7 +1112,7 @@ class Snipvoice:
             self._refresh_manager_voice_tab()
 
         buttons = tk.Frame(parent, bg=ui.surface)
-        buttons.pack(fill=tk.X, pady=(12, 0))
+        buttons.pack(fill=tk.X)
         tk.Button(
             buttons,
             text="Salvar e usar",
@@ -1086,9 +1159,9 @@ class Snipvoice:
         tk.Label(
             main,
             text="Entrada por voz",
-            font=ui.font(11, "bold"),
+            font=ui.font(16, "bold"),
             bg=ui.surface,
-            fg=ui.text,
+            fg=ui.text_strong,
         ).pack(anchor="w")
         tk.Label(
             main,
@@ -1098,7 +1171,7 @@ class Snipvoice:
             fg=ui.text_muted,
             wraplength=640,
             justify="left",
-        ).pack(anchor="w", pady=(4, 12))
+        ).pack(anchor="w", pady=(ui.space_xs, ui.space_lg))
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
         status_text = (
@@ -1129,11 +1202,19 @@ class Snipvoice:
             if not was_enabled:
                 refresh()
 
-        checkbox = tk.Checkbutton(
+        status_card = tk.Frame(
             main,
+            padx=ui.space_lg,
+            pady=ui.space_md,
+            **ui.card_options(),
+        )
+        status_card.pack(fill=tk.X, pady=(0, ui.space_md))
+        checkbox = tk.Checkbutton(
+            status_card,
             text="Ativar entrada por voz",
             command=on_toggle,
-            **ui.checkbutton_colors(ui.surface),
+            font=ui.font(10, "bold"),
+            **ui.checkbutton_colors(ui.card),
         )
         checkbox.pack(anchor="w")
         if enabled:
@@ -1142,15 +1223,15 @@ class Snipvoice:
             checkbox.deselect()
 
         status_label = tk.Label(
-            main,
+            status_card,
             text=status_text,
             font=ui.font(9),
-            bg=ui.surface,
+            bg=ui.card,
             fg=ui.text_muted,
             wraplength=640,
             justify="left",
         )
-        status_label.pack(anchor="w", pady=(4, 12))
+        status_label.pack(anchor="w", pady=(ui.space_xs, 0))
 
         refresh_form = self._build_voice_settings_controls(main, root)
         self._manager_voice_refresher = refresh
