@@ -152,7 +152,13 @@ class PackagingExcludeTests(unittest.TestCase):
             self.assertIn((512, 512, 2), sizes)
 
         with open(os.path.join(ROOT, "build_release_macos.sh"), encoding="utf-8") as handle:
-            self.assertIn('ICNS="$REPO_DIR/source/snipvoice.icns"', handle.read())
+            mac_text = handle.read()
+        self.assertIn('ICNS="$REPO_DIR/source/snipvoice.icns"', mac_text)
+        self.assertIn("plutil -extract CFBundleIconFile raw", mac_text)
+        self.assertIn(
+            'BUNDLE_ICON="$STAGED_APP/Contents/Resources/$BUNDLE_ICON_NAME"',
+            mac_text,
+        )
 
 
 if __name__ == "__main__":

@@ -116,9 +116,16 @@ fi
 
 BUNDLE_ICON_NAME="$(plutil -extract CFBundleIconFile raw \
     "$STAGED_APP/Contents/Info.plist" 2>/dev/null || true)"
-BUNDLE_ICON="$STAGED_APP/Contents/Resources/$APP_NAME.icns"
-if [[ "$BUNDLE_ICON_NAME" != "$APP_NAME.icns" || ! -s "$BUNDLE_ICON" ]]; then
-    echo "Packaging failed: the app bundle does not contain or reference $APP_NAME.icns." >&2
+case "$BUNDLE_ICON_NAME" in
+    ""|.|..|*/*|*\\*)
+        echo "Packaging failed: the app bundle has an invalid icon reference." >&2
+        echo "The existing dist was left unchanged." >&2
+        exit 1
+        ;;
+esac
+BUNDLE_ICON="$STAGED_APP/Contents/Resources/$BUNDLE_ICON_NAME"
+if [[ "$BUNDLE_ICON_NAME" != *.icns || ! -s "$BUNDLE_ICON" ]]; then
+    echo "Packaging failed: the app bundle does not contain its referenced ICNS icon." >&2
     echo "The existing dist was left unchanged." >&2
     exit 1
 fi
