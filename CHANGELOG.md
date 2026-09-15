@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add Qwen3.5 0.8B Q4_K_M as a 503 MiB compute-budget summary option.
+- Replace IBM Granite 4.2 3B with the first-party LiquidAI LFM2.5-2.6B Q4_K_M model.
+- Require an explicit first-download notice for LiquidAI's non-MIT, non-Apache LFM Open License v1.0.
+
 ## 2.0.0 - 2026-09-15
 
 - Replace the external Ollama summary adapter with a packaged llama.cpp runtime.

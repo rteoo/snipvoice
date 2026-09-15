@@ -127,6 +127,28 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIsNotNone(download.call_args.kwargs["cancel_event"])
         self.assertTrue(callable(download.call_args.kwargs["progress"]))
 
+    def test_liquidai_first_download_requires_nonstandard_license_acceptance(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        view.status = Variable()
+        view.summary_model_installed = {}
+        view.summary_model_buttons = {"lfm2.5-2.6b-q4": mock.Mock()}
+        view.summary_model_status = Variable()
+        view.summary_progress_lock = threading.Lock()
+        view.summary_progress = None
+        view._submit = mock.Mock(return_value=True)
+
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=False) as confirm:
+            view.toggle_summary_model("lfm2.5-2.6b-q4")
+
+        self.assertEqual("Licença do modelo", confirm.call_args.args[0])
+        prompt = confirm.call_args.args[1]
+        self.assertIn("LFM Open License v1.0", prompt)
+        self.assertIn("não é MIT nem Apache-2.0", prompt)
+        self.assertIn("US$ 10 milhões", prompt)
+        self.assertIn("Termos completos: https://", prompt)
+        view._submit.assert_not_called()
+
     def test_initial_saved_manual_selection_overrides_constructor_defaults(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.raw_settings = {}

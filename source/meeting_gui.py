@@ -389,9 +389,11 @@ class MeetingWindow:
             anchor="w", justify="left", wraplength=900, fg=self.ui.text_muted,
         ).pack(fill="x", pady=(0, self.ui.space_sm))
         self.summary_model_buttons = {}
-        for entry in summary_catalog():
-            row = self._card(parent)
-            row.pack(fill="x", pady=self.ui.space_xs)
+        entries = summary_catalog()
+        compact = len(entries) > 5
+        for entry in entries:
+            row = self._card(parent, pady=self.ui.space_sm if compact else self.ui.space_md)
+            row.pack(fill="x", pady=2 if compact else self.ui.space_xs)
             choice = tk.Radiobutton(
                 row, variable=self.summary_model, value=entry["id"],
                 command=self._summary_choice_changed, font=self.ui.font(), anchor="nw",
@@ -405,12 +407,13 @@ class MeetingWindow:
                         bg=self.ui.card, fg=self.ui.text_strong,
                         font=self.ui.font(weight="bold")).pack(fill="x")
             self._label(copy, entry["description"], anchor="w", wraplength=720,
-                        bg=self.ui.card, fg=self.ui.text_muted).pack(fill="x", pady=(4, 0))
+                        bg=self.ui.card, fg=self.ui.text_muted).pack(
+                            fill="x", pady=(2 if compact else 4, 0))
             button = self._button(row, "", lambda model_id=entry["id"]: self.toggle_summary_model(model_id))
             button.pack(side="right", anchor="n")
             self.summary_model_buttons[entry["id"]] = button
         actions = ttk.Frame(parent, style="Meeting.TFrame")
-        actions.pack(fill="x", pady=(18, 0))
+        actions.pack(fill="x", pady=(12 if compact else 18, 0))
         self._button(actions, "Salvar modelo padrão", self.save_settings, accent=True).pack(side="left")
         self._button(actions, "Cancelar download", self.cancel_summary_download).pack(side="left", padx=8)
         self.summary_model_status = tk.StringVar(self.window)
@@ -463,10 +466,16 @@ class MeetingWindow:
             if not submitted:
                 self._refresh_summary_models()
             return
-        terms = (f'\n\nAo continuar, você aceita os termos: {entry["license_url"]}'
-                 if entry["requires_acceptance"] else "")
+        terms = ""
+        if entry["requires_acceptance"]:
+            notice = entry.get("license_notice", "Leia a licença antes de continuar.")
+            terms = (
+                f"\n\n{notice}"
+                f'\n\nTermos completos: {entry["license_url"]}'
+                "\n\nAo continuar, você confirma que leu e aceita esses termos."
+            )
         if not messagebox.askyesno(
-                "Baixar modelo local",
+                "Licença do modelo" if entry["requires_acceptance"] else "Baixar modelo local",
                 f'Baixar {entry["name"]} ({format_model_size(entry["size_bytes"])})?'
                 f'\nLicença: {entry["license_id"]}{terms}', parent=self.window):
             return

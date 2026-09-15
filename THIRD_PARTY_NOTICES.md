@@ -22,6 +22,9 @@ in [`source/docs/voice-input-plan.md`](source/docs/voice-input-plan.md). Do not
 describe a model as bundled unless the release actually contains it. Summary
 model sources, hashes, sizes, and license gates are documented in
 [`source/docs/summary-model-selection.md`](source/docs/summary-model-selection.md).
+The optional LiquidAI LFM2.5-2.6B download is governed by the
+[LFM Open License v1.0](https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/blob/84022ce711b28455e8c4fc364ce68c00cf995875/LICENSE),
+including its redistribution conditions and commercial-use threshold.
 
 This file is an attribution index, not a replacement for the upstream license
 texts. Review the upstream notices for the exact versions and artifacts in the

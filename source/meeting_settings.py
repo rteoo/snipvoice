@@ -9,8 +9,9 @@ from summary_catalog import DEFAULT_SUMMARY_MODEL, is_known_summary_model
 SOURCES = ("both", "microphone", "system")
 LEGACY_SUMMARY_MODELS = {
     "qwen3-1.7b-q4": DEFAULT_SUMMARY_MODEL,
-    "granite-3.3-2b-q4": "granite-4.2-3b-q4",
-    "granite-4.0-1b-q4": "granite-4.2-3b-q4",
+    "granite-3.3-2b-q4": "lfm2.5-2.6b-q4",
+    "granite-4.0-1b-q4": "lfm2.5-2.6b-q4",
+    "granite-4.2-3b-q4": "lfm2.5-2.6b-q4",
     "gemma-3-1b-q4": "gemma-4-e2b-q4",
 }
 
