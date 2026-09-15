@@ -15,6 +15,7 @@ class VoiceRuntimeProbeTests(unittest.TestCase):
         backend.available.return_value = True
         modules = {
             "tkinter": types.ModuleType("tkinter"),
+            "av": types.ModuleType("av"),
             "sounddevice": types.ModuleType("sounddevice"),
             "soxr": types.ModuleType("soxr"),
             "transcribe_cpp_native": types.ModuleType("transcribe_cpp_native"),
@@ -28,6 +29,7 @@ class VoiceRuntimeProbeTests(unittest.TestCase):
         backend.available.return_value = False
         modules = {
             "tkinter": types.ModuleType("tkinter"),
+            "av": types.ModuleType("av"),
             "sounddevice": types.ModuleType("sounddevice"),
             "soxr": types.ModuleType("soxr"),
             "transcribe_cpp_native": types.ModuleType("transcribe_cpp_native"),

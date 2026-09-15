@@ -126,7 +126,7 @@ jobs:
 
       - name: Require native voice imports
         working-directory: source
-        run: python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native"
+        run: python -c "import av, sounddevice, soxr, transcribe_cpp, transcribe_cpp_native"
 
       # The core-only suite intentionally permits optional-runtime skips. This
       # native lane fails if either voice module skips, so a green job proves the

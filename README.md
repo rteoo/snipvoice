@@ -32,7 +32,7 @@ recordings, shortcuts, process identity, and installers.
 - Crash-recoverable segmented audio, explicit gaps, pause/resume, and partial-session preservation.
 - Atomic final WAV mixdown with an optional conservative microphone noise gate and voice gain.
 - Meeting library with local search, notes, bookmarks, playback, and transcription revisions.
-- WAV import plus Markdown, text, JSON, and per-track WAV export.
+- WAV, MP3, AAC/M4A, FLAC, OGG, and Opus import plus Markdown, text, JSON, and per-track WAV export.
 - Configurable final-audio destination and opt-in automatic local transcription and summary.
 - Installed-only meeting transcription; automatic processing never downloads a model.
 - Cited summaries through a built-in llama.cpp runtime and downloadable local models.
@@ -121,7 +121,7 @@ works when dictation is disabled and before any model is installed.
 | Workspace | Live source waveforms, pause/resume, meters, title, notes, bookmarks, local search, status filters |
 | Playback | Seek by timestamp and play one track through the current OS output |
 | Processing | Opt-in transcription followed by optional summary, with durable local-model revisions |
-| Files | Timestamp-aligned final PCM16 WAV plus integer-PCM import and text/JSON/per-track exports |
+| Files | Timestamp-aligned final PCM16 WAV plus bounded WAV/MP3/AAC/M4A/FLAC/OGG/Opus import and text/JSON/per-track exports |
 
 Selecting an output captures the mix already routed to that device; Snipvoice
 does not move another application's audio. Source labels identify tracks, not

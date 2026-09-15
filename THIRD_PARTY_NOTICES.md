@@ -10,6 +10,7 @@ The application depends on the following separately licensed projects:
 | `Pillow` | Image and icon handling | [Pillow license](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
 | `sounddevice` / PortAudio | Optional voice capture | [sounddevice](https://github.com/spatialaudio/python-sounddevice), [PortAudio](https://github.com/PortAudio/portaudio) |
 | `soxr` / libsoxr / PFFFT | Optional voice sample-rate conversion | [python-soxr](https://github.com/dofuuz/python-soxr), [LGPLv2.1+ license](https://github.com/dofuuz/python-soxr/blob/main/LICENSE.txt), [libsoxr](https://sourceforge.net/projects/soxr/) |
+| `PyAV` / FFmpeg | Compressed audio-file decoding | [PyAV BSD-3-Clause](https://github.com/PyAV-Org/PyAV/blob/main/LICENSE.txt), [FFmpeg licensing](https://ffmpeg.org/legal.html); verify the effective license and corresponding-source obligations of the exact bundled wheel before release |
 | `transcribe-cpp` / `transcribe-cpp-native` | Optional local transcription runtime | [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) |
 | `llama-cpp-python` / `llama.cpp` | Built-in local summary inference | [llama-cpp-python](https://github.com/abetlen/llama-cpp-python), [llama.cpp](https://github.com/ggml-org/llama.cpp) |
 

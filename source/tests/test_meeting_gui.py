@@ -23,6 +23,14 @@ def wait_for(predicate, timeout=2):
         time.sleep(0.005)
 
 
+def descendants(widget):
+    result = []
+    for child in widget.winfo_children():
+        result.append(child)
+        result.extend(descendants(child))
+    return result
+
+
 class Variable:
     def __init__(self, value=""):
         self.value = value
@@ -445,6 +453,29 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                 titles,
                 ["Gravação", "Biblioteca", "Settings"],
             )
+            settings_widgets = descendants(view.settings_tab)
+            settings_radios = [
+                widget for widget in settings_widgets
+                if isinstance(widget, tk.Radiobutton)
+            ]
+            settings_buttons = [
+                str(widget.cget("text")) for widget in settings_widgets
+                if isinstance(widget, tk.Button)
+            ]
+            self.assertEqual(settings_radios, [])
+            self.assertNotIn("Salvar modelo padrão", settings_buttons)
+            self.assertIn("Cancelar download", settings_buttons)
+            recording_buttons = [
+                str(widget.cget("text")) for widget in descendants(view.recording_tab)
+                if isinstance(widget, tk.Button)
+            ]
+            self.assertNotIn("Importar modelo local…", recording_buttons)
+            library_buttons = [
+                str(widget.cget("text")) for widget in descendants(view.library_tab)
+                if isinstance(widget, tk.Button)
+            ]
+            self.assertIn("Importar áudio…", library_buttons)
+            self.assertNotIn("Importar WAV…", library_buttons)
         finally:
             view.close_without_prompt(destroy=False)
             manager.destroy()

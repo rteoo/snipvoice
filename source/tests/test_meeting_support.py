@@ -80,6 +80,10 @@ class MeetingControllerTests(unittest.TestCase):
         store = MeetingStore(self.temp.name)
         metadata = store.get(session)
         self.assertEqual(metadata["status"], "completed")
+        self.assertRegex(
+            metadata["title"],
+            r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-Gravacao-sem-transcricao$",
+        )
         self.assertEqual(len(list(store.iter_audio(session))), 1)
         self.assertEqual(next(store.iter_events(session))["type"], "source_changed")
         self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
@@ -171,6 +175,24 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(transcribe.call_args.args[1], session)
         self.assertEqual(summarize.call_args.args[1], session)
         self.assertEqual(self.controller.snapshot()["postprocess"], "Pós-processamento concluído")
+
+    def test_manual_transcription_refines_only_an_automatic_title(self):
+        store = self.controller.store
+        session = store.begin({}, "2026-09-15-14-07-Gravacao-sem-transcricao")
+        store.finish(session)
+        revision = store.begin_revision(session, "balanced", "auto")
+        store.add_transcript(session, revision, {
+            "id": "microphone:0:1", "track": "microphone", "start": 0,
+            "end": 1, "text": "Revisão do planejamento financeiro anual",
+        })
+        store.finish_revision(session, revision)
+        with patch("meeting_transcription.transcribe_meeting"):
+            self.assertTrue(self.controller.transcribe(session, "balanced", "auto"))
+            self.controller._processing_thread.join(2)
+        self.assertEqual(
+            store.get(session)["title"],
+            "2026-09-15-14-07-Revisão-Planejamento-Financeiro-Anual",
+        )
 
     def test_auto_transcription_resource_failure_keeps_lease_and_source_audio(self):
         from meeting_transcription import MeetingTranscriptionError
