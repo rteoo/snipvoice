@@ -42,7 +42,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v2.0.0 release](https://github.com/rteoo/snipvoice/releases/tag/v2.0.0).
+[stable v3.0.0 release](https://github.com/rteoo/snipvoice/releases/tag/v3.0.0).
 To run from source with Python installed:
 
 ```powershell
@@ -59,7 +59,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v2.0.0`](https://github.com/rteoo/snipvoice/releases/tag/v2.0.0):
+[`v3.0.0`](https://github.com/rteoo/snipvoice/releases/tag/v3.0.0):
 
 | Platform | Package |
 | --- | --- |
@@ -71,12 +71,12 @@ macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
 
-### What's new in v2.0.0
+### What's new in v3.0.0
 
-- One Fluent-style window now contains voice setup, recording, the meeting library, and local-summary settings.
-- Meeting capture supports separate microphone and speaker-output tracks with OS-default or manually selected devices.
-- Built-in llama.cpp summaries replace Ollama and offer verified in-app downloads for curated Qwen, Gemma, and other local models.
-- Windows ships as a per-user `.exe` installer and portable ZIP; Apple Silicon macOS ships as an ad-hoc-signed app ZIP.
+- Recording is now the default window, with live microphone/system waveforms, friendly device names, and separate source controls.
+- Empty recording titles become timestamped, transcript-derived descriptions after local transcription.
+- The library imports WAV, MP3, AAC/M4A, FLAC, OGG, and Opus files without sending audio to a cloud service.
+- Model management is centralized in Settings while Dictation uses compact model and language selectors.
 
 ## First use
 
