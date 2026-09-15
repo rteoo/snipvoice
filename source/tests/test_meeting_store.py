@@ -167,6 +167,19 @@ class MeetingStoreTests(unittest.TestCase):
                 self.store.update(self.session, notes="unsaved")
         self.assertEqual(self.store.get(self.session)["notes"], "notes")
 
+    def test_final_audio_metadata_requires_an_existing_file(self):
+        self.store.finish(self.session)
+        output = Path(self.temp.name) / "final.wav"
+        output.write_bytes(b"RIFF")
+
+        saved = self.store.save_final_audio(self.session, output, voice_boost=True)
+
+        self.assertEqual(saved["path"], str(output.resolve()))
+        self.assertTrue(saved["voice_boost"])
+        self.assertEqual(self.store.get(self.session)["final_audio"], saved)
+        with self.assertRaises(ValueError):
+            self.store.save_final_audio(self.session, Path(self.temp.name) / "missing.wav")
+
     def test_invalid_paths_and_unknown_schema_are_rejected_read_only(self):
         with self.assertRaises(ValueError):
             self.store.get("../outside")

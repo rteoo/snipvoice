@@ -1,0 +1,310 @@
+"""Streaming local mixdown for the microphone and system meeting tracks.
+
+The meeting store keeps the two sources as timestamped little-endian float32
+blocks.  This module turns those blocks into one ordinary PCM16 WAV without
+changing or rewriting the source recordings.  It intentionally has no audio
+dependencies: format conversion is limited to bounded linear upsampling,
+channel adaptation, and PCM16 quantisation.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+from pathlib import Path
+import struct
+import tempfile
+
+
+OUTPUT_CHUNK_FRAMES = 4096
+MAX_OUTPUT_BYTES = 0xFFFFFFFF
+_FLOAT_BYTES = 4
+_PCM16 = struct.Struct("<h")
+
+
+class MixdownCancelled(RuntimeError):
+    """Raised when a caller cancels before the atomic destination replace."""
+
+
+def _cancel(cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise MixdownCancelled(
+            "A mixagem foi cancelada; as gravações originais e a saída existente foram preservadas."
+        )
+
+
+def _float_to_pcm16(value):
+    if not math.isfinite(value):
+        value = 0.0
+    value = max(-1.0, min(1.0, value))
+    return -32768 if value <= -1.0 else int(round(value * 32767.0))
+
+
+def _validate_event(event, payload, track):
+    if not isinstance(event, dict) or event.get("type") != "audio":
+        raise ValueError(f"A fonte {track} contém um evento que não é áudio.")
+    if event.get("track") != track:
+        raise ValueError(f"A fonte {track} contém um rótulo de faixa inesperado.")
+    rate = event.get("rate")
+    channels = event.get("channels")
+    frames = event.get("frames")
+    timestamp = event.get("timestamp")
+    if (not isinstance(rate, int) or isinstance(rate, bool) or not 1 <= rate <= 192000
+            or not isinstance(channels, int) or isinstance(channels, bool) or channels not in (1, 2)
+            or not isinstance(frames, int) or isinstance(frames, bool) or frames <= 0
+            or not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool)
+            or not math.isfinite(float(timestamp)) or timestamp < 0):
+        raise ValueError(f"A fonte {track} tem formato de áudio ou instante incompatível.")
+    try:
+        raw = memoryview(payload)
+    except TypeError as exc:
+        raise ValueError(f"O bloco da fonte {track} não é compatível com bytes.") from exc
+    expected = frames * channels * _FLOAT_BYTES
+    if raw.nbytes != expected:
+        raise ValueError(f"O bloco da fonte {track} está incompleto para a quantidade de frames informada.")
+    return rate, channels, frames, float(timestamp), raw
+
+
+class _Track:
+    """One lazy timestamped source; at most one store event is retained."""
+
+    def __init__(self, name, source):
+        self.name = name
+        self._source = iter(source)
+        self._current = None
+        self._last_end = -1.0
+        self.rate = None
+        self.channels = None
+        self.done = False
+        self._read_next()
+
+    def _read_next(self):
+        if self.done:
+            return
+        try:
+            event, payload = next(self._source)
+        except StopIteration:
+            self.done = True
+            self._current = None
+            return
+        rate, channels, frames, timestamp, raw = _validate_event(event, payload, self.name)
+        if self.rate is None:
+            self.rate, self.channels = rate, channels
+        elif (rate, channels) != (self.rate, self.channels):
+            raise ValueError(
+                f"A fonte {self.name} altera o formato ({self.rate} Hz/{self.channels} canais "
+                f"para {rate} Hz/{channels} canais); converta-a antes da mixagem."
+            )
+        start = timestamp
+        end = start + frames / rate
+        if start < self._last_end:
+            overlap = self._last_end - start
+            # Native packet clocks can differ by a tiny amount after their
+            # timestamps are serialized. Snap ordinary clock jitter to the
+            # prior block boundary, but reject a material overlap.
+            if overlap > max(0.02, 2.0 / rate):
+                raise ValueError(f"A fonte {self.name} contém blocos sobrepostos ou fora de ordem.")
+            start = self._last_end
+            end = start + frames / rate
+        self._last_end = end
+        self._current = (start, end, frames, raw)
+
+    def render(self, first_frame, last_frame, output_rate, output_channels, target):
+        """Add this source's overlap into an output float buffer."""
+        first_time = first_frame / output_rate
+        last_time = last_frame / output_rate
+        while not self.done:
+            current = self._current
+            if current is None:
+                self._read_next()
+                continue
+            start, end, frames, raw = current
+            if end <= first_time:
+                self._read_next()
+                continue
+            if start >= last_time:
+                return
+            overlap_start = max(first_frame, int(math.ceil(start * output_rate - 1e-9)))
+            overlap_end = min(last_frame, int(math.ceil(end * output_rate - 1e-9)))
+            source_channels = self.channels
+            for frame in range(overlap_start, overlap_end):
+                position = (frame / output_rate - start) * self.rate
+                source_frame = min(frames - 1, max(0, int(math.floor(position))))
+                fraction = position - source_frame
+                source_offset = source_frame * source_channels * _FLOAT_BYTES
+                destination_offset = (frame - first_frame) * output_channels
+                if source_channels == 1:
+                    value = struct.unpack_from("<f", raw, source_offset)[0]
+                    if source_frame + 1 < frames:
+                        next_value = struct.unpack_from("<f", raw, source_offset + _FLOAT_BYTES)[0]
+                        value += (next_value - value) * fraction
+                    for channel in range(output_channels):
+                        target[destination_offset + channel] += value
+                else:
+                    for channel in range(output_channels):
+                        value = struct.unpack_from(
+                            "<f", raw, source_offset + channel * _FLOAT_BYTES
+                        )[0]
+                        if source_frame + 1 < frames:
+                            next_value = struct.unpack_from(
+                                "<f", raw, source_offset + source_channels * _FLOAT_BYTES + channel * _FLOAT_BYTES
+                            )[0]
+                            value += (next_value - value) * fraction
+                        target[destination_offset + channel] += value
+            if end <= last_time:
+                self._read_next()
+            else:
+                return
+
+
+class _MicEnhancer:
+    """Small deterministic gate/gain stage, retained across output chunks."""
+
+    def __init__(self):
+        self.threshold = 0.015
+        self.gain = 1.5
+        self.limit = 0.95
+
+    def apply(self, samples, channels):
+        for index in range(0, len(samples), channels):
+            # A fixed floor is deliberate: it removes steady low-level room
+            # noise without estimating a long session in memory. Raise only
+            # with a measured adaptive-noise design and regression coverage.
+            for channel in range(channels):
+                value = samples[index + channel]
+                if abs(value) < self.threshold:
+                    samples[index + channel] = 0.0
+                else:
+                    samples[index + channel] = max(-self.limit, min(self.limit, value * self.gain))
+
+
+def _write_header(handle, rate, channels):
+    handle.write(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+    handle.write(struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * channels * 2, channels * 2, 16))
+    handle.write(b"data\x00\x00\x00\x00")
+
+
+def _finish_header(handle, data_bytes):
+    if data_bytes > MAX_OUTPUT_BYTES - 36:
+        raise ValueError("A mixagem excede o limite de 4 GiB do WAV PCM.")
+    end = handle.tell()
+    handle.seek(4)
+    handle.write(struct.pack("<I", 36 + data_bytes))
+    handle.seek(40)
+    handle.write(struct.pack("<I", data_bytes))
+    handle.seek(end)
+
+
+def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
+                   cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES):
+    """Mix timestamped ``microphone``/``system`` iterables into an atomic WAV.
+
+    ``track_sources`` is a mapping whose values yield ``(event, float32
+    payload)`` pairs, matching :meth:`MeetingStore.iter_audio`.  The output
+    starts at session time zero and ends at the last source frame.  Missing
+    sources are valid, but an empty mapping or all-empty sources is not.
+    """
+    if not hasattr(track_sources, "items"):
+        raise TypeError("track_sources deve ser um mapa de faixas para iteráveis.")
+    unknown = set(track_sources) - {"microphone", "system"}
+    if unknown:
+        raise ValueError("Somente as fontes microfone e sistema são suportadas.")
+    if not isinstance(chunk_frames, int) or isinstance(chunk_frames, bool) or not 1 <= chunk_frames <= 65536:
+        raise ValueError("chunk_frames deve ser um inteiro entre 1 e 65536.")
+    _cancel(cancel_event)
+    tracks = [_Track(name, source) for name, source in track_sources.items() if source is not None]
+    tracks = [track for track in tracks if not track.done]
+    if not tracks:
+        raise ValueError("Pelo menos uma fonte deve conter áudio.")
+    # A common highest-rate clock preserves the native timing and lets lower
+    # rate sources use bounded linear interpolation during rendering.
+    rate = max(track.rate for track in tracks)
+    output_channels = max(track.channels for track in tracks)
+    destination = Path(destination).absolute()
+    if not destination.parent.is_dir() or destination.is_dir():
+        raise ValueError("A pasta destino deve existir e o destino deve ser um arquivo.")
+
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent
+    )
+    data_bytes = 0
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            _write_header(handle, rate, output_channels)
+            enhancer = _MicEnhancer() if enhance_microphone else None
+            frame = 0
+            # ceiling: output chunks are capped at 4,096 frames (~32 KiB for
+            # stereo PCM16); increase only with measured memory profiling.
+            while not all(track.done and track._current is None for track in tracks):
+                _cancel(cancel_event)
+                next_end = frame + chunk_frames
+                samples = [0.0] * ((next_end - frame) * output_channels)
+                for track in tracks:
+                    contribution = samples
+                    if enhancer is not None and track.name == "microphone":
+                        contribution = [0.0] * ((next_end - frame) * output_channels)
+                    track.render(frame, next_end, rate, output_channels, contribution)
+                    if contribution is not samples:
+                        enhancer.apply(contribution, output_channels)
+                        for index, value in enumerate(contribution):
+                            samples[index] += value
+                all_done = all(track.done and track._current is None for track in tracks)
+                write_frames = next_end - frame
+                if all_done:
+                    final_end = max(track._last_end for track in tracks)
+                    final_end_frame = int(math.ceil(final_end * rate - 1e-9))
+                    write_frames = max(0, min(next_end, final_end_frame) - frame)
+                    samples = samples[:write_frames * output_channels]
+                encoded = bytearray(len(samples) * 2)
+                for index, value in enumerate(samples):
+                    _PCM16.pack_into(encoded, index * 2, _float_to_pcm16(value))
+                if data_bytes + len(encoded) > MAX_OUTPUT_BYTES - 36:
+                    raise ValueError("A mixagem excede o limite de 4 GiB do WAV PCM.")
+                handle.write(encoded)
+                data_bytes += len(encoded)
+                frame = next_end
+                if all_done:
+                    break
+            _cancel(cancel_event)
+            _finish_header(handle, data_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _cancel(cancel_event)
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return str(destination)
+
+
+def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
+                   cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES):
+    """Export one meeting's two store tracks without retaining the session."""
+    destination = Path(destination).absolute()
+    library = os.path.realpath(store.root)
+    try:
+        inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
+    except ValueError:
+        inside_library = False
+    if inside_library:
+        raise ValueError("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais.")
+    sources = {
+        track: store.iter_audio(session_id, track)
+        for track in ("microphone", "system")
+    }
+    return mixdown_tracks(
+        sources,
+        destination,
+        enhance_microphone=enhance_microphone,
+        cancel_event=cancel_event,
+        chunk_frames=chunk_frames,
+    )
+
+
+mixdown_meeting = export_mixdown
+
+
+__all__ = ["MixdownCancelled", "OUTPUT_CHUNK_FRAMES", "export_mixdown", "mixdown_meeting", "mixdown_tracks"]
