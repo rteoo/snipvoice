@@ -20,7 +20,7 @@ set "SHORTCUT_PATH=%STARTUP_DIR%\Snipvoice.lnk"
 if exist "%PREVIOUS_DIR%" (
     echo A previous rollback copy exists: "%PREVIOUS_DIR%"
     echo Resolve this recovery copy before rebuilding. No files were deleted.
-    pause
+    if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
     exit /b 1
 )
 
@@ -28,7 +28,7 @@ tasklist /FI "IMAGENAME eq Snipvoice.exe" 2>nul | find /I "Snipvoice.exe" >nul
 if not errorlevel 1 (
     echo "Snipvoice.exe" is currently running.
     echo Close the packaged app before rebuilding dist so the update can replace the old folder safely.
-    pause
+    if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
     exit /b 1
 )
 
@@ -94,6 +94,7 @@ if exist "%SHORTCUT_PATH%" (
     echo Startup shortcut already exists. Skipping shortcut prompt.
     goto finish
 )
+if defined SNIPVOICE_BUILD_NONINTERACTIVE goto finish
 
 echo.
 set /p "ADD_STARTUP_SHORTCUT=Add a Startup shortcut for Snipvoice? [Y/N]: "
@@ -193,7 +194,7 @@ if exist "%WORK_ROOT%" (
     attrib -r "%WORK_ROOT%\*.*" /s /d >nul 2>&1
     rmdir /s /q "%WORK_ROOT%" >nul 2>&1
 )
-pause
+if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
 exit /b 1
 
 :cleanup_and_exit
@@ -205,5 +206,5 @@ if exist "%WORK_ROOT%" (
     attrib -r "%WORK_ROOT%\*.*" /s /d >nul 2>&1
     rmdir /s /q "%WORK_ROOT%" >nul 2>&1
 )
-pause
+if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
 endlocal

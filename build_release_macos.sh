@@ -68,11 +68,14 @@ STAGING_ROOT="$WORK_ROOT/dist"
 STAGED_APP="$STAGING_ROOT/$APP_NAME.app"
 
 # --- App icon -------------------------------------------------------------
-# The repo ships a 256x256 .ico (Windows). Convert that source directly instead
-# of constructing a partial iconset: current iconutil rejects iconsets without
-# the 512px slots, and upscaling the source would only manufacture fake detail.
-ICNS="$WORK_ROOT/$APP_NAME.icns"
-sips -s format icns "$REPO_DIR/source/snipvoice.ico" --out "$ICNS" >/dev/null
+# The repository carries a complete ICNS generated from the same 1024px source
+# as the Windows ICO and README artwork. Packaging must use that reviewed asset
+# verbatim so the application icon is reproducible across build hosts.
+ICNS="$REPO_DIR/source/snipvoice.icns"
+if [[ ! -s "$ICNS" ]]; then
+    echo "Missing app icon: $ICNS" >&2
+    exit 1
+fi
 
 # --- Package --------------------------------------------------------------
 echo "Packaging $APP_NAME $APP_VERSION ($RELEASE_CHANNEL) ..."
