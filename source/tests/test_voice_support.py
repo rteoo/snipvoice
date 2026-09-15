@@ -374,12 +374,14 @@ class ControllerTests(unittest.TestCase):
                 mock.patch("voice_support.installed_model_path", return_value="model.gguf"), \
                 mock.patch.object(self.controller, "_start_monitor"):
             self.controller.set_language("en-US")
+            self.assertEqual(self.controller.state, STATE_LOADING)
+            release.set()
             deadline = time.monotonic() + 1.0
             while self.controller.state != STATE_IDLE and time.monotonic() < deadline:
                 time.sleep(0.01)
+            self.assertEqual(self.controller.state, STATE_IDLE)
 
         self.assertEqual(self.controller.history_entry(recording.record_id)["status"], "cancelled")
-        release.set()
         for thread in runner.threads:
             thread.join(1.0)
 
