@@ -11,7 +11,7 @@ set "DIST=%REPO_DIR%\dist\Snipvoice"
 if not exist "%DIST%\Snipvoice.exe" (
     echo Packaged app not found: "%DIST%\Snipvoice.exe"
     echo Run build_release.bat first, then re-run this script.
-    pause
+    if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
     exit /b 1
 )
 
@@ -23,7 +23,7 @@ if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" set "ISCC=%P
 if not defined ISCC (
     echo Inno Setup compiler ISCC.exe was not found.
     echo Install Inno Setup 6 ^(free^) from https://jrsoftware.org/isdl.php and re-run.
-    pause
+    if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
     exit /b 1
 )
 
@@ -31,11 +31,11 @@ echo Compiling installer with "%ISCC%"...
 "%ISCC%" "%ISS%"
 if errorlevel 1 (
     echo Installer compilation failed.
-    pause
+    if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
     exit /b 1
 )
 
 echo.
 echo Done. The installer is in installer\Output\
-pause
+if not defined SNIPVOICE_BUILD_NONINTERACTIVE pause
 endlocal

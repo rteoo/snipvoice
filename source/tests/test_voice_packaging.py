@@ -1,5 +1,8 @@
 import os
+import re
 import unittest
+
+from PIL import Image
 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -100,6 +103,56 @@ class PackagingExcludeTests(unittest.TestCase):
                 "transcribe-cpp-native==0.1.3",
             },
         )
+
+    def test_bundle_tool_is_pinned_separately(self):
+        path = os.path.join(ROOT, "source", "requirements-build.txt")
+        with open(path, encoding="utf-8") as handle:
+            requirements = [
+                line.strip()
+                for line in handle
+                if line.strip() and not line.lstrip().startswith("#")
+            ]
+        self.assertEqual(requirements, ["pyinstaller==6.22.3"])
+
+    def test_release_metadata_is_stable_and_synchronized(self):
+        paths = {
+            "source": os.path.join(ROOT, "source", "snipvoice.pyw"),
+            "installer": os.path.join(ROOT, "installer", "snipvoice.iss"),
+            "workflow": os.path.join(ROOT, ".github", "workflows", "bundles.yml"),
+        }
+        texts = {}
+        for name, path in paths.items():
+            with open(path, encoding="utf-8") as handle:
+                texts[name] = handle.read()
+
+        source_version = re.search(r'^APP_VERSION = "([^"]+)"$', texts["source"], re.M)
+        installer_version = re.search(r'^#define MyAppVersion "([^"]+)"$', texts["installer"], re.M)
+        workflow_version = re.search(r'^  SNIPVOICE_VERSION: "([^"]+)"$', texts["workflow"], re.M)
+        self.assertEqual(source_version.group(1), "1.0.0")
+        self.assertEqual(installer_version.group(1), "1.0.0")
+        self.assertEqual(workflow_version.group(1), "1.0.0")
+        self.assertIn('RELEASE_CHANNEL = "stable"', texts["source"])
+        self.assertIn('#define MyAppChannel "stable"', texts["installer"])
+
+    def test_release_icons_cover_desktop_sizes(self):
+        png_path = os.path.join(ROOT, "source", "snipvoice-icon.png")
+        ico_path = os.path.join(ROOT, "source", "snipvoice.ico")
+        icns_path = os.path.join(ROOT, "source", "snipvoice.icns")
+
+        with Image.open(png_path) as png:
+            self.assertEqual(png.size, (1024, 1024))
+            self.assertEqual(png.mode, "RGBA")
+            self.assertEqual(png.getchannel("A").getextrema(), (0, 255))
+        with Image.open(ico_path) as ico:
+            self.assertTrue({(16, 16), (32, 32), (48, 48), (256, 256)} <= ico.ico.sizes())
+        with Image.open(icns_path) as icns:
+            sizes = set(icns.info["sizes"])
+            self.assertIn((16, 16, 2), sizes)
+            self.assertIn((256, 256, 2), sizes)
+            self.assertIn((512, 512, 2), sizes)
+
+        with open(os.path.join(ROOT, "build_release_macos.sh"), encoding="utf-8") as handle:
+            self.assertIn('ICNS="$REPO_DIR/source/snipvoice.icns"', handle.read())
 
 
 if __name__ == "__main__":
