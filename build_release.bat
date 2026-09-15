@@ -17,6 +17,16 @@ set "WORK_DIR=%WORK_ROOT%\build"
 set "STARTUP_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "SHORTCUT_PATH=%STARTUP_DIR%\Snipvoice.lnk"
 
+if not defined SNIPVOICE_FFMPEG_COMPLIANCE_DIR (
+    echo SNIPVOICE_FFMPEG_COMPLIANCE_DIR is required for a release build.
+    echo Build the clean audio runtime with packaging\clean_audio_runtime.py first.
+    exit /b 1
+)
+if not exist "%SNIPVOICE_FFMPEG_COMPLIANCE_DIR%\runtime-manifest.json" (
+    echo Clean FFmpeg compliance manifest not found.
+    exit /b 1
+)
+
 if exist "%PREVIOUS_DIR%" (
     echo A previous rollback copy exists: "%PREVIOUS_DIR%"
     echo Resolve this recovery copy before rebuilding. No files were deleted.
@@ -54,7 +64,8 @@ if errorlevel 1 (
 python -c "import av, sounddevice, soxr, transcribe_cpp, transcribe_cpp_native" >nul 2>&1
 if errorlevel 1 (
     echo Voice transcription dependencies are missing.
-    echo Install them with: python -m pip install -r source\requirements-voice.txt
+    echo Build and install the clean decoder runtime documented in packaging\README.md,
+    echo then install source\requirements-voice.txt.
     goto cleanup_and_fail
 )
 REM transcribe.cpp and llama.cpp bundle different GGML DLL builds. Probe them in
@@ -70,7 +81,7 @@ set "VOICE_COLLECT_ARGS=--collect-all av --collect-all sounddevice --collect-all
 call "%REPO_DIR%\source\native\build_windows_capture.bat"
 if errorlevel 1 goto cleanup_and_fail
 
-python -m PyInstaller --noconfirm --clean --windowed --onedir --distpath "%STAGING_ROOT%" --workpath "%WORK_DIR%" --specpath "%REPO_DIR%" --name "Snipvoice" --icon "%REPO_DIR%\source\snipvoice.ico" --add-data "%REPO_DIR%\source\snipvoice.ico;." --add-data "%REPO_DIR%\THIRD_PARTY_NOTICES.md;." --add-data "%REPO_DIR%\LICENSE;." --add-binary "%REPO_DIR%\source\native\bin\snipvoice-capture.exe;native/bin" --hidden-import pystray._win32 %VOICE_COLLECT_ARGS% --exclude-module torch --exclude-module torchvision --exclude-module torchaudio --exclude-module cv2 --exclude-module transformers --exclude-module onnxruntime --exclude-module scipy "%REPO_DIR%\source\snipvoice.pyw"
+python -m PyInstaller --noconfirm --clean --windowed --onedir --distpath "%STAGING_ROOT%" --workpath "%WORK_DIR%" --specpath "%REPO_DIR%" --name "Snipvoice" --icon "%REPO_DIR%\source\snipvoice.ico" --add-data "%REPO_DIR%\source\snipvoice.ico;." --add-data "%REPO_DIR%\THIRD_PARTY_NOTICES.md;." --add-data "%REPO_DIR%\LICENSE;." --add-data "%SNIPVOICE_FFMPEG_COMPLIANCE_DIR%;THIRD_PARTY_LICENSES/FFmpeg" --add-binary "%REPO_DIR%\source\native\bin\snipvoice-capture.exe;native/bin" --hidden-import pystray._win32 %VOICE_COLLECT_ARGS% --exclude-module torch --exclude-module torchvision --exclude-module torchaudio --exclude-module cv2 --exclude-module transformers --exclude-module onnxruntime --exclude-module scipy "%REPO_DIR%\source\snipvoice.pyw"
 if errorlevel 1 (
     echo.
     echo Packaging failed. The existing dist was left unchanged.

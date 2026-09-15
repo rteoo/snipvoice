@@ -10,14 +10,17 @@ The application depends on the following separately licensed projects:
 | `Pillow` | Image and icon handling | [Pillow license](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
 | `sounddevice` / PortAudio | Optional voice capture | [sounddevice](https://github.com/spatialaudio/python-sounddevice), [PortAudio](https://github.com/PortAudio/portaudio) |
 | `soxr` / libsoxr / PFFFT | Optional voice sample-rate conversion | [python-soxr](https://github.com/dofuuz/python-soxr), [LGPLv2.1+ license](https://github.com/dofuuz/python-soxr/blob/main/LICENSE.txt), [libsoxr](https://sourceforge.net/projects/soxr/) |
-| `PyAV` / FFmpeg | Compressed audio-file decoding | [PyAV BSD-3-Clause](https://github.com/PyAV-Org/PyAV/blob/main/LICENSE.txt), [FFmpeg licensing](https://ffmpeg.org/legal.html); verify the effective license and corresponding-source obligations of the exact bundled wheel before release |
+| `PyAV` | Python bindings for compressed audio-file decoding | BSD-3-Clause; the exact license text is in `THIRD_PARTY_LICENSES/FFmpeg/PyAV-LICENSE.txt` |
+| Custom FFmpeg audio runtime | Shared native decoding of MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV and related audio formats | LGPL-2.1-or-later; source, configuration, hashes, build evidence, and the exact license text are in `THIRD_PARTY_LICENSES/FFmpeg/` |
 | `transcribe-cpp` / `transcribe-cpp-native` | Optional local transcription runtime | [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) |
 | `llama-cpp-python` / `llama.cpp` | Built-in local summary inference | [llama-cpp-python](https://github.com/abetlen/llama-cpp-python), [llama.cpp](https://github.com/ggml-org/llama.cpp) |
 
-The exact versions used by a build are recorded in
-`source/requirements*.txt`. Before publishing a packaged build, include the
-license and notice files shipped by each resolved dependency and native
-library. The optional voice catalog can download third-party model artifacts;
+The PyAV release wheel is built from hash-pinned source against Snipvoice's
+minimal shared FFmpeg build. The release gate rejects GPL, nonfree, version-3,
+external codec, network, and static-library configurations. The exact versions
+and build recipe are recorded in `packaging/clean_audio_runtime.py`; the bundled
+runtime manifest records the resulting configuration. The optional voice
+catalog can download third-party model artifacts;
 the model metadata and its applicable attribution requirements are documented
 in [`source/docs/voice-input-plan.md`](source/docs/voice-input-plan.md). Do not
 describe a model as bundled unless the release actually contains it. Summary

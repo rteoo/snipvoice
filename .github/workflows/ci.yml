@@ -111,9 +111,9 @@ jobs:
             source/requirements.txt
             source/requirements-voice.txt
 
-      # This lane deliberately installs the pinned native voice runtime. Its
-      # wheels cover the supported runner architectures; no microphone or model
-      # download is needed by the import and unit-test probes below.
+      # This lane installs capture, resampling, transcription, and summary
+      # dependencies. The custom PyAV/FFmpeg decoder is compiled and verified
+      # by the platform bundle jobs; it must never resolve from PyPI here.
       - name: Install Linux PortAudio runtime
         if: runner.os == 'Linux'
         run: |
@@ -126,7 +126,7 @@ jobs:
 
       - name: Require native voice imports
         working-directory: source
-        run: python -c "import av, sounddevice, soxr, transcribe_cpp, transcribe_cpp_native"
+        run: python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native"
 
       # The core-only suite intentionally permits optional-runtime skips. This
       # native lane fails if either voice module skips, so a green job proves the

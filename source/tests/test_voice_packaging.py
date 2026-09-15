@@ -117,12 +117,64 @@ class PackagingExcludeTests(unittest.TestCase):
             {
                 "sounddevice==0.5.5",
                 "soxr==1.1.0",
-                "av==18.1.0",
                 "transcribe-cpp==0.1.3",
                 "transcribe-cpp-native==0.1.3",
                 "llama-cpp-python==0.3.35",
             },
         )
+
+    def test_release_builds_pyav_from_the_clean_audio_recipe(self):
+        workflow = os.path.join(ROOT, ".github", "workflows", "bundles.yml")
+        recipe = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
+        with open(workflow, encoding="utf-8") as handle:
+            workflow_text = handle.read()
+        with open(recipe, encoding="utf-8") as handle:
+            recipe_text = handle.read()
+
+        self.assertEqual(workflow_text.count("packaging/clean_audio_runtime.py"), 2)
+        with open(
+            os.path.join(ROOT, "source", "requirements-voice.txt"), encoding="utf-8"
+        ) as handle:
+            voice_requirements = handle.read()
+        self.assertNotIn("av==18.1.0", voice_requirements)
+        for flag in (
+            "--disable-static",
+            "--enable-shared",
+            "--disable-gpl",
+            "--disable-nonfree",
+            "--disable-version3",
+            "--disable-autodetect",
+            "--disable-everything",
+            "--disable-network",
+            "--enable-protocol=file",
+        ):
+            self.assertIn(flag, recipe_text)
+        for forbidden_library in ("libx264", "libx265", "libfdk-aac"):
+            self.assertNotIn(f'"--enable-{forbidden_library}"', recipe_text)
+
+        with open(
+            os.path.join(ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8"
+        ) as handle:
+            quality_workflow = handle.read()
+        self.assertNotIn('python -c "import av,', quality_workflow)
+
+    def test_packaged_probe_rejects_non_clean_ffmpeg(self):
+        probe = os.path.join(ROOT, "source", "voice_runtime_probe.py")
+        validator = os.path.join(ROOT, "source", "clean_ffmpeg_runtime.py")
+        with open(probe, encoding="utf-8") as handle:
+            probe_text = handle.read()
+        with open(validator, encoding="utf-8") as handle:
+            validator_text = handle.read()
+        self.assertIn("verify_clean_ffmpeg_runtime(av)", probe_text)
+        self.assertIn('"--disable-everything"', validator_text)
+        self.assertIn('"--enable-gpl"', validator_text)
+
+    def test_release_bundles_clean_ffmpeg_compliance_materials(self):
+        for filename in ("build_release.bat", "build_release_macos.sh"):
+            with open(os.path.join(ROOT, filename), encoding="utf-8") as handle:
+                text = handle.read()
+            self.assertIn("SNIPVOICE_FFMPEG_COMPLIANCE_DIR", text)
+            self.assertIn("THIRD_PARTY_LICENSES/FFmpeg", text.replace("\\", "/"))
 
     def test_bundle_tool_is_pinned_separately(self):
         path = os.path.join(ROOT, "source", "requirements-build.txt")
@@ -133,6 +185,19 @@ class PackagingExcludeTests(unittest.TestCase):
                 if line.strip() and not line.lstrip().startswith("#")
             ]
         self.assertEqual(requirements, ["pyinstaller==6.22.3"])
+
+    def test_clean_audio_build_toolchain_is_pinned(self):
+        path = os.path.join(ROOT, "packaging", "requirements-build.txt")
+        with open(path, encoding="utf-8") as handle:
+            requirements = {
+                line.strip()
+                for line in handle
+                if line.strip() and not line.lstrip().startswith("#")
+            }
+        self.assertEqual(
+            requirements,
+            {"setuptools==84.0.0", "Cython==3.3.0", "wheel==0.48.0"},
+        )
 
     def test_release_metadata_is_stable_and_synchronized(self):
         paths = {
@@ -148,9 +213,9 @@ class PackagingExcludeTests(unittest.TestCase):
         source_version = re.search(r'^APP_VERSION = "([^"]+)"$', texts["source"], re.M)
         installer_version = re.search(r'^#define MyAppVersion "([^"]+)"$', texts["installer"], re.M)
         workflow_version = re.search(r'^  SNIPVOICE_VERSION: "([^"]+)"$', texts["workflow"], re.M)
-        self.assertEqual(source_version.group(1), "2.0.0")
-        self.assertEqual(installer_version.group(1), "2.0.0")
-        self.assertEqual(workflow_version.group(1), "2.0.0")
+        self.assertEqual(source_version.group(1), "3.0.0")
+        self.assertEqual(installer_version.group(1), "3.0.0")
+        self.assertEqual(workflow_version.group(1), "3.0.0")
         self.assertIn('RELEASE_CHANNEL = "stable"', texts["source"])
         self.assertIn('#define MyAppChannel "stable"', texts["installer"])
 
