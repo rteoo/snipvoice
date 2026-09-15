@@ -303,7 +303,7 @@ class MeetingWindow:
         self.endpoint_vars = {track: tk.StringVar(self.window) for track in ("microphone", "system")}
         self.endpoint_boxes = {}
         compact_recording = self.window.winfo_screenheight() <= 800
-        card_pady = self.ui.space_xs if compact_recording else self.ui.space_sm
+        card_pady = max(2, self.ui.space_xs // 2) if compact_recording else self.ui.space_sm
         row_pady = 1 if compact_recording else 3
         note_pady = (2, 4) if compact_recording else (4, 6)
         settings_card = self._card(recording, pady=card_pady)
