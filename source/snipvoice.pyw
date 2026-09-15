@@ -310,7 +310,14 @@ class Snipvoice:
         self._manager_recording_tab = meeting_view.recording_tab
         self._manager_library_tab = meeting_view.library_tab
         window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
-        center_on_screen(window)
+        window_width, window_height = (int(value) for value in geometry.split("x"))
+        screen_width = window.winfo_screenwidth()
+        screen_height = window.winfo_screenheight()
+        window_width = min(window_width, screen_width)
+        window_height = min(window_height, screen_height)
+        x = max(0, (screen_width - window_width) // 2)
+        y = max(0, (screen_height - window_height) // 2)
+        window.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     def _close_settings_window(self, force=False):
         meeting_view = self._manager_meeting_view

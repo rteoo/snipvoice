@@ -400,6 +400,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         def open_settings(shared_root):
             self.app._show_voice_settings(shared_root)
+            self.app.manager_window.update_idletasks()
             notebook = self.app._manager_notebook
             selected = notebook.select()
             labels = {
@@ -412,11 +413,16 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 _notebook_titles(self.app.manager_window),
                 str(notebook.cget("style")),
                 labels,
+                (
+                    self.app.manager_window.winfo_width(),
+                    self.app.manager_window.winfo_height(),
+                ),
             )
 
-        title, titles, notebook_style, labels = self._on_gui(open_settings)
+        title, titles, notebook_style, labels, manager_size = self._on_gui(open_settings)
         self.assertIn("Voz", title)
         self.assertEqual(notebook_style, "Manager.TNotebook")
+        self.assertEqual(manager_size, (1120, 820))
         self.assertIn("Processamento local", labels)
         self.assertIn("Modelo e idioma", labels)
         self.assertIn("Atalhos", labels)
