@@ -290,15 +290,6 @@ class Snipvoice:
             padx=ui.space_xl,
             pady=(ui.space_md, ui.space_lg),
         )
-        tab = tk.Frame(notebook, bg=ui.surface)
-        self._manager_voice_tab = tab
-        if self.voice is None:
-            notebook.add(tab, text="Diagnóstico")
-            tk.Label(tab, text="Entrada por voz indisponível. Verifique o runtime de transcrição.",
-                     bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(padx=24, pady=24)
-        else:
-            notebook.add(tab, text="Voz")
-            self._create_voice_tab(tab, window)
         from meeting_gui import add_meeting_tabs
         meeting_view = add_meeting_tabs(
             root, window, notebook, self.meetings,
@@ -309,6 +300,39 @@ class Snipvoice:
         self._manager_meeting_view = meeting_view
         self._manager_recording_tab = meeting_view.recording_tab
         self._manager_library_tab = meeting_view.library_tab
+        settings_tab = getattr(meeting_view, "settings_tab", None)
+        tab = tk.Frame(notebook, bg=ui.surface)
+        self._manager_voice_tab = tab
+        notebook.add(tab, text="Ditado")
+        # The meeting view owns Settings and adds it before the voice tab. Move
+        # that existing tab to the end so the user-facing order stays stable:
+        # Gravação, Biblioteca, Ditado, Settings.
+        if settings_tab is not None:
+            try:
+                notebook.insert("end", settings_tab)
+            except tk.TclError:
+                self.logger.debug("Não foi possível reposicionar a aba Settings")
+        if self.voice is None:
+            tk.Label(tab, text="Entrada por voz indisponível. Verifique o runtime de transcrição.",
+                     bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(padx=24, pady=24)
+            models_parent = getattr(meeting_view, "transcription_models_parent", None)
+            if models_parent is not None:
+                tk.Label(
+                    models_parent,
+                    text="Modelos de transcrição indisponíveis. Verifique o runtime de transcrição.",
+                    bg=ui.card,
+                    fg=ui.text_muted,
+                    font=ui.font(9),
+                    wraplength=640,
+                    justify="left",
+                ).pack(anchor="w", pady=(0, ui.space_md))
+        else:
+            self._create_voice_tab(
+                tab,
+                window,
+                models_parent=getattr(meeting_view, "transcription_models_parent", None),
+            )
+        notebook.select(meeting_view.recording_tab)
         window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
         window_width, window_height = (int(value) for value in geometry.split("x"))
         screen_width = window.winfo_screenwidth()
@@ -409,10 +433,9 @@ class Snipvoice:
         if platform_support.tk_runs_on_main_thread():
             platform_support.hide_dock_icon()
         menu = pystray.Menu(
-            pystray.MenuItem("Gravações e reuniões…", self.open_meetings),
+            pystray.MenuItem("Abrir Gravação…", self.open_meetings, default=True),
             pystray.MenuItem(self._voice_menu_label, self.toggle_voice, checked=self._voice_menu_checked),
-            pystray.MenuItem("Configurar voz…", self.open_voice_settings, default=True),
-            pystray.MenuItem("Recarregar comandos", self.reload_commands),
+            pystray.MenuItem("Configurar ditado…", self.open_voice_settings),
             pystray.MenuItem("Iniciar com o sistema", self.toggle_autostart,
                              checked=lambda item: self._autostart_state == platform_support.AUTOSTART_CURRENT),
             pystray.Menu.SEPARATOR,
@@ -425,7 +448,7 @@ class Snipvoice:
                                  **platform_support.tray_icon_options())
         self.task_runner.start(self._rebuild_meeting_monitor, name="meeting-hotkey")
         if show_settings:
-            self.open_voice_settings()
+            self.open_meetings()
         if platform_support.tk_runs_on_main_thread():
             self.icon.run_detached(setup=self.on_tray_ready)
             self.gui.run_mainloop()
@@ -794,10 +817,9 @@ class Snipvoice:
         return dialog
 
 
-    def _build_voice_settings_controls(self, parent, owner):
-        """Build profile, language, shortcut, and model controls."""
+    def _build_voice_settings_controls(self, parent, owner, models_parent=None):
+        """Build Ditado controls and, when supplied, the Settings model inventory."""
         from voice_catalog import (
-            LANGUAGES,
             available_languages,
             default_language_for_profile,
             format_size,
@@ -822,11 +844,15 @@ class Snipvoice:
             hotkey,
             command_hotkey,
         ]
-        profile_buttons = []
+        profile_labels = []
         download_buttons = []
 
+        # Settings owns the long download inventory. The fallback keeps direct
+        # callers and older embedded views functional while the manager view is
+        # being upgraded to expose ``transcription_models_parent``.
+        model_parent = models_parent if models_parent is not None else parent
         models_card = tk.Frame(
-            parent,
+            model_parent,
             padx=ui.space_lg,
             pady=ui.space_md,
             **ui.card_options(),
@@ -834,7 +860,7 @@ class Snipvoice:
         models_card.pack(fill=tk.X, pady=(0, ui.space_md))
         tk.Label(
             models_card,
-            text="Modelo e idioma",
+            text="Modelos de transcrição",
             font=ui.font(11, "bold"),
             bg=ui.card,
             fg=ui.text_strong,
@@ -859,7 +885,7 @@ class Snipvoice:
             )
 
         def refresh_profile_labels():
-            for button, entry in profile_buttons:
+            for button, entry in profile_labels:
                 try:
                     if not button.winfo_exists():
                         continue
@@ -888,18 +914,18 @@ class Snipvoice:
         for entry in visible:
             row = tk.Frame(models_card, bg=ui.card)
             row.pack(fill=tk.X, anchor="w", pady=ui.space_xs)
-            button = tk.Radiobutton(
+            label = tk.Label(
                 row,
                 text=profile_label(entry),
-                variable=selected,
-                value=entry["profile"],
                 anchor="w",
                 justify="left",
                 wraplength=wrap - 110,
-                **ui.checkbutton_colors(ui.card),
+                bg=ui.card,
+                fg=ui.text,
+                font=ui.font(9),
             )
-            button.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor="w")
-            profile_buttons.append((button, entry))
+            label.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor="w")
+            profile_labels.append((label, entry))
             download_button = tk.Button(
                 row,
                 text="Baixar",
@@ -910,50 +936,97 @@ class Snipvoice:
             download_button.pack(side=tk.RIGHT, padx=(8, 0))
             download_buttons.append((download_button, entry))
 
-        lang_row = tk.Frame(models_card, bg=ui.card)
-        lang_row.pack(anchor="w", pady=(ui.space_sm, 0))
-        language_label = tk.Label(
-            lang_row,
-            text="Idioma:",
+        def update_language_options(*_args):
+            profile = selected.get()
+            allowed = available_languages(profile)
+            if language.get() not in allowed:
+                language.set(default_language_for_profile(profile, language.get()))
+            language_combo.configure(
+                values=[language_display_labels[lang] for lang in allowed]
+            )
+            language_display.set(language_display_labels.get(language.get(), language.get()))
+
+        selected.trace_add("write", update_language_options)
+
+        # The compact controls are deliberately kept in Ditado. Internal
+        # values remain profile/language IDs so persistence and runtime code do
+        # not depend on the localized labels shown to users.
+        profile_display_labels = {
+            "balanced": "Equilibrado · Parakeet TDT",
+            "compact": "Compacto · Qwen 0.6B",
+            "accuracy": "Precisão · Qwen 1.7B",
+        }
+        profile_display_to_id = {
+            label: profile for profile, label in profile_display_labels.items()
+        }
+        language_display_labels = {
+            "auto": "Automático",
+            "pt-BR": "Português (Brasil)",
+            "en-US": "Inglês (Estados Unidos)",
+        }
+        language_display_to_id = {
+            label: lang for lang, label in language_display_labels.items()
+        }
+        model_display = tk.StringVar(master=owner)
+        language_display = tk.StringVar(master=owner)
+        selector_frame = tk.Frame(
+            parent,
+            padx=ui.space_lg,
+            pady=ui.space_md,
+            **ui.card_options(),
+        )
+        selector_frame.pack(fill=tk.X, pady=(0, ui.space_md))
+        selector_frame.grid_columnconfigure(1, weight=1)
+        tk.Label(
+            selector_frame,
+            text="Modelo e idioma",
+            bg=ui.card,
+            fg=ui.text_strong,
+            font=ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_sm))
+        tk.Label(
+            selector_frame,
+            text="Modelo de transcrição",
             bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
+        ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
+        model_combo = ttk.Combobox(
+            selector_frame,
+            state="readonly",
+            textvariable=model_display,
+            values=list(profile_display_labels.values()),
+            width=34,
         )
-        language_label.pack(side=tk.LEFT)
-        language_labels = {
-            "auto": "detecção automática",
-            "pt-BR": "pt-BR",
-            "en-US": "en-US",
-        }
-        language_buttons = {}
-        for lang in LANGUAGES:
-            button = tk.Radiobutton(
-                lang_row,
-                text=language_labels.get(lang, lang),
-                variable=language,
-                value=lang,
-                **ui.checkbutton_colors(ui.card),
-            )
-            button.pack(side=tk.LEFT, padx=4)
-            language_buttons[lang] = button
+        model_combo.grid(row=1, column=1, sticky="ew", pady=4)
+        tk.Label(
+            selector_frame,
+            text="Idioma",
+            bg=ui.card,
+            fg=ui.text,
+            font=ui.font(9),
+        ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
+        language_combo = ttk.Combobox(
+            selector_frame,
+            state="readonly",
+            textvariable=language_display,
+            values=list(language_display_labels.values()),
+            width=34,
+        )
+        language_combo.grid(row=2, column=1, sticky="ew", pady=4)
 
-        def update_language_options(*_args):
-            profile = selected.get()
-            allowed = set(available_languages(profile))
-            if language.get() not in allowed:
-                language.set(default_language_for_profile(profile, language.get()))
-            for lang, button in language_buttons.items():
-                button.configure(
-                    state=tk.NORMAL if lang in allowed else tk.DISABLED
-                )
-            if allowed == {"auto"}:
-                language_label.configure(text="Idioma: detecção automática (Qwen)")
-            else:
-                language_label.configure(text="Idioma:")
+        def on_model_selected(_event=None):
+            profile = profile_display_to_id.get(model_display.get())
+            if profile is not None:
+                selected.set(profile)
 
-        for button, _entry in profile_buttons:
-            button.configure(command=update_language_options)
-        selected.trace_add("write", update_language_options)
+        def on_language_selected(_event=None):
+            lang = language_display_to_id.get(language_display.get())
+            if lang is not None:
+                language.set(lang)
+
+        model_combo.bind("<<ComboboxSelected>>", on_model_selected)
+        language_combo.bind("<<ComboboxSelected>>", on_language_selected)
 
         shortcut_frame = tk.Frame(
             parent,
@@ -1016,6 +1089,12 @@ class Snipvoice:
             hotkey.set(voice.settings.hotkey)
             command_hotkey.set(voice.settings.command_hotkey)
             update_language_options()
+            model_display.set(
+                profile_display_labels.get(selected.get(), selected.get())
+            )
+            language_display.set(
+                language_display_labels.get(language.get(), language.get())
+            )
 
         def apply_voice_settings():
             profile = selected.get()
@@ -1111,46 +1190,39 @@ class Snipvoice:
             self.refresh_tray_menu()
             self._refresh_manager_voice_tab()
 
+        def action_button(text, command, accent=False):
+            return tk.Button(
+                buttons,
+                text=text,
+                command=command,
+                font=ui.font(),
+                **ui.button_colors(accent=accent),
+                **ui.button_chrome(),
+            )
+
         buttons = tk.Frame(parent, bg=ui.surface)
-        buttons.pack(fill=tk.X)
-        tk.Button(
-            buttons,
-            text="Salvar e usar",
-            command=apply_voice_settings,
-            **ui.button_colors(accent=True),
-        ).pack(side=tk.LEFT)
-        tk.Button(
-            buttons,
-            text="Remover modelo",
-            command=remove_model,
-            **ui.button_colors(),
-        ).pack(side=tk.LEFT, padx=(8, 0))
-        tk.Button(
-            buttons,
-            text="Licenças e atribuições…",
-            command=lambda: self._show_voice_third_party_notices(
-                owner, third_party_notices()
-            ),
-            **ui.button_colors(),
+        buttons.pack(fill=tk.X, pady=(ui.space_sm, 0))
+        action_button("Salvar e usar", apply_voice_settings, accent=True).pack(side=tk.LEFT)
+        action_button("Remover modelo", remove_model).pack(side=tk.LEFT, padx=(8, 0))
+        action_button(
+            "Licenças e atribuições…",
+            lambda: self._show_voice_third_party_notices(owner, third_party_notices()),
         ).pack(side=tk.RIGHT)
-        tk.Button(
-            buttons,
-            text="Histórico de voz…",
-            command=lambda: self._open_voice_history(owner),
-            **ui.button_colors(),
-        ).pack(side=tk.RIGHT, padx=(0, 8))
-        tk.Button(
-            buttons,
-            text="Correções…",
-            command=lambda: self._show_voice_replacements(owner),
-            **ui.button_colors(),
-        ).pack(side=tk.RIGHT, padx=(0, 8))
+        action_button("Histórico de voz…", lambda: self._open_voice_history(owner)).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
+        action_button("Recarregar comandos", self.reload_commands).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
+        action_button("Correções…", lambda: self._show_voice_replacements(owner)).pack(
+            side=tk.RIGHT, padx=(0, 8)
+        )
 
         refresh_form()
         return refresh_form
 
 
-    def _create_voice_tab(self, parent, root):
+    def _create_voice_tab(self, parent, root, models_parent=None):
         """Build manager voice controls backed by the existing tray actions."""
         ui = ui_theme.theme()
         main = tk.Frame(parent, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
@@ -1233,7 +1305,11 @@ class Snipvoice:
         )
         status_label.pack(anchor="w", pady=(ui.space_xs, 0))
 
-        refresh_form = self._build_voice_settings_controls(main, root)
+        refresh_form = self._build_voice_settings_controls(
+            main,
+            root,
+            models_parent=models_parent,
+        )
         self._manager_voice_refresher = refresh
         refresh()
 

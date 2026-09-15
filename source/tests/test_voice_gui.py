@@ -180,9 +180,9 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 str(widget.cget("text")) for widget in _descendants(frame)
                 if isinstance(widget, tk.Button)
             ]
-            radios = [
+            selectors = [
                 widget for widget in _descendants(frame)
-                if isinstance(widget, tk.Radiobutton)
+                if isinstance(widget, ttk.Combobox)
             ]
             labels = [
                 str(widget.cget("text")) for widget in _descendants(frame)
@@ -190,18 +190,19 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             ]
             checked = bool(int(checkbox.getvar(checkbox.cget("variable"))))
             checkbox.invoke()
-            return checked, labels, buttons, len(radios)
+            return checked, labels, buttons, len(selectors)
 
-        checked, labels, buttons, radio_count = self._on_gui(build)
+        checked, labels, buttons, selector_count = self._on_gui(build)
         self.assertTrue(checked)
         self.assertIn("Entrada por voz (pronta)", labels)
         self.assertIn("Salvar e usar", buttons)
         self.assertIn("Remover modelo", buttons)
+        self.assertIn("Recarregar comandos", buttons)
         self.assertIn("Histórico de voz…", buttons)
         self.assertIn("Licenças e atribuições…", buttons)
         self.assertFalse(any("transcribe.cpp — MIT" in text for text in labels))
-        self.assertFalse(any(text.startswith("Configurar voz") for text in buttons))
-        self.assertGreaterEqual(radio_count, 2)
+        self.assertFalse(any(text.startswith("Configurar ditado") for text in buttons))
+        self.assertGreaterEqual(selector_count, 2)
         self.app.toggle_voice.assert_called_once_with()
 
     def test_voice_licenses_open_in_a_bounded_scrollable_window(self):
@@ -280,11 +281,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 + widget.winfo_height()
                 for name, widget in actions.items()
                 if name in expected
-            }
+            }, {name: int(widget.cget("pady")) for name, widget in actions.items()
+                if name in expected}
             root.destroy()
             return result
 
-        available_height, action_bottoms = self._on_gui(measure)
+        available_height, action_bottoms, action_padding = self._on_gui(measure)
         self.assertGreater(available_height, 1)
         for name, bottom in action_bottoms.items():
             self.assertLessEqual(
@@ -292,6 +294,9 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 available_height,
                 f"{name!r} is clipped below the voice tab",
             )
+        if not IS_MAC:
+            for name, padding in action_padding.items():
+                self.assertGreaterEqual(padding, 6, f"{name!r} is too thin")
 
     def test_voice_tab_refresh_updates_install_labels_and_normalized_settings(self):
         voice = mock.Mock()
@@ -309,31 +314,27 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             root = tk.Toplevel(shared_root)
             root.withdraw()
             frame = tk.Frame(root)
-            with mock.patch("voice_models.model_is_installed", return_value=False):
-                self.app._create_voice_tab(frame, root)
+            self.app._create_voice_tab(frame, root)
             root.update_idletasks()
-            before = [
-                str(widget.cget("text")) for widget in _descendants(frame)
-                if isinstance(widget, tk.Radiobutton)
+            combos = [
+                widget for widget in _descendants(frame)
+                if isinstance(widget, ttk.Combobox)
             ]
+            self.assertGreaterEqual(len(combos), 2)
             selected, language, _hotkey, _command = self.app._manager_voice_tk_vars
             before_state = (selected.get(), language.get())
             voice.settings.profile = "accuracy"
             voice.settings.language = "auto"
-            with mock.patch("voice_models.model_is_installed", return_value=True):
-                self.app._manager_voice_refresher()
-            after = [
-                str(widget.cget("text")) for widget in _descendants(frame)
-                if isinstance(widget, tk.Radiobutton)
-            ]
+            self.app._manager_voice_refresher()
+            after_display = tuple(combo.get() for combo in combos)
             after_state = (selected.get(), language.get())
-            return before, before_state, after, after_state
+            return before_state, after_display, after_state
 
-        before, before_state, after, after_state = self._on_gui(build_and_refresh)
-        self.assertTrue(any("não baixado" in text for text in before), before)
+        before_state, after_display, after_state = self._on_gui(build_and_refresh)
         self.assertEqual(before_state, ("balanced", "pt-BR"))
-        self.assertTrue(any("instalado" in text for text in after), after)
         self.assertEqual(after_state, ("accuracy", "auto"))
+        self.assertTrue(any("Precisão" in text for text in after_display), after_display)
+        self.assertTrue(any("Automático" in text for text in after_display), after_display)
 
     def test_voice_tab_download_button_downloads_its_model_without_enabling(self):
         voice = mock.Mock()
@@ -349,15 +350,16 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.app.voice = voice
 
         def build_and_download(shared_root):
-            root = tk.Toplevel(shared_root)
-            root.withdraw()
-            frame = tk.Frame(root)
             with mock.patch("voice_models.model_is_installed", return_value=False), \
                     mock.patch.object(tx.messagebox, "askokcancel", return_value=True):
-                self.app._create_voice_tab(frame, root)
-                root.update_idletasks()
+                self.app._show_manager_window(shared_root)
+                settings_tab = next(
+                    notebook_tab for notebook_tab in self.app._manager_notebook.tabs()
+                    if self.app._manager_notebook.tab(notebook_tab, "text") == "Settings"
+                )
+                settings = self.app._manager_notebook.nametowidget(settings_tab)
                 rows = [
-                    widget for widget in _descendants(frame)
+                    widget for widget in _descendants(settings)
                     if isinstance(widget, tk.Button)
                     and str(widget.cget("text")) == "Baixar"
                 ]
@@ -406,7 +408,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             labels = {
                 str(widget.cget("text"))
                 for widget in _descendants(self.app.manager_window)
-                if isinstance(widget, tk.Label)
+                if isinstance(widget, (tk.Label, ttk.Label))
             }
             return (
                 notebook.tab(selected, "text"),
@@ -420,7 +422,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             )
 
         title, titles, notebook_style, labels, manager_size = self._on_gui(open_settings)
-        self.assertIn("Voz", title)
+        self.assertEqual(title, "Ditado")
         self.assertEqual(notebook_style, "Manager.TNotebook")
         self.assertGreaterEqual(manager_size[0], 900)
         self.assertGreaterEqual(manager_size[1], 700)
@@ -429,15 +431,82 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertIn("Processamento local", labels)
         self.assertIn("Modelo e idioma", labels)
         self.assertIn("Atalhos", labels)
+        self.assertIn("Modelos de transcrição", labels)
+        self.assertIn("Modelos de resumo de texto", labels)
         self.assertEqual(
             titles,
             [
-                "Voz",
                 "Gravação",
                 "Biblioteca",
-                "Resumo",
+                "Ditado",
+                "Settings",
             ],
         )
+
+    def test_manager_separates_model_settings_from_ditado_selectors(self):
+        """Settings owns model downloads; Ditado keeps compact friendly selectors."""
+        _ensure_voice(self.app)
+
+        def inspect_manager(shared_root):
+            self.app._show_manager_window(shared_root)
+            notebook = self.app._manager_notebook
+            tabs = {
+                notebook.tab(tab_id, "text"): notebook.nametowidget(tab_id)
+                for tab_id in notebook.tabs()
+            }
+            settings = tabs["Settings"]
+            ditado = tabs["Ditado"]
+            settings_text = [
+                str(widget.cget("text"))
+                for widget in _descendants(settings)
+                if isinstance(widget, (tk.Label, ttk.Label))
+            ]
+            combos = [
+                widget for widget in _descendants(ditado)
+                if isinstance(widget, ttk.Combobox)
+            ]
+            profile_box = next(
+                widget for widget in combos
+                if any("Equilibrado" in value for value in widget["values"])
+            )
+            language_box = next(
+                widget for widget in combos
+                if any("Automático" in value for value in widget["values"])
+            )
+            profile_values = tuple(profile_box["values"])
+            language_values = tuple(language_box["values"])
+            profile_box.set("Compacto · Qwen 0.6B")
+            profile_box.event_generate("<<ComboboxSelected>>")
+            compact_language_values = tuple(language_box["values"])
+            profile_box.set("Equilibrado · Parakeet TDT")
+            profile_box.event_generate("<<ComboboxSelected>>")
+            language_box.set("Português (Brasil)")
+            language_box.event_generate("<<ComboboxSelected>>")
+            self.app.manager_window.update_idletasks()
+            selected, language, _hotkey, _command = self.app._manager_voice_tk_vars
+            return (
+                settings_text,
+                profile_values,
+                language_values,
+                compact_language_values,
+                selected.get(),
+                language.get(),
+            )
+
+        (settings_text, profile_values, language_values, compact_language_values,
+         selected, language) = self._on_gui(inspect_manager)
+        self.assertIn("Modelos de transcrição", settings_text)
+        self.assertIn("Modelos de resumo de texto", settings_text)
+        self.assertIn("Equilibrado · Parakeet TDT", profile_values)
+        self.assertIn("Compacto · Qwen 0.6B", profile_values)
+        self.assertIn("Precisão · Qwen 1.7B", profile_values)
+        self.assertIn("Automático", language_values)
+        self.assertIn("Português (Brasil)", language_values)
+        self.assertEqual(compact_language_values, ("Automático",))
+        self.assertEqual(selected, "balanced")
+        self.assertEqual(language, "pt-BR")
+        self.assertNotIn("Qwen3-ASR-0.6B", profile_values)
+        self.assertNotIn("0.0.0.00000000", profile_values)
 
     def test_meeting_shortcut_reuses_manager_and_selects_recording_tab(self):
         _ensure_voice(self.app)
@@ -483,28 +552,27 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         controls_bottom, visible_bottom = self._on_gui(measure)
         self.assertLessEqual(controls_bottom, visible_bottom)
 
-    def test_voice_tab_absent_when_controller_missing(self):
+    def test_ditado_tab_is_last_and_recording_is_default_when_voice_is_unavailable(self):
         self.app.voice = None
 
         def open_manager(shared_root):
             self.app._show_manager_window(shared_root)
-            return _notebook_titles(self.app.manager_window)
+            notebook = self.app._manager_notebook
+            return (_notebook_titles(self.app.manager_window),
+                    notebook.tab(notebook.select(), "text"))
 
-        titles = self._on_gui(open_manager)
+        titles, selected = self._on_gui(open_manager)
         self.assertTrue(titles, "expected manager notebook tabs")
-        self.assertTrue(
-            all("Voz" not in title for title in titles),
-            titles,
-        )
         self.assertEqual(
             titles,
             [
-                "Diagnóstico",
                 "Gravação",
                 "Biblioteca",
-                "Resumo",
+                "Ditado",
+                "Settings",
             ],
         )
+        self.assertEqual(selected, "Gravação")
         self.assertIsNone(self.app._manager_voice_refresher)
 
     def test_manager_reopen_rebinds_voice_refresher(self):
@@ -533,7 +601,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertTrue(cleared)
         self.assertTrue(rebound)
         self.assertFalse(same, "reopen must register a new refresher")
-        self.assertTrue(any("Voz" in title for title in titles), titles)
+        self.assertIn("Ditado", titles)
 
 
 def _ensure_voice(app):

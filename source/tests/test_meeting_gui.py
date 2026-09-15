@@ -71,17 +71,45 @@ class MeetingGuiLogicTests(unittest.TestCase):
         selection = EndpointSelection("manual", "opaque-id")
         options = endpoint_options([], "system", selection)
         self.assertEqual(options[-1][1], selection)
-        self.assertIn("Indisponível", options[-1][0])
+        self.assertIn("indisponível", options[-1][0])
+        self.assertNotIn("opaque-id", options[-1][0])
         self.assertEqual(options[1][1].argument(), "default:communications")
 
-    def test_device_ids_disambiguate_names_and_sources(self):
+    def test_duplicate_names_are_disambiguated_without_showing_device_ids(self):
         options = endpoint_options([
-            {"id": "a", "name": "Same", "kind": "microphone"},
-            {"id": "b", "name": "Same", "kind": "microphone"},
+            {"id": "{input-a}", "name": "Microfone USB", "kind": "microphone"},
+            {"id": "{input-b}", "name": "Microfone USB", "kind": "microphone"},
             {"id": "c", "name": "Output", "kind": "system"},
         ], "microphone", EndpointSelection())
-        self.assertEqual([selection.endpoint_id for _, selection in options[2:]], ["a", "b"])
-        self.assertNotEqual(options[2][0], options[3][0])
+        self.assertEqual(
+            [selection.endpoint_id for _, selection in options[2:]],
+            ["{input-a}", "{input-b}"],
+        )
+        self.assertEqual([label for label, _selection in options[2:]],
+                         ["Microfone USB", "Microfone USB (2)"])
+        self.assertNotIn("{input", " ".join(label for label, _selection in options))
+
+    def test_input_and_output_labels_keep_only_friendly_device_names(self):
+        devices = [
+            {"id": "{0.0.1.00000000}.input-code",
+             "name": "Microfone (G522 LIGHTSPEED - USB Mode)", "kind": "microphone"},
+            {"id": "{0.0.0.00000000}.output-code",
+             "name": "Fones de ouvido (G522 LIGHTSPEED - USB Mode)", "kind": "system"},
+        ]
+        microphone = endpoint_options(devices, "microphone", EndpointSelection())
+        system = endpoint_options(devices, "system", EndpointSelection())
+
+        self.assertEqual(microphone[2][0], "Microfone (G522 LIGHTSPEED - USB Mode)")
+        self.assertEqual(system[2][0], "Fones de ouvido (G522 LIGHTSPEED - USB Mode)")
+        self.assertNotIn("input-code", microphone[2][0])
+        self.assertNotIn("output-code", system[2][0])
+
+    def test_identifier_only_devices_use_a_generic_user_label(self):
+        identifier = "{0.0.1.00000000}.opaque"
+        options = endpoint_options([
+            {"id": identifier, "name": identifier, "kind": "microphone"},
+        ], "microphone", EndpointSelection())
+        self.assertEqual(options[2][0], "Dispositivo de entrada")
 
     def test_settings_reject_invalid_and_overlapping_shortcuts(self):
         for hotkey in ("ctrl+alt+space", "ctrl+space", "ctrl+alt+shift+cmd+space", "not+a+chord"):
@@ -168,7 +196,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.language_box = mock.Mock()
         view._settings_loaded({"meeting_microphone": {"mode": "manual", "endpoint_id": "missing"}}, None)
         self.assertTrue(view.settings_loaded)
-        self.assertIn("Indisponível", view.endpoint_vars["microphone"].get())
+        self.assertIn("indisponível", view.endpoint_vars["microphone"].get())
         self.assertEqual(dict(view.options["microphone"])[view.endpoint_vars["microphone"].get()].endpoint_id, "missing")
 
     def test_independent_source_switches_and_postprocessing_are_persisted(self):
@@ -415,7 +443,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIs(view.notebook, notebook)
             self.assertEqual(
                 titles,
-                ["Gravação", "Biblioteca", "Resumo"],
+                ["Gravação", "Biblioteca", "Settings"],
             )
         finally:
             view.close_without_prompt(destroy=False)
