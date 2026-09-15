@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Replace the external Ollama summary adapter with a packaged llama.cpp runtime.
-- Add verified in-app downloads for Qwen3 1.7B, IBM Granite 3.3 2B, and Gemma 3 1B GGUF models.
-- Add a dedicated summary-model settings tab with selection, removal, cancellation, and explicit Gemma license acceptance.
+- Add verified in-app downloads for Qwen3.5 2B and 4B, IBM Granite 4.2 3B, and Gemma 4 E2B GGUF models.
+- Add a dedicated summary-model settings tab with selection, removal, cancellation, license details, and resource-size labels.
 
 ## 1.0.0 - 2026-09-14
 

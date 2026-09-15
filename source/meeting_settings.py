@@ -7,6 +7,12 @@ from voice_hotkey import parse_chord
 from summary_catalog import DEFAULT_SUMMARY_MODEL, is_known_summary_model
 
 SOURCES = ("both", "microphone", "system")
+LEGACY_SUMMARY_MODELS = {
+    "qwen3-1.7b-q4": DEFAULT_SUMMARY_MODEL,
+    "granite-3.3-2b-q4": "granite-4.2-3b-q4",
+    "granite-4.0-1b-q4": "granite-4.2-3b-q4",
+    "gemma-3-1b-q4": "gemma-4-e2b-q4",
+}
 
 
 @dataclass(frozen=True)
@@ -72,7 +78,9 @@ def resolve_meeting_settings(value):
     if not is_known_language(language):
         raise ValueError("Selecione um idioma de transcrição válido.")
     model = data.get("meeting_summary_model", DEFAULT_SUMMARY_MODEL)
-    # Migrate the former free-form Ollama setting to the safe built-in catalog.
+    # Migrate previous built-in IDs and former free-form Ollama settings.
+    if isinstance(model, str):
+        model = LEGACY_SUMMARY_MODELS.get(model, model)
     if not isinstance(model, str) or not is_known_summary_model(model):
         model = DEFAULT_SUMMARY_MODEL
     return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),

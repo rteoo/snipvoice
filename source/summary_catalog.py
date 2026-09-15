@@ -1,58 +1,93 @@
 """Pinned llama.cpp models for local meeting summaries."""
 
 
-DEFAULT_SUMMARY_MODEL = "qwen3-1.7b-q4"
+DEFAULT_SUMMARY_MODEL = "qwen3.5-2b-q4"
 
 SUMMARY_CATALOG = (
     {
         "id": DEFAULT_SUMMARY_MODEL,
         "profile": DEFAULT_SUMMARY_MODEL,
-        "name": "Qwen3 1.7B",
-        "description": "Recomendado · melhor equilíbrio para português e inglês",
-        "filename": "Qwen3-1.7B-Q4_K_M.gguf",
-        "url": "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf",
-        "sha256": "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5",
-        "size_bytes": 1_282_439_264,
-        "parameters": "1.7B",
-        "context_length": 4096,
-        "license_id": "Apache-2.0",
-        "license_url": "https://huggingface.co/Qwen/Qwen3-1.7B/blob/main/LICENSE",
-        "upstream_model": "Qwen/Qwen3-1.7B",
-        "requires_acceptance": False,
-        "disable_thinking": True,
-    },
-    {
-        "id": "granite-3.3-2b-q4",
-        "profile": "granite-3.3-2b-q4",
-        "name": "IBM Granite 3.3 2B",
-        "description": "Especializado em documentos e resumos de reuniões",
-        "filename": "granite-3.3-2b-instruct-Q4_K_M.gguf",
-        "url": "https://huggingface.co/ibm-granite/granite-3.3-2b-instruct-GGUF/resolve/main/granite-3.3-2b-instruct-Q4_K_M.gguf",
-        "sha256": "ac71e9e32c0bea919b409c5918f69ca74339854b0319c5065e4e9fb6d95c4852",
-        "size_bytes": 1_545_303_328,
+        "name": "Qwen3.5 2B",
+        "description": "Recomendado · melhor equilíbrio para português, inglês e uso local",
+        "filename": "Qwen3.5-2B-Q4_K_M.gguf",
+        "url": (
+            "https://huggingface.co/lmstudio-community/Qwen3.5-2B-GGUF/resolve/"
+            "bb84e11355a036e28f080c7793fa6d22b7c4e344/Qwen3.5-2B-Q4_K_M.gguf"
+        ),
+        "sha256": "0bfe35afc9f05b7fac3fa04925e051ac7939a42a8a17ea11afc99701bea826cc",
+        "size_bytes": 1_270_808_032,
         "parameters": "2B",
         "context_length": 4096,
         "license_id": "Apache-2.0",
-        "license_url": "https://huggingface.co/ibm-granite/granite-3.3-2b-instruct/blob/main/LICENSE",
-        "upstream_model": "ibm-granite/granite-3.3-2b-instruct",
+        "license_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/LICENSE",
+        "upstream_model": "Qwen/Qwen3.5-2B",
+        "quant_source": "lmstudio-community/Qwen3.5-2B-GGUF",
         "requires_acceptance": False,
         "disable_thinking": False,
     },
     {
-        "id": "gemma-3-1b-q4",
-        "profile": "gemma-3-1b-q4",
-        "name": "Gemma 3 1B",
-        "description": "Mais leve · qualidade em português deve ser avaliada",
-        "filename": "gemma-3-1b-it-Q4_K_M.gguf",
-        "url": "https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf",
-        "sha256": "8ccc5cd1f1b3602548715ae25a66ed73fd5dc68a210412eea643eb20eb75a135",
-        "size_bytes": 806_058_240,
-        "parameters": "1B",
+        "id": "qwen3.5-4b-q4",
+        "profile": "qwen3.5-4b-q4",
+        "name": "Qwen3.5 4B",
+        "description": "Mais qualidade · maior uso de memória e processamento",
+        "filename": "Qwen3.5-4B-Q4_K_M.gguf",
+        "url": (
+            "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/"
+            "f9f88ac3e234be915e23811a6d28ea287bdb927e/Qwen3.5-4B-Q4_K_M.gguf"
+        ),
+        "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+        "size_bytes": 2_707_513_696,
+        "parameters": "4B",
         "context_length": 4096,
-        "license_id": "Gemma Terms of Use",
-        "license_url": "https://ai.google.dev/gemma/terms",
-        "upstream_model": "google/gemma-3-1b-it",
-        "requires_acceptance": True,
+        "license_id": "Apache-2.0",
+        "license_url": "https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/LICENSE",
+        "upstream_model": "Qwen/Qwen3.5-4B",
+        "quant_source": "lmstudio-community/Qwen3.5-4B-GGUF",
+        "requires_acceptance": False,
+        "disable_thinking": False,
+    },
+    {
+        "id": "granite-4.2-3b-q4",
+        "profile": "granite-4.2-3b-q4",
+        "name": "IBM Granite 4.2 3B",
+        "description": "Alternativa IBM · modelo oficial com português testado",
+        "filename": "granite-4.2-3b-Q4_K_M.gguf",
+        "url": (
+            "https://huggingface.co/ibm-granite/granite-4.2-3b-GGUF/resolve/"
+            "c40945d71cd90f249a56985e8155551a9188dc30/granite-4.2-3b-Q4_K_M.gguf"
+        ),
+        "sha256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5",
+        "size_bytes": 2_244_011_552,
+        "parameters": "3B",
+        "context_length": 4096,
+        "license_id": "Apache-2.0",
+        "license_url": "https://huggingface.co/ibm-granite/granite-4.2-3b/blob/main/LICENSE",
+        "upstream_model": "ibm-granite/granite-4.2-3b",
+        "quant_source": "ibm-granite/granite-4.2-3b-GGUF",
+        "requires_acceptance": False,
+        "disable_thinking": False,
+    },
+    {
+        "id": "gemma-4-e2b-q4",
+        "profile": "gemma-4-e2b-q4",
+        "name": "Gemma 4 E2B",
+        "description": "2B efetivos / 5B totais · modelo oficial do Google, download maior",
+        "filename": "gemma-4-E2B_q4_0-it.gguf",
+        "url": (
+            "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/"
+            "675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B_q4_0-it.gguf"
+        ),
+        "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
+        "size_bytes": 3_349_516_256,
+        "parameters": "E2B / 5B",
+        "context_length": 4096,
+        "license_id": "Apache-2.0",
+        "license_url": (
+            "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/main/LICENSE"
+        ),
+        "upstream_model": "google/gemma-4-E2B-it",
+        "quant_source": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+        "requires_acceptance": False,
         "disable_thinking": False,
     },
 )

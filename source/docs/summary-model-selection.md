@@ -1,109 +1,78 @@
 # Offline summary model selection
 
-Research date: 2026-09-14. This note selects a small, downloadable catalog for
-Snipvoice meeting summaries. The target is local inference through llama.cpp,
-with Portuguese (Brazil) and English support, modest RAM use, and no account or
-cloud runtime requirement after the model is downloaded.
+Research date: 2026-09-14. Snipvoice uses a small, fixed catalog for local
+meeting summaries through its packaged llama.cpp runtime. The catalog favors
+Portuguese and English, laptop-class hardware, public downloads, and licenses
+that permit redistribution and local use.
 
 ## Recommendation
 
-Use **Qwen3-1.7B** as the default summary model, in a Q4_K_M GGUF, with
-thinking disabled for summaries. Its official card lists 1.7B parameters, a
-32,768-token context, support for 100+ languages and dialects, and a hard
-non-thinking mode intended to improve efficiency. It is Apache 2.0 and its
-official repository is public. The ggml-org GGUF is already published with a
-Q4_K_M artifact of about 1.28 GB. [Qwen3 card](https://huggingface.co/Qwen/Qwen3-1.7B/blob/main/README.md),
-[Qwen3 GGUF](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF)
+Use **Qwen3.5 2B Q4_K_M** as the default. Qwen publishes it as a 2B model with
+a native 262K context, support for 201 languages and dialects, and non-thinking
+behavior by default. Qwen's own language table reports material gains over
+Qwen3 1.7B, including MMLU-Pro 55.3 versus 40.2 and multilingual MMMLU 56.9
+versus 46.7 in non-thinking mode. These are vendor benchmarks, not a Snipvoice
+meeting-summary evaluation. Snipvoice keeps the runtime context at 4K to bound
+memory use and already reduces long transcripts before inference.
 
-The application should explicitly use Qwen3's non-thinking chat template mode
-(`enable_thinking=False`) and impose its own short output limit. This is an
-implementation inference from the model's documented modes, not a claim that
-Qwen3 has been benchmarked inside Snipvoice. Thinking would add latency and
-intermediate output without helping a constrained meeting-summary format.
+- Upstream: [Qwen/Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)
+- Quantization: [LM Studio Community Qwen3.5 2B GGUF](https://huggingface.co/lmstudio-community/Qwen3.5-2B-GGUF)
+- Pinned Q4_K_M: 1,270,808,032 bytes; SHA-256
+  `0bfe35afc9f05b7fac3fa04925e051ac7939a42a8a17ea11afc99701bea826cc`
 
-## Candidate catalog
+The Qwen GGUF files are community conversions of the official
+Apache-2.0 weights. Snipvoice pins the exact Hub revision, byte count, and hash;
+it does not follow a mutable `main` download URL.
 
-| Candidate and exact source | Parameters / context | Language fit | License and access | llama.cpp / download class | Decision |
-| --- | --- | --- | --- | --- | --- |
-| [Qwen/Qwen3-1.7B](https://huggingface.co/Qwen/Qwen3-1.7B) via [ggml-org/Qwen3-1.7B-GGUF](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF) | 1.7B; 32K context | 100+ languages and dialects; Portuguese is included in the published language metadata | Apache 2.0; public Hub repositories, no acceptance gate shown | Official ggml-org GGUF; Q4_K_M ~1.28 GB, Q8_0 ~2.17 GB, F16 ~4.07 GB | **Default**. Best balance of current multilingual instruction following, size, and direct GGUF availability. |
-| [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) via [Qwen/Qwen2.5-1.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) | 1.54B; 32K context, 8K generation | 29+ languages, explicitly including Portuguese and English | Apache 2.0; public Hub repositories, no acceptance gate shown | Official Qwen GGUF; Q4_K_M ~1.12 GB | **Fallback/stability option**. Slightly smaller and has a simpler non-reasoning behavior, useful on weaker machines. |
-| [ibm-granite/granite-3.3-2b-instruct](https://huggingface.co/ibm-granite/granite-3.3-2b-instruct) via [official GGUF](https://huggingface.co/ibm-granite/granite-3.3-2b-instruct-GGUF) | 2B; 128K published context, capped to 4K by Snipvoice | English and Portuguese are explicitly listed | Apache 2.0; public Hub repositories | First-party IBM Q4_K_M GGUF ~1.55 GB | **Meeting-focused alternative**. The official card explicitly lists long-document and meeting summarization use cases. |
-| [google/gemma-3-1b-it](https://huggingface.co/google/gemma-3-1b-it) via [ggml-org/gemma-3-1b-it-GGUF](https://huggingface.co/ggml-org/gemma-3-1b-it-GGUF) | 1B; 32K context for the 1B variant | The 1B card is described as English-focused; the 4B+ variants carry the broad 140+ language claim. Do not promise strong PT-BR quality from 1B without local evaluation. | Gemma terms, not Apache/MIT. The Hub repository requires the user to log in and accept Google's usage license before files can be downloaded; Google's terms include use restrictions and downstream notice obligations. | Official ggml-org GGUF; Q4_K_M ~806 MB, Q8_0 ~1.07 GB, F16 ~2.01 GB | **Optional lightweight model**. Smallest download, but licensing friction and weaker documented PT-BR fit make it a secondary choice. |
-| [HuggingFaceTB/SmolLM2-1.7B-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-1.7B-Instruct) | 1.7B; the card does not state a long context window in the cited model summary | The official card says it primarily understands and generates English | Apache 2.0; public repository | Community GGUF repositories exist; one published Q4_K_M is ~1.06 GB. This is not an official Hugging Face or ggml-org quantization. | **Do not ship in the initial catalog**. Useful English-only fallback, but inferior language fit and weaker provenance for the GGUF artifact. |
-| [microsoft/Phi-4-mini-instruct](https://huggingface.co/microsoft/Phi-4-mini-instruct) | 3.8B; 128K context | 24 languages including Portuguese and English | MIT; public repository, no Hub acceptance gate shown | No official Microsoft or ggml-org GGUF was found in this review; community GGUFs exist. Q4 size should be treated as roughly 2–3 GB until the exact artifact is pinned and hashed. | **Later/advanced option**. It may produce better summaries with more memory, but it is above the preferred 1–2B class and lacks a first-party GGUF path. |
+## Shipped catalog
 
-### Why Qwen3 over Gemma and Qwen2.5
+| Model | Role | Parameters shown to users | GGUF size | Artifact source | License |
+| --- | --- | --- | ---: | --- | --- |
+| Qwen3.5 2B Q4_K_M | Default balance | 2B | 1.18 GiB | LM Studio Community conversion of Qwen | Apache-2.0 |
+| Qwen3.5 4B Q4_K_M | Higher quality | 4B | 2.52 GiB | LM Studio Community conversion of Qwen | Apache-2.0 |
+| IBM Granite 4.2 3B Q4_K_M | Current IBM alternative | 3B | 2.09 GiB | First-party IBM GGUF | Apache-2.0 |
+| Gemma 4 E2B QAT Q4_0 | Current Google alternative | E2B / 5B total | 3.12 GiB | First-party Google GGUF | Apache-2.0 |
 
-Gemma 3 is attractive on size and its 1B Q4_K_M artifact is only about 806 MB,
-but Google's official model information gives the 1B variant 32K context and
-the broad 140+ language description to the 4B and larger variants. The Hub
-also gates the files behind acceptance of Gemma's terms. That makes Gemma a
-good opt-in experiment, not the universal default for PT-BR users. [Gemma 3
-card](https://huggingface.co/google/gemma-3-1b-it), [Gemma terms](https://ai.google.dev/gemma/terms)
+[Qwen3.5 4B](https://huggingface.co/Qwen/Qwen3.5-4B) stays within the requested
+4B ceiling and offers a quality-oriented option for machines with more memory.
+Its pinned Q4_K_M file is 2,707,513,696 bytes with SHA-256
+`25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c`.
 
-Qwen2.5-1.5B remains a sound fallback: its official card explicitly names
-Portuguese, gives a 32K context, and uses Apache 2.0. Qwen3 is preferable for
-the default because its own card documents stronger instruction-following
-improvements, 100+ language support, and a strict non-thinking switch suited to
-fast summaries. Those are vendor-reported capabilities; Snipvoice should run a
-small PT-BR/English meeting-summary fixture before declaring a quality winner.
-[Qwen2.5 card](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct/blob/main/README.md)
+[Granite 4.2 3B](https://huggingface.co/ibm-granite/granite-4.2-3b) replaces
+Granite 3.3 2B as the current IBM option. IBM lists Portuguese among its tested
+languages, gives it 3B parameters and a native 128K context, and publishes the
+GGUF directly. The pinned Q4_K_M file is 2,244,011,552 bytes with SHA-256
+`e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5`.
 
-Phi-4-mini-instruct is the strongest candidate above 2B: Microsoft documents
-3.8B parameters, 128K context, Portuguese support, and an MIT license. It is
-worth adding only after the app can pin a specific GGUF repository, file, SHA256
-and prompt template. A generic community conversion would weaken the
-reproducibility and supply-chain guarantees required for an in-app downloader.
-[Phi-4-mini card](https://huggingface.co/microsoft/Phi-4-mini-instruct/blob/main/README.md)
+[Gemma 4 E2B](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf) is the
+current Google option. Google labels the variant E2B, while the Hub metadata
+reports 5B total parameters. The UI states both figures. Its first-party QAT
+Q4_0 GGUF is 3,349,516,256 bytes with SHA-256
+`fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634`.
+The separate multimodal projector is intentionally not downloaded because
+Snipvoice sends transcript text only.
 
-## llama.cpp and downloader implications
+## Downloader and compatibility rules
 
-llama.cpp requires GGUF for local model loading. Its model documentation supports
-the `-hf <owner>/<repo>[:quant]` convention and also documents running a local
-GGUF file. The project publishes pre-built binaries and supports CPU, Apple
-Silicon, CUDA, HIP, Vulkan and other backends. Snipvoice should use the local
-llama.cpp runtime and download only from a pinned, reviewed catalog; it should
-not accept arbitrary repository names from the settings UI. [llama.cpp model
-documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/models.md),
-[llama.cpp README](https://github.com/ggml-org/llama.cpp/blob/master/README.md)
+Every catalog URL names an immutable Hub commit. A model becomes usable only
+after its exact size and SHA-256 match. Downloads stream to a resumable partial
+file and are atomically promoted after verification. Users may download and
+remove each model from the **Resumo local** tab; inference makes no network
+request after installation.
 
-For the first implementation, pin these entries and files:
+The packaged `llama-cpp-python` version recognizes Qwen3.5, Granite 4, and
+Gemma 4 GGUF architectures. Snipvoice relies on each GGUF's embedded chat
+template, requests deterministic JSON, and caps output. Previous catalog IDs
+migrate to the corresponding current family without deleting old cached files.
 
-```text
-Qwen3 default:
-  repo: ggml-org/Qwen3-1.7B-GGUF
-  file/quant: Q4_K_M
-  license: Apache-2.0
+## Evidence limits
 
-Granite meeting-focused alternative:
-  repo: ibm-granite/granite-3.3-2b-instruct-GGUF
-  file: granite-3.3-2b-instruct-Q4_K_M.gguf
-  license: Apache-2.0
-
-Gemma opt-in:
-  repo: ggml-org/gemma-3-1b-it-GGUF
-  file: gemma-3-1b-it-Q4_K_M.gguf
-  license: Gemma terms; require acceptance before download
-```
-
-The catalog stores the exact URL, byte size, SHA256, license URL, and
-prompt-template/runtime compatibility. Downloads belong in a separate
-non-roaming Snipvoice summary cache, use a temporary file plus atomic rename, and
-must be resumable or safely restartable. The UI should show the license and
-approximate disk size before download, report progress, and leave a partial file
-unusable after cancellation or failure.
-
-## Open questions and limits
-
-- No apples-to-apples Snipvoice fixture evaluation was run here; “best” is an
-  evidence-backed catalog recommendation, not a measured quality ranking.
-- Exact Qwen3 tokenizer/template behavior must be validated against the version
-  of llama.cpp bundled with Snipvoice, especially the non-thinking switch.
-- Gemma uses separate terms. Snipvoice requires explicit acceptance before it
-  downloads the public ggml-org GGUF and keeps the license URL visible.
-- Phi-4-mini's 128K context is useful for long transcripts, but the larger
-  quantized footprint and lack of a first-party GGUF artifact make it a poor v1
-  default. Transcript chunking remains necessary for all models when the input
-  exceeds the selected context budget.
-- Model weights are not included in the repository and were not downloaded for
-  this research.
+- No same-transcript PT-BR/en-US quality and latency comparison has been run in
+  Snipvoice, so the default is based on current upstream evidence and practical
+  size rather than an app-specific benchmark.
+- The exact model downloads and live llama.cpp inference were not exercised as
+  part of this catalog update; the downloader metadata came from the current
+  Hugging Face model API and is pinned against immutable revisions.
+- Gemma 4 E2B exceeds four billion total parameters even though its name and
+  effective-compute class are E2B. Its download size and both parameter figures
+  remain visible before download.

@@ -96,22 +96,22 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(view.summary_model_installed, {"qwen": True})
         button.configure.assert_called_once_with(text="Remover", state="normal")
 
-    def test_gemma_download_requires_visible_terms_and_uses_background_job(self):
+    def test_summary_download_shows_license_and_uses_background_job(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.window = mock.Mock()
         view.status = Variable()
         view.summary_model_installed = {}
-        view.summary_model_buttons = {"gemma-3-1b-q4": mock.Mock()}
+        view.summary_model_buttons = {"gemma-4-e2b-q4": mock.Mock()}
         view.summary_model_status = Variable()
         view.summary_progress_lock = threading.Lock()
         view.summary_progress = None
         view._submit = mock.Mock(return_value=True)
         with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm, \
                 mock.patch("meeting_gui.download_summary_model", return_value="model.gguf") as download:
-            view.toggle_summary_model("gemma-3-1b-q4")
+            view.toggle_summary_model("gemma-4-e2b-q4")
             operation = view._submit.call_args.args[1]
             operation()
-        self.assertIn("ai.google.dev/gemma/terms", confirm.call_args.args[1])
+        self.assertIn("Apache-2.0", confirm.call_args.args[1])
         download.assert_called_once()
         self.assertIsNotNone(download.call_args.kwargs["cancel_event"])
         self.assertTrue(callable(download.call_args.kwargs["progress"]))

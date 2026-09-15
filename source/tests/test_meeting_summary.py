@@ -65,7 +65,7 @@ class MeetingSummaryTests(unittest.TestCase):
         self.assertEqual(result["runtime"], "llama.cpp")
         self.assertEqual(self.store.get(self.sid)["summary"], result)
         runtime.close.assert_called_once_with()
-        self.assertTrue(runtime.generate.call_args.kwargs["disable_thinking"])
+        self.assertFalse(runtime.generate.call_args.kwargs["disable_thinking"])
 
     def test_empty_transcript_never_opens_model_or_runtime(self):
         self.store.finish_revision(self.sid, self.revision)
