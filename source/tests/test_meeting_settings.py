@@ -43,8 +43,9 @@ class MeetingSettingsTests(unittest.TestCase):
     def test_previous_builtin_catalog_ids_migrate_to_current_families(self):
         expected = {
             "qwen3-1.7b-q4": "qwen3.5-2b-q4",
-            "granite-3.3-2b-q4": "granite-4.2-3b-q4",
-            "granite-4.0-1b-q4": "granite-4.2-3b-q4",
+            "granite-3.3-2b-q4": "lfm2.5-2.6b-q4",
+            "granite-4.0-1b-q4": "lfm2.5-2.6b-q4",
+            "granite-4.2-3b-q4": "lfm2.5-2.6b-q4",
             "gemma-3-1b-q4": "gemma-4-e2b-q4",
         }
         for old, new in expected.items():

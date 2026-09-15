@@ -463,10 +463,16 @@ class MeetingWindow:
             if not submitted:
                 self._refresh_summary_models()
             return
-        terms = (f'\n\nAo continuar, você aceita os termos: {entry["license_url"]}'
-                 if entry["requires_acceptance"] else "")
+        terms = ""
+        if entry["requires_acceptance"]:
+            notice = entry.get("license_notice", "Leia a licença antes de continuar.")
+            terms = (
+                f"\n\n{notice}"
+                f'\n\nTermos completos: {entry["license_url"]}'
+                "\n\nAo continuar, você confirma que leu e aceita esses termos."
+            )
         if not messagebox.askyesno(
-                "Baixar modelo local",
+                "Licença do modelo" if entry["requires_acceptance"] else "Baixar modelo local",
                 f'Baixar {entry["name"]} ({format_model_size(entry["size_bytes"])})?'
                 f'\nLicença: {entry["license_id"]}{terms}', parent=self.window):
             return

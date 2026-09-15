@@ -47,24 +47,32 @@ SUMMARY_CATALOG = (
         "disable_thinking": False,
     },
     {
-        "id": "granite-4.2-3b-q4",
-        "profile": "granite-4.2-3b-q4",
-        "name": "IBM Granite 4.2 3B",
-        "description": "Alternativa IBM · modelo oficial com português testado",
-        "filename": "granite-4.2-3b-Q4_K_M.gguf",
+        "id": "lfm2.5-2.6b-q4",
+        "profile": "lfm2.5-2.6b-q4",
+        "name": "LiquidAI LFM2.5-2.6B",
+        "description": "Alternativa eficiente · modelo oficial para português e uso local",
+        "filename": "LFM2.5-2.6B-Q4_K_M.gguf",
         "url": (
-            "https://huggingface.co/ibm-granite/granite-4.2-3b-GGUF/resolve/"
-            "c40945d71cd90f249a56985e8155551a9188dc30/granite-4.2-3b-Q4_K_M.gguf"
+            "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/"
+            "84022ce711b28455e8c4fc364ce68c00cf995875/LFM2.5-2.6B-Q4_K_M.gguf"
         ),
-        "sha256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5",
-        "size_bytes": 2_244_011_552,
-        "parameters": "3B",
+        "sha256": "02a8b7e17487d326e46d68ce0ba24211e1b80a14c4cd0597fa73c1cd697f52ed",
+        "size_bytes": 1_674_455_040,
+        "parameters": "2.6B",
         "context_length": 4096,
-        "license_id": "Apache-2.0",
-        "license_url": "https://huggingface.co/ibm-granite/granite-4.2-3b/blob/main/LICENSE",
-        "upstream_model": "ibm-granite/granite-4.2-3b",
-        "quant_source": "ibm-granite/granite-4.2-3b-GGUF",
-        "requires_acceptance": False,
+        "license_id": "LFM Open License v1.0",
+        "license_url": (
+            "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/blob/"
+            "84022ce711b28455e8c4fc364ce68c00cf995875/LICENSE"
+        ),
+        "license_notice": (
+            "Esta licença não é MIT nem Apache-2.0. O uso comercial por pessoa jurídica "
+            "com receita anual de US$ 10 milhões ou mais não é licenciado. Cópias "
+            "redistribuídas devem incluir a licença."
+        ),
+        "upstream_model": "LiquidAI/LFM2.5-2.6B",
+        "quant_source": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "requires_acceptance": True,
         "disable_thinking": False,
     },
     {

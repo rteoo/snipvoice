@@ -73,7 +73,7 @@ launch. The Windows installer uses no administrator rights and installs under
 
 - One Fluent-style window now contains voice setup, recording, the meeting library, and local-summary settings.
 - Meeting capture supports separate microphone and speaker-output tracks with OS-default or manually selected devices.
-- Built-in llama.cpp summaries replace Ollama and offer verified in-app downloads for Qwen3.5, Granite 4.2, and Gemma 4 models.
+- Built-in llama.cpp summaries replace Ollama and offer verified in-app downloads for curated Qwen, Gemma, and other local models.
 - Windows ships as a per-user `.exe` installer and portable ZIP; Apple Silicon macOS ships as an ad-hoc-signed app ZIP.
 
 ## First use
@@ -83,7 +83,7 @@ launch. The Windows installer uses no administrator rights and installs under
 3. In **Voz**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Gravações e reuniões…** tray shortcut selects this tab in the same window.
-6. Open **Resumo local**, choose Qwen3.5, Granite 4.2, or Gemma 4 E2B/E4B, and download the model before generating a summary.
+6. Open **Resumo local**, choose Qwen3.5, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -132,10 +132,14 @@ processing accepts installed catalog models and never downloads one implicitly.
 Recordings remain usable before transcription and preserve earlier revisions.
 
 Structured summaries run inside Snipvoice through llama.cpp. The default is
-Qwen3.5 2B Q4_K_M; Qwen3.5 4B is the higher-quality option, IBM Granite 4.2 3B
-is the current IBM alternative, and Gemma 4 E2B/E4B are Google's current options.
+Qwen3.5 2B Q4_K_M; Qwen3.5 4B is the higher-quality option, LiquidAI
+LFM2.5-2.6B is the smaller efficient alternative, and Gemma 4 E2B/E4B are
+Google's current options.
 Gemma E2B is 3.12 GiB; the higher-capacity E4B is 4.80 GiB and contains about 8B
 total parameters. Settings show the effective and total counts before download.
+LiquidAI uses the LFM Open License v1.0 rather than MIT or Apache-2.0. Its first
+download shows the license terms and the US$10 million annual-revenue commercial
+use threshold for explicit acceptance.
 Downloads use a fixed catalog, stream to a resumable partial
 file, and become usable only after their exact size and SHA-256 match.
 After a model is installed, summary inference makes no network request. Review
