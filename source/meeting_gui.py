@@ -54,15 +54,24 @@ def endpoint_options(devices, track, selection):
     """Keep a missing manually selected endpoint explicit and pinned."""
     options = [("Padrão do sistema · multimídia", EndpointSelection()),
                ("Padrão do sistema · comunicações", EndpointSelection(default_role="communications"))]
+    used_labels = {label for label, _selection in options}
+    generic_label = "Dispositivo de entrada" if track == "microphone" else "Dispositivo de saída"
     for device in devices:
         if (isinstance(device, dict) and device.get("kind") == track
                 and isinstance(device.get("id"), str) and device["id"]):
             identifier = device["id"]
-            name = str(device.get("name") or identifier)
-            options.append((f"{name} · {identifier}", EndpointSelection("manual", identifier)))
+            name = str(device.get("name") or "").strip()
+            base_label = name if name and name != identifier else generic_label
+            label = base_label
+            suffix = 2
+            while label in used_labels:
+                label = f"{base_label} ({suffix})"
+                suffix += 1
+            used_labels.add(label)
+            options.append((label, EndpointSelection("manual", identifier)))
     if (selection.mode == "manual"
             and not any(item.endpoint_id == selection.endpoint_id for _, item in options)):
-        options.append((f"Indisponível · {selection.endpoint_id}", selection))
+        options.append(("Dispositivo selecionado indisponível", selection))
     return options
 
 
@@ -262,10 +271,13 @@ class MeetingWindow:
             self.notebook = notebook
         self.recording_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         self.library_tab = ttk.Frame(notebook, style="Meeting.TFrame")
-        self.summary_tab = ttk.Frame(notebook, style="Meeting.TFrame")
+        # Settings owns the local model catalog. Keep the old attribute as an
+        # alias for callers that still refer to the summary page directly.
+        self.settings_tab = ttk.Frame(notebook, style="Meeting.TFrame")
+        self.summary_tab = self.settings_tab
         notebook.add(self.recording_tab, text="Gravação")
         notebook.add(self.library_tab, text="Biblioteca")
-        notebook.add(self.summary_tab, text="Resumo")
+        notebook.add(self.settings_tab, text="Settings")
         self._page_header(
             self.recording_tab,
             "Gravar reunião",
@@ -277,12 +289,12 @@ class MeetingWindow:
             "Revise gravações, edite notas e gere transcrições e resumos locais.",
         )
         self._page_header(
-            self.summary_tab,
-            "Modelos de resumo",
-            "Baixe e escolha um modelo compacto para resumir sem enviar conteúdo à nuvem.",
+            self.settings_tab,
+            "Settings",
+            "Gerencie os modelos locais usados para transcrição e resumo sem enviar conteúdo à nuvem.",
         )
         self.status = tk.StringVar(self.window, "Carregando configurações…")
-        for tab in (self.recording_tab, self.library_tab, self.summary_tab):
+        for tab in (self.recording_tab, self.library_tab, self.settings_tab):
             self._label(
                 tab, "", textvariable=self.status, anchor="w", wraplength=940,
                 fg=self.ui.text_muted, font=self.ui.font(8),
@@ -294,8 +306,50 @@ class MeetingWindow:
         recording.rowconfigure(0, weight=1)
         library = ttk.Frame(self.library_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
-        summary = ttk.Frame(self.summary_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
-        summary.pack(fill="both", expand=True)
+        settings_view = ttk.Frame(self.settings_tab, style="Meeting.TFrame")
+        settings_view.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        settings_view.columnconfigure(0, weight=1)
+        settings_view.rowconfigure(0, weight=1)
+        settings_canvas = tk.Canvas(
+            settings_view, background=self.ui.surface, highlightthickness=0,
+            borderwidth=0,
+        )
+        settings_scrollbar = ttk.Scrollbar(
+            settings_view, orient="vertical", command=settings_canvas.yview,
+        )
+        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings_canvas.grid(row=0, column=0, sticky="nsew")
+        settings_scrollbar.grid(row=0, column=1, sticky="ns", padx=(self.ui.space_sm, 0))
+        settings_content = ttk.Frame(settings_canvas, style="Meeting.TFrame")
+        settings_window = settings_canvas.create_window(
+            (0, 0), window=settings_content, anchor="nw",
+        )
+
+        def update_settings_scroll_region(_event=None):
+            settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
+
+        def stretch_settings_content(event):
+            settings_canvas.itemconfigure(settings_window, width=event.width)
+
+        settings_content.bind("<Configure>", update_settings_scroll_region)
+        settings_canvas.bind("<Configure>", stretch_settings_content)
+        self.settings_canvas = settings_canvas
+        self.settings_content = settings_content
+        self.transcription_models_parent = tk.Frame(
+            settings_content, bg=self.ui.surface,
+        )
+        self.transcription_models_parent.pack(fill="x", pady=(0, self.ui.space_md))
+        summary = ttk.Frame(settings_content, style="Meeting.TFrame")
+        summary.pack(fill="x", expand=False)
+        self._label(
+            summary, "Modelos de resumo de texto",
+            font=self.ui.font(11, "bold"), fg=self.ui.text_strong,
+        ).pack(anchor="w", pady=(0, self.ui.space_xs))
+        self._label(
+            summary,
+            "Baixe e escolha um modelo compacto para resumir sem enviar conteúdo à nuvem.",
+            anchor="w", justify="left", wraplength=900, fg=self.ui.text_muted,
+        ).pack(fill="x", pady=(0, self.ui.space_sm))
         self.record_title = tk.StringVar(self.window)
         self.input_enabled = tk.BooleanVar(self.window, self.settings.input_enabled)
         self.output_enabled = tk.BooleanVar(self.window, self.settings.output_enabled)
@@ -440,12 +494,6 @@ class MeetingWindow:
         self._build_summary_models(summary)
 
     def _build_summary_models(self, parent):
-        self._label(
-            parent,
-            "O llama.cpp já vem no aplicativo. Baixe apenas os pesos que quiser usar; "
-            "depois disso, os resumos funcionam sem internet.",
-            anchor="w", justify="left", wraplength=900, fg=self.ui.text_muted,
-        ).pack(fill="x", pady=(0, self.ui.space_sm))
         self.summary_model_buttons = {}
         entries = summary_catalog()
         compact = len(entries) > 5

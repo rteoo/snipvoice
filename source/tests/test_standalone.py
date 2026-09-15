@@ -140,6 +140,32 @@ class StandaloneTests(unittest.TestCase):
         icon.run_detached.assert_called_once_with(setup=self.instance.on_tray_ready)
         icon.run.assert_not_called()
 
+    def test_tray_default_opens_recording_and_hides_manual_command_reload(self):
+        self.instance.gui = mock.Mock()
+        self.instance.gui.ensure_started.return_value = True
+        self.instance.task_runner = mock.Mock()
+        icon = mock.Mock()
+        image = mock.MagicMock()
+        image.__enter__.return_value.copy.return_value = object()
+        items = []
+
+        def menu_item(text, action, **options):
+            items.append((text, action, options))
+            return mock.Mock()
+
+        with mock.patch.object(app.platform_support, "tk_runs_on_main_thread", return_value=False), \
+                mock.patch.object(app.platform_support, "tray_icon_options", return_value={}), \
+                mock.patch.object(app.pystray, "MenuItem", side_effect=menu_item), \
+                mock.patch.object(app.pystray, "Menu", side_effect=lambda *entries: entries), \
+                mock.patch.object(app.pystray, "Icon", return_value=icon), \
+                mock.patch.object(app.Image, "open", return_value=image):
+            self.instance.run()
+
+        self.assertEqual(items[0][0], "Abrir Gravação…")
+        self.assertEqual(items[0][1], self.instance.open_meetings)
+        self.assertTrue(items[0][2]["default"])
+        self.assertNotIn("Recarregar comandos", [text for text, _action, _options in items])
+
 
 if __name__ == "__main__":
     unittest.main()
