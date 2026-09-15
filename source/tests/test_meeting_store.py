@@ -180,6 +180,25 @@ class MeetingStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.save_final_audio(self.session, Path(self.temp.name) / "missing.wav")
 
+    def test_delete_removes_finished_session_but_preserves_exported_audio(self):
+        self.store.finish(self.session)
+        exported = Path(self.temp.name).parent / f"{self.session}-exported.wav"
+        exported.write_bytes(b"RIFF")
+        self.addCleanup(exported.unlink, missing_ok=True)
+        self.store.save_final_audio(self.session, exported)
+
+        self.assertTrue(self.store.delete(self.session))
+
+        self.assertFalse((Path(self.temp.name) / self.session).exists())
+        self.assertTrue(exported.is_file())
+        with self.assertRaises(FileNotFoundError):
+            self.store.get(self.session)
+
+    def test_delete_rejects_an_active_session(self):
+        with self.assertRaisesRegex(ValueError, "andamento"):
+            self.store.delete(self.session)
+        self.assertTrue((Path(self.temp.name) / self.session).is_dir())
+
     def test_invalid_paths_and_unknown_schema_are_rejected_read_only(self):
         with self.assertRaises(ValueError):
             self.store.get("../outside")

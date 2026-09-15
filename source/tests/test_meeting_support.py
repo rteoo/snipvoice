@@ -144,6 +144,17 @@ class MeetingControllerTests(unittest.TestCase):
         self.controller._processing_thread.join(2)
         self.assertFalse(self.controller.snapshot()["processing"])
 
+    def test_delete_is_rejected_while_another_recording_operation_is_active(self):
+        store = Mock()
+        self.controller._store = store
+        self.controller._processing = True
+        try:
+            with self.assertRaisesRegex(RuntimeError, "processamento"):
+                self.controller.delete_session("finished-session")
+        finally:
+            self.controller._processing = False
+        store.delete.assert_not_called()
+
     def test_hotkeys_reject_subset_overlap_and_allow_independent_keys(self):
         with self.assertRaises(ValueError):
             validate_hotkey_conflicts({"meeting_hotkey": "ctrl+alt+shift+space"})

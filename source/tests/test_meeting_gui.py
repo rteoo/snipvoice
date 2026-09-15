@@ -268,6 +268,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.controller = mock.Mock()
         view.refresh_library = mock.Mock()
         view._submit = mock.Mock(return_value=True)
+        view.delete_button = mock.Mock()
         return view
 
     def test_failed_save_preserves_unsaved_notes_and_does_not_navigate(self):
@@ -295,6 +296,36 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.detail_ready = False
         view.save_notes()
         view._submit.assert_not_called()
+
+    def test_delete_selected_requires_confirmation_and_runs_in_background(self):
+        view = self.make_edit_view()
+        view.window = mock.Mock()
+        view.delete_button = mock.Mock()
+        view._clear_library_detail = mock.Mock()
+
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm:
+            view.delete_selected()
+
+        self.assertIn("não será apagado", confirm.call_args.args[1])
+        key, operation, callback = view._submit.call_args.args
+        self.assertEqual(key, "delete_session")
+        operation()
+        view.controller.delete_session.assert_called_once_with("one")
+        callback(True, None)
+        view._clear_library_detail.assert_called_once_with()
+        view.refresh_library.assert_called_once_with()
+        self.assertIn("excluída", view.status.get())
+
+    def test_delete_selected_cancel_preserves_the_recording(self):
+        view = self.make_edit_view()
+        view.window = mock.Mock()
+        view.delete_button = mock.Mock()
+
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=False):
+            view.delete_selected()
+
+        view._submit.assert_not_called()
+        view.controller.delete_session.assert_not_called()
 
     def test_detail_projection_bounds_notes_bookmarks_and_transcript_text(self):
         view = self.make_edit_view()

@@ -348,6 +348,9 @@ class MeetingController:
     def get_session(self, session_id):
         return self.store.get(session_id)
 
+    def delete_session(self, session_id):
+        return self._file_work(lambda: self.store.delete(session_id))
+
     def get_transcript(self, session_id):
         return list(itertools.islice(self.store.get_transcript(session_id), 500))
 

@@ -11,6 +11,7 @@ import heapq
 import json
 import math
 import os
+import shutil
 import struct
 import threading
 import time
@@ -285,6 +286,22 @@ class MeetingStore:
             self._checkpoint_session(session_id, metadata)
             if session_id in self._active:
                 self._active[session_id] = metadata
+            return True
+
+    def delete(self, session_id):
+        """Remove one finished, app-owned session without touching exported files."""
+        with self._lock:
+            if session_id in self._active:
+                raise ValueError("Não é possível excluir uma gravação em andamento.")
+            session_dir = self._session_dir(session_id)
+            metadata = self._load_metadata(session_id)
+            if metadata.get("status") == "recording":
+                raise ValueError("Não é possível excluir uma gravação em andamento.")
+            if os.path.islink(session_dir) or getattr(os.path, "isjunction", lambda _path: False)(session_dir):
+                raise ValueError("A pasta da gravação não pode ser excluída com segurança.")
+            shutil.rmtree(session_dir)
+            self._sequence_cache.pop(session_id, None)
+            self._last_checkpoint.pop(session_id, None)
             return True
 
     # -- Bounded readers and transcripts ---------------------------------

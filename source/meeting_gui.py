@@ -214,9 +214,10 @@ class MeetingWindow:
         kwargs.setdefault("fg", self.ui.text)
         return tk.Label(parent, text=text, **kwargs)
 
-    def _button(self, parent, text, command, accent=False):
+    def _button(self, parent, text, command, accent=False, danger=False):
         return tk.Button(parent, text=text, command=command, font=self.ui.font(),
-                         **self.ui.button_colors(accent=accent), **self.ui.button_chrome(compact=True))
+                         **self.ui.button_colors(accent=accent, danger=danger),
+                         **self.ui.button_chrome(compact=True))
 
     def _entry(self, parent, variable, width=30):
         return tk.Entry(parent, textvariable=variable, width=width, font=self.ui.font(),
@@ -696,6 +697,9 @@ class MeetingWindow:
         self._label(title_row, "Título").pack(side="left", padx=(0, 8))
         self._entry(title_row, self.title).pack(side="left", fill="x", expand=True)
         self._button(title_row, "Salvar notas", self.save_notes).pack(side="left", padx=(8, 0))
+        self.delete_button = self._button(title_row, "Excluir gravação", self.delete_selected, danger=True)
+        self.delete_button.configure(state="disabled")
+        self.delete_button.pack(side="left", padx=(8, 0))
         self._label(right, "Notas manuais", anchor="w").pack(fill="x", padx=12, pady=(12, 4))
         self.notes = tk.Text(right, height=5, wrap="word", undo=True, font=self.ui.font(), **self.ui.text_colors())
         self.notes.pack(fill="both", expand=True, padx=(12, 0))
@@ -985,6 +989,7 @@ class MeetingWindow:
     def load_session(self, session_id):
         self.selected = session_id
         self.detail_ready = False
+        self.delete_button.configure(state="disabled")
         self.loading = True
         self.title.set("")
         self.notes.configure(state="normal")
@@ -1034,6 +1039,7 @@ class MeetingWindow:
         self.notes.insert("1.0", metadata["notes"])
         self.truncated = metadata["truncated"]
         self.detail_ready = True
+        self.delete_button.configure(state="disabled" if metadata.get("status") == "recording" else "normal")
         if self.truncated:
             self.notes.configure(state="disabled")
         self.notes.edit_modified(False)
@@ -1091,6 +1097,63 @@ class MeetingWindow:
             elif after:
                 self.status.set("Há novas alterações nas notas. Salve novamente antes de sair.")
         self._submit("save_notes", lambda: self.controller.update_notes(session_id, title, notes, bookmarks=bookmarks), saved)
+
+    def delete_selected(self):
+        if not self.selected or not self.detail_ready:
+            self.status.set("Selecione uma gravação na biblioteca.")
+            return
+        session_id = self.selected
+        title = self.title.get().strip() or session_id
+        message = (
+            f'Excluir “{title}” da biblioteca?\n\n'
+            "Os arquivos capturados, a transcrição, as notas e o resumo serão removidos "
+            "permanentemente. Um arquivo final exportado para outra pasta não será apagado."
+        )
+        if not messagebox.askyesno("Excluir gravação", message, parent=self.window):
+            return
+        self.delete_button.configure(state="disabled")
+        self.status.set("Excluindo gravação…")
+
+        def deleted(value, error):
+            if error or value is False:
+                if self.selected == session_id:
+                    self.delete_button.configure(state="normal")
+                self.status.set(error or "Não foi possível excluir a gravação. Tente novamente.")
+                return
+            if self.selected == session_id:
+                self._clear_library_detail()
+            self.refresh_library()
+            self.status.set("Gravação excluída da biblioteca.")
+
+        if not self._submit("delete_session", lambda: self.controller.delete_session(session_id), deleted):
+            self.delete_button.configure(state="normal")
+
+    def _clear_library_detail(self):
+        self.bridge.invalidate("detail")
+        self.bridge.invalidate("outputs")
+        self.selected = None
+        self.detail_ready = False
+        self.dirty = False
+        self.truncated = False
+        self.loading = True
+        self.title.set("")
+        self.notes.configure(state="normal")
+        self.notes.delete("1.0", "end")
+        self.notes.edit_modified(False)
+        self.notes.configure(state="disabled")
+        self.loading = False
+        self.bookmarks = []
+        self._render_bookmarks()
+        self.transcript.delete(*self.transcript.get_children())
+        self.segments.clear()
+        self.segment_text.configure(state="normal")
+        self.segment_text.delete("1.0", "end")
+        self.segment_text.configure(state="disabled")
+        self._show_summary("")
+        self.delete_button.configure(state="disabled")
+        selected = self.sessions.selection()
+        if selected:
+            self.sessions.selection_remove(*selected)
 
     def _position(self):
         try:
