@@ -52,6 +52,11 @@ python -m pip install -r requirements.txt -r requirements-voice.txt
 python snipvoice.pyw
 ```
 
+Compressed audio import additionally requires Snipvoice's clean PyAV/FFmpeg
+runtime. Build it using [`packaging/README.md`](packaging/README.md); official
+release bundles already include it. Do not substitute PyAV's upstream binary
+wheel when producing a Snipvoice release.
+
 Use `pythonw snipvoice.pyw` on Windows after setup when you do not need console
 output. Models are not bundled. Voice starts disabled until a model is selected
 and the feature is enabled from **Configurar voz…**.

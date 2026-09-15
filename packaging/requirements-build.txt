@@ -1,0 +1,4 @@
+# Reproducible Python-side toolchain for the custom PyAV wheel.
+setuptools==84.0.0
+Cython==3.3.0
+wheel==0.48.0
