@@ -197,8 +197,8 @@ class MeetingWindow:
         self._poll()
 
     def _label(self, parent, text, **kwargs):
-        return tk.Label(parent, text=text, bg=self.ui.surface, fg=self.ui.text,
-                        font=self.ui.font(), **kwargs)
+        kwargs.setdefault("font", self.ui.font())
+        return tk.Label(parent, text=text, bg=self.ui.surface, fg=self.ui.text, **kwargs)
 
     def _button(self, parent, text, command, accent=False):
         return tk.Button(parent, text=text, command=command, font=self.ui.font(),
