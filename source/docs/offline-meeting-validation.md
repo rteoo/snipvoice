@@ -1,5 +1,9 @@
 # Offline meeting implementation and validation
 
+> Historical validation for v1.0.0. The unreleased built-in summary work
+> replaces the Ollama adapter with packaged llama.cpp and the pinned model
+> catalog documented in [summary-model-selection.md](summary-model-selection.md).
+
 Date: 2026-09-14. Branch: `codex/offline-meetings`.
 
 Source implementation is integrated and published for review in

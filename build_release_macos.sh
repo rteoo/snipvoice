@@ -80,12 +80,12 @@ fi
 # --- Package --------------------------------------------------------------
 echo "Packaging $APP_NAME $APP_VERSION ($RELEASE_CHANNEL) ..."
 VOICE_COLLECT_ARGS=()
-if ! "$PYTHON" -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native" >/dev/null 2>&1; then
+if ! "$PYTHON" -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native, llama_cpp" >/dev/null 2>&1; then
     echo "Voice release dependencies are missing." >&2
     echo "Install them with: $PYTHON -m pip install -r source/requirements-voice.txt" >&2
     exit 1
 fi
-VOICE_COLLECT_ARGS=(--collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native)
+VOICE_COLLECT_ARGS=(--collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native --collect-all llama_cpp)
 sh "$REPO_DIR/source/native/build_macos_capture.sh"
 "$PYTHON" -m PyInstaller --noconfirm --clean --windowed --onedir \
     --distpath "$STAGING_ROOT" \
@@ -192,6 +192,11 @@ fi
 
 if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --voice-runtime-probe; then
     echo "The staged voice runtime probe failed. dist left unchanged." >&2
+    exit 1
+fi
+
+if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --summary-runtime-probe; then
+    echo "The staged llama.cpp summary runtime probe failed. dist left unchanged." >&2
     exit 1
 fi
 

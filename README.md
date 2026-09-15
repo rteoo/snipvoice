@@ -33,7 +33,7 @@ recordings, shortcuts, process identity, and installers.
 - Meeting library with local search, notes, bookmarks, playback, and transcription revisions.
 - WAV import plus Markdown, text, JSON, and per-track WAV export.
 - Installed-only meeting transcription; processing never downloads a model.
-- Optional cited summaries through a manually installed loopback Ollama model.
+- Cited summaries through a built-in llama.cpp runtime and downloadable local models.
 - Deterministic term corrections and optional literal spoken commands.
 - No telemetry, transcript logging, implicit cloud storage, or Sniptype data migration.
 
@@ -72,10 +72,11 @@ launch. The Windows installer uses no administrator rights and installs under
 ## First use
 
 1. Start Snipvoice and find its icon in the Windows tray or macOS menu bar.
-2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, and the meeting library in separate tabs.
+2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
 3. In **Voz**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravar e configurar** to choose microphone/system sources and record a meeting. The **Gravações e reuniões…** tray shortcut selects this tab in the same window.
+6. Open **Resumo local**, choose Qwen3, Granite, or Gemma, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -99,7 +100,7 @@ are deliberately not imported.
 
 ## Meetings
 
-The **Gravar e configurar** and **Biblioteca e transcrição** tabs keep meeting
+The **Gravar e configurar**, **Biblioteca e transcrição**, and **Resumo local** tabs keep meeting
 capture independent from dictation inside the main Snipvoice window. Recording
 works when dictation is disabled and before any model is installed.
 
@@ -123,17 +124,20 @@ Model downloads happen only after an explicit action in voice settings. Meeting
 processing accepts installed catalog models and never downloads one implicitly.
 Recordings remain usable before transcription and preserve earlier revisions.
 
-Optional structured summaries use a local Ollama server fixed to
-`127.0.0.1:11434`. Snipvoice does not install Ollama, pull a model, follow
-redirects, or accept remote model routes. Configure Ollama with cloud features
-disabled (`OLLAMA_NO_CLOUD=1`) and review cited decisions and action items before
-using them.
+Structured summaries run inside Snipvoice through llama.cpp. The default is
+Qwen3 1.7B Q4_K_M; IBM Granite 3.3 2B is tuned for document and meeting
+summaries, and Gemma 3 1B is the smallest option. Downloads use a fixed catalog,
+stream to a resumable partial file, and become usable only after their exact size
+and SHA-256 match. Gemma requires explicit acceptance of its separate terms.
+After a model is installed, summary inference makes no network request. Review
+cited decisions and action items before using them.
 
 ## Data safety and privacy
 
 Settings, optional commands, logs, voice history, and meetings live under
 `~/.snipvoice` by default; `SNIPVOICE_HOME` overrides the location. Models use
-the separate non-roaming cache selected by `SNIPVOICE_VOICE_CACHE`.
+separate non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
+`SNIPVOICE_SUMMARY_CACHE`.
 
 Audio and transcripts remain until the user removes them. There is no automatic
 retention policy, telemetry, transcript logging, or implicit upload. Do not
@@ -164,8 +168,8 @@ build_installer.bat
 
 On macOS, run `./build_release_macos.sh`. Build tools must already be installed;
 the package workflow uses the pinned requirements in `source/requirements-build.txt`.
-Both packagers compile the native helper, bundle the local ASR runtime, stage the
-result, and run `--voice-runtime-probe` plus `--meeting-capture-probe` before
+Both packagers compile the native helper, bundle the local ASR and llama.cpp runtimes, stage the
+result, and run `--voice-runtime-probe`, `--summary-runtime-probe`, and `--meeting-capture-probe` before
 promotion. See the [development guide](source/docs/development.md) and
 [release validation](source/docs/offline-meeting-validation.md).
 

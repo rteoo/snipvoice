@@ -87,6 +87,35 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(format_time(float("nan")), "00:00:00")
         self.assertEqual(format_time(-10), "00:00:00")
 
+    def test_summary_inventory_result_is_applied_only_on_gui_callback(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        button = mock.Mock()
+        view.summary_model_buttons = {"qwen": button}
+        view.summary_model_status = Variable()
+        view._summary_inventory_loaded({"qwen": True}, None)
+        self.assertEqual(view.summary_model_installed, {"qwen": True})
+        button.configure.assert_called_once_with(text="Remover", state="normal")
+
+    def test_gemma_download_requires_visible_terms_and_uses_background_job(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        view.status = Variable()
+        view.summary_model_installed = {}
+        view.summary_model_buttons = {"gemma-3-1b-q4": mock.Mock()}
+        view.summary_model_status = Variable()
+        view.summary_progress_lock = threading.Lock()
+        view.summary_progress = None
+        view._submit = mock.Mock(return_value=True)
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm, \
+                mock.patch("meeting_gui.download_summary_model", return_value="model.gguf") as download:
+            view.toggle_summary_model("gemma-3-1b-q4")
+            operation = view._submit.call_args.args[1]
+            operation()
+        self.assertIn("ai.google.dev/gemma/terms", confirm.call_args.args[1])
+        download.assert_called_once()
+        self.assertIsNotNone(download.call_args.kwargs["cancel_event"])
+        self.assertTrue(callable(download.call_args.kwargs["progress"]))
+
     def test_initial_saved_manual_selection_overrides_constructor_defaults(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.raw_settings = {}
@@ -95,7 +124,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.options = {"microphone": [("old default", EndpointSelection())]}
         view.endpoint_vars = {track: Variable("old default") for track in ("microphone", "system")}
         view.endpoint_boxes = {track: mock.Mock() for track in ("microphone", "system")}
-        for name in ("sources", "profile", "language", "profile_display", "language_display", "hotkey", "summary_model", "status"):
+        for name in ("sources", "profile", "language", "profile_display", "language_display", "hotkey", "summary_model", "summary_display", "status"):
             setattr(view, name, Variable())
         view.language_box = mock.Mock()
         view._settings_loaded({"meeting_microphone": {"mode": "manual", "endpoint_id": "missing"}}, None)
@@ -324,7 +353,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIs(view.notebook, notebook)
             self.assertEqual(
                 titles,
-                ["Gravar e configurar", "Biblioteca e transcrição"],
+                ["Gravar e configurar", "Biblioteca e transcrição", "Resumo local"],
             )
         finally:
             view.close_without_prompt(destroy=False)

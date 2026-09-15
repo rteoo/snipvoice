@@ -24,7 +24,17 @@ def run_voice_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+def run_summary_runtime_probe_if_requested(argv=None):
+    """Run the packaged llama.cpp diagnostic before desktop imports."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--summary-runtime-probe" not in arguments:
+        return False
+    from summary_runtime_probe import main as probe_main
+    raise SystemExit(probe_main())
+
+
 run_voice_runtime_probe_if_requested()
+run_summary_runtime_probe_if_requested()
 
 if "--meeting-capture-probe" in sys.argv[1:]:
     from meeting_audio import NativeCapture

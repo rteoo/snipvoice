@@ -9,6 +9,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from meeting_settings import EndpointSelection, resolve_meeting_settings, validate_hotkey_conflicts
+from summary_catalog import format_model_size, summary_catalog, summary_catalog_entry
+from summary_models import (
+    delete_summary_model,
+    download_summary_model,
+    summary_model_is_installed,
+)
 import ui_theme
 from voice_catalog import available_languages, selectable_catalog
 from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY
@@ -31,6 +37,8 @@ PROFILE_LABELS = {"balanced": "Equilibrado · Parakeet TDT", "compact": "Compact
                   "accuracy": "Precisão · Qwen 1.7B", "streaming": "Transcrição contínua"}
 LANGUAGE_LABELS = {"auto": "Automático", "pt-BR": "Português (Brasil)", "en-US": "Inglês (Estados Unidos)"}
 TRACK_LABELS = {"Microfone": "microphone", "Sistema": "system"}
+SUMMARY_LABELS = {entry["id"]: f'{entry["name"]} · {entry["parameters"]}'
+                  for entry in summary_catalog()}
 
 
 def format_time(seconds):
@@ -173,6 +181,10 @@ class MeetingWindow:
         self.settings_loaded = False
         self.detail_ready = False
         self.processing_target = None
+        self.summary_download_cancel = None
+        self.summary_progress = None
+        self.summary_progress_lock = threading.Lock()
+        self.summary_model_installed = {}
         self.previous_state = None
         self.snapshot = {}
         self._build()
@@ -207,16 +219,20 @@ class MeetingWindow:
             self.notebook = notebook
         self.recording_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         self.library_tab = ttk.Frame(notebook, style="Meeting.TFrame")
+        self.summary_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         notebook.add(self.recording_tab, text="Gravar e configurar")
         notebook.add(self.library_tab, text="Biblioteca e transcrição")
+        notebook.add(self.summary_tab, text="Resumo local")
         self.status = tk.StringVar(self.window, "Carregando configurações…")
-        for tab in (self.recording_tab, self.library_tab):
+        for tab in (self.recording_tab, self.library_tab, self.summary_tab):
             self._label(tab, "", textvariable=self.status, anchor="w", wraplength=1050).pack(
                 fill="x", padx=18, pady=(12, 0))
         recording = ttk.Frame(self.recording_tab, padding=14, style="Meeting.TFrame")
         recording.pack(fill="both", expand=True)
         library = ttk.Frame(self.library_tab, padding=14, style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
+        summary = ttk.Frame(self.summary_tab, padding=14, style="Meeting.TFrame")
+        summary.pack(fill="both", expand=True)
         self.record_title = tk.StringVar(self.window)
         self.sources = tk.StringVar(self.window, SOURCE_LABELS[self.settings.sources])
         self.profile = tk.StringVar(self.window, self.settings.profile)
@@ -224,7 +240,8 @@ class MeetingWindow:
         self.profile_display = tk.StringVar(self.window, PROFILE_LABELS[self.settings.profile])
         self.language_display = tk.StringVar(self.window, LANGUAGE_LABELS[self.settings.language])
         self.hotkey = tk.StringVar(self.window)
-        self.summary_model = tk.StringVar(self.window)
+        self.summary_model = tk.StringVar(self.window, self.settings.summary_model)
+        self.summary_display = tk.StringVar(self.window, SUMMARY_LABELS[self.settings.summary_model])
         self.endpoint_vars = {track: tk.StringVar(self.window) for track in ("microphone", "system")}
         self.endpoint_boxes = {}
         rows = [("Título da próxima gravação", self._entry(recording, self.record_title)),
@@ -239,9 +256,12 @@ class MeetingWindow:
         self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
         self.language_box = ttk.Combobox(recording, textvariable=self.language_display, state="readonly")
         self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
+        self.summary_box = ttk.Combobox(recording, textvariable=self.summary_display,
+            values=list(SUMMARY_LABELS.values()), state="readonly")
+        self.summary_box.bind("<<ComboboxSelected>>", self._summary_display_changed)
         rows.extend([("Modelo de transcrição local", self.profile_box), ("Idioma", self.language_box),
                      ("Atalho de gravação (opcional)", self._entry(recording, self.hotkey)),
-                     ("Modelo local de resumo (Ollama)", self._entry(recording, self.summary_model))])
+                     ("Modelo de resumo local", self.summary_box)])
         for row, (label, widget) in enumerate(rows):
             self._label(recording, label, anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=6)
             widget.grid(row=row, column=1, sticky="ew", pady=6)
@@ -275,6 +295,135 @@ class MeetingWindow:
         self.options.clear()
         self._render_devices()
         self._build_library(library)
+        self._build_summary_models(summary)
+
+    def _build_summary_models(self, parent):
+        self._label(parent, "Modelos de resumo no próprio Snipvoice", anchor="w",
+                    font=self.ui.font(weight="bold")).pack(fill="x")
+        self._label(
+            parent,
+            "O llama.cpp já vem no aplicativo. Baixe apenas os pesos que quiser usar; "
+            "depois disso, os resumos funcionam sem internet.",
+            anchor="w", justify="left", wraplength=900,
+        ).pack(fill="x", pady=(6, 14))
+        self.summary_model_buttons = {}
+        for entry in summary_catalog():
+            row = ttk.Frame(parent, style="Meeting.TFrame")
+            row.pack(fill="x", pady=8)
+            choice = tk.Radiobutton(
+                row, variable=self.summary_model, value=entry["id"],
+                command=self._summary_choice_changed, bg=self.ui.surface, fg=self.ui.text,
+                activebackground=self.ui.surface, activeforeground=self.ui.text,
+                selectcolor=self.ui.surface, font=self.ui.font(), anchor="nw",
+            )
+            choice.pack(side="left", anchor="n")
+            copy = ttk.Frame(row, style="Meeting.TFrame")
+            copy.pack(side="left", fill="x", expand=True, padx=(4, 12))
+            self._label(copy, f'{entry["name"]} · {format_model_size(entry["size_bytes"])} · '
+                        f'{entry["license_id"]}', anchor="w",
+                        font=self.ui.font(weight="bold")).pack(fill="x")
+            self._label(copy, entry["description"], anchor="w", wraplength=720).pack(fill="x")
+            button = self._button(row, "", lambda model_id=entry["id"]: self.toggle_summary_model(model_id))
+            button.pack(side="right", anchor="n")
+            self.summary_model_buttons[entry["id"]] = button
+        actions = ttk.Frame(parent, style="Meeting.TFrame")
+        actions.pack(fill="x", pady=(18, 0))
+        self._button(actions, "Salvar modelo padrão", self.save_settings, accent=True).pack(side="left")
+        self._button(actions, "Cancelar download", self.cancel_summary_download).pack(side="left", padx=8)
+        self.summary_model_status = tk.StringVar(self.window)
+        self._label(parent, "", textvariable=self.summary_model_status, anchor="w",
+                    wraplength=900).pack(fill="x", pady=12)
+        self._refresh_summary_models()
+
+    def _summary_display_changed(self, _event=None):
+        self.summary_model.set(next(key for key, label in SUMMARY_LABELS.items()
+                                    if label == self.summary_display.get()))
+
+    def _summary_choice_changed(self):
+        self.summary_display.set(SUMMARY_LABELS[self.summary_model.get()])
+
+    def _refresh_summary_models(self):
+        for button in self.summary_model_buttons.values():
+            button.configure(text="Verificando…", state="disabled")
+        self._submit(
+            "summary_inventory",
+            lambda: {entry["id"]: summary_model_is_installed(entry["id"])
+                     for entry in summary_catalog()},
+            self._summary_inventory_loaded,
+        )
+
+    def _summary_inventory_loaded(self, installed, error):
+        if error:
+            self.summary_model_status.set(error)
+            return
+        self.summary_model_installed = dict(installed)
+        for model_id, button in self.summary_model_buttons.items():
+            button.configure(text="Remover" if installed.get(model_id) else "Baixar",
+                             state="normal")
+
+    def toggle_summary_model(self, model_id):
+        entry = summary_catalog_entry(model_id)
+        if entry is None:
+            self.status.set("O modelo de resumo selecionado não existe no catálogo.")
+            return
+        if self.summary_model_installed.get(model_id):
+            if not messagebox.askyesno("Remover modelo", f'Remover {entry["name"]} deste computador?',
+                                       parent=self.window):
+                return
+            for button in self.summary_model_buttons.values():
+                button.configure(state="disabled")
+            self.summary_model_status.set(f'Removendo {entry["name"]}…')
+            submitted = self._submit(
+                "summary_model", lambda: delete_summary_model(model_id),
+                lambda _value, error: self._summary_model_finished(entry, error, removed=True),
+            )
+            if not submitted:
+                self._refresh_summary_models()
+            return
+        terms = (f'\n\nAo continuar, você aceita os termos: {entry["license_url"]}'
+                 if entry["requires_acceptance"] else "")
+        if not messagebox.askyesno(
+                "Baixar modelo local",
+                f'Baixar {entry["name"]} ({format_model_size(entry["size_bytes"])})?'
+                f'\nLicença: {entry["license_id"]}{terms}', parent=self.window):
+            return
+        self.summary_download_cancel = threading.Event()
+        with self.summary_progress_lock:
+            self.summary_progress = (entry["name"], 0, entry["size_bytes"])
+        for button in self.summary_model_buttons.values():
+            button.configure(state="disabled")
+        self.summary_model_status.set(f'Baixando {entry["name"]} com verificação SHA-256…')
+        submitted = self._submit(
+            "summary_model",
+            lambda: download_summary_model(model_id, cancel_event=self.summary_download_cancel,
+                                           progress=lambda done, total: self._summary_progress(entry, done, total)),
+            lambda _value, error: self._summary_model_finished(entry, error),
+        )
+        if not submitted:
+            self.summary_download_cancel = None
+            self._refresh_summary_models()
+
+    def cancel_summary_download(self):
+        if self.summary_download_cancel is None:
+            self.summary_model_status.set("Nenhum download de modelo está em andamento.")
+            return
+        self.summary_download_cancel.set()
+        self.summary_model_status.set("Cancelando download; os bytes parciais poderão ser retomados.")
+
+    def _summary_progress(self, entry, done, total):
+        with self.summary_progress_lock:
+            self.summary_progress = (entry["name"], done, total)
+
+    def _summary_model_finished(self, entry, error, removed=False):
+        self.summary_download_cancel = None
+        with self.summary_progress_lock:
+            self.summary_progress = None
+        self._refresh_summary_models()
+        if error:
+            self.summary_model_status.set(error)
+            return
+        action = "removido" if removed else "baixado e verificado"
+        self.summary_model_status.set(f'{entry["name"]} {action}.')
 
     def _build_library(self, parent):
         search_row = ttk.Frame(parent, style="Meeting.TFrame")
@@ -408,6 +557,7 @@ class MeetingWindow:
         self.language_display.set(LANGUAGE_LABELS[settings.language])
         self.hotkey.set(settings.hotkey)
         self.summary_model.set(settings.summary_model)
+        self.summary_display.set(SUMMARY_LABELS[settings.summary_model])
         self._profile_changed()
         self.options.clear()
         self._render_devices()
@@ -793,8 +943,8 @@ class MeetingWindow:
             self.status.set("Selecione uma gravação na biblioteca.")
             return
         model = self.summary_model.get().strip()
-        if not model:
-            self.status.set("Informe o nome de um modelo Ollama local já instalado na aba de configurações.")
+        if not self.summary_model_installed.get(model):
+            self.status.set("Baixe o modelo selecionado na aba Resumo local antes de gerar o resumo.")
             return
         session_id = self.selected
         self._action("summarize", session_id, model,
@@ -864,6 +1014,14 @@ class MeetingWindow:
             return
         try:
             self.bridge.drain()
+            with self.summary_progress_lock:
+                progress = self.summary_progress
+            if progress is not None:
+                name, done, total = progress
+                percent = int(done * 100 / total) if total else 0
+                self.summary_model_status.set(
+                    f"Baixando {name}: {percent}% · verificação SHA-256 antes da instalação"
+                )
             self.snapshot = self.controller.snapshot()
             state = self.snapshot.get("state", "idle")
             active = state in ("starting", "recording", "paused", "stopping")
@@ -915,6 +1073,8 @@ class MeetingWindow:
         if self.closed:
             return
         self.closed = True
+        if getattr(self, "summary_download_cancel", None) is not None:
+            self.summary_download_cancel.set()
         self.bridge.close()
         if self.after_id is not None:
             self.root.after_cancel(self.after_id)
