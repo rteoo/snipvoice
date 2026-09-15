@@ -198,6 +198,7 @@ class MeetingWindow:
         self.previous_state = None
         self.previous_processing = False
         self.snapshot = {}
+        self._mousewheel_bindings = []
         self._build()
         if not self.embedded:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -236,6 +237,40 @@ class MeetingWindow:
         kwargs.setdefault("padx", self.ui.space_lg)
         kwargs.setdefault("pady", self.ui.space_md)
         return tk.Frame(parent, **self.ui.card_options(), **kwargs)
+
+    def _bind_mousewheel_region(self, region, target):
+        """Route wheel events from nested controls to one scrollable region."""
+        if not hasattr(self, "_mousewheel_bindings"):
+            self._mousewheel_bindings = []
+
+        def on_mousewheel(event):
+            widget = getattr(event, "widget", None)
+            while widget is not None and widget is not region:
+                widget = getattr(widget, "master", None)
+            if widget is not region:
+                return None
+            if getattr(event, "delta", 0):
+                steps = -1 if event.delta > 0 else 1
+            elif getattr(event, "num", None) == 4:
+                steps = -1
+            elif getattr(event, "num", None) == 5:
+                steps = 1
+            else:
+                return None
+            target.yview_scroll(steps, "units")
+            return "break"
+
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            binding_id = self.window.bind(sequence, on_mousewheel, add="+")
+            self._mousewheel_bindings.append((sequence, binding_id))
+
+    def _unbind_mousewheel_regions(self):
+        for sequence, binding_id in getattr(self, "_mousewheel_bindings", ()):
+            try:
+                self.window.unbind(sequence, binding_id)
+            except tk.TclError:
+                pass
+        self._mousewheel_bindings = []
 
     def _build(self):
         style = ttk.Style(self.window)
@@ -333,6 +368,7 @@ class MeetingWindow:
 
         settings_content.bind("<Configure>", update_settings_scroll_region)
         settings_canvas.bind("<Configure>", stretch_settings_content)
+        self._bind_mousewheel_region(settings_view, settings_canvas)
         self.settings_canvas = settings_canvas
         self.settings_content = settings_content
         self.transcription_models_parent = tk.Frame(
@@ -1347,6 +1383,7 @@ class MeetingWindow:
         self.closed = True
         if getattr(self, "summary_download_cancel", None) is not None:
             self.summary_download_cancel.set()
+        self._unbind_mousewheel_regions()
         self.bridge.close()
         if self.after_id is not None:
             self.root.after_cancel(self.after_id)

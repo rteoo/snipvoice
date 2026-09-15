@@ -1,9 +1,11 @@
 """Workspace concurrency, selection, persistence, and shared-root smoke checks."""
 
 import os
+import sys
 import threading
 import time
 import tkinter as tk
+import types
 import unittest
 from tkinter import ttk
 from unittest import mock
@@ -74,6 +76,32 @@ class MeetingGuiLogicTests(unittest.TestCase):
         label.assert_called_once_with(
             parent, text="Heading", bg="surface", fg="text", font="bold-font",
         )
+
+    def test_settings_mousewheel_routes_descendant_events_to_canvas(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        region = types.SimpleNamespace(master=None)
+        child = types.SimpleNamespace(master=region)
+        canvas = mock.Mock()
+
+        view._bind_mousewheel_region(region, canvas)
+
+        callbacks = {
+            call.args[0]: call.args[1] for call in view.window.bind.call_args_list
+        }
+        result = callbacks["<MouseWheel>"](
+            types.SimpleNamespace(widget=child, delta=-120, num=None),
+        )
+        self.assertEqual(result, "break")
+        canvas.yview_scroll.assert_called_once_with(1, "units")
+
+        canvas.reset_mock()
+        outside = types.SimpleNamespace(master=None)
+        result = callbacks["<MouseWheel>"](
+            types.SimpleNamespace(widget=outside, delta=-120, num=None),
+        )
+        self.assertIsNone(result)
+        canvas.yview_scroll.assert_not_called()
 
     def test_missing_manual_device_stays_pinned(self):
         selection = EndpointSelection("manual", "opaque-id")
@@ -476,6 +504,43 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             ]
             self.assertIn("Importar áudio…", library_buttons)
             self.assertNotIn("Importar WAV…", library_buttons)
+        finally:
+            view.close_without_prompt(destroy=False)
+            manager.destroy()
+            self.root.update()
+
+    def test_settings_mousewheel_scrolls_when_pointer_is_over_content(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        manager = tk.Toplevel(self.root)
+        manager.geometry("1120x820")
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        try:
+            notebook.select(view.settings_tab)
+            self.root.update()
+            view.settings_canvas.yview_moveto(0)
+            self.root.update()
+            target = next(
+                widget for widget in descendants(view.settings_content)
+                if isinstance(widget, tk.Label) and "Qwen3.5 4B" in widget.cget("text")
+            )
+            before = view.settings_canvas.yview()[0]
+
+            if sys.platform.startswith(("win", "darwin")):
+                target.event_generate("<MouseWheel>", delta=-120)
+            else:
+                target.event_generate("<Button-5>")
+            self.root.update()
+
+            self.assertGreater(view.settings_canvas.yview()[0], before)
         finally:
             view.close_without_prompt(destroy=False)
             manager.destroy()
