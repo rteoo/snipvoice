@@ -1,6 +1,8 @@
 import json
+import os
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from snippet_utils import (
     build_saveable_snippets,
@@ -77,6 +79,27 @@ class SnippetUtilsTests(unittest.TestCase):
 
         write_json_atomic(path, {"new": "value"})
 
+        self.assertEqual({"new": "value"}, json.loads(path.read_text(encoding='utf-8')))
+
+    def test_write_json_atomic_retries_transient_permission_errors(self):
+        path = self.make_test_path('retry')
+        path.write_text('{"old": true}', encoding='utf-8')
+        original_replace = os.replace
+        attempts = []
+
+        def flaky_replace(source, destination):
+            attempts.append((source, destination))
+            if len(attempts) < 3:
+                raise PermissionError("destination is temporarily busy")
+            original_replace(source, destination)
+
+        with mock.patch("snippet_utils.os.replace", side_effect=flaky_replace), mock.patch(
+            "snippet_utils.time.sleep"
+        ) as sleep:
+            write_json_atomic(path, {"new": "value"})
+
+        self.assertEqual(3, len(attempts))
+        self.assertEqual([mock.call(0.01), mock.call(0.02)], sleep.call_args_list)
         self.assertEqual({"new": "value"}, json.loads(path.read_text(encoding='utf-8')))
 
     def test_build_saveable_snippets_filters_runtime_callables(self):
