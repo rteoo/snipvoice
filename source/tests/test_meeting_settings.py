@@ -4,6 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from meeting_settings import resolve_meeting_settings, resolve_selection
+from summary_catalog import DEFAULT_SUMMARY_MODEL
 
 
 class MeetingSettingsTests(unittest.TestCase):
@@ -12,6 +13,7 @@ class MeetingSettingsTests(unittest.TestCase):
         self.assertEqual(settings.sources, "both")
         self.assertEqual(settings.microphone.argument(), "default:multimedia")
         self.assertEqual(settings.hotkey, "")
+        self.assertEqual(settings.summary_model, DEFAULT_SUMMARY_MODEL)
         self.assertNotIn("voice_enabled", settings.payload())
 
     def test_manual_id_and_role_round_trip(self):
@@ -33,3 +35,7 @@ class MeetingSettingsTests(unittest.TestCase):
                        {"meeting_profile": "streaming"}, {"meeting_language": "xx"}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 resolve_meeting_settings(values)
+
+    def test_legacy_ollama_value_migrates_to_builtin_default(self):
+        settings = resolve_meeting_settings({"meeting_summary_model": "qwen:latest"})
+        self.assertEqual(settings.summary_model, DEFAULT_SUMMARY_MODEL)
