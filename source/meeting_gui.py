@@ -302,7 +302,7 @@ class MeetingWindow:
         self.summary_display = tk.StringVar(self.window, SUMMARY_LABELS[self.settings.summary_model])
         self.endpoint_vars = {track: tk.StringVar(self.window) for track in ("microphone", "system")}
         self.endpoint_boxes = {}
-        settings_card = self._card(recording)
+        settings_card = self._card(recording, pady=self.ui.space_sm)
         settings_card.pack(fill="x", pady=(0, self.ui.space_md))
         self._label(
             settings_card, "Configuração da próxima gravação",
@@ -328,22 +328,22 @@ class MeetingWindow:
                      ("Modelo de resumo local", self.summary_box)])
         for row, (label, widget) in enumerate(rows, 1):
             self._label(settings_card, label, anchor="w", bg=self.ui.card).grid(
-                row=row, column=0, sticky="w", padx=(0, 18), pady=5,
+                row=row, column=0, sticky="w", padx=(0, 18), pady=3,
             )
-            widget.grid(row=row, column=1, sticky="ew", pady=5)
+            widget.grid(row=row, column=1, sticky="ew", pady=3)
         settings_card.columnconfigure(1, weight=1)
         self._label(settings_card, "Configurações valem para a próxima gravação. O atalho começa sem atribuição.\n"
                     "O áudio do sistema inclui os sons do dispositivo escolhido. Use fones para reduzir duplicação.",
                     justify="left", anchor="w", wraplength=850, bg=self.ui.card,
                     fg=self.ui.text_muted, font=self.ui.font(8)).grid(
-                        row=9, column=0, columnspan=2, sticky="ew", pady=(8, 10),
+                        row=9, column=0, columnspan=2, sticky="ew", pady=(4, 6),
                     )
         commands = tk.Frame(settings_card, bg=self.ui.card)
         commands.grid(row=10, column=0, columnspan=2, sticky="w")
         self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
         self._button(commands, "Salvar configurações", self.save_settings).pack(side="left", padx=(0, 8))
         self._button(commands, "Importar modelo local…", self.import_model).pack(side="left")
-        activity = self._card(recording)
+        activity = self._card(recording, pady=self.ui.space_sm)
         activity.pack(fill="x")
         self._label(
             activity, "Controles da gravação", bg=self.ui.card, fg=self.ui.text_strong,

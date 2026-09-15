@@ -461,6 +461,25 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(title, "Gravação")
         self.assertEqual(top_levels, 1)
 
+    def test_recording_level_meters_fit_inside_the_manager_viewport(self):
+        _ensure_voice(self.app)
+
+        def measure(shared_root):
+            self.app._show_meetings(shared_root)
+            manager = self.app.manager_window
+            manager.update_idletasks()
+            tab = self.app._manager_recording_tab
+            meters = self.app._manager_meeting_view.meters.values()
+            visible_bottom = tab.winfo_rooty() + tab.winfo_height()
+            controls_bottom = max(
+                meter.winfo_rooty() + meter.winfo_height()
+                for meter in meters
+            )
+            return controls_bottom, visible_bottom
+
+        controls_bottom, visible_bottom = self._on_gui(measure)
+        self.assertLessEqual(controls_bottom, visible_bottom)
+
     def test_voice_tab_absent_when_controller_missing(self):
         self.app.voice = None
 
