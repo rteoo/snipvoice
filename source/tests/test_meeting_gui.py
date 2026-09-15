@@ -55,6 +55,17 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_label_allows_an_explicit_font_override(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.ui = mock.Mock(surface="surface", text="text")
+        view.ui.font.return_value = "default-font"
+        parent = mock.Mock()
+        with mock.patch("meeting_gui.tk.Label") as label:
+            view._label(parent, "Heading", font="bold-font")
+        label.assert_called_once_with(
+            parent, text="Heading", bg="surface", fg="text", font="bold-font",
+        )
+
     def test_missing_manual_device_stays_pinned(self):
         selection = EndpointSelection("manual", "opaque-id")
         options = endpoint_options([], "system", selection)
