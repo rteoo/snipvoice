@@ -465,8 +465,11 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         _ensure_voice(self.app)
 
         def measure(shared_root):
-            self.app._show_meetings(shared_root)
+            with mock.patch.object(tk.Misc, "winfo_screenwidth", return_value=1024), \
+                    mock.patch.object(tk.Misc, "winfo_screenheight", return_value=768):
+                self.app._show_meetings(shared_root)
             manager = self.app.manager_window
+            manager.geometry("1024x749+0+0")
             manager.update_idletasks()
             tab = self.app._manager_recording_tab
             meters = self.app._manager_meeting_view.meters.values()
