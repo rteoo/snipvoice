@@ -5,6 +5,27 @@ DEFAULT_SUMMARY_MODEL = "qwen3.5-2b-q4"
 
 SUMMARY_CATALOG = (
     {
+        "id": "qwen3.5-0.8b-q4",
+        "profile": "qwen3.5-0.8b-q4",
+        "name": "Qwen3.5 0.8B",
+        "description": "Economia máxima · para hardware limitado, com menor qualidade",
+        "filename": "Qwen3.5-0.8B-Q4_K_M.gguf",
+        "url": (
+            "https://huggingface.co/lmstudio-community/Qwen3.5-0.8B-GGUF/resolve/"
+            "7925ccdc665d4efdb1034791e6b553e11128e6f8/Qwen3.5-0.8B-Q4_K_M.gguf"
+        ),
+        "sha256": "f5b14da98939b60bbe1019a964eba656407e1e0b64f1fe3003ff6d650e93bfec",
+        "size_bytes": 527_502_816,
+        "parameters": "0.8B",
+        "context_length": 4096,
+        "license_id": "Apache-2.0",
+        "license_url": "https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/LICENSE",
+        "upstream_model": "Qwen/Qwen3.5-0.8B",
+        "quant_source": "lmstudio-community/Qwen3.5-0.8B-GGUF",
+        "requires_acceptance": False,
+        "disable_thinking": False,
+    },
+    {
         "id": DEFAULT_SUMMARY_MODEL,
         "profile": DEFAULT_SUMMARY_MODEL,
         "name": "Qwen3.5 2B",

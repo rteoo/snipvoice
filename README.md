@@ -83,7 +83,7 @@ launch. The Windows installer uses no administrator rights and installs under
 3. In **Voz**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Gravações e reuniões…** tray shortcut selects this tab in the same window.
-6. Open **Resumo local**, choose Qwen3.5, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
+6. Open **Resumo local**, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -131,10 +131,11 @@ Model downloads happen only after an explicit action in voice settings. Meeting
 processing accepts installed catalog models and never downloads one implicitly.
 Recordings remain usable before transcription and preserve earlier revisions.
 
-Structured summaries run inside Snipvoice through llama.cpp. The default is
-Qwen3.5 2B Q4_K_M; Qwen3.5 4B is the higher-quality option, LiquidAI
-LFM2.5-2.6B is the smaller efficient alternative, and Gemma 4 E2B/E4B are
-Google's current options.
+Structured summaries run inside Snipvoice through llama.cpp. Qwen3.5 0.8B is
+the 503 MiB compute-budget option for constrained hardware, while Qwen3.5 2B
+Q4_K_M remains the recommended default and Qwen3.5 4B favors quality. LiquidAI
+LFM2.5-2.6B is the efficient alternative, and Gemma 4 E2B/E4B are Google's
+current options.
 Gemma E2B is 3.12 GiB; the higher-capacity E4B is 4.80 GiB and contains about 8B
 total parameters. Settings show the effective and total counts before download.
 LiquidAI uses the LFM Open License v1.0 rather than MIT or Apache-2.0. Its first

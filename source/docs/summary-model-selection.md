@@ -28,11 +28,19 @@ it does not follow a mutable `main` download URL.
 
 | Model | Role | Parameters shown to users | GGUF size | Artifact source | License |
 | --- | --- | --- | ---: | --- | --- |
+| Qwen3.5 0.8B Q4_K_M | Compute budget | 0.8B | 503 MiB | LM Studio Community conversion of Qwen | Apache-2.0 |
 | Qwen3.5 2B Q4_K_M | Default balance | 2B | 1.18 GiB | LM Studio Community conversion of Qwen | Apache-2.0 |
 | Qwen3.5 4B Q4_K_M | Higher quality | 4B | 2.52 GiB | LM Studio Community conversion of Qwen | Apache-2.0 |
 | LiquidAI LFM2.5-2.6B Q4_K_M | Efficient alternative | 2.6B | 1.56 GiB | First-party LiquidAI GGUF | LFM Open License v1.0 |
 | Gemma 4 E2B QAT Q4_0 | Current Google alternative | E2B / 5B total | 3.12 GiB | First-party Google GGUF | Apache-2.0 |
 | Gemma 4 E4B QAT Q4_0 | Higher-capacity Google option | E4B / 8B total | 4.80 GiB | First-party Google GGUF | Apache-2.0 |
+
+[Qwen3.5 0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) is the smallest
+compute-budget option for constrained hardware. Qwen positions this scale for
+prototyping, task-specific fine-tuning, and research or development, so the UI
+states that it trades quality for lower resource use. The pinned Q4_K_M file is
+527,502,816 bytes with SHA-256
+`f5b14da98939b60bbe1019a964eba656407e1e0b64f1fe3003ff6d650e93bfec`.
 
 [Qwen3.5 4B](https://huggingface.co/Qwen/Qwen3.5-4B) stays within the requested
 4B ceiling and offers a quality-oriented option for machines with more memory.
@@ -85,6 +93,8 @@ migrate to the corresponding current family without deleting old cached files.
 - No same-transcript PT-BR/en-US quality and latency comparison has been run in
   Snipvoice, so the default is based on current upstream evidence and practical
   size rather than an app-specific benchmark.
+- Qwen3.5 0.8B is expected to be materially less capable than the 2B default;
+  it is included for machines where memory and compute are the binding limits.
 - The exact model downloads and live llama.cpp inference were not exercised as
   part of this catalog update; the downloader metadata came from the current
   Hugging Face model API and is pinned against immutable revisions.
