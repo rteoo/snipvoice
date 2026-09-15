@@ -402,17 +402,31 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             self.app._show_voice_settings(shared_root)
             notebook = self.app._manager_notebook
             selected = notebook.select()
-            return notebook.tab(selected, "text"), _notebook_titles(self.app.manager_window)
+            labels = {
+                str(widget.cget("text"))
+                for widget in _descendants(self.app.manager_window)
+                if isinstance(widget, tk.Label)
+            }
+            return (
+                notebook.tab(selected, "text"),
+                _notebook_titles(self.app.manager_window),
+                str(notebook.cget("style")),
+                labels,
+            )
 
-        title, titles = self._on_gui(open_settings)
+        title, titles, notebook_style, labels = self._on_gui(open_settings)
         self.assertIn("Voz", title)
+        self.assertEqual(notebook_style, "Manager.TNotebook")
+        self.assertIn("Processamento local", labels)
+        self.assertIn("Modelo e idioma", labels)
+        self.assertIn("Atalhos", labels)
         self.assertEqual(
             titles,
             [
                 "Voz",
-                "Gravar e configurar",
-                "Biblioteca e transcrição",
-                "Resumo local",
+                "Gravação",
+                "Biblioteca",
+                "Resumo",
             ],
         )
 
@@ -435,7 +449,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         reused, title, top_levels = self._on_gui(select_recording)
         self.assertTrue(reused)
-        self.assertEqual(title, "Gravar e configurar")
+        self.assertEqual(title, "Gravação")
         self.assertEqual(top_levels, 1)
 
     def test_voice_tab_absent_when_controller_missing(self):
@@ -455,9 +469,9 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             titles,
             [
                 "Diagnóstico",
-                "Gravar e configurar",
-                "Biblioteca e transcrição",
-                "Resumo local",
+                "Gravação",
+                "Biblioteca",
+                "Resumo",
             ],
         )
         self.assertIsNone(self.app._manager_voice_refresher)

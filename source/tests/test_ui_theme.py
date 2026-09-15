@@ -230,7 +230,7 @@ class WidgetOptionTests(unittest.TestCase):
     def test_windows_keeps_its_button_widths_and_window_size(self):
         theme = ui_theme.build_theme("windows", system="windows")
         self.assertEqual(theme.button_width(12), 12)
-        self.assertEqual(theme.manager_window_size, ("1080x720", 900, 580))
+        self.assertEqual(theme.manager_window_size, ("1120x820", 920, 700))
         self.assertFalse(theme.stacked_toolbar_status)
 
     def test_fluent_spacing_and_tree_density_are_stable(self):
@@ -249,9 +249,21 @@ class WidgetOptionTests(unittest.TestCase):
         theme = ui_theme.build_theme("dark", system="darwin")
         self.assertEqual(theme.button_width(12), 0)
         geometry, min_width, _ = theme.manager_window_size
-        self.assertEqual(geometry, "1140x760")
+        self.assertEqual(geometry, "1160x840")
         self.assertGreater(min_width, 820)
         self.assertTrue(theme.stacked_toolbar_status)
+
+    def test_settings_cards_use_the_shared_surface_and_quiet_border(self):
+        theme = ui_theme.build_theme("windows", system="windows")
+        self.assertEqual(
+            theme.card_options(),
+            {
+                "bg": theme.card,
+                "highlightbackground": theme.border,
+                "highlightthickness": 1,
+                "bd": 0,
+            },
+        )
 
     def test_macos_never_paints_a_natively_drawn_control(self):
         # Aqua ignores -background on buttons and checkboxes but honours
@@ -397,6 +409,33 @@ class TtkThemeSelectionTests(unittest.TestCase):
                 raise RuntimeError("no ttk")
 
         self.assertIsNone(ui_theme.apply_ttk_theme(Broken(), "windows"))
+
+    def test_manager_styles_define_navigation_and_selection_states(self):
+        class Recorder:
+            def __init__(self):
+                self.configured = {}
+                self.mapped = {}
+
+            def configure(self, name, **options):
+                self.configured[name] = options
+
+            def map(self, name, **options):
+                self.mapped[name] = options
+
+        style = Recorder()
+        theme = ui_theme.build_theme("windows", system="windows")
+        self.assertIs(ui_theme.configure_manager_styles(style, theme), style)
+        self.assertEqual(
+            style.configured["Manager.TNotebook.Tab"]["padding"], (18, 10)
+        )
+        self.assertIn(
+            ("selected", theme.accent),
+            style.mapped["Manager.TNotebook.Tab"]["foreground"],
+        )
+        self.assertEqual(
+            style.mapped["Manager.Treeview"]["background"],
+            [("selected", theme.select_bg)],
+        )
 
 
 class GuiSourceTests(unittest.TestCase):

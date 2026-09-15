@@ -75,7 +75,7 @@ launch. The Windows installer uses no administrator rights and installs under
 2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
 3. In **Voz**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
-5. Use **Gravar e configurar** to choose microphone/system sources and record a meeting. The **Gravações e reuniões…** tray shortcut selects this tab in the same window.
+5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Gravações e reuniões…** tray shortcut selects this tab in the same window.
 6. Open **Resumo local**, choose Qwen3.5, Granite 4.2, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
@@ -100,7 +100,7 @@ are deliberately not imported.
 
 ## Meetings
 
-The **Gravar e configurar**, **Biblioteca e transcrição**, and **Resumo local** tabs keep meeting
+The **Gravação**, **Biblioteca**, and **Resumo** tabs keep meeting
 capture independent from dictation inside the main Snipvoice window. Recording
 works when dictation is disabled and before any model is installed.
 

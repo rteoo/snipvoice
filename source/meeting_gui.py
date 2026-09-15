@@ -198,7 +198,9 @@ class MeetingWindow:
 
     def _label(self, parent, text, **kwargs):
         kwargs.setdefault("font", self.ui.font())
-        return tk.Label(parent, text=text, bg=self.ui.surface, fg=self.ui.text, **kwargs)
+        kwargs.setdefault("bg", self.ui.surface)
+        kwargs.setdefault("fg", self.ui.text)
+        return tk.Label(parent, text=text, **kwargs)
 
     def _button(self, parent, text, command, accent=False):
         return tk.Button(parent, text=text, command=command, font=self.ui.font(),
@@ -208,30 +210,86 @@ class MeetingWindow:
         return tk.Entry(parent, textvariable=variable, width=width, font=self.ui.font(),
                         **self.ui.entry_colors())
 
+    def _page_header(self, parent, title, description):
+        header = tk.Frame(parent, bg=self.ui.surface)
+        header.pack(fill="x", padx=self.ui.space_lg, pady=(self.ui.space_lg, self.ui.space_sm))
+        self._label(
+            header, title, font=self.ui.font(16, "bold"), fg=self.ui.text_strong,
+        ).pack(anchor="w")
+        self._label(
+            header, description, font=self.ui.font(9), fg=self.ui.text_muted,
+            anchor="w", justify="left", wraplength=940,
+        ).pack(fill="x", pady=(self.ui.space_xs, 0))
+
+    def _card(self, parent, **kwargs):
+        kwargs.setdefault("padx", self.ui.space_lg)
+        kwargs.setdefault("pady", self.ui.space_md)
+        return tk.Frame(parent, **self.ui.card_options(), **kwargs)
+
     def _build(self):
         style = ttk.Style(self.window)
+        ui_theme.apply_ttk_theme(style)
+        ui_theme.configure_manager_styles(style, self.ui)
         style.configure("Meeting.TFrame", background=self.ui.surface)
-        style.configure("Meeting.Treeview", rowheight=self.ui.tree_row_height, font=self.ui.font())
+        style.configure(
+            "Meeting.Treeview",
+            background=self.ui.card,
+            fieldbackground=self.ui.card,
+            foreground=self.ui.text,
+            rowheight=self.ui.tree_row_height,
+            font=self.ui.font(),
+            borderwidth=0,
+        )
+        style.map(
+            "Meeting.Treeview",
+            background=[("selected", self.ui.select_bg)],
+            foreground=[("selected", self.ui.select_fg)],
+        )
+        style.configure(
+            "Meeting.Treeview.Heading",
+            background=self.ui.surface_alt,
+            foreground=self.ui.text_strong,
+            font=self.ui.font(9, "bold"),
+            padding=(8, 8),
+            relief="flat",
+        )
         notebook = self.notebook
         if notebook is None:
-            notebook = ttk.Notebook(self.window)
-            notebook.pack(fill="both", expand=True, padx=12, pady=12)
+            notebook = ttk.Notebook(self.window, style="Manager.TNotebook")
+            notebook.pack(fill="both", expand=True, padx=self.ui.space_xl, pady=self.ui.space_lg)
             self.notebook = notebook
         self.recording_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         self.library_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         self.summary_tab = ttk.Frame(notebook, style="Meeting.TFrame")
-        notebook.add(self.recording_tab, text="Gravar e configurar")
-        notebook.add(self.library_tab, text="Biblioteca e transcrição")
-        notebook.add(self.summary_tab, text="Resumo local")
+        notebook.add(self.recording_tab, text="Gravação")
+        notebook.add(self.library_tab, text="Biblioteca")
+        notebook.add(self.summary_tab, text="Resumo")
+        self._page_header(
+            self.recording_tab,
+            "Gravar reunião",
+            "Escolha as fontes locais, confira os dispositivos e controle a gravação.",
+        )
+        self._page_header(
+            self.library_tab,
+            "Biblioteca",
+            "Revise gravações, edite notas e gere transcrições e resumos locais.",
+        )
+        self._page_header(
+            self.summary_tab,
+            "Modelos de resumo",
+            "Baixe e escolha um modelo compacto para resumir sem enviar conteúdo à nuvem.",
+        )
         self.status = tk.StringVar(self.window, "Carregando configurações…")
         for tab in (self.recording_tab, self.library_tab, self.summary_tab):
-            self._label(tab, "", textvariable=self.status, anchor="w", wraplength=1050).pack(
-                fill="x", padx=18, pady=(12, 0))
-        recording = ttk.Frame(self.recording_tab, padding=14, style="Meeting.TFrame")
+            self._label(
+                tab, "", textvariable=self.status, anchor="w", wraplength=940,
+                fg=self.ui.text_muted, font=self.ui.font(8),
+            ).pack(fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
+        recording = ttk.Frame(self.recording_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         recording.pack(fill="both", expand=True)
-        library = ttk.Frame(self.library_tab, padding=14, style="Meeting.TFrame")
+        library = ttk.Frame(self.library_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
-        summary = ttk.Frame(self.summary_tab, padding=14, style="Meeting.TFrame")
+        summary = ttk.Frame(self.summary_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         summary.pack(fill="both", expand=True)
         self.record_title = tk.StringVar(self.window)
         self.sources = tk.StringVar(self.window, SOURCE_LABELS[self.settings.sources])
@@ -244,38 +302,56 @@ class MeetingWindow:
         self.summary_display = tk.StringVar(self.window, SUMMARY_LABELS[self.settings.summary_model])
         self.endpoint_vars = {track: tk.StringVar(self.window) for track in ("microphone", "system")}
         self.endpoint_boxes = {}
-        rows = [("Título da próxima gravação", self._entry(recording, self.record_title)),
-                ("Fontes de áudio", ttk.Combobox(recording, textvariable=self.sources,
+        settings_card = self._card(recording)
+        settings_card.pack(fill="x", pady=(0, self.ui.space_md))
+        self._label(
+            settings_card, "Configuração da próxima gravação",
+            bg=self.ui.card, fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, self.ui.space_sm))
+        rows = [("Título", self._entry(settings_card, self.record_title)),
+                ("Fontes de áudio", ttk.Combobox(settings_card, textvariable=self.sources,
                                                values=list(SOURCE_LABELS.values()), state="readonly"))]
         for track, label in (("microphone", "Microfone"), ("system", "Áudio do sistema")):
-            combo = ttk.Combobox(recording, textvariable=self.endpoint_vars[track], state="readonly", width=65)
+            combo = ttk.Combobox(settings_card, textvariable=self.endpoint_vars[track], state="readonly", width=65)
             self.endpoint_boxes[track] = combo
             rows.append((label, combo))
-        self.profile_box = ttk.Combobox(recording, textvariable=self.profile_display,
+        self.profile_box = ttk.Combobox(settings_card, textvariable=self.profile_display,
             values=[PROFILE_LABELS[entry["profile"]] for entry in selectable_catalog()], state="readonly")
         self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
-        self.language_box = ttk.Combobox(recording, textvariable=self.language_display, state="readonly")
+        self.language_box = ttk.Combobox(settings_card, textvariable=self.language_display, state="readonly")
         self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
-        self.summary_box = ttk.Combobox(recording, textvariable=self.summary_display,
+        self.summary_box = ttk.Combobox(settings_card, textvariable=self.summary_display,
             values=list(SUMMARY_LABELS.values()), state="readonly")
         self.summary_box.bind("<<ComboboxSelected>>", self._summary_display_changed)
         rows.extend([("Modelo de transcrição local", self.profile_box), ("Idioma", self.language_box),
-                     ("Atalho de gravação (opcional)", self._entry(recording, self.hotkey)),
+                     ("Atalho de gravação (opcional)", self._entry(settings_card, self.hotkey)),
                      ("Modelo de resumo local", self.summary_box)])
-        for row, (label, widget) in enumerate(rows):
-            self._label(recording, label, anchor="w").grid(row=row, column=0, sticky="w", padx=(0, 18), pady=6)
-            widget.grid(row=row, column=1, sticky="ew", pady=6)
-        recording.columnconfigure(1, weight=1)
-        self._label(recording, "Configurações valem para a próxima gravação. O atalho começa sem atribuição.\n"
+        for row, (label, widget) in enumerate(rows, 1):
+            self._label(settings_card, label, anchor="w", bg=self.ui.card).grid(
+                row=row, column=0, sticky="w", padx=(0, 18), pady=5,
+            )
+            widget.grid(row=row, column=1, sticky="ew", pady=5)
+        settings_card.columnconfigure(1, weight=1)
+        self._label(settings_card, "Configurações valem para a próxima gravação. O atalho começa sem atribuição.\n"
                     "O áudio do sistema inclui os sons do dispositivo escolhido. Use fones para reduzir duplicação.",
-                    justify="left", anchor="w", wraplength=850).grid(row=8, column=0, columnspan=2, sticky="ew", pady=12)
-        commands = ttk.Frame(recording, style="Meeting.TFrame")
-        commands.grid(row=9, column=0, columnspan=2, sticky="w")
+                    justify="left", anchor="w", wraplength=850, bg=self.ui.card,
+                    fg=self.ui.text_muted, font=self.ui.font(8)).grid(
+                        row=9, column=0, columnspan=2, sticky="ew", pady=(8, 10),
+                    )
+        commands = tk.Frame(settings_card, bg=self.ui.card)
+        commands.grid(row=10, column=0, columnspan=2, sticky="w")
         self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
         self._button(commands, "Salvar configurações", self.save_settings).pack(side="left", padx=(0, 8))
         self._button(commands, "Importar modelo local…", self.import_model).pack(side="left")
-        transport = ttk.Frame(recording, style="Meeting.TFrame")
-        transport.grid(row=10, column=0, columnspan=2, sticky="w", pady=18)
+        activity = self._card(recording)
+        activity.pack(fill="x")
+        self._label(
+            activity, "Controles da gravação", bg=self.ui.card, fg=self.ui.text_strong,
+            font=self.ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, self.ui.space_sm))
+        activity.columnconfigure(1, weight=1)
+        transport = tk.Frame(activity, bg=self.ui.card)
+        transport.grid(row=1, column=0, columnspan=2, sticky="w")
         self.start_button = self._button(transport, "Iniciar gravação", self.start, accent=True)
         self.start_button.pack(side="left", padx=(0, 8))
         self.pause_button = self._button(transport, "Pausar", self.pause_resume)
@@ -283,12 +359,16 @@ class MeetingWindow:
         self.stop_button = self._button(transport, "Parar e preservar", self.stop)
         self.stop_button.pack(side="left")
         self.record_status = tk.StringVar(self.window, "Pronto · 00:00:00")
-        self._label(recording, "", textvariable=self.record_status, anchor="w",
-                    wraplength=850).grid(row=11, column=0, columnspan=2, sticky="ew")
+        self._label(activity, "", textvariable=self.record_status, anchor="w",
+                    wraplength=850, bg=self.ui.card, fg=self.ui.text_muted).grid(
+                        row=2, column=0, columnspan=2, sticky="ew", pady=(10, 4),
+                    )
         self.meters = {}
-        for row, (track, label) in enumerate((("microphone", "Nível do microfone"), ("system", "Nível do sistema")), 12):
-            self._label(recording, label, anchor="w").grid(row=row, column=0, sticky="w", pady=8)
-            meter = ttk.Progressbar(recording, maximum=1.0)
+        for row, (track, label) in enumerate((("microphone", "Nível do microfone"), ("system", "Nível do sistema")), 3):
+            self._label(activity, label, anchor="w", bg=self.ui.card).grid(
+                row=row, column=0, sticky="w", padx=(0, 18), pady=6,
+            )
+            meter = ttk.Progressbar(activity, maximum=1.0)
             meter.grid(row=row, column=1, sticky="ew")
             self.meters[track] = meter
         self._profile_changed()
@@ -298,31 +378,30 @@ class MeetingWindow:
         self._build_summary_models(summary)
 
     def _build_summary_models(self, parent):
-        self._label(parent, "Modelos de resumo no próprio Snipvoice", anchor="w",
-                    font=self.ui.font(weight="bold")).pack(fill="x")
         self._label(
             parent,
             "O llama.cpp já vem no aplicativo. Baixe apenas os pesos que quiser usar; "
             "depois disso, os resumos funcionam sem internet.",
-            anchor="w", justify="left", wraplength=900,
-        ).pack(fill="x", pady=(6, 14))
+            anchor="w", justify="left", wraplength=900, fg=self.ui.text_muted,
+        ).pack(fill="x", pady=(0, self.ui.space_sm))
         self.summary_model_buttons = {}
         for entry in summary_catalog():
-            row = ttk.Frame(parent, style="Meeting.TFrame")
-            row.pack(fill="x", pady=8)
+            row = self._card(parent)
+            row.pack(fill="x", pady=self.ui.space_xs)
             choice = tk.Radiobutton(
                 row, variable=self.summary_model, value=entry["id"],
-                command=self._summary_choice_changed, bg=self.ui.surface, fg=self.ui.text,
-                activebackground=self.ui.surface, activeforeground=self.ui.text,
-                selectcolor=self.ui.surface, font=self.ui.font(), anchor="nw",
+                command=self._summary_choice_changed, font=self.ui.font(), anchor="nw",
+                **self.ui.checkbutton_colors(self.ui.card),
             )
             choice.pack(side="left", anchor="n")
-            copy = ttk.Frame(row, style="Meeting.TFrame")
+            copy = tk.Frame(row, bg=self.ui.card)
             copy.pack(side="left", fill="x", expand=True, padx=(4, 12))
             self._label(copy, f'{entry["name"]} · {format_model_size(entry["size_bytes"])} · '
                         f'{entry["license_id"]}', anchor="w",
+                        bg=self.ui.card, fg=self.ui.text_strong,
                         font=self.ui.font(weight="bold")).pack(fill="x")
-            self._label(copy, entry["description"], anchor="w", wraplength=720).pack(fill="x")
+            self._label(copy, entry["description"], anchor="w", wraplength=720,
+                        bg=self.ui.card, fg=self.ui.text_muted).pack(fill="x", pady=(4, 0))
             button = self._button(row, "", lambda model_id=entry["id"]: self.toggle_summary_model(model_id))
             button.pack(side="right", anchor="n")
             self.summary_model_buttons[entry["id"]] = button
@@ -426,10 +505,11 @@ class MeetingWindow:
         self.summary_model_status.set(f'{entry["name"]} {action}.')
 
     def _build_library(self, parent):
-        search_row = ttk.Frame(parent, style="Meeting.TFrame")
-        search_row.pack(fill="x", pady=(0, 12))
+        search_row = self._card(parent, pady=self.ui.space_sm)
+        search_row.pack(fill="x", pady=(0, self.ui.space_md))
         self.query = tk.StringVar(self.window)
-        self._label(search_row, "Buscar título/notas").pack(side="left", padx=(0, 8))
+        self._label(search_row, "Buscar", bg=self.ui.card,
+                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 8))
         search = self._entry(search_row, self.query)
         search.pack(side="left", fill="x", expand=True)
         search.bind("<Return>", lambda _event: self.search())
@@ -944,7 +1024,7 @@ class MeetingWindow:
             return
         model = self.summary_model.get().strip()
         if not self.summary_model_installed.get(model):
-            self.status.set("Baixe o modelo selecionado na aba Resumo local antes de gerar o resumo.")
+            self.status.set("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo.")
             return
         session_id = self.selected
         self._action("summarize", session_id, model,

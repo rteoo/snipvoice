@@ -233,13 +233,12 @@ class Theme:
     def manager_window_size(self):
         """``(geometry, min_width, min_height)`` for the manager window.
 
-        macOS needs a wider default: Aqua's native buttons have a minimum
-        width the flat Win32 ones do not, so the editor pane that fits its
-        formatting toolbar in 433px on Windows needs ~490px here.
+        macOS needs a wider default because Aqua's native buttons and controls
+        have larger minimum metrics than their Win32 counterparts.
         """
         if self.system == "darwin":
-            return ("1140x760", 980, 600)
-        return ("1080x720", 900, 580)
+            return ("1160x840", 980, 700)
+        return ("1120x820", 920, 700)
 
     @property
     def stacked_toolbar_status(self):
@@ -263,6 +262,20 @@ class Theme:
             "highlightbackground": self.border,
             "highlightcolor": self.focus_ring,
             "cursor": "hand2",
+        }
+
+    def card_options(self):
+        """Tk frame options for WinUI-style settings cards.
+
+        Tk has no reliable cross-platform rounded-corner primitive. A quiet
+        one-pixel border and the card surface preserve the hierarchy without
+        drawing faux rounded controls that would clash with native widgets.
+        """
+        return {
+            "bg": self.card,
+            "highlightbackground": self.border,
+            "highlightthickness": 1,
+            "bd": 0,
         }
 
     def button_colors(self, accent=False, danger=False):
@@ -467,6 +480,55 @@ def apply_ttk_theme(style, system=None):
         return style.theme_use()
     except Exception:
         return None
+
+
+def configure_manager_styles(style, resolved=None):
+    """Apply the shared Fluent shell styles to a live ttk style object."""
+    ui = resolved or theme()
+    style.configure(
+        "Manager.TNotebook",
+        background=ui.surface,
+        borderwidth=0,
+        tabmargins=(0, 0, 0, 0),
+    )
+    style.configure(
+        "Manager.TNotebook.Tab",
+        padding=(18, 10),
+        font=ui.font(9, "bold"),
+        foreground=ui.tab_unselected_fg,
+        background=ui.surface,
+        borderwidth=0,
+    )
+    style.map(
+        "Manager.TNotebook.Tab",
+        foreground=[("selected", ui.accent), ("active", ui.text_strong)],
+        background=[("selected", ui.card), ("active", ui.surface_hover)],
+        expand=[("selected", (0, 0, 0, 0))],
+    )
+    style.configure("Manager.TFrame", background=ui.surface)
+    style.configure(
+        "Manager.Treeview",
+        background=ui.card,
+        fieldbackground=ui.card,
+        foreground=ui.text,
+        rowheight=ui.tree_row_height,
+        font=ui.font(9),
+        borderwidth=0,
+    )
+    style.map(
+        "Manager.Treeview",
+        background=[("selected", ui.select_bg)],
+        foreground=[("selected", ui.select_fg)],
+    )
+    style.configure(
+        "Manager.Treeview.Heading",
+        background=ui.surface_alt,
+        foreground=ui.text_strong,
+        font=ui.font(9, "bold"),
+        padding=(8, 8),
+        relief="flat",
+    )
+    return style
 
 
 # ---------------------------------------------------------------------------
