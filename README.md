@@ -28,11 +28,13 @@ recordings, shortcuts, process identity, and installers.
 
 - Local push-to-talk dictation with configurable shortcuts and languages.
 - Separate microphone and selected speaker-output recording on Windows and macOS.
-- OS-default devices or manually pinned input/output endpoints.
+- Independent microphone/system toggles, live two-track waveforms, and OS-default or manually pinned endpoints.
 - Crash-recoverable segmented audio, explicit gaps, pause/resume, and partial-session preservation.
+- Atomic final WAV mixdown with an optional conservative microphone noise gate and voice gain.
 - Meeting library with local search, notes, bookmarks, playback, and transcription revisions.
 - WAV import plus Markdown, text, JSON, and per-track WAV export.
-- Installed-only meeting transcription; processing never downloads a model.
+- Configurable final-audio destination and opt-in automatic local transcription and summary.
+- Installed-only meeting transcription; automatic processing never downloads a model.
 - Cited summaries through a built-in llama.cpp runtime and downloadable local models.
 - Deterministic term corrections and optional literal spoken commands.
 - No telemetry, transcript logging, implicit cloud storage, or Sniptype data migration.
@@ -113,17 +115,21 @@ works when dictation is disabled and before any model is installed.
 
 | Capability | Behavior |
 | --- | --- |
-| Sources | Microphone, speaker output, or both in separate native PCM tracks |
+| Sources | Independently toggle microphone and speaker output; raw sources stay in separate native PCM tracks |
 | Devices | Follow the OS multimedia/communications default or pin a stable endpoint |
 | Recovery | Append-only 30-second segments, CRC journal, atomic metadata, interrupted-session repair |
-| Workspace | Pause/resume, source meters, title, notes, bookmarks, local search, status filters |
+| Workspace | Live source waveforms, pause/resume, meters, title, notes, bookmarks, local search, status filters |
 | Playback | Seek by timestamp and play one track through the current OS output |
-| Processing | Durable local-model revisions with resumable completed chunks |
-| Files | Integer-PCM WAV import; Markdown, text, JSON, and PCM16 WAV export |
+| Processing | Opt-in transcription followed by optional summary, with durable local-model revisions |
+| Files | Timestamp-aligned final PCM16 WAV plus integer-PCM import and text/JSON/per-track exports |
 
 Selecting an output captures the mix already routed to that device; Snipvoice
 does not move another application's audio. Source labels identify tracks, not
 individual speakers. Acoustic echo cancellation and diarization are not included.
+
+The optional microphone booster applies a fixed low-level noise gate, bounded gain,
+and limiter to the derived final WAV. Raw source tracks remain unchanged; it is not
+a spectral denoiser or acoustic echo canceller.
 
 ## Local transcription and summaries
 
@@ -148,7 +154,8 @@ cited decisions and action items before using them.
 
 ## Data safety and privacy
 
-Settings, optional commands, logs, voice history, and meetings live under
+Settings, optional commands, logs, voice history, raw meetings, and the default
+final-recording folder live under
 `~/.snipvoice` by default; `SNIPVOICE_HOME` overrides the location. Models use
 separate non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
 `SNIPVOICE_SUMMARY_CACHE`.

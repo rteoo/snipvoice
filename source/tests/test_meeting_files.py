@@ -103,6 +103,22 @@ class MeetingFilesTests(unittest.TestCase):
             if format == "json":
                 self.assertEqual(json.loads(text)["transcripts"][0]["segments"][0]["id"], "s1")
 
+    def test_json_export_does_not_disclose_local_destination_paths(self):
+        private_destination = str(self.root / "private-client-folder")
+        sid = self.store.begin({"meeting_destination": private_destination})
+        self.store.finish(sid)
+        final_audio = self.root / "final.wav"
+        final_audio.write_bytes(b"RIFF")
+        self.store.save_final_audio(sid, final_audio)
+        exported = self.root / "export.json"
+
+        export_meeting(self.store, sid, exported, "json")
+
+        document = json.loads(exported.read_text(encoding="utf-8"))
+        self.assertNotIn("meeting_destination", document["metadata"]["settings"])
+        self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
+        self.assertNotIn(str(self.root), exported.read_text(encoding="utf-8"))
+
     def test_export_failure_keeps_previous_destination(self):
         sid = self.session()
         path = self.root / "export.md"

@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from meeting_settings import MeetingSettings, validate_hotkey_conflicts
 from meeting_store import MeetingStore
-from meeting_support import MeetingController
+from meeting_support import (
+    MeetingController, WAVEFORM_POINTS, _amplitude_envelope, _final_audio_path,
+)
 
 
 class FakeCapture:
@@ -76,9 +78,38 @@ class MeetingControllerTests(unittest.TestCase):
         self.voice.release_meeting.assert_called_once_with("lease")
         session = self.controller.snapshot()["session_id"]
         store = MeetingStore(self.temp.name)
-        self.assertEqual(store.get(session)["status"], "completed")
+        metadata = store.get(session)
+        self.assertEqual(metadata["status"], "completed")
         self.assertEqual(len(list(store.iter_audio(session))), 1)
         self.assertEqual(next(store.iter_events(session))["type"], "source_changed")
+        self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
+
+    def test_snapshot_exposes_bounded_real_waveform_envelopes(self):
+        values = [0.0, 0.25, -0.5, 0.1, 0.75, -0.2]
+        self.assertEqual(_amplitude_envelope(values, 2, points=2), [0.5, 0.75])
+        self.assertEqual(_amplitude_envelope([float("nan"), 2.0], 1), [0.0, 1.0])
+
+        self.controller._waveforms["microphone"].extend([0.1] * (WAVEFORM_POINTS + 10))
+        snapshot = self.controller.snapshot()
+        self.assertEqual(len(snapshot["waveforms"]["microphone"]), WAVEFORM_POINTS)
+        snapshot["waveforms"]["microphone"].append(1.0)
+        self.assertEqual(len(self.controller.snapshot()["waveforms"]["microphone"]), WAVEFORM_POINTS)
+
+    def test_final_audio_path_uses_local_default_and_never_overwrites(self):
+        settings = MeetingSettings()
+        first = _final_audio_path(Path(self.temp.name) / "meetings", settings,
+                                  "session", ' Review: Q3 / next? ')
+        self.assertEqual(first.name, "session - Review- Q3 - next.wav")
+        self.assertEqual(first.parent, Path(self.temp.name) / "recordings")
+        first.write_bytes(b"existing")
+        second = _final_audio_path(Path(self.temp.name) / "meetings", settings,
+                                   "session", ' Review: Q3 / next? ')
+        self.assertEqual(second.name, "session - Review- Q3 - next (2).wav")
+
+    def test_configured_final_audio_destination_must_exist_and_be_absolute(self):
+        settings = MeetingSettings(destination="relative")
+        with self.assertRaisesRegex(ValueError, "absoluta"):
+            _final_audio_path(Path(self.temp.name) / "meetings", settings, "session")
 
     def test_unproven_teardown_keeps_lease_and_blocks_restart(self):
         self.capture.fail_stop = True
@@ -122,3 +153,55 @@ class MeetingControllerTests(unittest.TestCase):
             self.controller._processing_thread.join(2)
         self.assertEqual(self.controller.snapshot()["state"], "unavailable")
         self.voice.release_meeting.assert_not_called()
+
+    def test_enabled_automatic_transcription_then_summary_run_after_mixdown(self):
+        settings = MeetingSettings(auto_transcribe=True, auto_summary=True, voice_boost=True)
+        with patch("meeting_transcription.transcribe_meeting") as transcribe, \
+                patch("meeting_summary.summarize_meeting") as summarize:
+            self.assertTrue(self.controller.start(settings, title="Planning"))
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(3)
+
+        session = self.controller.snapshot()["session_id"]
+        metadata = MeetingStore(self.temp.name).get(session)
+        self.assertTrue(metadata["final_audio"]["voice_boost"])
+        transcribe.assert_called_once()
+        summarize.assert_called_once()
+        self.assertEqual(transcribe.call_args.args[1], session)
+        self.assertEqual(summarize.call_args.args[1], session)
+        self.assertEqual(self.controller.snapshot()["postprocess"], "Pós-processamento concluído")
+
+    def test_auto_transcription_resource_failure_keeps_lease_and_source_audio(self):
+        from meeting_transcription import MeetingTranscriptionError
+        settings = MeetingSettings(auto_transcribe=True)
+        with patch("meeting_transcription.transcribe_meeting",
+                   side_effect=MeetingTranscriptionError("still live", resource_live=True)):
+            self.controller.start(settings)
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(3)
+
+        session = self.controller.snapshot()["session_id"]
+        self.assertEqual(MeetingStore(self.temp.name).get(session)["status"], "completed")
+        self.assertEqual(self.controller.snapshot()["state"], "unavailable")
+        self.voice.release_meeting.assert_not_called()
+
+    def test_cancelled_auto_transcription_does_not_run_summary_or_report_complete(self):
+        settings = MeetingSettings(auto_transcribe=True, auto_summary=True)
+
+        def cancel_during_transcription(*_args, **_kwargs):
+            self.controller._cancel.set()
+
+        with patch("meeting_transcription.transcribe_meeting",
+                   side_effect=cancel_during_transcription), \
+                patch("meeting_summary.summarize_meeting") as summarize:
+            self.controller.start(settings)
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(3)
+
+        summarize.assert_not_called()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot["postprocess"], "Pós-processamento parcial")
+        self.assertIn("cancelado", snapshot["error"])

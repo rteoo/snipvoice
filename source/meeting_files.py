@@ -130,8 +130,19 @@ def _json(handle, value):
 
 def _json_export(handle, store, session, metadata, cancel_event=None):
     _cancel(cancel_event)
+    public_metadata = {key: value for key, value in metadata.items() if key != "events"}
+    settings = public_metadata.get("settings")
+    if isinstance(settings, dict) and "meeting_destination" in settings:
+        settings = dict(settings)
+        settings.pop("meeting_destination", None)
+        public_metadata["settings"] = settings
+    final_audio = public_metadata.get("final_audio")
+    if isinstance(final_audio, dict) and final_audio.get("path"):
+        final_audio = dict(final_audio)
+        final_audio["path"] = os.path.basename(os.fspath(final_audio["path"]))
+        public_metadata["final_audio"] = final_audio
     handle.write('{"metadata":')
-    _json(handle, {key: value for key, value in metadata.items() if key != "events"})
+    _json(handle, public_metadata)
     handle.write(',"events":[')
     separator = ""
     for event in _events(store, session, metadata):

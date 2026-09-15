@@ -1,5 +1,6 @@
 """Workspace concurrency, selection, persistence, and shared-root smoke checks."""
 
+import os
 import threading
 import time
 import tkinter as tk
@@ -157,13 +158,41 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.options = {"microphone": [("old default", EndpointSelection())]}
         view.endpoint_vars = {track: Variable("old default") for track in ("microphone", "system")}
         view.endpoint_boxes = {track: mock.Mock() for track in ("microphone", "system")}
-        for name in ("sources", "profile", "language", "profile_display", "language_display", "hotkey", "summary_model", "summary_display", "status"):
+        for name in ("profile", "language", "profile_display", "language_display", "hotkey",
+                     "summary_model", "summary_display", "status", "destination"):
             setattr(view, name, Variable())
+        view.input_enabled, view.output_enabled = Variable(True), Variable(True)
+        view.auto_transcribe, view.auto_summary = Variable(False), Variable(False)
+        view.voice_boost = Variable(False)
+        view.voice_boost_check, view.auto_summary_check = mock.Mock(), mock.Mock()
         view.language_box = mock.Mock()
         view._settings_loaded({"meeting_microphone": {"mode": "manual", "endpoint_id": "missing"}}, None)
         self.assertTrue(view.settings_loaded)
         self.assertIn("Indisponível", view.endpoint_vars["microphone"].get())
         self.assertEqual(dict(view.options["microphone"])[view.endpoint_vars["microphone"].get()].endpoint_id, "missing")
+
+    def test_independent_source_switches_and_postprocessing_are_persisted(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.settings_loaded = True
+        view.raw_settings = {}
+        view.input_enabled, view.output_enabled = Variable(True), Variable(False)
+        destination = os.path.abspath("recordings")
+        view.destination = Variable(destination)
+        view.auto_transcribe, view.auto_summary = Variable(True), Variable(True)
+        view.voice_boost = Variable(True)
+        view.profile, view.language = Variable("balanced"), Variable("pt-BR")
+        view.hotkey, view.summary_model = Variable(""), Variable("lfm2.5-2.6b-q4")
+        view.endpoint_vars = {"microphone": Variable("default"), "system": Variable("default")}
+        view.options = {track: [("default", EndpointSelection())]
+                        for track in ("microphone", "system")}
+
+        settings = view._current_settings()
+
+        self.assertEqual(settings.sources, "microphone")
+        self.assertEqual(settings.destination, destination)
+        self.assertTrue(settings.auto_transcribe)
+        self.assertTrue(settings.auto_summary)
+        self.assertTrue(settings.voice_boost)
 
     def make_edit_view(self):
         view = MeetingWindow.__new__(MeetingWindow)

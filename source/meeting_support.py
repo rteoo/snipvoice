@@ -1,15 +1,66 @@
 """Worker-owned meeting lifecycle; keyboard and Tk callbacks only enqueue work."""
 
 import array
+from collections import deque
 import itertools
+import math
+import os
+from pathlib import Path
 import queue
+import re
 import sys
 import threading
 import time
 
 from meeting_audio import NativeCapture
+from meeting_mixdown import export_mixdown
 from meeting_settings import resolve_meeting_settings
 from meeting_store import MeetingStore
+
+
+WAVEFORM_POINTS = 360
+WAVEFORM_BLOCK_POINTS = 24
+_INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+
+def _amplitude_envelope(values, channels, points=WAVEFORM_BLOCK_POINTS):
+    """Return bounded real peaks from one interleaved native audio block."""
+    frames = len(values) // channels if channels else 0
+    if frames <= 0:
+        return []
+    bucket_frames = max(1, math.ceil(frames / max(1, points)))
+    peaks = []
+    for first in range(0, frames, bucket_frames):
+        last = min(frames, first + bucket_frames)
+        peak = 0.0
+        for frame in range(first, last):
+            offset = frame * channels
+            for channel in range(channels):
+                value = values[offset + channel]
+                if math.isfinite(value):
+                    peak = max(peak, abs(value))
+        peaks.append(min(1.0, peak))
+    return peaks
+
+
+def _final_audio_path(root, settings, session_id, title=""):
+    """Resolve one non-overwriting visible recording path."""
+    if settings.destination:
+        destination = Path(settings.destination).expanduser()
+        if not destination.is_absolute() or not destination.is_dir():
+            raise ValueError("A pasta padrão de gravações não existe ou não é absoluta.")
+    else:
+        destination = Path(root).resolve().parent / "recordings"
+        destination.mkdir(parents=True, exist_ok=True)
+    clean_title = _INVALID_FILENAME.sub("-", str(title)).strip(" .-")[:120]
+    stem = session_id + (" - " + clean_title if clean_title else "")
+    candidate = destination / (stem + ".wav")
+    # ceiling: a session will not probe an unbounded hostile destination.
+    for suffix in range(2, 1002):
+        if not candidate.exists():
+            return candidate
+        candidate = destination / f"{stem} ({suffix}).wav"
+    raise RuntimeError("A pasta de gravações contém muitas cópias com o mesmo nome.")
 
 
 class MeetingController:
@@ -39,6 +90,12 @@ class MeetingController:
         self._started = 0.0
         self._elapsed = 0.0
         self._levels = {"microphone": 0.0, "system": 0.0}
+        # ceiling: the UI keeps only the latest 360 measured envelope points
+        # per source, independent of recording duration.
+        self._waveforms = {track: deque(maxlen=WAVEFORM_POINTS)
+                           for track in ("microphone", "system")}
+        self._output_path = ""
+        self._postprocess = ""
         self._processing = False
         self._last_status = ""
         self._source_errors = set()
@@ -57,7 +114,10 @@ class MeetingController:
                     "last_status": self._last_status, "partial": bool(self._source_errors),
                     "elapsed": max(0.0, time.monotonic() - self._started)
                     if self._state in {"starting", "recording", "paused", "stopping"} else self._elapsed,
-                    "levels": dict(self._levels)}
+                    "levels": dict(self._levels),
+                    "waveforms": {track: list(values) for track, values in self._waveforms.items()},
+                    "final_audio": self._output_path,
+                    "postprocess": self._postprocess}
 
     def devices(self):
         return self.capture_factory().list_devices()
@@ -74,8 +134,13 @@ class MeetingController:
             self._state, self._error = "starting", ""
             self._source_errors.clear()
             self._elapsed = 0.0
+            self._output_path = ""
+            self._postprocess = ""
+            for values in self._waveforms.values():
+                values.clear()
             self._started = time.monotonic()
             self._stop.clear()
+            self._cancel.clear()
             self._commands = queue.Queue(maxsize=16)
             self._thread = threading.Thread(target=self._capture,
                                             args=(settings, title, self._generation), daemon=True)
@@ -114,10 +179,17 @@ class MeetingController:
 
     def _capture(self, settings, title, generation):
         token, session, capture = None, None, None
-        error, clean_stop = "", True
+        error, clean_stop, final_status = "", True, "failed"
         try:
+            if settings.destination and (not os.path.isabs(settings.destination)
+                                         or not os.path.isdir(settings.destination)):
+                raise ValueError("A pasta padrão de gravações não existe ou não é absoluta.")
             token = self.voice.reserve_for_meeting()
-            session = self.store.begin(settings.payload(), title)
+            session_settings = settings.payload()
+            # The output directory can contain a user name or client folder.
+            # It is an app preference, not recording provenance.
+            session_settings.pop("meeting_destination", None)
+            session = self.store.begin(session_settings, title)
             with self._lock:
                 self._session_id = session
             capture = self.capture_factory()
@@ -159,8 +231,10 @@ class MeetingController:
                     if sys.byteorder != "little":
                         values.byteswap()
                     peak = min(1.0, max((abs(value) for value in values), default=0.0))
+                    envelope = _amplitude_envelope(values, event["channels"])
                     with self._lock:
                         self._levels[event["track"]] = peak
+                        self._waveforms[event["track"]].extend(envelope)
                 else:
                     self.store.add_event(session, event)
                     loss = event["type"] == "gap" and any(word in str(event.get("reason", ""))
@@ -185,23 +259,85 @@ class MeetingController:
                     error = error or str(exc)
             if session is not None:
                 try:
-                    status = "failed" if error else "partial" if self._source_errors else "completed"
-                    self.store.finish(session, status, error or self._error or None)
+                    final_status = "failed" if error else "partial" if self._source_errors else "completed"
+                    self.store.finish(session, final_status, error or self._error or None)
                     if not error and not self._closed:
                         self.store.begin_revision(session, settings.profile, settings.language, status="pending")
                 except Exception:
                     error = error or "Não foi possível finalizar os metadados; a recuperação ocorrerá ao reabrir."
+            if session is not None and not error and clean_stop and not self._closed:
+                with self._lock:
+                    self._state = "postprocessing"
+                    self._processing = True
+                postprocess_errors, postprocess_resource_live = self._postprocess_recording(
+                    session, title, settings)
+                if postprocess_resource_live:
+                    clean_stop = False
+                if postprocess_errors:
+                    error = "A gravação foi preservada, mas " + "; ".join(postprocess_errors)
             if token is not None and clean_stop:
                 self.voice.release_meeting(token)
             with self._lock:
                 self._error = error or self._error
                 self._elapsed = max(0.0, time.monotonic() - self._started)
-                self._last_status = "failed" if error else "partial" if self._source_errors else "completed"
+                self._last_status = final_status
                 self._levels = {"microphone": 0.0, "system": 0.0}
+                self._processing = False
                 # Retain the reservation and block a new capture if teardown is unproven.
                 self._state = "idle" if clean_stop else "unavailable"
             if error:
                 self.notify(error)
+
+    def _postprocess_recording(self, session_id, title, settings):
+        """Create the final WAV, then run requested local processing in order."""
+        errors = []
+        resource_live = False
+        try:
+            with self._lock:
+                self._postprocess = "Gerando o áudio final"
+            destination = _final_audio_path(self.root, settings, session_id, title)
+            output = export_mixdown(
+                self.store, session_id, destination,
+                enhance_microphone=settings.voice_boost,
+                cancel_event=self._cancel,
+            )
+            self.store.save_final_audio(session_id, output, settings.voice_boost)
+            with self._lock:
+                self._output_path = output
+        except Exception as exc:
+            errors.append("não foi possível gerar o áudio final: " + str(exc))
+
+        transcription_ready = False
+        if settings.auto_transcribe and not self._cancel.is_set():
+            try:
+                with self._lock:
+                    self._postprocess = "Transcrevendo localmente"
+                from meeting_transcription import transcribe_meeting
+                transcribe_meeting(
+                    self.store, session_id, settings.profile, settings.language,
+                    self.voice.cache_dir, cancel_event=self._cancel,
+                )
+                if self._cancel.is_set():
+                    errors.append("o processamento automático foi cancelado")
+                else:
+                    transcription_ready = True
+            except Exception as exc:
+                errors.append("a transcrição automática falhou: " + str(exc))
+                if getattr(exc, "resource_live", False):
+                    resource_live = True
+
+        if settings.auto_summary and transcription_ready and not self._cancel.is_set():
+            try:
+                with self._lock:
+                    self._postprocess = "Gerando o resumo local"
+                from meeting_summary import summarize_meeting
+                summarize_meeting(self.store, session_id, settings.summary_model,
+                                  cancel_event=self._cancel)
+            except Exception as exc:
+                errors.append("o resumo automático falhou: " + str(exc))
+        with self._lock:
+            self._postprocess = "Pós-processamento concluído" if not errors else "Pós-processamento parcial"
+        return errors, resource_live
 
     def list_sessions(self, offset=0, limit=50, query="", status=""):
         return self.store.list_sessions(offset, limit, query, status=status)
@@ -284,6 +420,12 @@ class MeetingController:
         from meeting_files import export_meeting
         return self._file_work(lambda: export_meeting(self.store, session_id, path, format,
                                                     cancel_event=self._cancel))
+
+    def export_mixdown(self, session_id, path, enhance_microphone=False):
+        return self._file_work(lambda: export_mixdown(
+            self.store, session_id, path, enhance_microphone=enhance_microphone,
+            cancel_event=self._cancel,
+        ))
 
     def _file_work(self, operation):
         # Caller is an IO worker; reserve admission without another nested thread.

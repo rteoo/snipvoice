@@ -52,3 +52,55 @@ class MeetingSettingsTests(unittest.TestCase):
             with self.subTest(old=old):
                 settings = resolve_meeting_settings({"meeting_summary_model": old})
                 self.assertEqual(settings.summary_model, new)
+
+    def test_new_settings_default_to_explicit_recording_and_opt_in_automation(self):
+        settings = resolve_meeting_settings({})
+        self.assertEqual(settings.destination, "")
+        self.assertTrue(settings.input_enabled)
+        self.assertTrue(settings.output_enabled)
+        self.assertFalse(settings.auto_transcribe)
+        self.assertFalse(settings.auto_summary)
+        self.assertFalse(settings.voice_boost)
+
+    def test_destination_and_switches_round_trip_without_touching_destination(self):
+        destination = os.path.join(os.path.dirname(__file__), "missing-recordings")
+        self.assertFalse(os.path.exists(destination))
+        settings = resolve_meeting_settings({
+            "meeting_destination": destination,
+            "meeting_input_enabled": True,
+            "meeting_output_enabled": False,
+            "meeting_auto_transcribe": True,
+            "meeting_auto_summary": True,
+            "meeting_voice_boost": True,
+        })
+        self.assertEqual(resolve_meeting_settings(settings.payload()), settings)
+        self.assertEqual(settings.sources, "microphone")
+        self.assertFalse(os.path.exists(destination))
+
+    def test_source_enum_migrates_to_input_output_switches(self):
+        settings = resolve_meeting_settings({"meeting_sources": "system"})
+        self.assertFalse(settings.input_enabled)
+        self.assertTrue(settings.output_enabled)
+        self.assertEqual(settings.sources, "system")
+
+    def test_malformed_new_values_fail_without_fallback(self):
+        values = (
+            {"meeting_destination": 3},
+            {"meeting_destination": None},
+            {"meeting_destination": "relative/path"},
+            {"meeting_input_enabled": "false"},
+            {"meeting_input_enabled": None},
+            {"meeting_output_enabled": 0},
+            {"meeting_auto_transcribe": "yes"},
+            {"meeting_auto_summary": 1},
+            {"meeting_voice_boost": []},
+            {"meeting_input_enabled": False, "meeting_output_enabled": False},
+            {"meeting_auto_summary": True},
+        )
+        for value in values:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                resolve_meeting_settings(value)
+
+    def test_unknown_keys_are_not_persisted(self):
+        payload = resolve_meeting_settings({"future_setting": "ignore"}).payload()
+        self.assertNotIn("future_setting", payload)

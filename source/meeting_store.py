@@ -108,6 +108,7 @@ class MeetingStore:
                 "events": [],
                 "revisions": [],
                 "summary": None,
+                "final_audio": None,
             }
             self._write_metadata(session_id, metadata)
             # Create the journal eagerly.  Its existence is a useful marker
@@ -345,6 +346,30 @@ class MeetingStore:
             metadata = copy.deepcopy(current)
             metadata["summary"] = value
             metadata["summary_updated_at"] = _utc_timestamp()
+            self._checkpoint_session(session_id, metadata)
+            if session_id in self._active:
+                self._active[session_id] = metadata
+            return copy.deepcopy(value)
+
+    def save_final_audio(self, session_id, path, voice_boost=False):
+        """Record the derived final WAV without changing the source tracks."""
+        if not isinstance(path, (str, os.PathLike)):
+            raise ValueError("O caminho do áudio final é inválido.")
+        destination = os.path.abspath(os.fspath(path))
+        if len(destination) > 4096 or not os.path.isfile(destination):
+            raise ValueError("O arquivo de áudio final não foi encontrado.")
+        if not isinstance(voice_boost, bool):
+            raise ValueError("A configuração de realce de voz é inválida.")
+        value = {
+            "path": destination,
+            "voice_boost": voice_boost,
+            "created_at": _utc_timestamp(),
+        }
+        with self._lock:
+            current = self._active_metadata(session_id)
+            metadata = copy.deepcopy(current)
+            metadata["final_audio"] = value
+            metadata["updated_at"] = _utc_timestamp()
             self._checkpoint_session(session_id, metadata)
             if session_id in self._active:
                 self._active[session_id] = metadata
