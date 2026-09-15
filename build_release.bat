@@ -51,9 +51,17 @@ if errorlevel 1 (
     echo Repair or select a Python installation with working Tcl/Tk before packaging.
     goto cleanup_and_fail
 )
-python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native, llama_cpp" >nul 2>&1
+python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native" >nul 2>&1
 if errorlevel 1 (
-    echo Voice release dependencies are missing.
+    echo Voice transcription dependencies are missing.
+    echo Install them with: python -m pip install -r source\requirements-voice.txt
+    goto cleanup_and_fail
+)
+REM transcribe.cpp and llama.cpp bundle different GGML DLL builds. Probe them in
+REM separate processes so Windows does not reuse one runtime's loaded DLLs for the other.
+python -c "import llama_cpp" >nul 2>&1
+if errorlevel 1 (
+    echo Local summary dependencies are missing.
     echo Install them with: python -m pip install -r source\requirements-voice.txt
     goto cleanup_and_fail
 )

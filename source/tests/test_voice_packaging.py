@@ -87,6 +87,13 @@ class PackagingExcludeTests(unittest.TestCase):
             text = handle.read()
         self.assertIn("from llama_cpp import Llama", text)
 
+    def test_windows_preflight_isolates_the_two_ggml_runtimes(self):
+        path = os.path.join(ROOT, "build_release.bat")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn('python -c "import llama_cpp"', text)
+        self.assertNotIn("transcribe_cpp_native, llama_cpp", text)
+
     def test_entrypoint_runs_the_probe_before_desktop_imports(self):
         path = os.path.join(ROOT, "source", "snipvoice.pyw")
         with open(path, encoding="utf-8") as handle:
