@@ -4,10 +4,11 @@ import threading
 import time
 import tkinter as tk
 import unittest
+from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT,
+    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, add_meeting_tabs,
     endpoint_options, format_time, open_meeting_window, validated_settings,
 )
 from meeting_settings import EndpointSelection, resolve_meeting_settings
@@ -162,6 +163,34 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertNotIn("events", metadata)
         self.assertEqual(len(segments[0]["text"]), 8000)
 
+    def test_embedded_close_runs_owner_callback_without_destroying_shared_window(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed, view.dirty = False, False
+        view.bridge, view.root, view.window = mock.Mock(), mock.Mock(), mock.Mock()
+        view.after_id = None
+        after_close = mock.Mock()
+
+        view.close(destroy=False, after_close=after_close)
+
+        self.assertTrue(view.closed)
+        view.bridge.close.assert_called_once_with()
+        view.window.destroy.assert_not_called()
+        after_close.assert_called_once_with()
+
+    def test_embedded_close_cancel_keeps_shared_window_open(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed, view.dirty = False, True
+        view.bridge, view.root, view.window = mock.Mock(), mock.Mock(), mock.Mock()
+        view.after_id = None
+        after_close = mock.Mock()
+
+        with mock.patch("meeting_gui.messagebox.askyesnocancel", return_value=None):
+            view.close(destroy=False, after_close=after_close)
+
+        self.assertFalse(view.closed)
+        view.bridge.close.assert_not_called()
+        after_close.assert_not_called()
+
 
 class BackgroundBridgeTests(unittest.TestCase):
     def setUp(self):
@@ -272,6 +301,34 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIn("input", [selection.endpoint_id for _, selection in view.options["microphone"]])
         finally:
             view.close()
+            self.root.update()
+
+    def test_meeting_tabs_attach_to_an_existing_manager_notebook(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        manager = tk.Toplevel(self.root)
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        try:
+            self.root.update()
+            titles = [notebook.tab(tab_id, "text") for tab_id in notebook.tabs()]
+            self.assertTrue(view.embedded)
+            self.assertIs(view.window, manager)
+            self.assertIs(view.notebook, notebook)
+            self.assertEqual(
+                titles,
+                ["Gravar e configurar", "Biblioteca e transcrição"],
+            )
+        finally:
+            view.close_without_prompt(destroy=False)
+            manager.destroy()
             self.root.update()
 
 

@@ -71,11 +71,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
     def tearDown(self):
         def cleanup(root):
-            self.app._manager_voice_refresher = None
-            self.app._manager_notebook = None
-            self.app._manager_voice_tab = None
-            self.app._manager_voice_tk_vars = []
-            self.app.manager_window = None
+            self.app._close_settings_window(force=True)
             for child in list(root.winfo_children()):
                 try:
                     child.destroy()
@@ -406,10 +402,36 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             self.app._show_voice_settings(shared_root)
             notebook = self.app._manager_notebook
             selected = notebook.select()
-            return notebook.tab(selected, "text")
+            return notebook.tab(selected, "text"), _notebook_titles(self.app.manager_window)
 
-        title = self._on_gui(open_settings)
+        title, titles = self._on_gui(open_settings)
         self.assertIn("Voz", title)
+        self.assertEqual(
+            titles,
+            ["Voz", "Gravar e configurar", "Biblioteca e transcrição"],
+        )
+
+    def test_meeting_shortcut_reuses_manager_and_selects_recording_tab(self):
+        _ensure_voice(self.app)
+
+        def select_recording(shared_root):
+            self.app._show_voice_settings(shared_root)
+            manager = self.app.manager_window
+            self.app._show_meetings(shared_root)
+            notebook = self.app._manager_notebook
+            return (
+                self.app.manager_window is manager,
+                notebook.tab(notebook.select(), "text"),
+                len([
+                    child for child in shared_root.winfo_children()
+                    if isinstance(child, tk.Toplevel)
+                ]),
+            )
+
+        reused, title, top_levels = self._on_gui(select_recording)
+        self.assertTrue(reused)
+        self.assertEqual(title, "Gravar e configurar")
+        self.assertEqual(top_levels, 1)
 
     def test_voice_tab_absent_when_controller_missing(self):
         self.app.voice = None
@@ -423,6 +445,10 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertTrue(
             all("Voz" not in title for title in titles),
             titles,
+        )
+        self.assertEqual(
+            titles,
+            ["Diagnóstico", "Gravar e configurar", "Biblioteca e transcrição"],
         )
         self.assertIsNone(self.app._manager_voice_refresher)
 

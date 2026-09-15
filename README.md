@@ -72,9 +72,10 @@ launch. The Windows installer uses no administrator rights and installs under
 ## First use
 
 1. Start Snipvoice and find its icon in the Windows tray or macOS menu bar.
-2. Open **Configurar voz…**, choose a profile and language, and download or import its local model.
-3. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
-4. Open **Gravações e reuniões…** to choose microphone/system sources and record a meeting.
+2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, and the meeting library in separate tabs.
+3. In **Voz**, choose a profile and language, then download or import its local model.
+4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
+5. Use **Gravar e configurar** to choose microphone/system sources and record a meeting. The **Gravações e reuniões…** tray shortcut selects this tab in the same window.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -98,9 +99,9 @@ are deliberately not imported.
 
 ## Meetings
 
-The **Gravações e reuniões…** workspace keeps meeting capture independent from
-dictation. Recording works when dictation is disabled and before any model is
-installed.
+The **Gravar e configurar** and **Biblioteca e transcrição** tabs keep meeting
+capture independent from dictation inside the main Snipvoice window. Recording
+works when dictation is disabled and before any model is installed.
 
 | Capability | Behavior |
 | --- | --- |

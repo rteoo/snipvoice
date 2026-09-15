@@ -141,14 +141,20 @@ class BackgroundBridge:
 
 
 class MeetingWindow:
-    def __init__(self, root, controller, settings_getter, persist_settings, on_settings_changed=None):
+    def __init__(self, root, controller, settings_getter, persist_settings,
+                 on_settings_changed=None, *, window=None, notebook=None):
         self.root, self.controller = root, controller
         self.settings_getter, self.persist_settings = settings_getter, persist_settings
         self.on_settings_changed = on_settings_changed
-        self.window = tk.Toplevel(root)
-        self.window.title("Gravações e reuniões")
-        self.window.geometry("1120x820")
-        self.window.minsize(920, 700)
+        if (window is None) != (notebook is None):
+            raise ValueError("window and notebook must be supplied together")
+        self.embedded = window is not None
+        self.window = window or tk.Toplevel(root)
+        self.notebook = notebook
+        if not self.embedded:
+            self.window.title("Gravações e reuniões")
+            self.window.geometry("1120x820")
+            self.window.minsize(920, 700)
         self.ui = ui_theme.bind(self.window)
         self.window.configure(bg=self.ui.surface)
         self.bridge = BackgroundBridge()
@@ -170,7 +176,8 @@ class MeetingWindow:
         self.previous_state = None
         self.snapshot = {}
         self._build()
-        self.window.protocol("WM_DELETE_WINDOW", self.close)
+        if not self.embedded:
+            self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Destroy>", self._destroyed, add="+")
         self._submit("settings", self.settings_getter, self._settings_loaded)
         self.refresh_devices()
@@ -193,15 +200,23 @@ class MeetingWindow:
         style = ttk.Style(self.window)
         style.configure("Meeting.TFrame", background=self.ui.surface)
         style.configure("Meeting.Treeview", rowheight=self.ui.tree_row_height, font=self.ui.font())
-        notebook = ttk.Notebook(self.window)
-        notebook.pack(fill="both", expand=True, padx=12, pady=12)
-        recording = ttk.Frame(notebook, padding=14, style="Meeting.TFrame")
-        library = ttk.Frame(notebook, padding=14, style="Meeting.TFrame")
-        notebook.add(recording, text="Gravar e configurar")
-        notebook.add(library, text="Biblioteca e transcrição")
+        notebook = self.notebook
+        if notebook is None:
+            notebook = ttk.Notebook(self.window)
+            notebook.pack(fill="both", expand=True, padx=12, pady=12)
+            self.notebook = notebook
+        self.recording_tab = ttk.Frame(notebook, style="Meeting.TFrame")
+        self.library_tab = ttk.Frame(notebook, style="Meeting.TFrame")
+        notebook.add(self.recording_tab, text="Gravar e configurar")
+        notebook.add(self.library_tab, text="Biblioteca e transcrição")
         self.status = tk.StringVar(self.window, "Carregando configurações…")
-        self._label(self.window, "", textvariable=self.status, anchor="w", wraplength=1050).pack(
-            fill="x", padx=18, pady=(0, 12))
+        for tab in (self.recording_tab, self.library_tab):
+            self._label(tab, "", textvariable=self.status, anchor="w", wraplength=1050).pack(
+                fill="x", padx=18, pady=(12, 0))
+        recording = ttk.Frame(self.recording_tab, padding=14, style="Meeting.TFrame")
+        recording.pack(fill="both", expand=True)
+        library = ttk.Frame(self.library_tab, padding=14, style="Meeting.TFrame")
+        library.pack(fill="both", expand=True)
         self.record_title = tk.StringVar(self.window)
         self.sources = tk.StringVar(self.window, SOURCE_LABELS[self.settings.sources])
         self.profile = tk.StringVar(self.window, self.settings.profile)
@@ -882,21 +897,21 @@ class MeetingWindow:
 
     def _destroyed(self, event):
         if event.widget is self.window:
-            self.close(destroy=False)
+            self.close_without_prompt(destroy=False)
 
-    def close(self, destroy=True):
+    def close(self, destroy=True, after_close=None):
         if self.closed:
             return
-        if destroy and self.dirty:
+        if self.dirty:
             answer = messagebox.askyesnocancel("Notas não salvas", "Salvar as notas antes de fechar?", parent=self.window)
             if answer is None:
                 return
             if answer:
-                self.save_notes(after=lambda: self.close_without_prompt())
+                self.save_notes(after=lambda: self.close_without_prompt(destroy, after_close))
                 return
-        self.close_without_prompt(destroy)
+        self.close_without_prompt(destroy, after_close)
 
-    def close_without_prompt(self, destroy=True):
+    def close_without_prompt(self, destroy=True, after_close=None):
         if self.closed:
             return
         self.closed = True
@@ -906,9 +921,22 @@ class MeetingWindow:
             self.after_id = None
         if destroy:
             self.window.destroy()
+        if after_close is not None:
+            after_close()
 
 
 def open_meeting_window(root, controller, settings_getter, persist_settings, on_settings_changed=None):
     view = MeetingWindow(root, controller, settings_getter, persist_settings, on_settings_changed)
     view.window._meeting_view = view
     return view.window
+
+
+def add_meeting_tabs(root, window, notebook, controller, settings_getter,
+                     persist_settings, on_settings_changed=None):
+    """Attach recording and library tabs to the shared application window."""
+    view = MeetingWindow(
+        root, controller, settings_getter, persist_settings, on_settings_changed,
+        window=window, notebook=notebook,
+    )
+    window._meeting_view = view
+    return view

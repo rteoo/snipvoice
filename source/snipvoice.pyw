@@ -108,13 +108,15 @@ class Snipvoice:
         self._manager_voice_tab = None
         self._manager_voice_refresher = None
         self._manager_voice_tk_vars = []
+        self._manager_meeting_view = None
+        self._manager_recording_tab = None
+        self._manager_library_tab = None
         self.voice_status_indicator = None
         self._quitting = threading.Event()
         self._autostart_state = platform_support.AUTOSTART_ABSENT
         self._notification_lock = threading.Lock()
         self._notification_times = {}
         self.voice = None
-        self.meeting_window = None
         self._meeting_monitor = None
         self._settings_lock = threading.RLock()
         self.snippets = {}
@@ -139,15 +141,15 @@ class Snipvoice:
         self.gui.submit(self._show_meetings)
 
     def _show_meetings(self, root):
-        if self.meeting_window is not None and self.meeting_window.winfo_exists():
-            self.meeting_window.deiconify()
-            self.meeting_window.lift()
+        self._show_manager_window(root)
+        notebook = self._manager_notebook
+        tab = self._manager_recording_tab
+        if notebook is None or tab is None:
             return
-        from meeting_gui import open_meeting_window
-        self.meeting_window = open_meeting_window(
-            root, self.meetings, lambda: dict(self.settings), self._persist_voice_settings,
-            on_settings_changed=lambda: self.task_runner.start(
-                self._rebuild_meeting_monitor, name="meeting-hotkey"))
+        try:
+            notebook.select(tab)
+        except tk.TclError:
+            pass
 
     def _rebuild_meeting_monitor(self):
         # Called from the GUI worker after persistence; listener construction stays off Tk.
@@ -230,8 +232,8 @@ class Snipvoice:
         window = tk.Toplevel(root)
         self.manager_window = window
         window.title(APP_DISPLAY_NAME)
-        window.geometry("960x780")
-        window.minsize(780, 640)
+        window.geometry("1120x820")
+        window.minsize(920, 700)
         window.configure(bg=ui.surface)
         self._set_window_icon(window)
         ui_theme.apply_ttk_theme(ttk.Style(window))
@@ -247,14 +249,37 @@ class Snipvoice:
         else:
             notebook.add(tab, text="Voz")
             self._create_voice_tab(tab, window)
+        from meeting_gui import add_meeting_tabs
+        meeting_view = add_meeting_tabs(
+            root, window, notebook, self.meetings,
+            lambda: dict(self.settings), self._persist_voice_settings,
+            on_settings_changed=lambda: self.task_runner.start(
+                self._rebuild_meeting_monitor, name="meeting-hotkey"),
+        )
+        self._manager_meeting_view = meeting_view
+        self._manager_recording_tab = meeting_view.recording_tab
+        self._manager_library_tab = meeting_view.library_tab
         window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
         center_on_screen(window)
 
-    def _close_settings_window(self):
+    def _close_settings_window(self, force=False):
+        meeting_view = self._manager_meeting_view
+        if meeting_view is not None and not meeting_view.closed:
+            if force:
+                meeting_view.close_without_prompt(destroy=False)
+            else:
+                meeting_view.close(destroy=False, after_close=self._destroy_manager_window)
+                return
+        self._destroy_manager_window()
+
+    def _destroy_manager_window(self):
         self._manager_voice_refresher = None
         self._manager_voice_tk_vars = []
         self._manager_voice_tab = None
         self._manager_notebook = None
+        self._manager_meeting_view = None
+        self._manager_recording_tab = None
+        self._manager_library_tab = None
         window, self.manager_window = self.manager_window, None
         if window is not None:
             window.destroy()
@@ -312,7 +337,7 @@ class Snipvoice:
                 self._meeting_monitor = None
         self.meetings.shutdown()
         self.voice.shutdown()
-        self.gui.submit(lambda root: self._close_settings_window())
+        self.gui.submit(lambda root: self._close_settings_window(force=True))
         self.gui.stop()
         if self.icon is not None:
             self.icon.stop()
@@ -474,8 +499,6 @@ class Snipvoice:
 
     def open_voice_settings(self, icon=None, item=None):
         """Open the voice profile/license controls on the GUI thread."""
-        if self.voice is None:
-            return
         try:
             self.gui.submit(self._show_voice_settings)
         except Exception as exc:
