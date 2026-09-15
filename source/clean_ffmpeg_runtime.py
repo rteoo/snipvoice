@@ -27,7 +27,8 @@ FORBIDDEN_FLAGS = {
     "--enable-librubberband",
     "--enable-libvidstab",
 }
-REQUIRED_FORMATS = {"aac", "flac", "mov", "mp3", "ogg", "wav"}
+REQUIRED_FORMATS = {"aac", "flac", "mp3", "ogg", "wav"}
+REQUIRED_DEMUXERS = {"aac", "flac", "matroska", "mov", "mp3", "ogg", "wav"}
 REQUIRED_CODECS = {"aac", "flac", "mp3", "opus", "pcm_s16le", "vorbis"}
 
 
@@ -61,10 +62,16 @@ def verify_clean_ffmpeg_runtime(av_module=None) -> None:
         )
     if not licenses or any(not license_name.startswith("LGPL") for license_name in licenses):
         raise RuntimeError(f"Bundled FFmpeg is not LGPL: {sorted(licenses)}")
+    enabled_demuxers = set()
+    for token in configuration.split():
+        if token.startswith("--enable-demuxer="):
+            enabled_demuxers.update(token.split("=", 1)[1].split(","))
+    missing_demuxers = REQUIRED_DEMUXERS - enabled_demuxers
     missing_formats = REQUIRED_FORMATS - set(av_module.formats_available)
     missing_codecs = REQUIRED_CODECS - set(av_module.codecs_available)
-    if missing_formats or missing_codecs:
+    if missing_demuxers or missing_formats or missing_codecs:
         raise RuntimeError(
             "Clean FFmpeg runtime is missing required audio support: "
+            f"demuxers={sorted(missing_demuxers)}, "
             f"formats={sorted(missing_formats)}, codecs={sorted(missing_codecs)}"
         )

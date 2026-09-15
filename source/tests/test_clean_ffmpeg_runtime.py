@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from clean_ffmpeg_runtime import (  # noqa: E402
     REQUIRED_CODECS,
+    REQUIRED_DEMUXERS,
     REQUIRED_FLAGS,
     REQUIRED_FORMATS,
     verify_clean_ffmpeg_runtime,
@@ -14,7 +15,9 @@ from clean_ffmpeg_runtime import (  # noqa: E402
 
 
 def fake_av(*, configuration=None, license_name="LGPL version 2.1 or later"):
-    configuration = configuration or " ".join(sorted(REQUIRED_FLAGS))
+    configuration = configuration or " ".join(
+        (*sorted(REQUIRED_FLAGS), f"--enable-demuxer={','.join(sorted(REQUIRED_DEMUXERS))}")
+    )
     metadata = {
         name: {"configuration": configuration, "license": license_name}
         for name in (
@@ -59,6 +62,15 @@ class CleanFfmpegRuntimeTests(unittest.TestCase):
         runtime = fake_av()
         runtime.codecs_available = REQUIRED_CODECS - {"opus"}
         with self.assertRaisesRegex(RuntimeError, "opus"):
+            verify_clean_ffmpeg_runtime(runtime)
+
+    def test_rejects_missing_m4a_demuxer(self):
+        runtime = fake_av()
+        configuration = runtime._core.library_meta["libavcodec"]["configuration"]
+        configuration = configuration.replace(",mov", "")
+        for metadata in runtime._core.library_meta.values():
+            metadata["configuration"] = configuration
+        with self.assertRaisesRegex(RuntimeError, "mov"):
             verify_clean_ffmpeg_runtime(runtime)
 
 
