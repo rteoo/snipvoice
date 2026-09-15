@@ -3,8 +3,8 @@
 Date: 2026-09-14. Branch: `codex/offline-meetings`.
 
 Source implementation is integrated and published for review in
-[PR #1](https://github.com/rteoo/snipvoice/pull/1). Native physical platform
-acceptance remains open; this is not a certified desktop release.
+[PR #1](https://github.com/rteoo/snipvoice/pull/1). Hosted release bundles are
+verified; native physical platform acceptance and trusted code signing remain open.
 
 ## Delivered checkpoints
 
@@ -33,16 +33,23 @@ same final key and overlapping modifier subsets are rejected in both settings fl
 
 ## Validation on this Windows host
 
-- `python -m unittest discover -s tests -v`, from `source`: **924 tests run;
-  878 passed; 46 reported skips; no failures**.
+- `python -m unittest discover -s tests -v`, from `source`: **927 tests run;
+  881 passed; 46 reported skips; no failures**.
 - Cached Ruff **0.16.4**: `ruff check source` passed. The configured development
   pin remains **0.16.3**; that exact executable is unavailable on this host.
 - `python -m compileall -q source`: passed.
 - `python -m pip check`: passed.
 - `git diff --check`: passed.
-- GitHub CI: **13 jobs passed** across Windows, macOS and Linux on Python 3.12
-  and 3.14. Hosted Windows and macOS jobs compiled both capture helpers and ran
-  their non-recording probes successfully.
+- GitHub CI: **13 test jobs passed** across Windows, macOS and Linux on Python
+  3.12 and 3.14. Two additional release jobs built the Windows x64 portable
+  bundle and installer and the macOS ARM64 app bundle. Hosted Windows and macOS
+  jobs compiled both capture helpers and ran their non-recording probes.
+- Downloaded CI artifacts matched their SHA-256 sidecars and contained the
+  executable, native helper, app license and third-party notices. The downloaded
+  Windows bundle passed both packaged runtime and capture probes locally. Its
+  installer reports product version 1.0.0. The macOS app's runtime, capture and
+  ad-hoc signature checks ran on the hosted ARM64 runner; its archive structure
+  was inspected on this Windows host.
 - Independent integration and native protocol reviews completed. Corrections
   include device-change timestamps, matching sample-rate ceilings, required integer
   generations, error exit handling, partial loss statuses, and reservation retention
@@ -69,10 +76,12 @@ recordings, models, settings or command libraries were copied into the repositor
    bounded memory, disk latency and recoverability. Unit queue/storage limits do
    not certify physical long-session behavior.
 3. Exercise the real Tk workspace, cold offline startup, actual local ASR weights,
-   physical playback, existing Ollama weights with outbound networking blocked,
-   and staged packages/signatures. No packaged release was built or promoted here.
-4. Review and merge PR #1 only after the physical acceptance gates required for the
-   intended release have been assigned or completed.
+   physical playback, and existing Ollama weights with outbound networking blocked.
+   Install the Windows package and launch the macOS app on physical machines.
+4. Apply trusted Windows signing and Apple Developer ID signing/notarization before
+   distributing a release that promises verified publisher identity or a frictionless
+   first launch. The hosted release uses an unsigned Windows installer and an ad-hoc
+   macOS signature.
 
 ## Deliberate limits
 
