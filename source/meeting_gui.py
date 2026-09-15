@@ -50,6 +50,28 @@ def format_time(seconds):
     return f"{whole // 3600:02d}:{whole // 60 % 60:02d}:{whole % 60:02d}"
 
 
+def destination_display(path):
+    """Describe the implicit local destination without changing its saved value."""
+    return str(path or "").strip() or "Pasta local padrão (recordings)"
+
+
+def format_recording_status(snapshot):
+    """Return bounded user-facing state without exposing paths or native errors."""
+    state = snapshot.get("state", "idle")
+    displayed = snapshot.get("last_status") if state == "idle" else state
+    parts = [STATE_LABELS.get(displayed or state, displayed or state),
+             format_time(snapshot.get("elapsed"))]
+    if snapshot.get("processing"):
+        parts.append("Processando localmente")
+    if snapshot.get("final_audio"):
+        parts.append("Gravação preservada")
+    if snapshot.get("partial"):
+        parts.append("Uma fonte de áudio foi interrompida")
+    if snapshot.get("error"):
+        parts.append("Não foi possível concluir uma etapa")
+    return " · ".join(parts)
+
+
 def endpoint_options(devices, track, selection):
     """Keep a missing manually selected endpoint explicit and pinned."""
     options = [("Padrão do sistema · multimídia", EndpointSelection()),
@@ -307,13 +329,13 @@ class MeetingWindow:
             self.notebook = notebook
         self.recording_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         self.library_tab = ttk.Frame(notebook, style="Meeting.TFrame")
-        # Settings owns the local model catalog. Keep the old attribute as an
+        # The Configurações page owns the local model catalog. Keep the old attribute as an
         # alias for callers that still refer to the summary page directly.
         self.settings_tab = ttk.Frame(notebook, style="Meeting.TFrame")
         self.summary_tab = self.settings_tab
         notebook.add(self.recording_tab, text="Gravação")
         notebook.add(self.library_tab, text="Biblioteca")
-        notebook.add(self.settings_tab, text="Settings")
+        notebook.add(self.settings_tab, text="Configurações")
         self._page_header(
             self.recording_tab,
             "Gravar reunião",
@@ -326,19 +348,19 @@ class MeetingWindow:
         )
         self._page_header(
             self.settings_tab,
-            "Settings",
+            "Configurações",
             "Gerencie os modelos locais usados para transcrição e resumo sem enviar conteúdo à nuvem.",
         )
         self.status = tk.StringVar(self.window, "Carregando configurações…")
         for tab in (self.recording_tab, self.library_tab, self.settings_tab):
             self._label(
                 tab, "", textvariable=self.status, anchor="w", wraplength=940,
-                fg=self.ui.text_muted, font=self.ui.font(8),
+                fg=self.ui.text_muted, font=self.ui.font(9),
             ).pack(fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
         recording = ttk.Frame(self.recording_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         recording.pack(fill="both", expand=True)
-        recording.columnconfigure(0, weight=5)
-        recording.columnconfigure(1, weight=7)
+        recording.columnconfigure(0, weight=4, minsize=360)
+        recording.columnconfigure(1, weight=7, minsize=440)
         recording.rowconfigure(0, weight=1)
         library = ttk.Frame(self.library_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
@@ -372,6 +394,8 @@ class MeetingWindow:
         self._bind_mousewheel_region(settings_view, settings_canvas)
         self.settings_canvas = settings_canvas
         self.settings_content = settings_content
+        self.recording_defaults_parent = self._card(settings_content)
+        self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
         self.transcription_models_parent = tk.Frame(
             settings_content, bg=self.ui.surface,
         )
@@ -391,6 +415,9 @@ class MeetingWindow:
         self.input_enabled = tk.BooleanVar(self.window, self.settings.input_enabled)
         self.output_enabled = tk.BooleanVar(self.window, self.settings.output_enabled)
         self.destination = tk.StringVar(self.window, self.settings.destination)
+        self.destination_label = tk.StringVar(
+            self.window, destination_display(self.settings.destination),
+        )
         self.auto_transcribe = tk.BooleanVar(self.window, self.settings.auto_transcribe)
         self.auto_summary = tk.BooleanVar(self.window, self.settings.auto_summary)
         self.voice_boost = tk.BooleanVar(self.window, self.settings.voice_boost)
@@ -403,6 +430,47 @@ class MeetingWindow:
         self.summary_display = tk.StringVar(self.window, SUMMARY_LABELS[self.settings.summary_model])
         self.endpoint_vars = {track: tk.StringVar(self.window) for track in ("microphone", "system")}
         self.endpoint_boxes = {}
+        defaults = self.recording_defaults_parent
+        self._label(
+            defaults, "Padrões de gravação", bg=self.ui.card,
+            fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self._label(
+            defaults,
+            "Escolha os modelos, o idioma e o atalho usados em novas gravações.",
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
+            wraplength=860,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
+        self.profile_box = ttk.Combobox(
+            defaults, textvariable=self.profile_display,
+            values=[PROFILE_LABELS[entry["profile"]] for entry in selectable_catalog()],
+            state="readonly",
+        )
+        self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
+        self.language_box = ttk.Combobox(
+            defaults, textvariable=self.language_display, state="readonly",
+        )
+        self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
+        self.summary_box = ttk.Combobox(
+            defaults, textvariable=self.summary_display,
+            values=list(SUMMARY_LABELS.values()), state="readonly",
+        )
+        self.summary_box.bind("<<ComboboxSelected>>", self._summary_display_changed)
+        default_rows = [
+            ("Modelo de transcrição local", self.profile_box),
+            ("Idioma", self.language_box),
+            ("Atalho de gravação (opcional)", self._entry(defaults, self.hotkey)),
+            ("Modelo de resumo local", self.summary_box),
+        ]
+        for row, (label, widget) in enumerate(default_rows, 2):
+            self._label(defaults, label, anchor="w", bg=self.ui.card).grid(
+                row=row, column=0, sticky="w", padx=(0, self.ui.space_lg), pady=3,
+            )
+            widget.grid(row=row, column=1, sticky="ew", pady=3)
+        defaults.columnconfigure(1, weight=1)
+        self._button(defaults, "Salvar como padrão", self.save_settings, accent=True).grid(
+            row=2 + len(default_rows), column=1, sticky="e", pady=(self.ui.space_sm, 0),
+        )
         compact_recording = self.window.winfo_screenheight() <= 800
         card_pady = max(2, self.ui.space_xs // 2) if compact_recording else self.ui.space_sm
         row_pady = 1 if compact_recording else 3
@@ -410,81 +478,62 @@ class MeetingWindow:
         settings_card = self._card(recording, pady=card_pady)
         settings_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.ui.space_md))
         self._label(
-            settings_card, "Configuração da próxima gravação",
+            settings_card, "Detalhes e automação",
             bg=self.ui.card, fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, self.ui.space_sm))
-        source_switches = tk.Frame(settings_card, bg=self.ui.card)
-        self.source_checks = {}
-        for track, label, variable in (
-                ("microphone", "Microfone", self.input_enabled),
-                ("system", "Áudio do sistema", self.output_enabled)):
-            control = tk.Checkbutton(
-                source_switches, text=label, variable=variable, command=self._source_toggled,
-                font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
-            )
-            control.pack(side="left", padx=(0, self.ui.space_lg))
-            self.source_checks[track] = control
-        rows = [("Título", self._entry(settings_card, self.record_title)),
-                ("Fontes de áudio", source_switches)]
-        for track, label in (("microphone", "Microfone"), ("system", "Áudio do sistema")):
-            combo = ttk.Combobox(settings_card, textvariable=self.endpoint_vars[track], state="readonly", width=42)
-            self.endpoint_boxes[track] = combo
-            rows.append((label, combo))
+        ).grid(row=0, column=0, sticky="w", pady=(0, self.ui.space_sm))
+        rows = [("Título", self._entry(settings_card, self.record_title))]
         destination_row = tk.Frame(settings_card, bg=self.ui.card)
-        self._entry(destination_row, self.destination, width=34).pack(side="left", fill="x", expand=True)
-        self._button(destination_row, "Escolher pasta…", self.choose_destination).pack(
+        destination_entry = self._entry(destination_row, self.destination_label)
+        destination_entry.configure(state="readonly")
+        destination_entry.pack(side="left", fill="x", expand=True)
+        self._button(destination_row, "Escolher…", self.choose_destination).pack(
+            side="left", padx=(self.ui.space_sm, 0))
+        self._button(destination_row, "Usar padrão", self.use_default_destination).pack(
             side="left", padx=(self.ui.space_sm, 0))
         rows.append(("Pasta dos arquivos finais", destination_row))
-        self.profile_box = ttk.Combobox(settings_card, textvariable=self.profile_display,
-            values=[PROFILE_LABELS[entry["profile"]] for entry in selectable_catalog()], state="readonly")
-        self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
-        self.language_box = ttk.Combobox(settings_card, textvariable=self.language_display, state="readonly")
-        self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
-        self.summary_box = ttk.Combobox(settings_card, textvariable=self.summary_display,
-            values=list(SUMMARY_LABELS.values()), state="readonly")
-        self.summary_box.bind("<<ComboboxSelected>>", self._summary_display_changed)
-        rows.extend([("Modelo de transcrição local", self.profile_box), ("Idioma", self.language_box),
-                     ("Atalho de gravação (opcional)", self._entry(settings_card, self.hotkey)),
-                     ("Modelo de resumo local", self.summary_box)])
-        for row, (label, widget) in enumerate(rows, 1):
+        next_row = 1
+        for label, widget in rows:
             self._label(settings_card, label, anchor="w", bg=self.ui.card).grid(
-                row=row, column=0, sticky="w", padx=(0, 18), pady=row_pady,
+                row=next_row, column=0, sticky="w", pady=(row_pady, 0),
             )
-            widget.grid(row=row, column=1, sticky="ew", pady=row_pady)
-        settings_card.columnconfigure(1, weight=1)
+            widget.grid(row=next_row + 1, column=0, sticky="ew", pady=(0, row_pady))
+            next_row += 2
+        settings_card.columnconfigure(0, weight=1)
         automation = tk.Frame(settings_card, bg=self.ui.card)
         self.auto_transcribe_check = tk.Checkbutton(
             automation, text="Transcrever automaticamente", variable=self.auto_transcribe,
             command=self._automation_toggled, font=self.ui.font(),
             **self.ui.checkbutton_colors(self.ui.card),
         )
-        self.auto_transcribe_check.pack(anchor="w")
+        self.auto_transcribe_check.pack(anchor="w", fill="x")
         self.auto_summary_check = tk.Checkbutton(
             automation, text="Resumir após transcrever", variable=self.auto_summary,
             command=self._automation_toggled, font=self.ui.font(),
             **self.ui.checkbutton_colors(self.ui.card),
         )
-        self.auto_summary_check.pack(anchor="w")
+        self.auto_summary_check.pack(anchor="w", fill="x", padx=(self.ui.space_xl, 0))
         self.voice_boost_check = tk.Checkbutton(
-            automation, text="Limpar ruído baixo e reforçar voz", variable=self.voice_boost,
+            automation, text="Melhorar a voz do microfone", variable=self.voice_boost,
             font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
         )
-        self.voice_boost_check.pack(anchor="w")
-        automation_row = len(rows) + 1
+        self.voice_boost_check.pack(anchor="w", fill="x", pady=(self.ui.space_xs, 0))
+        automation_row = next_row
         self._label(settings_card, "Depois de gravar", anchor="w", bg=self.ui.card).grid(
-            row=automation_row, column=0, sticky="w", padx=(0, 18), pady=row_pady)
-        automation.grid(row=automation_row, column=1, sticky="ew", pady=row_pady)
-        note_row = automation_row + 1
-        self._label(settings_card, "Configurações valem para a próxima gravação. Pasta vazia usa recordings ao lado da biblioteca local.\n"
-                    "O sistema inclui todos os sons do dispositivo escolhido. Use fones para reduzir duplicação acústica.",
-                    justify="left", anchor="w", wraplength=430, bg=self.ui.card,
-                    fg=self.ui.text_muted, font=self.ui.font(8)).grid(
-                        row=note_row, column=0, columnspan=2, sticky="ew", pady=note_pady,
-                    )
+            row=automation_row, column=0, sticky="w", pady=(row_pady, 0))
+        automation.grid(row=automation_row + 1, column=0, sticky="ew", pady=(0, row_pady))
+        note_row = automation_row + 2
+        self._label(
+            settings_card,
+            "Configurações valem para a próxima gravação. A pasta local padrão "
+            "fica ao lado da biblioteca.\nO sistema inclui todos os sons do "
+            "dispositivo escolhido. Use fones para reduzir duplicação acústica.",
+            justify="left", anchor="w", wraplength=360, bg=self.ui.card,
+            fg=self.ui.text_muted, font=self.ui.font(9),
+        ).grid(row=note_row, column=0, sticky="ew", pady=note_pady)
         commands = tk.Frame(settings_card, bg=self.ui.card)
-        commands.grid(row=note_row + 1, column=0, columnspan=2, sticky="w")
+        commands.grid(row=note_row + 1, column=0, sticky="w")
         self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
-        self._button(commands, "Salvar", self.save_settings).pack(side="left")
+        self._button(commands, "Salvar como padrão", self.save_settings).pack(side="left")
         activity = self._card(recording, pady=card_pady)
         activity.grid(row=0, column=1, sticky="nsew")
         self._label(
@@ -492,16 +541,34 @@ class MeetingWindow:
             font=self.ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, self.ui.space_sm))
         activity.columnconfigure(1, weight=1)
-        activity.rowconfigure(1, weight=1)
+        activity.rowconfigure(2, weight=1)
+        sources = tk.Frame(activity, bg=self.ui.card)
+        sources.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, self.ui.space_sm))
+        sources.columnconfigure(1, weight=1)
+        self.source_checks = {}
+        for row, (track, label, variable) in enumerate((
+                ("microphone", "Microfone", self.input_enabled),
+                ("system", "Áudio do sistema", self.output_enabled))):
+            control = tk.Checkbutton(
+                sources, text=label, variable=variable, command=self._source_toggled,
+                font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+            )
+            control.grid(row=row, column=0, sticky="w", padx=(0, self.ui.space_md), pady=2)
+            combo = ttk.Combobox(
+                sources, textvariable=self.endpoint_vars[track], state="readonly",
+            )
+            combo.grid(row=row, column=1, sticky="ew", pady=2)
+            self.source_checks[track] = control
+            self.endpoint_boxes[track] = combo
         self.waveform = MeetingWaveform(
             activity, theme=self.ui, height=170,
             track_labels={"microphone": "Microfone", "system": "Áudio do sistema"},
             state_labels={"idle": "Pronto", "recording": "Gravando", "paused": "Pausado"},
         )
-        self.waveform.grid(row=1, column=0, columnspan=2, sticky="nsew",
+        self.waveform.grid(row=2, column=0, columnspan=2, sticky="nsew",
                            pady=(0, self.ui.space_sm))
         transport = tk.Frame(activity, bg=self.ui.card)
-        transport.grid(row=2, column=0, columnspan=2, sticky="w")
+        transport.grid(row=3, column=0, columnspan=2, sticky="w")
         self.start_button = self._button(transport, "Iniciar gravação", self.start, accent=True)
         self.start_button.pack(side="left", padx=(0, 8))
         self.pause_button = self._button(transport, "Pausar", self.pause_resume)
@@ -509,12 +576,22 @@ class MeetingWindow:
         self.stop_button = self._button(transport, "Parar e preservar", self.stop)
         self.stop_button.pack(side="left")
         self.record_status = tk.StringVar(self.window, "Pronto · 00:00:00")
-        self._label(activity, "", textvariable=self.record_status, anchor="w",
-                    wraplength=850, bg=self.ui.card, fg=self.ui.text_muted).grid(
-                        row=3, column=0, columnspan=2, sticky="ew", pady=(10, 4),
-                    )
+        status_row = tk.Frame(activity, bg=self.ui.card)
+        status_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 4))
+        self._label(status_row, "", textvariable=self.record_status, anchor="w",
+                    wraplength=600, bg=self.ui.card, fg=self.ui.text_muted).pack(
+                        side="left", fill="x", expand=True)
+        self.record_details = ""
+        self.operation_details = ""
+        self.record_details_button = self._button(
+            status_row, "Ver detalhes", self.show_recording_details,
+        )
+        self.record_details_button.configure(state="disabled")
+        self.record_details_button.pack(side="right", padx=(self.ui.space_sm, 0))
         self.meters = {}
-        for row, (track, label) in enumerate((("microphone", "Nível do microfone"), ("system", "Nível do sistema")), 4):
+        meters = (("microphone", "Nível do microfone"),
+                  ("system", "Nível do sistema"))
+        for row, (track, label) in enumerate(meters, 5):
             self._label(activity, label, anchor="w", bg=self.ui.card).grid(
                 row=row, column=0, sticky="w", padx=(0, 18), pady=6,
             )
@@ -766,11 +843,17 @@ class MeetingWindow:
         return True
 
     def _done(self, _value, error):
-        self.status.set(error or ("A operação não foi aceita. Verifique o estado atual." if _value is False else "Operação concluída."))
+        if error:
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível concluir a operação. Veja os detalhes na aba Gravação.")
+        else:
+            self.status.set("A operação não foi aceita. Verifique o estado atual."
+                            if _value is False else "Operação concluída.")
 
     def _settings_loaded(self, raw, error):
         if error:
-            self.status.set(error)
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível carregar as configurações. Veja os detalhes na aba Gravação.")
             return
         self.raw_settings = dict(raw or {})
         try:
@@ -782,6 +865,7 @@ class MeetingWindow:
         self.input_enabled.set(settings.input_enabled)
         self.output_enabled.set(settings.output_enabled)
         self.destination.set(settings.destination)
+        self.destination_label.set(destination_display(settings.destination))
         self.auto_transcribe.set(settings.auto_transcribe)
         self.auto_summary.set(settings.auto_summary)
         self.voice_boost.set(settings.voice_boost)
@@ -837,6 +921,22 @@ class MeetingWindow:
         path = filedialog.askdirectory(**options)
         if path:
             self.destination.set(path)
+            self.destination_label.set(destination_display(path))
+
+    def use_default_destination(self):
+        self.destination.set("")
+        self.destination_label.set(destination_display(""))
+
+    def show_recording_details(self):
+        if self.record_details:
+            messagebox.showinfo(
+                "Detalhes da gravação", self.record_details, parent=self.window,
+            )
+
+    def _remember_operation_error(self, error):
+        self.operation_details = "Detalhes técnicos: " + str(error)[:4096]
+        self.record_details = self.operation_details
+        self.record_details_button.configure(state="normal")
 
     def _current_settings(self):
         if not self.settings_loaded:
@@ -861,7 +961,8 @@ class MeetingWindow:
 
     def _saved_settings(self, settings, error):
         if error:
-            self.status.set(error)
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível salvar as configurações. Veja os detalhes na aba Gravação.")
             return
         self.settings = settings
         self.raw_settings.update(settings.payload())
@@ -889,7 +990,8 @@ class MeetingWindow:
 
     def _devices_loaded(self, devices, error):
         if error:
-            self.status.set(error)
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível atualizar os dispositivos. Veja os detalhes na aba Gravação.")
             return
         self.devices = list(islice(devices or [], 256))
         self._render_devices()
@@ -926,7 +1028,12 @@ class MeetingWindow:
         self._submit("control", lambda: self.controller.start(settings, title=title), self._started, urgent=True)
 
     def _started(self, accepted, error):
-        self.status.set(error or ("Gravação solicitada." if accepted else "Não foi possível iniciar. Verifique o estado da gravação."))
+        if error:
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível iniciar a gravação. Veja os detalhes na aba Gravação.")
+        else:
+            self.status.set("Gravação solicitada." if accepted else
+                            "Não foi possível iniciar. Verifique o estado da gravação.")
 
     def stop(self):
         self._action("stop", urgent=True)
@@ -935,6 +1042,7 @@ class MeetingWindow:
         self._action("resume" if self.snapshot.get("state") == "paused" else "pause", urgent=True)
 
     def _action(self, method, *args, urgent=False, callback=None, **kwargs):
+        self.operation_details = ""
         self.status.set("Processando solicitação…")
         self._submit("control" if urgent else method, lambda: getattr(self.controller, method)(*args, **kwargs),
                      callback, urgent)
@@ -957,7 +1065,8 @@ class MeetingWindow:
 
     def _library_loaded(self, sessions, error):
         if error:
-            self.status.set(error)
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível carregar a biblioteca. Veja os detalhes na aba Gravação.")
             return
         self.sessions.delete(*self.sessions.get_children())
         items = list(islice(sessions or [], PAGE_SIZE))
@@ -1029,7 +1138,8 @@ class MeetingWindow:
         if session_id != self.selected:
             return
         if error:
-            self.status.set(error)
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível carregar a gravação. Veja os detalhes na aba Gravação.")
             return
         metadata, segments = data
         self.loading = True
@@ -1051,7 +1161,7 @@ class MeetingWindow:
         self._show_summary(metadata.get("summary"))
         self.status.set("Notas extensas: visualização parcial, somente leitura." if self.truncated else
                         f"Gravação carregada · {len(segments)} trechos exibidos (limite {TRANSCRIPT_LIMIT})."
-                        + (" · " + str(metadata["error"])[:1024] if metadata.get("error") else ""))
+                        + (" · Uma etapa anterior não foi concluída." if metadata.get("error") else ""))
 
     def _render_transcript(self, segments):
         self.transcript.delete(*self.transcript.get_children())
@@ -1085,7 +1195,10 @@ class MeetingWindow:
         bookmarks = [dict(item) for item in self.bookmarks]
         def saved(_value, error):
             if error or _value is False:
-                self.status.set(error or "Não foi possível salvar as notas. Tente novamente.")
+                if error:
+                    self._remember_operation_error(error)
+                self.status.set("Não foi possível salvar as notas. Veja os detalhes na aba Gravação."
+                                if error else "Não foi possível salvar as notas. Tente novamente.")
                 return
             if (self.selected == session_id and self.title.get() == title
                     and self.notes.get("1.0", "end-1c") == notes and self.bookmarks == bookmarks):
@@ -1118,7 +1231,10 @@ class MeetingWindow:
             if error or value is False:
                 if self.selected == session_id:
                     self.delete_button.configure(state="normal")
-                self.status.set(error or "Não foi possível excluir a gravação. Tente novamente.")
+                if error:
+                    self._remember_operation_error(error)
+                self.status.set("Não foi possível excluir a gravação. Veja os detalhes na aba Gravação."
+                                if error else "Não foi possível excluir a gravação. Tente novamente.")
                 return
             if self.selected == session_id:
                 self._clear_library_detail()
@@ -1261,7 +1377,10 @@ class MeetingWindow:
         if path:
             def imported(session_id, error):
                 if error:
-                    self.status.set(error)
+                    self._remember_operation_error(error)
+                    self.status.set(
+                        "Não foi possível importar o áudio. Veja os detalhes na aba Gravação."
+                    )
                     return
                 self.refresh_library()
                 self.load_session(session_id)
@@ -1302,7 +1421,7 @@ class MeetingWindow:
             return
         model = self.summary_model.get().strip()
         if not self.summary_model_installed.get(model):
-            self.status.set("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo.")
+            self.status.set("Baixe o modelo selecionado em Configurações antes de gerar o resumo.")
             return
         session_id = self.selected
         self._action("summarize", session_id, model,
@@ -1310,8 +1429,18 @@ class MeetingWindow:
 
     def _processing_launched(self, session_id, accepted, error):
         if error or not accepted:
-            self.status.set(error or "Há uma captura ou outro processamento em andamento. Tente novamente depois.")
+            if error:
+                self._remember_operation_error(error)
+                self.status.set(
+                    "Não foi possível iniciar o processamento local. "
+                    "Veja os detalhes na aba Gravação."
+                )
+            else:
+                self.status.set(
+                    "Há uma captura ou outro processamento em andamento. Tente novamente depois."
+                )
             return
+        self.operation_details = ""
         self.processing_target = session_id
         self.status.set("Processamento local iniciado. O resultado aparecerá quando terminar.")
 
@@ -1328,7 +1457,8 @@ class MeetingWindow:
             if self.selected != session_id or not self.detail_ready:
                 return
             if error:
-                self.status.set(error)
+                self._remember_operation_error(error)
+                self.status.set("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação.")
                 return
             summary, segments = data
             self._show_summary(summary)
@@ -1354,8 +1484,13 @@ class MeetingWindow:
             return
         session_id = self.selected
         text = self.summary.get("1.0", "end-1c")
-        self._submit("save_summary", lambda: self.controller.update_summary(session_id, text),
-                     lambda value, error: self.status.set(error or "Resumo revisado salvo; o resultado original foi preservado."))
+        def saved(_value, error):
+            if error:
+                self._remember_operation_error(error)
+                self.status.set("Não foi possível salvar o resumo. Veja os detalhes na aba Gravação.")
+            else:
+                self.status.set("Resumo revisado salvo; o resultado original foi preservado.")
+        self._submit("save_summary", lambda: self.controller.update_summary(session_id, text), saved)
 
     def _show_summary(self, value):
         if isinstance(value, dict):
@@ -1390,15 +1525,18 @@ class MeetingWindow:
                 state="normal" if state in ("recording", "paused") else "disabled")
             self.play_button.configure(state="normal" if state == "idle" and not processing else "disabled")
             error = self.snapshot.get("error")
-            displayed_state = self.snapshot.get("last_status") if state == "idle" else state
-            displayed_state = displayed_state or state
-            self.record_status.set(f"{STATE_LABELS.get(displayed_state, displayed_state)} · {format_time(self.snapshot.get('elapsed'))}"
-                                   + (" · Processando localmente" if processing else "")
-                                   + (f" · {self.snapshot.get('postprocess')}" if self.snapshot.get("postprocess") else "")
-                                   + (" · Captura parcial" if self.snapshot.get("partial") else "")
-                                   + (f" · Arquivo final: {os.path.basename(self.snapshot.get('final_audio'))}"
-                                      if self.snapshot.get("final_audio") else "")
-                                   + (f" · {error}" if error else ""))
+            self.record_status.set(format_recording_status(self.snapshot))
+            details = [self.operation_details] if self.operation_details else []
+            if self.snapshot.get("final_audio"):
+                details.append("Arquivo final: " + str(self.snapshot["final_audio"])[:2048])
+            if self.snapshot.get("postprocess"):
+                details.append("Processamento: " + str(self.snapshot["postprocess"])[:2048])
+            if error:
+                details.append("Detalhes técnicos: " + str(error)[:4096])
+            self.record_details = "\n".join(details)
+            self.record_details_button.configure(
+                state="normal" if self.record_details else "disabled",
+            )
             self.waveform.clear()
             for track, values in self.snapshot.get("waveforms", {}).items():
                 if track in ("microphone", "system"):
@@ -1417,11 +1555,19 @@ class MeetingWindow:
             self.previous_processing = bool(processing)
             if self.processing_target is not None and not processing:
                 target, self.processing_target = self.processing_target, None
-                self.status.set(error or "Processamento local finalizado.")
+                if error:
+                    self._remember_operation_error(error)
+                    self.status.set(
+                        "O processamento local não foi concluído. "
+                        "Veja os detalhes na aba Gravação."
+                    )
+                else:
+                    self.operation_details = ""
+                    self.status.set("Processamento local finalizado.")
                 if target and not error:
                     self.refresh_outputs(target)
-        except Exception as exc:
-            self.status.set(f"Não foi possível atualizar o estado: {exc}")
+        except Exception:
+            self.status.set("Não foi possível atualizar o estado da gravação.")
         self.after_id = self.root.after(200, self._poll)
 
     def _destroyed(self, event):

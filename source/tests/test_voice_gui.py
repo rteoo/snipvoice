@@ -355,7 +355,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 self.app._show_manager_window(shared_root)
                 settings_tab = next(
                     notebook_tab for notebook_tab in self.app._manager_notebook.tabs()
-                    if self.app._manager_notebook.tab(notebook_tab, "text") == "Settings"
+                    if self.app._manager_notebook.tab(notebook_tab, "text") == "Configurações"
                 )
                 settings = self.app._manager_notebook.nametowidget(settings_tab)
                 rows = [
@@ -439,12 +439,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 "Gravação",
                 "Biblioteca",
                 "Ditado",
-                "Settings",
+                "Configurações",
             ],
         )
 
     def test_manager_separates_model_settings_from_ditado_selectors(self):
-        """Settings owns model downloads; Ditado keeps compact friendly selectors."""
+        """Configurações owns downloads; Ditado keeps compact friendly selectors."""
         _ensure_voice(self.app)
 
         def inspect_manager(shared_root):
@@ -454,7 +454,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 notebook.tab(tab_id, "text"): notebook.nametowidget(tab_id)
                 for tab_id in notebook.tabs()
             }
-            settings = tabs["Settings"]
+            settings = tabs["Configurações"]
             ditado = tabs["Ditado"]
             settings_text = [
                 str(widget.cget("text"))
@@ -569,7 +569,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 "Gravação",
                 "Biblioteca",
                 "Ditado",
-                "Settings",
+                "Configurações",
             ],
         )
         self.assertEqual(selected, "Gravação")

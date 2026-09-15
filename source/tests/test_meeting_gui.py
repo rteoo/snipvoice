@@ -12,7 +12,8 @@ from unittest import mock
 
 from meeting_gui import (
     BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, add_meeting_tabs,
-    endpoint_options, format_time, open_meeting_window, validated_settings,
+    destination_display, endpoint_options, format_recording_status, format_time,
+    open_meeting_window, validated_settings,
 )
 from meeting_settings import EndpointSelection, resolve_meeting_settings
 
@@ -163,6 +164,56 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(format_time(float("nan")), "00:00:00")
         self.assertEqual(format_time(-10), "00:00:00")
 
+    def test_recording_status_hides_paths_ids_and_technical_errors(self):
+        status = format_recording_status({
+            "state": "idle",
+            "last_status": "partial",
+            "elapsed": 31,
+            "partial": True,
+            "final_audio": r"C:\\recordings\\20260915-opaque-id.wav",
+            "error": "native_discontinuity: HRESULT 0x88890004",
+        })
+
+        self.assertEqual(
+            status,
+            "Parcial · 00:00:31 · Gravação preservada · "
+            "Uma fonte de áudio foi interrompida · Não foi possível concluir uma etapa",
+        )
+        self.assertNotIn("opaque-id", status)
+        self.assertNotIn("HRESULT", status)
+
+    def test_empty_destination_has_a_clear_local_default_label(self):
+        self.assertEqual(destination_display(""), "Pasta local padrão (recordings)")
+        self.assertEqual(destination_display(r"C:\\Audio"), r"C:\\Audio")
+
+    def test_custom_destination_can_return_to_the_local_default(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.destination = Variable(r"C:\\Audio")
+        view.destination_label = Variable(r"C:\\Audio")
+
+        view.use_default_destination()
+
+        self.assertEqual(view.destination.get(), "")
+        self.assertEqual(
+            view.destination_label.get(), "Pasta local padrão (recordings)",
+        )
+
+    def test_processing_errors_are_hidden_behind_recording_details(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.status = Variable()
+        view.record_details = ""
+        view.record_details_button = mock.Mock()
+
+        view._processing_launched("meeting", False, "HRESULT 0x88890004")
+
+        self.assertEqual(
+            view.status.get(),
+            "Não foi possível iniciar o processamento local. Veja os detalhes na aba Gravação.",
+        )
+        self.assertNotIn("HRESULT", view.status.get())
+        self.assertIn("HRESULT", view.record_details)
+        view.record_details_button.configure.assert_called_with(state="normal")
+
     def test_summary_inventory_result_is_applied_only_on_gui_callback(self):
         view = MeetingWindow.__new__(MeetingWindow)
         button = mock.Mock()
@@ -223,7 +274,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.endpoint_vars = {track: Variable("old default") for track in ("microphone", "system")}
         view.endpoint_boxes = {track: mock.Mock() for track in ("microphone", "system")}
         for name in ("profile", "language", "profile_display", "language_display", "hotkey",
-                     "summary_model", "summary_display", "status", "destination"):
+                     "summary_model", "summary_display", "status", "destination",
+                     "destination_label"):
             setattr(view, name, Variable())
         view.input_enabled, view.output_enabled = Variable(True), Variable(True)
         view.auto_transcribe, view.auto_summary = Variable(False), Variable(False)
@@ -510,7 +562,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIs(view.notebook, notebook)
             self.assertEqual(
                 titles,
-                ["Gravação", "Biblioteca", "Settings"],
+                ["Gravação", "Biblioteca", "Configurações"],
             )
             settings_widgets = descendants(view.settings_tab)
             settings_radios = [

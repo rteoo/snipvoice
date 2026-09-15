@@ -81,16 +81,16 @@ launch. The Windows installer uses no administrator rights and installs under
 - Recording is now the default window, with live microphone/system waveforms, friendly device names, and separate source controls.
 - Empty recording titles become timestamped, transcript-derived descriptions after local transcription.
 - The library imports WAV, MP3, AAC/M4A, FLAC, OGG, and Opus files without sending audio to a cloud service.
-- Model management is centralized in Settings while Dictation uses compact model and language selectors.
+- Model management is centralized in the **Configurações** tab while **Ditado** uses compact model and language selectors.
 
 ## First use
 
 1. Start Snipvoice and find its icon in the Windows tray or macOS menu bar.
 2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
-3. In **Voz**, choose a profile and language, then download or import its local model.
+3. In **Ditado**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
-6. Open **Settings**, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
+6. Open **Configurações**, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -114,7 +114,7 @@ are deliberately not imported.
 
 ## Meetings
 
-The **Gravação**, **Biblioteca**, **Ditado**, and **Settings** tabs keep meeting
+The **Gravação**, **Biblioteca**, **Ditado**, and **Configurações** tabs keep meeting
 capture independent from dictation inside the main Snipvoice window. Recording
 works when dictation is disabled and before any model is installed.
 
@@ -148,7 +148,7 @@ Q4_K_M remains the recommended default and Qwen3.5 4B favors quality. LiquidAI
 LFM2.5-2.6B is the efficient alternative, and Gemma 4 E2B/E4B are Google's
 current options.
 Gemma E2B is 3.12 GiB; the higher-capacity E4B is 4.80 GiB and contains about 8B
-total parameters. Settings show the effective and total counts before download.
+total parameters. The **Configurações** tab shows the effective and total counts before download.
 LiquidAI uses the LFM Open License v1.0 rather than MIT or Apache-2.0. Its first
 download shows the license terms and the US$10 million annual-revenue commercial
 use threshold for explicit acceptance.

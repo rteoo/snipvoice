@@ -211,6 +211,13 @@ class WidgetOptionTests(unittest.TestCase):
             self.assertEqual(theme.checkbutton_colors("#FFFFFF")["bg"], "#FFFFFF")
             self.assertEqual(theme.button_colors()["bg"], "#FAFAFA")
 
+    def test_disabled_checkboxes_keep_readable_secondary_text(self):
+        theme = ui_theme.build_theme("light", system="windows")
+        self.assertEqual(
+            theme.checkbutton_colors(theme.card)["disabledforeground"],
+            theme.text_muted,
+        )
+
     def test_added_foregrounds_resolve_to_each_platform_default(self):
         # `text_native` is for widgets the pre-change GUI left uncolored, so it
         # has to *be* the platform default rather than the app's near-black.
