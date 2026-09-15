@@ -2,6 +2,11 @@ import copy
 import json
 import os
 import tempfile
+import time
+
+
+_ATOMIC_REPLACE_ATTEMPTS = 5
+_ATOMIC_REPLACE_RETRY_SECONDS = 0.01
 
 
 DEFAULT_SNIPPETS = {
@@ -60,7 +65,14 @@ def write_json_atomic(path, data):
     try:
         with os.fdopen(file_descriptor, 'w', encoding='utf-8') as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
-        os.replace(temp_path, path)
+        for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if attempt + 1 >= _ATOMIC_REPLACE_ATTEMPTS:
+                    raise
+                time.sleep(_ATOMIC_REPLACE_RETRY_SECONDS * (attempt + 1))
     except Exception:
         try:
             os.remove(temp_path)
