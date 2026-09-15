@@ -213,9 +213,9 @@ class PackagingExcludeTests(unittest.TestCase):
         source_version = re.search(r'^APP_VERSION = "([^"]+)"$', texts["source"], re.M)
         installer_version = re.search(r'^#define MyAppVersion "([^"]+)"$', texts["installer"], re.M)
         workflow_version = re.search(r'^  SNIPVOICE_VERSION: "([^"]+)"$', texts["workflow"], re.M)
-        self.assertEqual(source_version.group(1), "3.0.0")
-        self.assertEqual(installer_version.group(1), "3.0.0")
-        self.assertEqual(workflow_version.group(1), "3.0.0")
+        self.assertEqual(source_version.group(1), "3.1.0")
+        self.assertEqual(installer_version.group(1), "3.1.0")
+        self.assertEqual(workflow_version.group(1), "3.1.0")
         self.assertIn('RELEASE_CHANNEL = "stable"', texts["source"])
         self.assertIn('#define MyAppChannel "stable"', texts["installer"])
 

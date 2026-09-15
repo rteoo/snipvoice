@@ -1,16 +1,19 @@
 """Workspace concurrency, selection, persistence, and shared-root smoke checks."""
 
 import os
+import sys
 import threading
 import time
 import tkinter as tk
+import types
 import unittest
 from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
     BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, add_meeting_tabs,
-    endpoint_options, format_time, open_meeting_window, validated_settings,
+    destination_display, endpoint_options, format_recording_status, format_time,
+    open_meeting_window, validated_settings,
 )
 from meeting_settings import EndpointSelection, resolve_meeting_settings
 
@@ -75,6 +78,32 @@ class MeetingGuiLogicTests(unittest.TestCase):
             parent, text="Heading", bg="surface", fg="text", font="bold-font",
         )
 
+    def test_settings_mousewheel_routes_descendant_events_to_canvas(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        region = types.SimpleNamespace(master=None)
+        child = types.SimpleNamespace(master=region)
+        canvas = mock.Mock()
+
+        view._bind_mousewheel_region(region, canvas)
+
+        callbacks = {
+            call.args[0]: call.args[1] for call in view.window.bind.call_args_list
+        }
+        result = callbacks["<MouseWheel>"](
+            types.SimpleNamespace(widget=child, delta=-120, num=None),
+        )
+        self.assertEqual(result, "break")
+        canvas.yview_scroll.assert_called_once_with(1, "units")
+
+        canvas.reset_mock()
+        outside = types.SimpleNamespace(master=None)
+        result = callbacks["<MouseWheel>"](
+            types.SimpleNamespace(widget=outside, delta=-120, num=None),
+        )
+        self.assertIsNone(result)
+        canvas.yview_scroll.assert_not_called()
+
     def test_missing_manual_device_stays_pinned(self):
         selection = EndpointSelection("manual", "opaque-id")
         options = endpoint_options([], "system", selection)
@@ -134,6 +163,56 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(format_time(3661.25), "01:01:01")
         self.assertEqual(format_time(float("nan")), "00:00:00")
         self.assertEqual(format_time(-10), "00:00:00")
+
+    def test_recording_status_hides_paths_ids_and_technical_errors(self):
+        status = format_recording_status({
+            "state": "idle",
+            "last_status": "partial",
+            "elapsed": 31,
+            "partial": True,
+            "final_audio": r"C:\\recordings\\20260915-opaque-id.wav",
+            "error": "native_discontinuity: HRESULT 0x88890004",
+        })
+
+        self.assertEqual(
+            status,
+            "Parcial · 00:00:31 · Gravação preservada · "
+            "Uma fonte de áudio foi interrompida · Não foi possível concluir uma etapa",
+        )
+        self.assertNotIn("opaque-id", status)
+        self.assertNotIn("HRESULT", status)
+
+    def test_empty_destination_has_a_clear_local_default_label(self):
+        self.assertEqual(destination_display(""), "Pasta local padrão (recordings)")
+        self.assertEqual(destination_display(r"C:\\Audio"), r"C:\\Audio")
+
+    def test_custom_destination_can_return_to_the_local_default(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.destination = Variable(r"C:\\Audio")
+        view.destination_label = Variable(r"C:\\Audio")
+
+        view.use_default_destination()
+
+        self.assertEqual(view.destination.get(), "")
+        self.assertEqual(
+            view.destination_label.get(), "Pasta local padrão (recordings)",
+        )
+
+    def test_processing_errors_are_hidden_behind_recording_details(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.status = Variable()
+        view.record_details = ""
+        view.record_details_button = mock.Mock()
+
+        view._processing_launched("meeting", False, "HRESULT 0x88890004")
+
+        self.assertEqual(
+            view.status.get(),
+            "Não foi possível iniciar o processamento local. Veja os detalhes na aba Gravação.",
+        )
+        self.assertNotIn("HRESULT", view.status.get())
+        self.assertIn("HRESULT", view.record_details)
+        view.record_details_button.configure.assert_called_with(state="normal")
 
     def test_summary_inventory_result_is_applied_only_on_gui_callback(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -195,7 +274,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.endpoint_vars = {track: Variable("old default") for track in ("microphone", "system")}
         view.endpoint_boxes = {track: mock.Mock() for track in ("microphone", "system")}
         for name in ("profile", "language", "profile_display", "language_display", "hotkey",
-                     "summary_model", "summary_display", "status", "destination"):
+                     "summary_model", "summary_display", "status", "destination",
+                     "destination_label"):
             setattr(view, name, Variable())
         view.input_enabled, view.output_enabled = Variable(True), Variable(True)
         view.auto_transcribe, view.auto_summary = Variable(False), Variable(False)
@@ -240,6 +320,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.controller = mock.Mock()
         view.refresh_library = mock.Mock()
         view._submit = mock.Mock(return_value=True)
+        view.delete_button = mock.Mock()
         return view
 
     def test_failed_save_preserves_unsaved_notes_and_does_not_navigate(self):
@@ -267,6 +348,36 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.detail_ready = False
         view.save_notes()
         view._submit.assert_not_called()
+
+    def test_delete_selected_requires_confirmation_and_runs_in_background(self):
+        view = self.make_edit_view()
+        view.window = mock.Mock()
+        view.delete_button = mock.Mock()
+        view._clear_library_detail = mock.Mock()
+
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm:
+            view.delete_selected()
+
+        self.assertIn("não será apagado", confirm.call_args.args[1])
+        key, operation, callback = view._submit.call_args.args
+        self.assertEqual(key, "delete_session")
+        operation()
+        view.controller.delete_session.assert_called_once_with("one")
+        callback(True, None)
+        view._clear_library_detail.assert_called_once_with()
+        view.refresh_library.assert_called_once_with()
+        self.assertIn("excluída", view.status.get())
+
+    def test_delete_selected_cancel_preserves_the_recording(self):
+        view = self.make_edit_view()
+        view.window = mock.Mock()
+        view.delete_button = mock.Mock()
+
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=False):
+            view.delete_selected()
+
+        view._submit.assert_not_called()
+        view.controller.delete_session.assert_not_called()
 
     def test_detail_projection_bounds_notes_bookmarks_and_transcript_text(self):
         view = self.make_edit_view()
@@ -451,7 +562,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIs(view.notebook, notebook)
             self.assertEqual(
                 titles,
-                ["Gravação", "Biblioteca", "Settings"],
+                ["Gravação", "Biblioteca", "Configurações"],
             )
             settings_widgets = descendants(view.settings_tab)
             settings_radios = [
@@ -476,6 +587,43 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             ]
             self.assertIn("Importar áudio…", library_buttons)
             self.assertNotIn("Importar WAV…", library_buttons)
+        finally:
+            view.close_without_prompt(destroy=False)
+            manager.destroy()
+            self.root.update()
+
+    def test_settings_mousewheel_scrolls_when_pointer_is_over_content(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        manager = tk.Toplevel(self.root)
+        manager.geometry("1120x820")
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        try:
+            notebook.select(view.settings_tab)
+            self.root.update()
+            view.settings_canvas.yview_moveto(0)
+            self.root.update()
+            target = next(
+                widget for widget in descendants(view.settings_content)
+                if isinstance(widget, tk.Label) and "Qwen3.5 4B" in widget.cget("text")
+            )
+            before = view.settings_canvas.yview()[0]
+
+            if sys.platform.startswith(("win", "darwin")):
+                target.event_generate("<MouseWheel>", delta=-120)
+            else:
+                target.event_generate("<Button-5>")
+            self.root.update()
+
+            self.assertGreater(view.settings_canvas.yview()[0], before)
         finally:
             view.close_without_prompt(destroy=False)
             manager.destroy()

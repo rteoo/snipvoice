@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 3.1.0 - 2026-09-15
+
+- Refine the recording workspace with a responsive layout, full-width automation controls, and recording defaults in Configurações.
+- Replace raw recording errors with friendly status messages while keeping technical details available on demand.
+- Add a clear action for restoring the default recording destination.
+- Add safe library deletion with confirmation while preserving audio exported outside the managed recording folder.
+- Make the Settings model list respond to the mouse wheel.
+- Improve disabled-control contrast and Portuguese interface consistency.
+
 ## 3.0.0 - 2026-09-15
 
 - Add independent microphone/system toggles and bounded live two-track waveforms.

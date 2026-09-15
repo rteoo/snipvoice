@@ -1,5 +1,5 @@
 """Snipvoice - local push-to-talk dictation for Windows and macOS.
-Version: 3.0.0
+Version: 3.1.0
 Channel: stable
 
 Recording is explicit and local. Audio and transcripts are kept in recoverable
@@ -64,7 +64,7 @@ from voice_support import VoiceController
 from meeting_support import MeetingController
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 RELEASE_CHANNEL = "stable"
 APP_DISPLAY_NAME = f"Snipvoice v{APP_VERSION}"
 if RELEASE_CHANNEL != "stable":
@@ -304,14 +304,14 @@ class Snipvoice:
         tab = tk.Frame(notebook, bg=ui.surface)
         self._manager_voice_tab = tab
         notebook.add(tab, text="Ditado")
-        # The meeting view owns Settings and adds it before the voice tab. Move
+        # The meeting view owns the Configurações page and adds it before the voice tab. Move
         # that existing tab to the end so the user-facing order stays stable:
-        # Gravação, Biblioteca, Ditado, Settings.
+        # Gravação, Biblioteca, Ditado, Configurações.
         if settings_tab is not None:
             try:
                 notebook.insert("end", settings_tab)
             except tk.TclError:
-                self.logger.debug("Não foi possível reposicionar a aba Settings")
+                self.logger.debug("Não foi possível reposicionar a aba Configurações")
         if self.voice is None:
             tk.Label(tab, text="Entrada por voz indisponível. Verifique o runtime de transcrição.",
                      bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(padx=24, pady=24)
@@ -818,7 +818,7 @@ class Snipvoice:
 
 
     def _build_voice_settings_controls(self, parent, owner, models_parent=None):
-        """Build Ditado controls and, when supplied, the Settings model inventory."""
+        """Build Ditado controls and, when supplied, the Configurações model inventory."""
         from voice_catalog import (
             available_languages,
             default_language_for_profile,
@@ -847,7 +847,7 @@ class Snipvoice:
         profile_labels = []
         download_buttons = []
 
-        # Settings owns the long download inventory. The fallback keeps direct
+        # The Configurações page owns the long download inventory. The fallback keeps direct
         # callers and older embedded views functional while the manager view is
         # being upgraded to expose ``transcription_models_parent``.
         model_parent = models_parent if models_parent is not None else parent

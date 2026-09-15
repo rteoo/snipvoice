@@ -174,6 +174,7 @@ class Theme:
             "fg": self.text_native,
             "activebackground": bg,
             "activeforeground": self.text_native,
+            "disabledforeground": self.text_muted,
         }
 
     def toolbar_frame_colors(self):
