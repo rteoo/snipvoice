@@ -152,6 +152,12 @@ class PackagingExcludeTests(unittest.TestCase):
         for forbidden_library in ("libx264", "libx265", "libfdk-aac"):
             self.assertNotIn(f'"--enable-{forbidden_library}"', recipe_text)
 
+        with open(
+            os.path.join(ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8"
+        ) as handle:
+            quality_workflow = handle.read()
+        self.assertNotIn('python -c "import av,', quality_workflow)
+
     def test_packaged_probe_rejects_non_clean_ffmpeg(self):
         probe = os.path.join(ROOT, "source", "voice_runtime_probe.py")
         validator = os.path.join(ROOT, "source", "clean_ffmpeg_runtime.py")
