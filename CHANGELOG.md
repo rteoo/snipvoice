@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+## 2.0.0 - 2026-09-15
+
 - Replace the external Ollama summary adapter with a packaged llama.cpp runtime.
 - Add verified in-app downloads for Qwen3.5 2B and 4B, IBM Granite 4.2 3B, and Gemma 4 E2B/E4B GGUF models.
 - Add a dedicated summary-model settings tab with selection, removal, cancellation, license details, and resource-size labels.
+- Unify voice setup, meeting recording, the library, and summary models in one Fluent-style settings window.
+- Keep the meeting tray shortcut focused on the recording tab while reusing the shared application window.
+- Retry brief Windows file-sharing conflicts while atomically saving settings and meeting metadata.
 
 ## 1.0.0 - 2026-09-14
 

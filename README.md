@@ -40,7 +40,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v1.0.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.0.0).
+[stable v2.0.0 release](https://github.com/rteoo/snipvoice/releases/tag/v2.0.0).
 To run from source with Python installed:
 
 ```powershell
@@ -57,7 +57,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v1.0.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.0.0):
+[`v2.0.0`](https://github.com/rteoo/snipvoice/releases/tag/v2.0.0):
 
 | Platform | Package |
 | --- | --- |
@@ -68,6 +68,13 @@ The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
+
+### What's new in v2.0.0
+
+- One Fluent-style window now contains voice setup, recording, the meeting library, and local-summary settings.
+- Meeting capture supports separate microphone and speaker-output tracks with OS-default or manually selected devices.
+- Built-in llama.cpp summaries replace Ollama and offer verified in-app downloads for Qwen3.5, Granite 4.2, and Gemma 4 models.
+- Windows ships as a per-user `.exe` installer and portable ZIP; Apple Silicon macOS ships as an ad-hoc-signed app ZIP.
 
 ## First use
 
