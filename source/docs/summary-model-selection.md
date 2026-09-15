@@ -32,6 +32,7 @@ it does not follow a mutable `main` download URL.
 | Qwen3.5 4B Q4_K_M | Higher quality | 4B | 2.52 GiB | LM Studio Community conversion of Qwen | Apache-2.0 |
 | IBM Granite 4.2 3B Q4_K_M | Current IBM alternative | 3B | 2.09 GiB | First-party IBM GGUF | Apache-2.0 |
 | Gemma 4 E2B QAT Q4_0 | Current Google alternative | E2B / 5B total | 3.12 GiB | First-party Google GGUF | Apache-2.0 |
+| Gemma 4 E4B QAT Q4_0 | Higher-capacity Google option | E4B / 8B total | 4.80 GiB | First-party Google GGUF | Apache-2.0 |
 
 [Qwen3.5 4B](https://huggingface.co/Qwen/Qwen3.5-4B) stays within the requested
 4B ceiling and offers a quality-oriented option for machines with more memory.
@@ -51,6 +52,13 @@ Q4_0 GGUF is 3,349,516,256 bytes with SHA-256
 `fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634`.
 The separate multimodal projector is intentionally not downloaded because
 Snipvoice sends transcript text only.
+
+[Gemma 4 E4B](https://huggingface.co/google/gemma-4-E4B-it) is an advanced
+opt-in. Google reports 4.5B effective and 8B total parameters. Its published
+benchmarks are materially above E2B, including MMLU-Pro 69.4% versus 60.0% and
+MMMLU 76.6% versus 67.4%; these vendor results do not measure Snipvoice summary
+quality. The pinned first-party QAT Q4_0 GGUF is 5,154,941,280 bytes with
+SHA-256 `676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee`.
 
 ## Downloader and compatibility rules
 
@@ -76,3 +84,6 @@ migrate to the corresponding current family without deleting old cached files.
 - Gemma 4 E2B exceeds four billion total parameters even though its name and
   effective-compute class are E2B. Its download size and both parameter figures
   remain visible before download.
+- Gemma 4 E4B is outside the original 1–4B total-parameter target. It remains an
+  explicit advanced option because its 4.5B effective class can improve quality
+  on hardware that can accommodate the 4.80 GiB weights plus runtime overhead.

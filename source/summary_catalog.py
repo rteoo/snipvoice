@@ -90,6 +90,29 @@ SUMMARY_CATALOG = (
         "requires_acceptance": False,
         "disable_thinking": False,
     },
+    {
+        "id": "gemma-4-e4b-q4",
+        "profile": "gemma-4-e4b-q4",
+        "name": "Gemma 4 E4B",
+        "description": "4,5B efetivos / 8B totais · mais qualidade e maior uso de memória",
+        "filename": "gemma-4-E4B_q4_0-it.gguf",
+        "url": (
+            "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/"
+            "4b4a2c1d584be7264f87aac328a1bc739ce81b6c/gemma-4-E4B_q4_0-it.gguf"
+        ),
+        "sha256": "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee",
+        "size_bytes": 5_154_941_280,
+        "parameters": "E4B / 8B",
+        "context_length": 4096,
+        "license_id": "Apache-2.0",
+        "license_url": (
+            "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob/main/LICENSE"
+        ),
+        "upstream_model": "google/gemma-4-E4B-it",
+        "quant_source": "google/gemma-4-E4B-it-qat-q4_0-gguf",
+        "requires_acceptance": False,
+        "disable_thinking": False,
+    },
 )
 
 
