@@ -408,7 +408,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertIn("Voz", title)
         self.assertEqual(
             titles,
-            ["Voz", "Gravar e configurar", "Biblioteca e transcrição"],
+            [
+                "Voz",
+                "Gravar e configurar",
+                "Biblioteca e transcrição",
+                "Resumo local",
+            ],
         )
 
     def test_meeting_shortcut_reuses_manager_and_selects_recording_tab(self):
@@ -448,7 +453,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             titles,
-            ["Diagnóstico", "Gravar e configurar", "Biblioteca e transcrição"],
+            [
+                "Diagnóstico",
+                "Gravar e configurar",
+                "Biblioteca e transcrição",
+                "Resumo local",
+            ],
         )
         self.assertIsNone(self.app._manager_voice_refresher)
 
