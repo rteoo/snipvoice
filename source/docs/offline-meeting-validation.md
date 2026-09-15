@@ -2,8 +2,9 @@
 
 Date: 2026-09-14. Branch: `codex/offline-meetings`.
 
-Source implementation is integrated. Native platform acceptance and publication
-remain open; this is not a certified desktop release.
+Source implementation is integrated and published for review in
+[PR #1](https://github.com/rteoo/snipvoice/pull/1). Native physical platform
+acceptance remains open; this is not a certified desktop release.
 
 ## Delivered checkpoints
 
@@ -39,6 +40,9 @@ same final key and overlapping modifier subsets are rejected in both settings fl
 - `python -m compileall -q source`: passed.
 - `python -m pip check`: passed.
 - `git diff --check`: passed.
+- GitHub CI: **13 jobs passed** across Windows, macOS and Linux on Python 3.12
+  and 3.14. Hosted Windows and macOS jobs compiled both capture helpers and ran
+  their non-recording probes successfully.
 - Independent integration and native protocol reviews completed. Corrections
   include device-change timestamps, matching sample-rate ceilings, required integer
   generations, error exit handling, partial loss statuses, and reservation retention
@@ -57,22 +61,18 @@ recordings, models, settings or command libraries were copied into the repositor
 
 ## Remaining acceptance gates
 
-1. Compile both helpers with their actual SDKs and run non-recording binary probes.
-   Windows MSVC/SDK compilation is unavailable on this host. Transfer of the owned
-   Swift source to mac-mini for compilation was automatically rejected because that
-   exact source transfer was not explicitly authorized; nothing was transferred.
-2. Use isolated synthetic signals on physical Windows and macOS hardware to verify
+1. Use isolated synthetic signals on physical Windows and macOS hardware to verify
    microphone/output selection, simultaneous tracks, formats, pause, permission
    denial, endpoint changes, and cleanup. A tap-only aggregate on macOS needs actual
    signal verification; static API review does not establish successful capture.
-3. Record two hours on each platform and measure start/end synchronization, drift,
+2. Record two hours on each platform and measure start/end synchronization, drift,
    bounded memory, disk latency and recoverability. Unit queue/storage limits do
    not certify physical long-session behavior.
-4. Exercise the real Tk workspace, cold offline startup, actual local ASR weights,
+3. Exercise the real Tk workspace, cold offline startup, actual local ASR weights,
    physical playback, existing Ollama weights with outbound networking blocked,
    and staged packages/signatures. No packaged release was built or promoted here.
-5. Set the user-specified GitHub destination, push the task branch, create the PR,
-   and inspect platform CI. The repository currently has no Git remote.
+4. Review and merge PR #1 only after the physical acceptance gates required for the
+   intended release have been assigned or completed.
 
 ## Deliberate limits
 
