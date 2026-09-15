@@ -12,7 +12,7 @@ import wave
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from meeting_files import IMPORT_FRAMES, export_meeting, import_wav, play_audio
+from meeting_files import IMPORT_FRAMES, export_meeting, import_audio, import_wav, play_audio
 from meeting_store import MeetingStore
 
 
@@ -91,6 +91,91 @@ class MeetingFilesTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 import_wav(self.store, path, {})
         self.assertEqual(self.store.list_sessions(), [])
+
+    def test_compressed_audio_uses_bounded_pyav_frames_and_provenance(self):
+        class Layout:
+            name = "stereo"
+            nb_channels = 2
+
+        class Format:
+            name = "flt"
+
+        class Frame:
+            sample_rate = 48000
+            layout = Layout()
+            format = Format()
+
+            def __init__(self, samples, value):
+                self.samples = samples
+                self.planes = (struct.pack("<" + "f" * samples * 2, *([value] * samples * 2)),)
+
+        class Streams:
+            @staticmethod
+            def best(kind):
+                return object() if kind == "audio" else None
+
+        class Container:
+            streams = Streams()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            @staticmethod
+            def decode(_stream):
+                return iter((Frame(IMPORT_FRAMES, 0.25), Frame(3, -0.5)))
+
+        class Resampler:
+            def __init__(self, **options):
+                self.options = options
+
+            @staticmethod
+            def resample(frame):
+                return [] if frame is None else [frame]
+
+        fake_av = types.SimpleNamespace(open=lambda *_args, **_kwargs: Container(), AudioResampler=Resampler)
+        path = self.root / "reunião.m4a"
+        path.write_bytes(b"fake container")
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            sid = import_audio(self.store, path, {})
+
+        chunks = list(self.store.iter_audio(sid))
+        self.assertEqual([event["frames"] for event, _ in chunks], [IMPORT_FRAMES, 3])
+        self.assertEqual(chunks[1][0]["timestamp"], IMPORT_FRAMES / 48000)
+        self.assertAlmostEqual(struct.unpack_from("<f", chunks[0][1])[0], 0.25)
+        metadata = self.store.get(sid)
+        self.assertEqual(metadata["status"], "completed")
+        imported = next(event for event in self.store.iter_events(sid) if event["type"] == "imported_audio")
+        self.assertEqual((imported["filename"], imported["source_format"], imported["decoder"]),
+                         ("reunião.m4a", "m4a", "PyAV"))
+
+    def test_unsupported_audio_is_rejected_before_session_creation(self):
+        path = self.root / "input.wma"
+        path.write_bytes(b"unsupported")
+        with self.assertRaisesRegex(ValueError, "WAV, MP3, AAC/M4A, FLAC, OGG ou Opus"):
+            import_audio(self.store, path, {})
+        self.assertEqual(self.store.list_sessions(), [])
+
+    def test_cancelled_compressed_import_preserves_completed_prefix(self):
+        path = self.root / "input.mp3"
+        path.write_bytes(b"fake container")
+        cancellation = threading.Event()
+        chunk = (48000, 1, struct.pack("<" + "f" * IMPORT_FRAMES, *([0.25] * IMPORT_FRAMES)))
+        append = self.store.append_audio
+
+        def cancel_after_first(*arguments):
+            append(*arguments)
+            cancellation.set()
+
+        with mock.patch("meeting_files._pyav_chunks", return_value=iter((chunk, chunk))), \
+                mock.patch.object(self.store, "append_audio", side_effect=cancel_after_first):
+            with self.assertRaisesRegex(RuntimeError, "cancelada"):
+                import_audio(self.store, path, {}, cancellation)
+        item = self.store.list_sessions()[0]
+        self.assertEqual(item["status"], "cancelled")
+        self.assertEqual(len(list(self.store.iter_audio(item["id"]))), 1)
 
     def test_json_and_text_include_revision_notes_bookmarks_and_gaps(self):
         sid = self.session()

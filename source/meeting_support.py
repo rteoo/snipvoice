@@ -16,6 +16,7 @@ from meeting_audio import NativeCapture
 from meeting_mixdown import export_mixdown
 from meeting_settings import resolve_meeting_settings
 from meeting_store import MeetingStore
+from meeting_titles import initial_recording_title, refine_recording_title
 
 
 WAVEFORM_POINTS = 360
@@ -130,6 +131,7 @@ class MeetingController:
                 return False
             if self._play_thread and self._play_thread.is_alive():
                 return False
+            title = initial_recording_title(title)
             self._generation += 1
             self._state, self._error = "starting", ""
             self._source_errors.clear()
@@ -320,6 +322,7 @@ class MeetingController:
                 if self._cancel.is_set():
                     errors.append("o processamento automático foi cancelado")
                 else:
+                    self._refine_automatic_title(session_id)
                     transcription_ready = True
             except Exception as exc:
                 errors.append("a transcrição automática falhou: " + str(exc))
@@ -388,6 +391,8 @@ class MeetingController:
             try:
                 transcribe_meeting(self.store, session_id, profile, language,
                                    self.voice.cache_dir, cancel_event=self._cancel)
+                if not self._cancel.is_set():
+                    self._refine_automatic_title(session_id)
             except Exception as exc:
                 if getattr(exc, "resource_live", False):
                     release = False
@@ -398,6 +403,17 @@ class MeetingController:
                 if release:
                     self.voice.release_meeting(token)
         return self._launch_processing(work)
+
+    def _refine_automatic_title(self, session_id):
+        metadata = self.store.get(session_id)
+        current = metadata.get("title", "")
+        refined = refine_recording_title(
+            current,
+            session_id,
+            self.store.get_transcript(session_id),
+        )
+        if refined != current:
+            self.store.update(session_id, title=refined)
 
     def cancel_processing(self):
         self._cancel.set()
@@ -412,9 +428,12 @@ class MeetingController:
                 self.voice.release_meeting(token)
         return self._launch_processing(work)
 
+    def import_audio(self, path, settings):
+        from meeting_files import import_audio
+        return self._file_work(lambda: import_audio(self.store, path, settings, cancel_event=self._cancel))
+
     def import_wav(self, path, settings):
-        from meeting_files import import_wav
-        return self._file_work(lambda: import_wav(self.store, path, settings, cancel_event=self._cancel))
+        return self.import_audio(path, settings)
 
     def export(self, session_id, path, format="markdown"):
         from meeting_files import export_meeting

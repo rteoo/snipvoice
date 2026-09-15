@@ -1,6 +1,7 @@
 """Worker-owned, bounded WAV import, provenance exports, and native playback."""
 
 import array
+import itertools
 import json
 import math
 import os
@@ -15,6 +16,7 @@ import wave
 PLAY_FRAMES = 1024
 IMPORT_FRAMES = 8192
 RIFF_LIMIT = 0xFFFFFFFF
+SUPPORTED_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg", ".opus"})
 
 
 def _cancel(cancel_event):
@@ -115,6 +117,127 @@ def import_wav(store, path, settings, cancel_event=None):
             except Exception as persistence_error:
                 raise OSError("A importação falhou e não foi possível registrar o estado final. Preserve a reunião para recuperação.") from persistence_error
         raise
+
+
+def _pyav_chunks(path, cancel_event=None):
+    try:
+        import av
+    except ImportError as error:
+        raise RuntimeError(
+            "A importação deste formato exige o decodificador de áudio incluído na instalação completa do Snipvoice."
+        ) from error
+    try:
+        with av.open(str(path), mode="r") as container:
+            stream = container.streams.best("audio")
+            if stream is None:
+                raise ValueError("O arquivo não contém uma faixa de áudio compatível.")
+            resampler = None
+            rate = channels = None
+            decoded = False
+            for source_frame in container.decode(stream):
+                _cancel(cancel_event)
+                if resampler is None:
+                    rate = source_frame.sample_rate
+                    channels = source_frame.layout.nb_channels
+                    if channels not in range(1, 9) or not isinstance(rate, int) or not 8000 <= rate <= 192000:
+                        raise ValueError("Use áudio de 8–192 kHz e 1–8 canais.")
+                    resampler = av.AudioResampler(
+                        format="flt", layout=source_frame.layout.name, rate=rate,
+                        frame_size=IMPORT_FRAMES,
+                    )
+                for frame in resampler.resample(source_frame):
+                    decoded = True
+                    yield rate, channels, _packed_float_frame(frame, rate, channels)
+            if resampler is not None:
+                for frame in resampler.resample(None):
+                    decoded = True
+                    yield rate, channels, _packed_float_frame(frame, rate, channels)
+            if not decoded:
+                raise ValueError("O arquivo não contém áudio decodificável.")
+    except Exception as error:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError(
+                "A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."
+            ) from error
+        ffmpeg_error = getattr(av, "FFmpegError", ())
+        if isinstance(error, ffmpeg_error):
+            raise ValueError("Não foi possível decodificar o arquivo de áudio selecionado.") from error
+        if isinstance(error, (OSError, ValueError)):
+            raise
+        raise ValueError("Não foi possível decodificar o arquivo de áudio selecionado.") from error
+
+
+def _packed_float_frame(frame, rate, channels):
+    if (frame.sample_rate != rate or frame.layout.nb_channels != channels
+            or frame.format.name != "flt" or len(frame.planes) != 1):
+        raise ValueError("O formato do áudio mudou durante a decodificação.")
+    if not isinstance(frame.samples, int) or frame.samples < 1 or frame.samples > IMPORT_FRAMES:
+        raise ValueError("O decodificador retornou um bloco de áudio inválido.")
+    expected = frame.samples * channels * 4
+    plane = memoryview(frame.planes[0])
+    if len(plane) < expected:
+        raise ValueError("O decodificador retornou um bloco de áudio incompleto.")
+    payload = bytes(plane[:expected])
+    if sys.byteorder != "little":
+        values = array.array("f")
+        values.frombytes(payload)
+        values.byteswap()
+        payload = values.tobytes()
+    return payload
+
+
+def import_audio(store, path, settings, cancel_event=None):
+    """Import a supported local audio file into the append-only meeting store."""
+    _cancel(cancel_event)
+    path = Path(path)
+    suffix = path.suffix.casefold()
+    if suffix not in SUPPORTED_AUDIO_EXTENSIONS:
+        raise ValueError("Escolha um arquivo WAV, MP3, AAC/M4A, FLAC, OGG ou Opus.")
+    if suffix == ".wav":
+        return import_wav(store, path, settings, cancel_event)
+    snapshot = settings.payload() if hasattr(settings, "payload") else dict(settings)
+    chunks = iter(_pyav_chunks(path, cancel_event))
+    first = next(chunks, None)
+    if first is None:
+        raise ValueError("O arquivo não contém áudio decodificável.")
+    session = None
+    try:
+        session = store.begin(snapshot, path.stem[:400])
+        store.add_event(session, {
+            "type": "imported_audio", "timestamp": 0.0, "track": "microphone",
+            "filename": path.name, "source_format": suffix[1:],
+            "decoder": "PyAV", "timing_precision": "audio_frames",
+        })
+        frames_read = 0
+        sequence = 0
+        for rate, channels, payload in itertools.chain((first,), chunks):
+            _cancel(cancel_event)
+            frames = len(payload) // (channels * 4)
+            if frames < 1 or frames > IMPORT_FRAMES or len(payload) != frames * channels * 4:
+                raise ValueError("O decodificador retornou um bloco de áudio inválido.")
+            store.append_audio(session, {
+                "type": "audio", "generation": 0, "track": "microphone", "sequence": sequence,
+                "rate": rate, "channels": channels, "frames": frames, "timestamp": frames_read / rate,
+            }, payload)
+            frames_read += frames
+            sequence += 1
+        _cancel(cancel_event)
+        store.finish(session)
+        return session
+    except Exception as error:
+        if session is not None:
+            try:
+                status = "cancelled" if cancel_event is not None and cancel_event.is_set() else "failed"
+                store.finish(session, status, str(error))
+            except Exception as persistence_error:
+                raise OSError(
+                    "A importação falhou e não foi possível registrar o estado final. Preserve a reunião para recuperação."
+                ) from persistence_error
+        raise
+    finally:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
 
 
 def _events(store, session, metadata):

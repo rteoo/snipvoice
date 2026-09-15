@@ -447,8 +447,7 @@ class MeetingWindow:
         commands = tk.Frame(settings_card, bg=self.ui.card)
         commands.grid(row=note_row + 1, column=0, columnspan=2, sticky="w")
         self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
-        self._button(commands, "Salvar", self.save_settings).pack(side="left", padx=(0, 8))
-        self._button(commands, "Importar modelo local…", self.import_model).pack(side="left")
+        self._button(commands, "Salvar", self.save_settings).pack(side="left")
         activity = self._card(recording, pady=card_pady)
         activity.grid(row=0, column=1, sticky="nsew")
         self._label(
@@ -500,14 +499,8 @@ class MeetingWindow:
         for entry in entries:
             row = self._card(parent, pady=self.ui.space_sm if compact else self.ui.space_md)
             row.pack(fill="x", pady=2 if compact else self.ui.space_xs)
-            choice = tk.Radiobutton(
-                row, variable=self.summary_model, value=entry["id"],
-                command=self._summary_choice_changed, font=self.ui.font(), anchor="nw",
-                **self.ui.checkbutton_colors(self.ui.card),
-            )
-            choice.pack(side="left", anchor="n")
             copy = tk.Frame(row, bg=self.ui.card)
-            copy.pack(side="left", fill="x", expand=True, padx=(4, 12))
+            copy.pack(side="left", fill="x", expand=True, padx=(0, 12))
             self._label(copy, f'{entry["name"]} · {format_model_size(entry["size_bytes"])} · '
                         f'{entry["license_id"]}', anchor="w",
                         bg=self.ui.card, fg=self.ui.text_strong,
@@ -520,8 +513,7 @@ class MeetingWindow:
             self.summary_model_buttons[entry["id"]] = button
         actions = ttk.Frame(parent, style="Meeting.TFrame")
         actions.pack(fill="x", pady=(12 if compact else 18, 0))
-        self._button(actions, "Salvar modelo padrão", self.save_settings, accent=True).pack(side="left")
-        self._button(actions, "Cancelar download", self.cancel_summary_download).pack(side="left", padx=8)
+        self._button(actions, "Cancelar download", self.cancel_summary_download).pack(side="left")
         self.summary_model_status = tk.StringVar(self.window)
         self._label(parent, "", textvariable=self.summary_model_status, anchor="w",
                     wraplength=900).pack(fill="x", pady=12)
@@ -530,9 +522,6 @@ class MeetingWindow:
     def _summary_display_changed(self, _event=None):
         self.summary_model.set(next(key for key, label in SUMMARY_LABELS.items()
                                     if label == self.summary_display.get()))
-
-    def _summary_choice_changed(self):
-        self.summary_display.set(SUMMARY_LABELS[self.summary_model.get()])
 
     def _refresh_summary_models(self):
         for button in self.summary_model_buttons.values():
@@ -638,7 +627,7 @@ class MeetingWindow:
                                values=list(STATUS_FILTERS), width=14)
         filters.pack(side="left", padx=(0, 8))
         filters.bind("<<ComboboxSelected>>", lambda _event: self.search())
-        self._button(search_row, "Importar WAV…", self.import_wav).pack(side="left")
+        self._button(search_row, "Importar áudio…", self.import_audio).pack(side="left")
         panes = ttk.Panedwindow(parent, orient="horizontal")
         panes.pack(fill="both", expand=True)
         left = ttk.Frame(panes, style="Meeting.TFrame")
@@ -1156,14 +1145,20 @@ class MeetingWindow:
             self._action("import_model", profile, path,
                          callback=lambda value, error: self._processing_launched("", value, error))
 
-    def import_wav(self):
+    def import_audio(self):
         try:
             settings = self._current_settings()
         except ValueError as exc:
             self.status.set(str(exc))
             return
-        path = filedialog.askopenfilename(parent=self.window, title="Importar áudio WAV",
-                                           filetypes=(("Áudio WAV", "*.wav"),))
+        path = filedialog.askopenfilename(
+            parent=self.window,
+            title="Importar áudio",
+            filetypes=(
+                ("Áudio compatível", "*.wav *.mp3 *.aac *.m4a *.flac *.ogg *.opus"),
+                ("Todos os arquivos", "*"),
+            ),
+        )
         if path:
             def imported(session_id, error):
                 if error:
@@ -1171,7 +1166,7 @@ class MeetingWindow:
                     return
                 self.refresh_library()
                 self.load_session(session_id)
-            self._action("import_wav", path, settings, callback=imported)
+            self._action("import_audio", path, settings, callback=imported)
 
     def export(self, format):
         if not self.selected:
