@@ -4,10 +4,11 @@ import threading
 import time
 import tkinter as tk
 import unittest
+from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT,
+    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, add_meeting_tabs,
     endpoint_options, format_time, open_meeting_window, validated_settings,
 )
 from meeting_settings import EndpointSelection, resolve_meeting_settings
@@ -86,6 +87,35 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(format_time(float("nan")), "00:00:00")
         self.assertEqual(format_time(-10), "00:00:00")
 
+    def test_summary_inventory_result_is_applied_only_on_gui_callback(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        button = mock.Mock()
+        view.summary_model_buttons = {"qwen": button}
+        view.summary_model_status = Variable()
+        view._summary_inventory_loaded({"qwen": True}, None)
+        self.assertEqual(view.summary_model_installed, {"qwen": True})
+        button.configure.assert_called_once_with(text="Remover", state="normal")
+
+    def test_summary_download_shows_license_and_uses_background_job(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        view.status = Variable()
+        view.summary_model_installed = {}
+        view.summary_model_buttons = {"gemma-4-e2b-q4": mock.Mock()}
+        view.summary_model_status = Variable()
+        view.summary_progress_lock = threading.Lock()
+        view.summary_progress = None
+        view._submit = mock.Mock(return_value=True)
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm, \
+                mock.patch("meeting_gui.download_summary_model", return_value="model.gguf") as download:
+            view.toggle_summary_model("gemma-4-e2b-q4")
+            operation = view._submit.call_args.args[1]
+            operation()
+        self.assertIn("Apache-2.0", confirm.call_args.args[1])
+        download.assert_called_once()
+        self.assertIsNotNone(download.call_args.kwargs["cancel_event"])
+        self.assertTrue(callable(download.call_args.kwargs["progress"]))
+
     def test_initial_saved_manual_selection_overrides_constructor_defaults(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.raw_settings = {}
@@ -94,7 +124,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.options = {"microphone": [("old default", EndpointSelection())]}
         view.endpoint_vars = {track: Variable("old default") for track in ("microphone", "system")}
         view.endpoint_boxes = {track: mock.Mock() for track in ("microphone", "system")}
-        for name in ("sources", "profile", "language", "profile_display", "language_display", "hotkey", "summary_model", "status"):
+        for name in ("sources", "profile", "language", "profile_display", "language_display", "hotkey", "summary_model", "summary_display", "status"):
             setattr(view, name, Variable())
         view.language_box = mock.Mock()
         view._settings_loaded({"meeting_microphone": {"mode": "manual", "endpoint_id": "missing"}}, None)
@@ -161,6 +191,34 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertTrue(metadata["truncated"])
         self.assertNotIn("events", metadata)
         self.assertEqual(len(segments[0]["text"]), 8000)
+
+    def test_embedded_close_runs_owner_callback_without_destroying_shared_window(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed, view.dirty = False, False
+        view.bridge, view.root, view.window = mock.Mock(), mock.Mock(), mock.Mock()
+        view.after_id = None
+        after_close = mock.Mock()
+
+        view.close(destroy=False, after_close=after_close)
+
+        self.assertTrue(view.closed)
+        view.bridge.close.assert_called_once_with()
+        view.window.destroy.assert_not_called()
+        after_close.assert_called_once_with()
+
+    def test_embedded_close_cancel_keeps_shared_window_open(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed, view.dirty = False, True
+        view.bridge, view.root, view.window = mock.Mock(), mock.Mock(), mock.Mock()
+        view.after_id = None
+        after_close = mock.Mock()
+
+        with mock.patch("meeting_gui.messagebox.askyesnocancel", return_value=None):
+            view.close(destroy=False, after_close=after_close)
+
+        self.assertFalse(view.closed)
+        view.bridge.close.assert_not_called()
+        after_close.assert_not_called()
 
 
 class BackgroundBridgeTests(unittest.TestCase):
@@ -272,6 +330,34 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertIn("input", [selection.endpoint_id for _, selection in view.options["microphone"]])
         finally:
             view.close()
+            self.root.update()
+
+    def test_meeting_tabs_attach_to_an_existing_manager_notebook(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        manager = tk.Toplevel(self.root)
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        try:
+            self.root.update()
+            titles = [notebook.tab(tab_id, "text") for tab_id in notebook.tabs()]
+            self.assertTrue(view.embedded)
+            self.assertIs(view.window, manager)
+            self.assertIs(view.notebook, notebook)
+            self.assertEqual(
+                titles,
+                ["Gravar e configurar", "Biblioteca e transcrição", "Resumo local"],
+            )
+        finally:
+            view.close_without_prompt(destroy=False)
+            manager.destroy()
             self.root.update()
 
 

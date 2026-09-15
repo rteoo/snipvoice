@@ -265,7 +265,7 @@ def _hash_file(path):
                     break
                 hasher.update(chunk)
     except OSError as exc:
-        raise VoiceModelError(f"Falha ao verificar o modelo de voz: {exc}") from exc
+        raise VoiceModelError(f"Falha ao verificar o modelo: {exc}") from exc
     return hasher.hexdigest()
 
 
@@ -292,12 +292,12 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
     free = _free_bytes(dest_dir)
     if free < needed:
         raise VoiceModelError(
-            "Espaço em disco insuficiente para baixar o modelo de voz."
+            "Espaço em disco insuficiente para baixar o modelo."
         )
     if written == expected_size:
         if hasher.hexdigest() != entry["sha256"]:
             _remove_file(retained_path)
-            raise VoiceModelError("A verificação SHA-256 do modelo de voz falhou.")
+            raise VoiceModelError("A verificação SHA-256 do modelo falhou.")
         os.replace(retained_path, dest_file)
         _write_manifest(entry, cache_dir, entry["sha256"])
         return dest_file
@@ -387,7 +387,7 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
         if digest != entry["sha256"]:
             _remove_file(retained_path)
             raise VoiceModelError(
-                "A verificação SHA-256 do modelo de voz falhou."
+                "A verificação SHA-256 do modelo falhou."
             )
         os.replace(retained_path, dest_file)
         _write_manifest(entry, cache_dir, digest)
@@ -395,7 +395,7 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
     except VoiceModelError:
         raise
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise VoiceModelError(f"Falha ao baixar o modelo de voz: {exc}") from exc
+        raise VoiceModelError(f"Falha ao baixar o modelo: {exc}") from exc
 
 
 def _write_manifest(entry, cache_dir, digest, verified_stat=None):

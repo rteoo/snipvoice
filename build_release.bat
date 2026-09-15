@@ -51,13 +51,13 @@ if errorlevel 1 (
     echo Repair or select a Python installation with working Tcl/Tk before packaging.
     goto cleanup_and_fail
 )
-python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native" >nul 2>&1
+python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native, llama_cpp" >nul 2>&1
 if errorlevel 1 (
     echo Voice release dependencies are missing.
     echo Install them with: python -m pip install -r source\requirements-voice.txt
     goto cleanup_and_fail
 )
-set "VOICE_COLLECT_ARGS=--collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native"
+set "VOICE_COLLECT_ARGS=--collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native --collect-all llama_cpp"
 
 call "%REPO_DIR%\source\native\build_windows_capture.bat"
 if errorlevel 1 goto cleanup_and_fail
@@ -77,6 +77,12 @@ if not exist "%STAGING_DIR%" (
 start "" /wait "%STAGING_DIR%\Snipvoice.exe" --voice-runtime-probe
 if errorlevel 1 (
     echo Packaging failed: the staged voice runtime probe did not pass.
+    goto cleanup_and_fail
+)
+
+start "" /wait "%STAGING_DIR%\Snipvoice.exe" --summary-runtime-probe
+if errorlevel 1 (
+    echo Packaging failed: the staged llama.cpp summary runtime probe did not pass.
     goto cleanup_and_fail
 )
 

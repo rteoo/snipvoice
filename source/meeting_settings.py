@@ -4,8 +4,15 @@ from dataclasses import dataclass
 
 from voice_catalog import DEFAULT_PROFILE, LANGUAGE_AUTO, is_selectable_profile, is_known_language
 from voice_hotkey import parse_chord
+from summary_catalog import DEFAULT_SUMMARY_MODEL, is_known_summary_model
 
 SOURCES = ("both", "microphone", "system")
+LEGACY_SUMMARY_MODELS = {
+    "qwen3-1.7b-q4": DEFAULT_SUMMARY_MODEL,
+    "granite-3.3-2b-q4": "granite-4.2-3b-q4",
+    "granite-4.0-1b-q4": "granite-4.2-3b-q4",
+    "gemma-3-1b-q4": "gemma-4-e2b-q4",
+}
 
 
 @dataclass(frozen=True)
@@ -45,7 +52,7 @@ class MeetingSettings:
     hotkey: str = ""
     profile: str = DEFAULT_PROFILE
     language: str = LANGUAGE_AUTO
-    summary_model: str = ""
+    summary_model: str = DEFAULT_SUMMARY_MODEL
 
     def payload(self):
         return {"meeting_sources": self.sources,
@@ -70,12 +77,15 @@ def resolve_meeting_settings(value):
     language = data.get("meeting_language", LANGUAGE_AUTO)
     if not is_known_language(language):
         raise ValueError("Selecione um idioma de transcrição válido.")
-    model = data.get("meeting_summary_model", "")
-    if not isinstance(model, str) or len(model) > 256 or any(ord(c) < 32 for c in model):
-        raise ValueError("O nome do modelo local de resumo é inválido.")
+    model = data.get("meeting_summary_model", DEFAULT_SUMMARY_MODEL)
+    # Migrate previous built-in IDs and former free-form Ollama settings.
+    if isinstance(model, str):
+        model = LEGACY_SUMMARY_MODELS.get(model, model)
+    if not isinstance(model, str) or not is_known_summary_model(model):
+        model = DEFAULT_SUMMARY_MODEL
     return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),
                            resolve_selection(data.get("meeting_system")), hotkey,
-                           profile, language, model.strip())
+                           profile, language, model)
 
 
 def validate_hotkey_conflicts(settings):

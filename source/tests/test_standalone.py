@@ -106,6 +106,16 @@ class StandaloneTests(unittest.TestCase):
         mutex.assert_not_called()
         probe.assert_called_once_with()
 
+    def test_summary_probe_exits_before_mutex_or_tray(self):
+        probe = mock.Mock(return_value=0)
+        with mock.patch.dict(sys.modules, {"summary_runtime_probe": types.SimpleNamespace(main=probe)}), \
+                mock.patch.object(app, "acquire_single_instance_mutex") as mutex, \
+                self.assertRaises(SystemExit) as raised:
+            app.run_summary_runtime_probe_if_requested(["--summary-runtime-probe"])
+        self.assertEqual(raised.exception.code, 0)
+        mutex.assert_not_called()
+        probe.assert_called_once_with()
+
     def test_failed_autostart_change_reports_failure(self):
         self.instance.notify_error = mock.Mock()
         with mock.patch.object(app.platform_support, "install_autostart", return_value=False), \

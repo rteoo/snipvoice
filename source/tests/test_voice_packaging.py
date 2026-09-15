@@ -52,6 +52,8 @@ class PackagingExcludeTests(unittest.TestCase):
             self.assertIn("--collect-all transcribe_cpp", text)
             self.assertIn("--collect-all transcribe_cpp_native", text)
             self.assertIn("--voice-runtime-probe", text)
+            self.assertIn("--collect-all llama_cpp", text)
+            self.assertIn("--summary-runtime-probe", text)
 
     def test_release_bundles_the_application_license(self):
         windows = os.path.join(ROOT, "build_release.bat")
@@ -79,12 +81,20 @@ class PackagingExcludeTests(unittest.TestCase):
         for package in ("tkinter", "sounddevice", "soxr", "transcribe_cpp_native"):
             self.assertIn(f"import {package}", text)
 
+    def test_summary_runtime_probe_requires_packaged_llama_cpp(self):
+        path = os.path.join(ROOT, "source", "summary_runtime_probe.py")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("from llama_cpp import Llama", text)
+
     def test_entrypoint_runs_the_probe_before_desktop_imports(self):
         path = os.path.join(ROOT, "source", "snipvoice.pyw")
         with open(path, encoding="utf-8") as handle:
             text = handle.read()
         probe_call = "\nrun_voice_runtime_probe_if_requested()\n"
         self.assertLess(text.index(probe_call), text.index("import platform_support"))
+        summary_probe = "\nrun_summary_runtime_probe_if_requested()\n"
+        self.assertLess(text.index(summary_probe), text.index("import platform_support"))
 
     def test_voice_build_dependencies_are_version_pinned(self):
         path = os.path.join(ROOT, "source", "requirements-voice.txt")
@@ -101,6 +111,7 @@ class PackagingExcludeTests(unittest.TestCase):
                 "soxr==1.1.0",
                 "transcribe-cpp==0.1.3",
                 "transcribe-cpp-native==0.1.3",
+                "llama-cpp-python==0.3.35",
             },
         )
 

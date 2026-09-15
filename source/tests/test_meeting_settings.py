@@ -4,6 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from meeting_settings import resolve_meeting_settings, resolve_selection
+from summary_catalog import DEFAULT_SUMMARY_MODEL
 
 
 class MeetingSettingsTests(unittest.TestCase):
@@ -12,6 +13,7 @@ class MeetingSettingsTests(unittest.TestCase):
         self.assertEqual(settings.sources, "both")
         self.assertEqual(settings.microphone.argument(), "default:multimedia")
         self.assertEqual(settings.hotkey, "")
+        self.assertEqual(settings.summary_model, DEFAULT_SUMMARY_MODEL)
         self.assertNotIn("voice_enabled", settings.payload())
 
     def test_manual_id_and_role_round_trip(self):
@@ -33,3 +35,19 @@ class MeetingSettingsTests(unittest.TestCase):
                        {"meeting_profile": "streaming"}, {"meeting_language": "xx"}):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 resolve_meeting_settings(values)
+
+    def test_legacy_ollama_value_migrates_to_builtin_default(self):
+        settings = resolve_meeting_settings({"meeting_summary_model": "qwen:latest"})
+        self.assertEqual(settings.summary_model, DEFAULT_SUMMARY_MODEL)
+
+    def test_previous_builtin_catalog_ids_migrate_to_current_families(self):
+        expected = {
+            "qwen3-1.7b-q4": "qwen3.5-2b-q4",
+            "granite-3.3-2b-q4": "granite-4.2-3b-q4",
+            "granite-4.0-1b-q4": "granite-4.2-3b-q4",
+            "gemma-3-1b-q4": "gemma-4-e2b-q4",
+        }
+        for old, new in expected.items():
+            with self.subTest(old=old):
+                settings = resolve_meeting_settings({"meeting_summary_model": old})
+                self.assertEqual(settings.summary_model, new)
