@@ -43,6 +43,7 @@ MAX_PEOPLE = 512
 MAX_COLLECTIONS = 1024
 MAX_SPEAKER_LABELS = 10_000
 MAX_HIGHLIGHT_SEGMENTS = 512
+MAX_BATCH_ASSIGNMENTS = 500
 MAX_ID_CHARS = 128
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.05
@@ -53,6 +54,19 @@ REPORT_SECTIONS = frozenset({
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _REFERENCE_RE = re.compile(r"^[^/\\\x00]{1,128}$")
 _UNSET = object()
+
+
+class BatchOrganizationRollbackError(RuntimeError):
+    """A batch failed and one or more compensating writes also failed."""
+
+    def __init__(self, original_error, result):
+        self.original_error = original_error
+        self.result = copy.deepcopy(result)
+        failures = ", ".join(item["session_id"] for item in result["rollback_failures"])
+        super().__init__(
+            "A atribuição em lote falhou e não foi possível desfazer todas as alterações: "
+            f"{failures}."
+        )
 
 
 class MeetingLibraryError(ValueError):
@@ -1306,6 +1320,93 @@ class MeetingLibrary:
             session_id, patch, expected_generation=expected_generation,
         )
 
+    def preview_organization_batch(self, session_ids, *, collection_ids=None,
+                                   tags=None, people=None, series_id=_UNSET):
+        """Validate a bounded batch before any sidecar is changed."""
+        if not isinstance(session_ids, (list, tuple)) or not session_ids:
+            raise ValueError("A seleção de reuniões é inválida.")
+        if (len(session_ids) > MAX_BATCH_ASSIGNMENTS
+                or any(not isinstance(item, str) for item in session_ids)
+                or len(set(session_ids)) != len(session_ids)):
+            raise ValueError("A seleção de reuniões excede o limite ou contém duplicatas.")
+        patch = {}
+        if collection_ids is not None:
+            patch["collection_ids"] = self._normalized_labels(collection_ids, "de coleções", MAX_COLLECTIONS)
+        if tags is not None:
+            patch["tags"] = self._normalized_labels(tags, "de tags", MAX_TAGS)
+        if people is not None:
+            patch["people"] = self._normalized_labels(people, "de pessoas", MAX_PEOPLE)
+        if series_id is not _UNSET:
+            if series_id is not None and not _valid_id(series_id):
+                raise ValueError("A série é inválida.")
+            patch["series_id"] = series_id
+        if not patch:
+            raise ValueError("Nenhuma organização foi alterada.")
+        items = []
+        for session_id in session_ids:
+            annotations = self.read_annotations(session_id)
+            items.append({"id": session_id, "generation": annotations["generation"]})
+        return {"items": items, "patch": copy.deepcopy(patch), "count": len(items)}
+
+    def assign_organization_batch(self, session_ids, *, collection_ids=None, tags=None,
+                                  people=None, series_id=_UNSET,
+                                  expected_generations, cancel_event=None):
+        """Apply a preflighted organization patch with rollback on any failure."""
+        preview = self.preview_organization_batch(
+            session_ids, collection_ids=collection_ids, tags=tags,
+            people=people, series_id=series_id,
+        )
+        if not isinstance(expected_generations, dict) or {
+            item["id"] for item in preview["items"]
+        } != set(expected_generations):
+            raise ValueError("A confirmação de gerações não corresponde à prévia.")
+        for item in preview["items"]:
+            if expected_generations[item["id"]] != item["generation"]:
+                raise AnnotationConflict(expected_generations[item["id"]], item["generation"])
+        originals, updated = {}, []
+        try:
+            for item in preview["items"]:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("A atribuição em lote foi cancelada antes da conclusão.")
+                session_id = item["id"]
+                originals[session_id] = self.read_annotations(session_id)
+                self.update_annotations(
+                    session_id, preview["patch"], expected_generation=item["generation"],
+                )
+                updated.append(session_id)
+            return {"updated": updated, "rolled_back": [], "count": len(updated)}
+        except Exception as original_error:
+            rollback_failures = []
+            rolled_back = []
+            for session_id in reversed(updated):
+                try:
+                    current = self.read_annotations(session_id)
+                    original = originals[session_id]
+                    restore = {
+                        key: copy.deepcopy(value) for key, value in original.items()
+                        if key not in {"schema_version", "generation", "updated_at"}
+                    }
+                    self.update_annotations(
+                        session_id, restore, expected_generation=current["generation"],
+                    )
+                    rolled_back.append(session_id)
+                except Exception as rollback_error:
+                    rollback_failures.append({
+                        "session_id": session_id,
+                        "error": str(rollback_error),
+                    })
+            if rollback_failures:
+                raise BatchOrganizationRollbackError(
+                    original_error,
+                    {
+                        "updated": list(updated),
+                        "rolled_back": rolled_back,
+                        "rollback_failures": rollback_failures,
+                        "count": len(updated),
+                    },
+                ) from original_error
+            raise
+
     def _canonical_session_ids(self):
         try:
             with os.scandir(self.meetings_root) as entries:
@@ -1381,27 +1482,211 @@ class MeetingLibrary:
 
     # -- Catalog projection and compatibility fallback ------------------
 
-    def list_sessions(self, offset=0, limit=50, query="", status=""):
+    @staticmethod
+    def _catalog_filters(*, collection=None, tag=None, person=None, series=None,
+                         status="", date_from=None, date_to=None):
+        def values(value):
+            if value is None or value == "":
+                return ()
+            if isinstance(value, str):
+                return (value,)
+            if isinstance(value, (list, tuple, set, frozenset)):
+                if any(not isinstance(item, str) or not item for item in value):
+                    raise ValueError("O filtro da biblioteca é inválido.")
+                return tuple(value)
+            raise ValueError("O filtro da biblioteca é inválido.")
+        return {
+            "collection": values(collection), "tag": values(tag), "person": values(person),
+            "series": values(series), "status": values(status),
+            "date_from": date_from or "", "date_to": date_to or "",
+        }
+
+    @staticmethod
+    def _catalog_match(metadata, annotations, filters):
+        if filters["status"] and metadata.get("status") not in filters["status"]:
+            return False
+        created = str(metadata.get("created_at") or "")
+        if filters["date_from"] and created < filters["date_from"]:
+            return False
+        if filters["date_to"] and created > filters["date_to"]:
+            return False
+        for key, annotation_key in (("collection", "collection_ids"), ("tag", "tags"),
+                                     ("person", "people"), ("series", "series_id")):
+            if filters[key]:
+                values = annotations.get(annotation_key, []) if annotation_key != "series_id" else [annotations.get(annotation_key)]
+                if not any(item in values for item in filters[key]):
+                    return False
+        return True
+
+    def list_sessions_page(self, *, limit=50, cursor=None, query="", status="",
+                           collection=None, tag=None, person=None, series=None,
+                           date_from=None, date_to=None, collection_id=None,
+                           series_id=None, offset=0):
+        if collection is None:
+            collection = collection_id
+        if series is None:
+            series = series_id
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento da biblioteca é inválido.")
+        if cursor is not None and offset:
+            raise ValueError("O cursor não pode ser combinado com deslocamento.")
         try:
             if self.index_state == "ready" and not self._index_stale:
-                return self.index.list_sessions(offset=offset, limit=limit, query=query, status=status)
+                if hasattr(self.index, "list_sessions_page"):
+                    return self.index.list_sessions_page(
+                        limit=limit, cursor=cursor, query=query, status=status,
+                        collection=collection, tag=tag, person=person, series=series,
+                        date_from=date_from, date_to=date_to, offset=offset,
+                    )
+                if cursor is None and not any(
+                    value not in (None, "", (), [], {})
+                    for value in (collection, tag, person, series, date_from, date_to)
+                ):
+                    return {"items": self.index.list_sessions(
+                        offset=offset, limit=limit, query=query, status=status,
+                    ), "next_cursor": None}
+        except ValueError:
+            raise
         except Exception:
             self._mark_index_stale()
-        sessions = self.store.list_sessions(offset=offset, limit=limit, query=query, status=status)
-        projected = []
-        for item in sessions:
-            session_id = item.get("id") if isinstance(item, dict) else None
-            if not isinstance(session_id, str) or not self.has_annotation_sidecar(session_id):
-                projected.append(item)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
+            raise ValueError("O limite da biblioteca é inválido.")
+        if cursor is not None:
+            # Canonical fallback cursors are intentionally opaque and cannot
+            # be reused after a projection becomes available.
+            raise ValueError("O cursor canônico expirou; reinicie a listagem.")
+        filters = self._catalog_filters(
+            collection=collection, tag=tag, person=person, series=series,
+            status=status, date_from=date_from, date_to=date_to,
+        )
+        if not isinstance(query, str) or len(query) > 512:
+            raise ValueError("A busca da biblioteca é inválida.")
+        needle = query.casefold()
+        rows = []
+        for session_id in self._canonical_session_ids():
+            try:
+                metadata = self.store.get(session_id, include_events=False)
+                annotations = self.read_annotations(session_id)
+            except (OSError, ValueError, SchemaError):
                 continue
-            annotations = self.read_annotations(session_id)
-            value = copy.deepcopy(item)
-            for key in ("title", "notes", "bookmarks", "reviewed_summary"):
-                if key in annotations:
-                    value[key] = copy.deepcopy(annotations[key])
-            value["annotation_generation"] = annotations["generation"]
-            projected.append(value)
-        return projected
+            if not self._catalog_match(metadata, annotations, filters):
+                continue
+            haystack = "\n".join((
+                str(annotations.get("title", metadata.get("title", ""))),
+                str(annotations.get("notes", metadata.get("notes", ""))),
+                " ".join(str(item) for item in annotations.get("tags", [])),
+                " ".join(str(item) for item in annotations.get("people", [])),
+                " ".join(str(item) for item in annotations.get("collection_ids", [])),
+                str(annotations.get("reviewed_summary", "")),
+            )).casefold()
+            if needle and needle not in haystack:
+                revision_ids = [item.get("id") for item in metadata.get("revisions", []) if isinstance(item, dict)]
+                if not any(needle in str(segment.get("text", "")).casefold()
+                           for revision_id in revision_ids for segment in self.store.get_transcript(session_id, revision_id)):
+                    if not any(needle in json.dumps(report.get("generated", ""), ensure_ascii=False).casefold()
+                               for report in self.list_reports(session_id)):
+                        continue
+            rows.append({"id": session_id, "title": annotations.get("title", metadata.get("title", "")),
+                         "status": metadata.get("status"), "created_at": metadata.get("created_at"),
+                         "duration": metadata.get("duration", 0.0), "error": metadata.get("error")})
+        rows.sort(key=lambda item: (str(item.get("created_at") or ""), item["id"]), reverse=True)
+        return {"items": rows[offset:offset + limit], "next_cursor": None}
+
+    def list_sessions(self, offset=0, limit=50, query="", status="", **filters):
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento da biblioteca é inválido.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
+            raise ValueError("O limite da biblioteca é inválido.")
+        page = self.list_sessions_page(
+            limit=limit, offset=offset, query=query, status=status, **filters,
+        )
+        return page["items"]
+
+    list_sessions_cursor = list_sessions_page
+
+    def search(self, query, *, limit=50, offset=0, **filters):
+        if filters.get("collection") is None and "collection_id" in filters:
+            filters["collection"] = filters.pop("collection_id")
+        if filters.get("series") is None and "series_id" in filters:
+            filters["series"] = filters.pop("series_id")
+        try:
+            if self.index_state == "ready" and not self._index_stale:
+                return self.index.search(query, limit=limit, offset=offset, **filters)
+        except ValueError:
+            raise
+        except Exception:
+            self._mark_index_stale()
+        if not isinstance(query, str) or len(query) > 512:
+            raise ValueError("A busca da biblioteca é inválida.")
+        if not query.strip():
+            return []
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
+            raise ValueError("O limite da busca é inválido.")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento da busca é inválido.")
+        from meeting_index import _bounded_text, _EVIDENCE_WEIGHTS, _query_parts
+
+        query_parts = _query_parts(query)
+        if not query_parts:
+            return []
+
+        def matches(text):
+            normalized = " ".join(str(text).split()).casefold()
+            return all(
+                " ".join(content.split()).casefold() in normalized
+                for content, _is_phrase in query_parts
+            )
+
+        catalog_filters = self._catalog_filters(**filters)
+        if limit == 0:
+            return []
+        matched = 0
+        returned = []
+        for session_id in self._canonical_session_ids():
+            try:
+                metadata = self.store.get(session_id, include_events=False)
+                annotations = self.read_annotations(session_id)
+            except (OSError, ValueError, SchemaError):
+                continue
+            if not self._catalog_match(metadata, annotations, catalog_filters):
+                continue
+            sources = [("session", None, None, None, " ".join((
+                str(annotations.get("title", metadata.get("title", ""))),
+                str(annotations.get("notes", metadata.get("notes", ""))),
+                " ".join(str(item) for item in annotations.get("tags", [])),
+                " ".join(str(item) for item in annotations.get("people", [])),
+            )))]
+            def source_stream():
+                yield sources[0]
+                for revision in metadata.get("revisions", []):
+                    revision_id = revision.get("id") if isinstance(revision, dict) else None
+                    if isinstance(revision_id, str):
+                        for segment in self.store.get_transcript(session_id, revision_id):
+                            yield ("transcript", revision_id, segment.get("id"), None,
+                                   str(segment.get("text", "")))
+                for report in self.list_reports(session_id):
+                    generated = json.dumps(report.get("generated", ""), ensure_ascii=False)
+                    yield ("report", report.get("transcript_revision"), None,
+                           report.get("id"), generated)
+                    reviewed = report.get("reviewed_artifact")
+                    if reviewed:
+                        yield ("reviewed_artifact", report.get("transcript_revision"), None,
+                               report.get("id"), json.dumps(reviewed, ensure_ascii=False))
+
+            for kind, revision_id, segment_id, report_id, text in source_stream():
+                if matches(text):
+                    if matched < offset:
+                        matched += 1
+                        continue
+                    returned.append({"source_kind": kind, "session_id": session_id,
+                                     "revision_id": revision_id, "segment_id": segment_id,
+                                     "report_id": report_id, "snippet": _bounded_text(text),
+                                     "evidence_weight": _EVIDENCE_WEIGHTS.get(kind, 0.25),
+                                     "primary": kind == "transcript"})
+                    matched += 1
+                    if len(returned) >= limit:
+                        return returned
+        return returned
 
     def get_transcript(self, session_id, revision=None):
         return self.store.get_transcript(session_id, revision)
@@ -1653,6 +1938,28 @@ class MeetingLibrary:
         active = MeetingLibrary._active_revision_id(metadata)
         return MeetingLibrary._filter_annotation_revision(annotations, active) if active else copy.deepcopy(annotations)
 
+    def _index_annotations(self, metadata, annotations):
+        """Add disposable display labels without changing canonical sidecars."""
+        value = self._index_annotation_view(metadata, annotations)
+        if value is None:
+            return None
+        try:
+            workspace = self.read_workspace()
+            labels = {
+                item.get("id"): item.get("name")
+                for item in workspace.get("collections", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            value["_collection_labels"] = [
+                labels[item] for item in value.get("collection_ids", [])
+                if item in labels
+            ]
+        except (OSError, SchemaError, ValueError):
+            # Workspace corruption is handled by canonical reads; the index
+            # remains useful with stable collection IDs until repair.
+            value["_collection_labels"] = []
+        return value
+
     @staticmethod
     def _index_transcripts(metadata, transcripts, annotations):
         if annotations is None:
@@ -1689,7 +1996,7 @@ class MeetingLibrary:
                     path = self._annotations_path(session_id)
                     metadata = self.store.get(session_id, include_events=False)
                     annotations = self.read_annotations(session_id) if os.path.lexists(path) else None
-                    projected_annotations = self._index_annotation_view(metadata, annotations)
+                    projected_annotations = self._index_annotations(metadata, annotations)
                     reports = self._read_report_files(session_id)
                     if annotations and annotations.get("speaker_labels") and hasattr(self.index, "index_session"):
                         transcripts = {
@@ -1849,7 +2156,7 @@ class MeetingLibrary:
                                     )
 
                             transcripts[revision_id] = checked_values()
-                        projected_annotations = self._index_annotation_view(metadata, annotations)
+                        projected_annotations = self._index_annotations(metadata, annotations)
                         projected_transcripts = self._index_transcripts(
                             metadata, transcripts, annotations,
                         )
@@ -1877,6 +2184,7 @@ __all__ = [
     "ANNOTATIONS_FILENAME",
     "ANNOTATIONS_SCHEMA_VERSION",
     "AnnotationConflict",
+    "BatchOrganizationRollbackError",
     "MeetingLibrary",
     "MeetingLibraryError",
     "PathSafetyError",

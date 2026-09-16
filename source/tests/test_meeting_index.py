@@ -76,6 +76,59 @@ class MeetingIndexTests(unittest.TestCase):
         self.index.index_session(*self.entry)
         self.assertEqual(self.index.list_sessions(query="marco")[0]["id"], "fixture-meeting-v1")
 
+    def test_cursor_listing_combines_organization_filters_and_invalidates_after_projection_edit(self):
+        first = copy.deepcopy(self.metadata)
+        first["id"] = "first-meeting"
+        first["created_at"] = "2026-09-16T12:00:00Z"
+        second = copy.deepcopy(self.metadata)
+        second["id"] = "second-meeting"
+        second["created_at"] = "2026-09-16T13:00:00Z"
+        first_annotations = copy.deepcopy(self.annotations)
+        first_annotations.update({"collection_ids": ["project-1"], "tags": ["planejamento"], "people": ["Teô"]})
+        second_annotations = copy.deepcopy(self.annotations)
+        second_annotations.update({"collection_ids": ["project-1"], "tags": ["planejamento"], "people": ["Ana"]})
+        self.index.rebuild([
+            (first, first_annotations, self.transcripts, []),
+            (second, second_annotations, self.transcripts, []),
+        ])
+        page = self.index.list_sessions_page(limit=1, collection="project-1", tag="planejamento")
+        self.assertEqual(page["items"][0]["id"], "second-meeting")
+        self.assertIsNotNone(page["next_cursor"])
+        next_page = self.index.list_sessions_page(
+            limit=1, cursor=page["next_cursor"], collection="project-1", tag="planejamento",
+        )
+        self.assertEqual(next_page["items"][0]["id"], "first-meeting")
+        edited = copy.deepcopy(first)
+        edited["title"] = "Edited"
+        self.index.index_session(edited, first_annotations, self.transcripts, [])
+        with self.assertRaises(ValueError):
+            self.index.list_sessions_page(
+                limit=1, cursor=page["next_cursor"], collection="project-1", tag="planejamento",
+            )
+
+    def test_search_returns_bounded_provenance_and_weights_reviewed_reports(self):
+        reports = [{
+            "id": "report-1", "kind": "report", "profile_id": "general",
+            "text": "Ação importante", "reviewed_artifact": "Ação revisada",
+        }]
+        self.index.index_session(self.metadata, self.annotations, self.transcripts, reports)
+        results = self.index.search('"Ação"')
+        self.assertTrue(any(item["source_kind"] == "transcript" for item in self.index.search("equipe")))
+        report = next(item for item in results if item["source_kind"] == "report")
+        self.assertEqual(report["report_id"], "report-1")
+        self.assertEqual(report["evidence_weight"], 0.85)
+        reviewed = next(item for item in results if item["source_kind"] == "reviewed_artifact")
+        self.assertEqual(reviewed["report_id"], "report-1")
+        self.assertEqual(reviewed["evidence_weight"], 0.65)
+        self.assertTrue(all(len(item["snippet"]) <= 480 for item in results))
+        self.assertTrue(all("\\" not in item["snippet"] for item in results))
+
+    def test_search_preserves_quoted_phrases_and_literal_punctuation(self):
+        self.index.index_session(self.metadata, self.annotations, self.transcripts, [])
+        self.assertTrue(self.index.search('"próximo marco"'))
+        self.assertTrue(self.index.search('próximo "marco."'))
+        self.assertEqual(self.index.state, STATE_READY)
+
     def test_control_fts_input_is_rejected_without_poisoning_ready_state(self):
         self.index.index_session(*self.entry)
         with self.assertRaises(ValueError):

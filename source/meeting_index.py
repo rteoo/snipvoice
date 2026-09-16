@@ -6,6 +6,7 @@ rebuilds are assembled in a closed temporary database and published with one
 ``os.replace`` only after all handles and WAL files are closed.
 """
 
+import base64
 import contextlib
 import copy
 import hashlib
@@ -30,6 +31,15 @@ DEFAULT_BUSY_TIMEOUT_MS = 5000
 MAX_QUERY_CHARS = 512
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.05
+MAX_CURSOR_CHARS = 2048
+MAX_SNIPPET_CHARS = 480
+_EVIDENCE_WEIGHTS = {
+    "transcript": 1.0,
+    "report": 0.85,
+    "reviewed_artifact": 0.65,
+    "annotation": 0.65,
+    "session": 0.45,
+}
 
 
 _PATH_LOCKS_GUARD = threading.Lock()
@@ -174,6 +184,84 @@ def fts5_available():
 
 def _json_piece(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+
+
+def _bounded_text(value, limit=MAX_SNIPPET_CHARS):
+    """Return a Unicode-safe, bounded display snippet."""
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _query_parts(query):
+    """Parse safe literal terms and phrases for both FTS and fallback scans."""
+    if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS:
+        raise ValueError("A busca do índice é inválida.")
+    if any(unicodedata.category(character).startswith("C") for character in query):
+        raise ValueError("A busca do índice não pode conter caracteres de controle.")
+    parts = []
+    index = 0
+    while index < len(query):
+        while index < len(query) and query[index].isspace():
+            index += 1
+        if index >= len(query):
+            break
+        if query[index] == '"':
+            start = index + 1
+            cursor = start
+            closed = False
+            while cursor < len(query):
+                if query[cursor] == '"':
+                    if cursor + 1 < len(query) and query[cursor + 1] == '"':
+                        cursor += 2
+                        continue
+                    closed = True
+                    break
+                cursor += 1
+            content = query[start:cursor]
+            if closed:
+                index = cursor + 1
+                content = content.replace('""', '"')
+                if content.strip():
+                    parts.append((content, True))
+                continue
+            index = len(query)
+            parts.extend((token, False) for token in content.split() if token)
+            continue
+        end = index
+        while end < len(query) and not query[end].isspace():
+            end += 1
+        token = query[index:end].replace('"', "")
+        if token:
+            parts.append((token, False))
+        index = end
+    return parts
+
+
+def _encode_cursor(value):
+    encoded = base64.urlsafe_b64encode(
+        _json_piece(value).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    if len(encoded) > MAX_CURSOR_CHARS:
+        raise ValueError("O cursor do índice é grande demais.")
+    return encoded
+
+
+def _decode_cursor(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > MAX_CURSOR_CHARS:
+        raise ValueError("O cursor do índice é inválido.")
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(value + padding).decode("utf-8"))
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("O cursor do índice é inválido.") from error
+    if not isinstance(decoded, dict) or decoded.get("v") != 1:
+        raise ValueError("O cursor do índice é incompatível.")
+    return decoded
 
 
 def _metadata_without_events(metadata):
@@ -368,6 +456,10 @@ class MeetingIndex:
             "INSERT OR IGNORE INTO index_metadata(key, value) VALUES ('build_revision', ?)",
             ("0",),
         )
+        connection.execute(
+            "INSERT OR IGNORE INTO index_metadata(key, value) VALUES ('projection_revision', ?)",
+            ("0",),
+        )
 
     @staticmethod
     def _read_state(connection):
@@ -426,6 +518,21 @@ class MeetingIndex:
             )
 
     @staticmethod
+    def _bump_projection_revision(connection):
+        connection.execute(
+            "INSERT INTO index_metadata(key, value) VALUES ('projection_revision', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (uuid.uuid4().hex,),
+        )
+
+    @staticmethod
+    def _projection_revision(connection):
+        row = connection.execute(
+            "SELECT value FROM index_metadata WHERE key='projection_revision'"
+        ).fetchone()
+        return str(row[0]) if row else "0"
+
+    @staticmethod
     def _clear_session(connection, session_id):
         connection.execute("DELETE FROM fts WHERE session_id=?", (session_id,))
         connection.execute("DELETE FROM transcript_segments WHERE session_id=?", (session_id,))
@@ -446,12 +553,19 @@ class MeetingIndex:
                 payload = _json_piece(payload)
             if not isinstance(payload, str):
                 payload = str(payload)
+            reviewed = report.get("reviewed_artifact")
+            reviewed_payload = ""
+            if reviewed:
+                reviewed_payload = (
+                    _json_piece(reviewed) if isinstance(reviewed, (dict, list)) else str(reviewed)
+                )
             yield (
                 report_id,
                 report.get("profile_id") or report.get("profile"),
                 report.get("kind") or report.get("report_kind"),
                 int(bool(report.get("reviewed") or report.get("reviewed_artifact"))),
                 payload,
+                reviewed_payload,
             )
 
     @staticmethod
@@ -624,7 +738,7 @@ class MeetingIndex:
             row = next(self._report_rows((report,)), None)
             if row is None:
                 continue
-            report_id, profile_id, kind, reviewed, payload = row
+            report_id, profile_id, kind, reviewed, payload, reviewed_payload = row
             add("report\0", report)
             # Canonical report readers provide creation order; the last
             # successfully indexed report is the active projection.  UUID
@@ -639,11 +753,18 @@ class MeetingIndex:
                 "VALUES (?,?,?,?,?,?)",
                 (session_id, "report", None, None, report_id, payload),
             )
+            if reviewed_payload:
+                connection.execute(
+                    "INSERT INTO fts(session_id,source_kind,revision_id,segment_id,report_id,content) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, "reviewed_artifact", None, None, report_id, reviewed_payload),
+                )
 
         if annotations:
             values = []
             for key in ("tags", "people", "collection_ids"):
                 values.extend(str(item) for item in annotations.get(key, []) or ())
+            values.extend(str(item) for item in annotations.get("_collection_labels", []) or ())
             if annotations.get("series_id"):
                 values.append(str(annotations["series_id"]))
             if values:
@@ -682,6 +803,7 @@ class MeetingIndex:
                     connection.execute("BEGIN IMMEDIATE")
                     self._write_state(connection, STATE_REBUILDING)
                     self._insert_projection(connection, metadata, annotations, transcripts, reports)
+                    self._bump_projection_revision(connection)
                     self._write_state(connection, STATE_READY)
                     connection.commit()
                     self._set_memory_state(STATE_READY, "indexed")
@@ -720,6 +842,7 @@ class MeetingIndex:
                     connection = self._open_initialized(create=False)
                     connection.execute("BEGIN IMMEDIATE")
                     self._clear_session(connection, session_id)
+                    self._bump_projection_revision(connection)
                     self._write_state(connection, STATE_READY)
                     connection.commit()
                     self._set_memory_state(STATE_READY, "removed")
@@ -759,61 +882,171 @@ class MeetingIndex:
                     if connection is not None:
                         connection.close()
 
-    def _fts_query(self, query):
-        if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS:
-            raise ValueError("A busca do índice é inválida.")
-        if any(unicodedata.category(character).startswith("C") for character in query):
-            raise ValueError("A busca do índice não pode conter caracteres de controle.")
-        tokens = [token for token in query.split() if token]
-        # Quoting each token prevents malformed user syntax from escaping the
-        # FTS expression while preserving Unicode and ordinary word search.
-        return " AND ".join('"' + token.replace('"', '""') + '"' for token in tokens)
+    @staticmethod
+    def _fts_query(query):
+        parts = [
+            '"' + content.replace('"', '""') + '"'
+            for content, _is_phrase in _query_parts(query)
+        ]
+        # Every part is a literal FTS token or phrase; operators and malformed
+        # syntax therefore cannot escape the caller's intended search.
+        return " AND ".join(parts)
 
-    def list_sessions(self, *, offset=0, limit=50, query="", status=""):
-        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento do índice é inválido.")
+    @staticmethod
+    def _filter_values(value, label):
+        if value is None or value == "":
+            return ()
+        if isinstance(value, str):
+            value = (value,)
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            value = tuple(value)
+        else:
+            raise ValueError(f"O filtro {label} é inválido.")
+        result, seen = [], set()
+        for item in value:
+            if not isinstance(item, str) or not item:
+                raise ValueError(f"O filtro {label} é inválido.")
+            item = unicodedata.normalize("NFC", item)
+            if item.casefold() not in seen:
+                result.append(item)
+                seen.add(item.casefold())
+        return tuple(result)
+
+    @classmethod
+    def _session_filters(cls, *, query="", status="", collection=None, tag=None,
+                         person=None, series=None, date_from=None, date_to=None):
+        fts_query = cls._fts_query(query)
+        filters = {
+            "query": fts_query,
+            "status": cls._filter_values(status, "estado"),
+            "collection": cls._filter_values(collection, "coleção"),
+            "tag": cls._filter_values(tag, "tag"),
+            "person": cls._filter_values(person, "pessoa"),
+            "series": cls._filter_values(series, "série"),
+            "date_from": date_from or "", "date_to": date_to or "",
+        }
+        for value, label in ((date_from, "data inicial"), (date_to, "data final")):
+            if value is not None and (not isinstance(value, str) or len(value) > 64):
+                raise ValueError(f"O filtro {label} é inválido.")
+        digest = hashlib.sha256(_json_piece(filters).encode("utf-8")).hexdigest()
+        return filters, digest
+
+    @staticmethod
+    def _where_for_filters(filters):
+        clauses, params = [], []
+        if filters["query"]:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM fts WHERE fts.session_id=s.session_id AND fts MATCH ?)"
+            )
+            params.append(filters["query"])
+        for key, kind in (("collection", "collection"), ("tag", "tag"),
+                          ("person", "person"), ("series", "series")):
+            values = filters[key]
+            if values:
+                placeholders = ",".join("?" for _ in values)
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM memberships fm WHERE fm.session_id=s.session_id "
+                    f"AND fm.kind=? AND fm.value IN ({placeholders}))"
+                )
+                params.extend((kind, *values))
+        if filters["status"]:
+            placeholders = ",".join("?" for _ in filters["status"])
+            clauses.append(f"s.status IN ({placeholders})")
+            params.extend(filters["status"])
+        if filters["date_from"]:
+            clauses.append("COALESCE(s.created_at,'') >= ?")
+            params.append(filters["date_from"])
+        if filters["date_to"]:
+            clauses.append("COALESCE(s.created_at,'') <= ?")
+            params.append(filters["date_to"])
+        return clauses, params
+
+    def list_sessions_page(self, *, limit=50, cursor=None, query="", status="",
+                           collection=None, tag=None, person=None, series=None,
+                           date_from=None, date_to=None, collection_id=None,
+                           series_id=None, offset=0):
+        """List meetings with stable keyset pagination and combined filters."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
             raise ValueError("O limite do índice é inválido.")
-        if not isinstance(status, str):
-            raise ValueError("O filtro do índice é inválido.")
-        if limit == 0:
-            return []
-        if self.state != STATE_READY:
-            return []
-        fts_query = self._fts_query(query)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento do índice é inválido.")
+        if cursor is not None and offset:
+            raise ValueError("O cursor não pode ser combinado com deslocamento.")
+        if limit == 0 or self.state != STATE_READY:
+            return {"items": [], "next_cursor": None}
+        if collection is None:
+            collection = collection_id
+        if series is None:
+            series = series_id
+        filters, filter_digest = self._session_filters(
+            query=query, status=status, collection=collection, tag=tag,
+            person=person, series=series, date_from=date_from, date_to=date_to,
+        )
+        decoded = _decode_cursor(cursor)
         connection = None
         try:
             connection = self._connect(create=False)
-            if fts_query:
-                sql = (
-                    "SELECT s.session_id,s.title,s.status,s.created_at,s.duration,s.error "
-                    "FROM sessions s JOIN (SELECT DISTINCT session_id FROM fts WHERE fts MATCH ?) f "
-                    "ON f.session_id=s.session_id "
+            revision = self._projection_revision(connection)
+            if decoded is not None and (
+                decoded.get("kind") != "sessions" or decoded.get("revision") != revision
+                or decoded.get("filters") != filter_digest
+            ):
+                raise ValueError("O cursor do índice expirou; reinicie a listagem.")
+            clauses, params = self._where_for_filters(filters)
+            if decoded is not None:
+                position = decoded.get("position")
+                if not isinstance(position, list) or len(position) != 2:
+                    raise ValueError("O cursor do índice é inválido.")
+                clauses.append(
+                    "(COALESCE(s.created_at,'') < ? OR "
+                    "(COALESCE(s.created_at,'') = ? AND s.session_id < ?))"
                 )
-                params = [fts_query]
-            else:
-                sql = "SELECT session_id,title,status,created_at,duration,error FROM sessions "
-                params = []
-            if status:
-                sql += " WHERE s.status=?" if fts_query else " WHERE status=?"
-                params.append(status)
-            sql += " ORDER BY s.created_at DESC, s.session_id DESC LIMIT ? OFFSET ?" if fts_query else \
-                " ORDER BY created_at DESC, session_id DESC LIMIT ? OFFSET ?"
-            params.extend((limit, offset))
-            rows = connection.execute(sql, params).fetchall()
-            return [
+                params.extend((position[0], position[0], position[1]))
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = connection.execute(
+                "SELECT s.session_id,s.title,s.status,s.created_at,s.duration,s.error "
+                f"FROM sessions s{where} ORDER BY COALESCE(s.created_at,'') DESC, "
+                "s.session_id DESC LIMIT ? OFFSET ?", (*params, limit + 1, offset),
+            ).fetchall()
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+            items = [
                 {"id": row[0], "title": row[1], "status": row[2], "created_at": row[3],
                  "duration": row[4], "error": row[5]}
                 for row in rows
             ]
+            next_cursor = None
+            if has_more and rows:
+                next_cursor = _encode_cursor({
+                    "v": 1, "kind": "sessions", "revision": revision,
+                    "filters": filter_digest, "position": [rows[-1][3] or "", rows[-1][0]],
+                })
+            return {"items": items, "next_cursor": next_cursor}
+        except ValueError:
+            raise
         except (sqlite3.DatabaseError, IndexUnavailable) as error:
             self._set_memory_state(STATE_UNAVAILABLE, str(error))
-            return []
+            return {"items": [], "next_cursor": None}
         finally:
             if connection is not None:
                 connection.close()
 
-    def search(self, query, *, limit=50, offset=0):
+    def list_sessions(self, *, offset=0, limit=50, query="", status="", **filters):
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento do índice é inválido.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
+            raise ValueError("O limite do índice é inválido.")
+        if limit == 0:
+            return []
+        page = self.list_sessions_page(limit=limit, offset=offset, query=query,
+                                       status=status, **filters)
+        return page["items"]
+
+    list_sessions_cursor = list_sessions_page
+
+    def search(self, query, *, limit=50, offset=0, collection=None, tag=None,
+               person=None, series=None, status="", date_from=None, date_to=None,
+               collection_id=None, series_id=None):
         if self.state != STATE_READY:
             return []
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
@@ -821,20 +1054,35 @@ class MeetingIndex:
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError("O deslocamento da busca é inválido.")
         fts_query = self._fts_query(query)
+        if collection is None:
+            collection = collection_id
+        if series is None:
+            series = series_id
         if not fts_query or limit == 0:
             return []
         connection = None
         try:
             connection = self._connect(create=False)
+            filters, _ = self._session_filters(
+                status=status, collection=collection, tag=tag, person=person,
+                series=series, date_from=date_from, date_to=date_to,
+            )
+            clauses, params = self._where_for_filters(filters)
+            clauses.insert(0, "fts MATCH ?")
+            params.insert(0, fts_query)
+            where = " WHERE " + " AND ".join(clauses)
             rows = connection.execute(
-                "SELECT source_kind,session_id,revision_id,segment_id,report_id,"
-                "snippet(fts,0,'','', '…', 32) FROM fts WHERE fts MATCH ? "
-                "ORDER BY bm25(fts) LIMIT ? OFFSET ?",
-                (fts_query, limit, offset),
+                "SELECT fts.source_kind,fts.session_id,fts.revision_id,fts.segment_id,"
+                "fts.report_id,snippet(fts,0,'','', '…', 32),bm25(fts) "
+                f"FROM fts JOIN sessions s ON s.session_id=fts.session_id{where} "
+                "ORDER BY bm25(fts) LIMIT ? OFFSET ?", (*params, limit, offset),
             ).fetchall()
             return [
                 {"source_kind": row[0], "session_id": row[1], "revision_id": row[2],
-                 "segment_id": row[3], "report_id": row[4], "snippet": row[5]}
+                 "segment_id": row[3], "report_id": row[4],
+                 "snippet": _bounded_text(row[5]),
+                 "evidence_weight": _EVIDENCE_WEIGHTS.get(row[0], 0.25),
+                 "primary": row[0] == "transcript"}
                 for row in rows
             ]
         except (sqlite3.DatabaseError, IndexUnavailable) as error:
@@ -955,6 +1203,7 @@ class MeetingIndex:
                             if progress is not None:
                                 progress(processed, total)
                     self._write_state(connection, STATE_READY)
+                    self._bump_projection_revision(connection)
                     connection.commit()
                     connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     connection.close()

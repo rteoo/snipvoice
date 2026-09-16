@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from meeting_library import (
     AnnotationConflict,
+    BatchOrganizationRollbackError,
     MeetingLibrary,
     PathSafetyError,
     SchemaError,
@@ -87,6 +88,63 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         self.assertEqual(annotations["reviewed_summary"], "Revisar o marco na próxima reunião.")
         self.assertFalse((self.session_dir / "annotations.json").exists())
         self.assertEqual(self.library.get_session("fixture-meeting-v1")["title"], "Weekly product review")
+
+    def test_canonical_search_fallback_returns_transcript_provenance_and_filters(self):
+        self.library.update_annotations(
+            "fixture-meeting-v1", {"tags": ["planejamento"], "people": ["Teô"]},
+            expected_generation=0,
+        )
+        results = self.library.search("próximo marco", tag="planejamento")
+        self.assertEqual(results[0]["session_id"], "fixture-meeting-v1")
+        self.assertEqual(results[0]["source_kind"], "transcript")
+        self.assertEqual(results[0]["revision_id"], "revision-1")
+        self.assertEqual(results[0]["segment_id"], "microphone:0.000000:3.000000")
+
+    def test_canonical_search_fallback_matches_phrases_and_rejects_control_input(self):
+        phrase = self.library.search('"próximo marco"')
+        malformed = self.library.search('"próximo marco')
+        punctuation = self.library.search('"marco."')
+        self.assertEqual(phrase[0]["source_kind"], "transcript")
+        self.assertEqual(malformed[0]["segment_id"], phrase[0]["segment_id"])
+        self.assertEqual(punctuation[0]["segment_id"], phrase[0]["segment_id"])
+        with self.assertRaises(ValueError):
+            self.library.search("marco\x00")
+        self.assertEqual(self.library.index_state, "unavailable")
+
+    def test_batch_organization_reports_rollback_failure_explicitly(self):
+        shutil.copytree(FIXTURE, self.meetings / "second-meeting")
+        original_update = self.library.update_annotations
+        calls = {"count": 0}
+
+        def flaky_update(session_id, patch=None, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise RuntimeError("apply failed")
+            if calls["count"] == 3:
+                raise RuntimeError("rollback failed")
+            return original_update(session_id, patch, **kwargs)
+
+        with mock.patch.object(self.library, "update_annotations", side_effect=flaky_update):
+            with self.assertRaises(BatchOrganizationRollbackError) as context:
+                self.library.assign_organization_batch(
+                    ["fixture-meeting-v1", "second-meeting"],
+                    tags=["batch"],
+                    expected_generations={
+                        "fixture-meeting-v1": 0,
+                        "second-meeting": 0,
+                    },
+                )
+        self.assertEqual(context.exception.result["rollback_failures"][0]["session_id"], "fixture-meeting-v1")
+        self.assertIn("rollback failed", context.exception.result["rollback_failures"][0]["error"])
+
+    def test_invalid_index_inputs_do_not_trigger_stale_fallback(self):
+        self.library.reconcile()
+        self.assertEqual(self.library.index_state, "ready")
+        with self.assertRaises(ValueError):
+            self.library.list_sessions_page(cursor="not-a-cursor")
+        with self.assertRaises(ValueError):
+            self.library.search("bad\x00query")
+        self.assertEqual(self.library.index_state, "ready")
 
     def test_first_mutation_writes_one_atomic_sidecar_and_mirrors_legacy_fields(self):
         result = self.library.update_annotations(
