@@ -12,7 +12,14 @@ import wave
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from meeting_files import IMPORT_FRAMES, export_meeting, import_audio, import_wav, play_audio
+from meeting_files import (
+    IMPORT_FRAMES,
+    export_highlight_clip,
+    export_meeting,
+    import_audio,
+    import_wav,
+    play_audio,
+)
 from meeting_store import MeetingStore
 
 
@@ -292,6 +299,118 @@ class MeetingFilesTests(unittest.TestCase):
                 export_meeting(self.store, sid, path, "json", cancellation)
         self.assertEqual(path.read_bytes(), b"previous")
         self.assertEqual(list(self.root.glob(".export.json-*.tmp")), [])
+
+    def test_highlight_clip_trims_exclusive_end_and_preserves_gaps(self):
+        sid = self.store.begin({}, "Clip")
+        self.audio(sid, [0.1, 0.2, 0.3, 0.4])
+        self.audio(sid, [0.5, 0.6, 0.7], timestamp=0.001, sequence=1)
+        self.store.finish(sid)
+        destination = self.root / "clip.wav"
+        highlight = {
+            "id": "highlight-1",
+            "revision": "revision-1",
+            "start": 2 / 8000,
+            "end": 10 / 8000,
+            "track": "microphone",
+            "label": "Decision",
+            "note": "Keep the source timing.",
+            "segment_ids": ["segment-1"],
+            "private_path": str(self.root / "must-not-leak"),
+        }
+
+        self.assertEqual(export_highlight_clip(self.store, sid, highlight, destination), str(destination))
+        with wave.open(str(destination), "rb") as reader:
+            self.assertEqual((reader.getframerate(), reader.getnchannels(), reader.getsampwidth()), (8000, 1, 2))
+            samples = struct.unpack("<8h", reader.readframes(20))
+        expected = tuple(round(value * 32767) for value in (0.3, 0.4, 0.0, 0.0, 0.0, 0.0, 0.5, 0.6))
+        self.assertEqual(samples, expected)
+        payload = destination.read_bytes()
+        self.assertIn(b"highlight-1", payload)
+        self.assertIn(b'"start":0.00025', payload)
+        self.assertIn(b'"end":0.00125', payload)
+        self.assertIn(b'"gap":true', payload)
+        self.assertIn(b'"gaps":[', payload)
+        self.assertNotIn(str(self.root).encode(), payload)
+
+    def test_highlight_clip_does_not_overwrite_or_leave_temp_files(self):
+        sid = self.session()
+        destination = self.root / "clip.wav"
+        destination.write_bytes(b"previous")
+
+        with self.assertRaises(FileExistsError):
+            export_highlight_clip(
+                self.store,
+                sid,
+                {"id": "h", "start": 0, "end": 1 / 8000, "track": "microphone"},
+                destination,
+            )
+        self.assertEqual(destination.read_bytes(), b"previous")
+        self.assertEqual(list(self.root.glob(".clip.wav-*.tmp")), [])
+
+    def test_cancelled_highlight_clip_preserves_destination_and_cleans_temp(self):
+        sid = self.session()
+        cancellation = threading.Event()
+        destination = self.root / "clip.wav"
+        original = self.store.iter_audio
+
+        def cancel_after_first(*arguments):
+            iterator = original(*arguments)
+            for item in iterator:
+                cancellation.set()
+                yield item
+
+        with mock.patch.object(self.store, "iter_audio", side_effect=cancel_after_first):
+            with self.assertRaisesRegex(RuntimeError, "cancelada"):
+                export_highlight_clip(
+                    self.store,
+                    sid,
+                    {"id": "h", "start": 0, "end": 1 / 8000, "track": "microphone"},
+                    destination,
+                    cancel_event=cancellation,
+                )
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.glob(".clip.wav-*.tmp")), [])
+
+    def test_highlight_clip_rejects_format_changes_and_preserves_destination(self):
+        sid = self.store.begin({})
+        self.audio(sid, [0.1] * 4)
+        self.audio(sid, [0.2] * 4, timestamp=0.0005, sequence=1, rate=16000)
+        self.store.finish(sid)
+        destination = self.root / "clip.wav"
+        with self.assertRaisesRegex(ValueError, "formato"):
+            export_highlight_clip(
+                self.store,
+                sid,
+                {"id": "h", "start": 0, "end": 0.001, "track": "microphone"},
+                destination,
+            )
+        self.assertFalse(destination.exists())
+
+    def test_highlight_clip_enforces_riff_limit_before_commit(self):
+        sid = self.session()
+        destination = self.root / "clip.wav"
+        with mock.patch("meeting_files.RIFF_LIMIT", 256):
+            with self.assertRaisesRegex(ValueError, "4 GiB"):
+                export_highlight_clip(
+                    self.store,
+                    sid,
+                    {"id": "h", "start": 0, "end": 4 / 8000, "track": "microphone"},
+                    destination,
+                )
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.glob(".clip.wav-*.tmp")), [])
+
+    def test_highlight_clip_rejects_empty_or_non_finite_ranges(self):
+        sid = self.session()
+        for start, end in ((0, 0), (float("nan"), 1), (0, float("inf"))):
+            with self.subTest(start=start, end=end):
+                with self.assertRaisesRegex(ValueError, "intervalo"):
+                    export_highlight_clip(
+                        self.store,
+                        sid,
+                        {"id": "h", "start": start, "end": end, "track": "microphone"},
+                        self.root / ("clip-" + str(len(str(start))) + ".wav"),
+                    )
 
 
 if __name__ == "__main__":

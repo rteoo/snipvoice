@@ -357,6 +357,78 @@ def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=
             gap -= count
 
 
+def _clip_audio_chunks(store, session, track, start, end, cancel_event=None, gaps=None):
+    """Yield only ``[start, end)`` from one native source track.
+
+    Audio is kept in bounded chunks, and missing intervals are represented by
+    explicit silence.  The caller supplies ``gaps`` when it needs provenance;
+    the list is deliberately metadata-only and never retains audio bytes.
+    """
+    cursor = float(start)
+    output_format = None
+    saw_audio = False
+    for event, payload in store.iter_audio(session, track, start):
+        _cancel(cancel_event)
+        rate, channels = event["rate"], event["channels"]
+        frame_bytes = channels * 4
+        frames = event["frames"]
+        if len(payload) != frames * frame_bytes:
+            raise ValueError("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la.")
+        event_start = float(event["timestamp"])
+        event_end = event_start + frames / rate
+        if event_end <= start:
+            continue
+        if event_start >= end:
+            break
+        native_format = (rate, channels)
+        if output_format is not None and native_format != output_format:
+            raise ValueError(
+                "A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente."
+            )
+        if output_format is None:
+            output_format = native_format
+
+        first_frame = max(0, math.ceil((start - event_start) * rate - 1e-9))
+        last_frame = min(frames, math.ceil((end - event_start) * rate - 1e-9))
+        if last_frame <= first_frame:
+            continue
+        overlap_start = event_start + first_frame / rate
+        if overlap_start > cursor:
+            gap_frames = max(0, math.ceil((overlap_start - cursor) * rate - 1e-9))
+            if gap_frames:
+                gap_end = cursor + gap_frames / rate
+                if gaps is not None:
+                    gaps.append({"start": cursor, "end": min(gap_end, end)})
+                while gap_frames:
+                    _cancel(cancel_event)
+                    count = min(gap_frames, PLAY_FRAMES)
+                    yield rate, channels, b"\0" * (count * frame_bytes)
+                    gap_frames -= count
+                cursor = gap_end
+
+        for frame in range(first_frame, last_frame, PLAY_FRAMES):
+            _cancel(cancel_event)
+            frame_end = min(last_frame, frame + PLAY_FRAMES)
+            yield rate, channels, payload[frame * frame_bytes:frame_end * frame_bytes]
+        cursor = event_start + last_frame / rate
+        saw_audio = True
+
+    if not saw_audio or output_format is None:
+        raise ValueError("A fonte escolhida não contém áudio no intervalo do destaque.")
+    rate, channels = output_format
+    if cursor < end:
+        gap_frames = max(0, math.ceil((end - cursor) * rate - 1e-9))
+        if gap_frames:
+            gap_end = cursor + gap_frames / rate
+            if gaps is not None:
+                gaps.append({"start": cursor, "end": min(gap_end, end)})
+            while gap_frames:
+                _cancel(cancel_event)
+                count = min(gap_frames, PLAY_FRAMES)
+                yield rate, channels, b"\0" * (count * channels * 4)
+                gap_frames -= count
+
+
 def _pcm16(raw):
     result = bytearray(len(raw) // 2)
     for index, (value,) in enumerate(struct.iter_unpack("<f", raw)):
@@ -450,6 +522,147 @@ def export_meeting(store, session_id, path, format="markdown", cancel_event=None
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+        raise
+    return str(destination)
+
+
+def _clip_annotation(highlight):
+    """Keep only stable, non-path annotation fields in clip provenance."""
+    allowed = (
+        "id", "revision", "transcript_revision", "start", "end", "track",
+        "label", "note", "segment_ids", "segments",
+    )
+    return {key: highlight[key] for key in allowed if key in highlight}
+
+
+def _commit_new_file(temporary, destination):
+    """Publish a temporary file atomically without replacing a destination."""
+    try:
+        os.link(temporary, destination)
+    except FileExistsError:
+        raise
+    finally:
+        if os.path.lexists(temporary):
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
+    track = highlight["track"]
+    start = highlight["start"]
+    end = highlight["end"]
+    gaps = []
+    chunks = iter(_clip_audio_chunks(
+        store, session, track, start, end, cancel_event=cancel_event, gaps=gaps,
+    ))
+    first = next(chunks, None)
+    if first is None:
+        raise ValueError("A fonte escolhida não contém áudio no intervalo do destaque.")
+    rate, channels, _ = first
+    handle.write(b"RIFF\0\0\0\0WAVEfmt ")
+    handle.write(struct.pack(
+        "<IHHIIHH", 16, 1, channels, rate, rate * channels * 2, channels * 2, 16,
+    ))
+    data_header = handle.tell()
+    handle.write(b"data\0\0\0\0")
+
+    data_length = 0
+
+    def write_audio(chunk):
+        nonlocal data_length
+        _cancel(cancel_event)
+        native_rate, native_channels, raw = chunk
+        if (native_rate, native_channels) != (rate, channels):
+            raise ValueError(
+                "A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente."
+            )
+        pcm = _pcm16(raw)
+        if data_length + len(pcm) > RIFF_LIMIT:
+            raise ValueError("O áudio excede o limite de 4 GiB do WAV.")
+        data_length += len(pcm)
+        handle.write(pcm)
+
+    write_audio(first)
+    for chunk in chunks:
+        write_audio(chunk)
+    provenance = {
+        "schema_version": 1,
+        "type": "highlight_clip",
+        "session": session,
+        "track": track,
+        "start": start,
+        "end": end,
+        "gap": bool(gaps),
+        "gaps": gaps,
+        "annotation": _clip_annotation(highlight),
+    }
+    try:
+        provenance_bytes = json.dumps(
+            provenance, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("A proveniência do destaque não é serializável.") from error
+    if len(provenance_bytes) > RIFF_LIMIT:
+        raise ValueError("A proveniência excede o limite de 4 GiB do formato WAV.")
+    handle.write(b"svpr" + struct.pack("<I", len(provenance_bytes)) + provenance_bytes)
+    if len(provenance_bytes) & 1:
+        handle.write(b"\0")
+    file_end = handle.tell()
+    riff_length = file_end - 8
+    if riff_length > RIFF_LIMIT:
+        raise ValueError("O áudio excede o limite de 4 GiB do WAV.")
+    for position, length in ((4, riff_length), (data_header + 4, data_length)):
+        handle.seek(position)
+        handle.write(struct.pack("<I", length))
+    handle.seek(file_end)
+
+
+def export_highlight_clip(store, session_id, highlight, path, cancel_event=None):
+    """Export one source-track highlight as an atomic, non-overwriting PCM16 WAV."""
+    if not isinstance(highlight, dict):
+        raise ValueError("O destaque deve ser um objeto.")
+    track = highlight.get("track")
+    start, end = highlight.get("start"), highlight.get("end")
+    if track not in {"microphone", "system"}:
+        raise ValueError("A fonte do destaque é inválida.")
+    if (isinstance(start, bool) or isinstance(end, bool)
+            or not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+            or not math.isfinite(start) or not math.isfinite(end)
+            or start < 0 or end <= start):
+        raise ValueError("O intervalo do destaque é inválido.")
+    destination = Path(path).absolute()
+    if not destination.parent.is_dir() or destination.is_dir() or os.path.lexists(destination):
+        if os.path.lexists(destination):
+            raise FileExistsError("O arquivo de destino já existe; escolha um novo nome para preservar o clipe anterior.")
+        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+    library = os.path.realpath(store.root)
+    try:
+        inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
+    except ValueError:
+        inside_library = False
+    if inside_library:
+        raise ValueError("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais.")
+    store.get(session_id, include_events=False)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            _highlight_wav_export(handle, store, session_id, {
+                **highlight, "start": float(start), "end": float(end),
+            }, cancel_event)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _cancel(cancel_event)
+        _commit_new_file(temporary, destination)
+    except Exception:
+        if os.path.lexists(temporary):
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
         raise
     return str(destination)
 
