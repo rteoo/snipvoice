@@ -25,8 +25,12 @@ WORKSPACE_SCHEMA_VERSION = 1
 ANNOTATIONS_SCHEMA_VERSION = 1
 WORKSPACE_FILENAME = "workspace.json"
 ANNOTATIONS_FILENAME = "annotations.json"
+REPORTS_DIRECTORY = "reports"
+REPORT_SCHEMA_VERSION = 1
 MAX_WORKSPACE_BYTES = 2 * 1024 * 1024
 MAX_ANNOTATIONS_BYTES = 2 * 1024 * 1024
+MAX_REPORT_BYTES = 2 * 1024 * 1024
+MAX_REPORTS = 10_000
 MAX_TITLE_CHARS = 400
 MAX_NOTES_BYTES = 1024 * 1024
 MAX_BOOKMARKS = 10_000
@@ -37,6 +41,10 @@ MAX_PEOPLE = 512
 MAX_COLLECTIONS = 1024
 MAX_SPEAKER_LABELS = 10_000
 MAX_ID_CHARS = 128
+REPORT_SECTIONS = frozenset({
+    "summary", "decisions", "action_items", "open_questions", "risks",
+    "objections", "feedback", "follow_up_email", "answer",
+})
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _REFERENCE_RE = re.compile(r"^[^/\\\x00]{1,128}$")
 _UNSET = object()
@@ -483,6 +491,7 @@ class MeetingLibrary:
             "series_id": None,
             "reviewed_artifacts": {},
             "reviewed_summary": copy.deepcopy(metadata.get("reviewed_summary", "")),
+            "active_report_id": None,
             "retention_override": None,
             "updated_at": metadata.get("updated_at") if _valid_timestamp(metadata.get("updated_at")) else _utc_timestamp(),
         }
@@ -578,6 +587,24 @@ class MeetingLibrary:
             raise SchemaError("O resumo revisado é inválido; o arquivo foi preservado.")
         if not isinstance(value.get("reviewed_artifacts"), dict):
             raise SchemaError("Os artefatos revisados são inválidos; o arquivo foi preservado.")
+        reviewed_artifacts = value["reviewed_artifacts"]
+        if len(reviewed_artifacts) > MAX_REPORTS:
+            raise SchemaError("Há artefatos revisados demais; o arquivo foi preservado.")
+        for report_id, artifact in reviewed_artifacts.items():
+            if not _valid_id(report_id) or not isinstance(artifact, dict):
+                raise SchemaError("Um artefato revisado é inválido; o arquivo foi preservado.")
+            _valid_generation(artifact.get("generation"), "do artefato revisado")
+            sections = artifact.get("sections")
+            if not isinstance(sections, dict) or not sections or any(
+                key not in REPORT_SECTIONS or not isinstance(text, str)
+                for key, text in sections.items()
+            ):
+                raise SchemaError("As seções revisadas são inválidas; o arquivo foi preservado.")
+            if not _valid_timestamp(artifact.get("updated_at")):
+                raise SchemaError("A data do artefato revisado é inválida; o arquivo foi preservado.")
+        active_report_id = value.get("active_report_id")
+        if active_report_id is not None and not _valid_id(active_report_id):
+            raise SchemaError("O relatório ativo é inválido; o arquivo foi preservado.")
         override = value.get("retention_override")
         if override is not None and not isinstance(override, dict):
             raise SchemaError("A política de retenção é inválida; o arquivo foi preservado.")
@@ -683,7 +710,7 @@ class MeetingLibrary:
         expected = fields.pop("expected_generation", _UNSET)
         allowed = {"title", "notes", "bookmarks", "reviewed_summary", "highlights",
                    "speaker_labels", "collection_ids", "tags", "people", "series_id",
-                   "reviewed_artifacts", "retention_override"}
+                   "reviewed_artifacts", "active_report_id", "retention_override"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError("Há campos de reunião não reconhecidos.")
@@ -725,6 +752,220 @@ class MeetingLibrary:
             _LibraryStoreView(self), session_id, path, format, cancel_event=cancel_event
         )
 
+    # -- Generated report revisions ------------------------------------
+
+    def _reports_dir(self, session_id, *, create=False):
+        session_dir = self._session_dir(session_id)
+        result = os.path.join(session_dir, REPORTS_DIRECTORY)
+        if os.path.lexists(result) and _is_link_or_junction(result):
+            raise PathSafetyError("A pasta de relatórios não pode ser um link ou junction.")
+        if not _commonpath_is(os.path.realpath(session_dir), os.path.realpath(result)):
+            raise PathSafetyError("A pasta de relatórios aponta para fora da reunião.")
+        if create:
+            os.makedirs(result, exist_ok=True)
+        return result
+
+    def _report_path(self, session_id, report_id, *, create_directory=False):
+        if not _valid_id(report_id):
+            raise ValueError("O identificador do relatório é inválido.")
+        directory = self._reports_dir(session_id, create=create_directory)
+        path = os.path.join(directory, f"{report_id}.json")
+        if os.path.lexists(path) and _is_link_or_junction(path):
+            raise PathSafetyError("O relatório não pode ser um link ou junction.")
+        if not _commonpath_is(os.path.realpath(directory), os.path.realpath(path)):
+            raise PathSafetyError("O relatório aponta para fora da reunião.")
+        return path
+
+    @staticmethod
+    def _report_citations(generated):
+        citations = []
+
+        def visit(value, key=None):
+            if key in {"citations", "segment_ids"}:
+                if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                    raise SchemaError("As citações do relatório são inválidas.")
+                citations.extend(value)
+                return
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    visit(child, child_key)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(generated)
+        return citations
+
+    def _validate_report(self, session_id, envelope):
+        if not isinstance(envelope, dict):
+            raise SchemaError("O relatório deve ser um objeto.")
+        allowed = {
+            "schema_version", "id", "report_id", "kind", "profile_id",
+            "profile_version", "session_id", "transcript_revision", "model",
+            "generated", "payload", "status", "created_at", "completed_at",
+        }
+        if set(envelope) - allowed:
+            raise SchemaError("O relatório contém campos não reconhecidos.")
+        if envelope.get("schema_version") != REPORT_SCHEMA_VERSION:
+            raise SchemaError("A versão do relatório é incompatível.")
+        report_id = envelope.get("id", envelope.get("report_id"))
+        if not _valid_id(report_id):
+            raise SchemaError("O identificador do relatório é inválido.")
+        if envelope.get("session_id") != session_id:
+            raise SchemaError("O relatório referencia outra reunião.")
+        kind = envelope.get("kind")
+        if kind not in {"report", "qa"}:
+            raise SchemaError("O tipo do relatório é inválido.")
+        if not _valid_id(envelope.get("profile_id")):
+            raise SchemaError("O perfil do relatório é inválido.")
+        profile_version = envelope.get("profile_version")
+        if isinstance(profile_version, bool) or not isinstance(profile_version, int) or profile_version < 1:
+            raise SchemaError("A versão do perfil é inválida.")
+        metadata = self.store.get(session_id, include_events=False)
+        revisions = {
+            item.get("id") for item in metadata.get("revisions", []) if isinstance(item, dict)
+        }
+        revision_id = envelope.get("transcript_revision")
+        if not isinstance(revision_id, str) or revision_id not in revisions:
+            raise SchemaError("O relatório referencia uma revisão inexistente.")
+        model = envelope.get("model")
+        if not isinstance(model, dict) or set(model) - {"id", "sha256", "runtime", "context_limit"}:
+            raise SchemaError("A proveniência do modelo é inválida.")
+        if not _valid_id(model.get("id"), reference=True):
+            raise SchemaError("O modelo do relatório é inválido.")
+        digest = model.get("sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise SchemaError("O hash do modelo é inválido.")
+        if not isinstance(model.get("runtime"), str) or not model["runtime"]:
+            raise SchemaError("O runtime do relatório é inválido.")
+        generated = envelope.get("generated", envelope.get("payload"))
+        if not isinstance(generated, dict) or not generated or any(
+            key not in REPORT_SECTIONS for key in generated
+        ):
+            raise SchemaError("As seções geradas são inválidas.")
+        if not _valid_timestamp(envelope.get("created_at")):
+            raise SchemaError("A data do relatório é inválida.")
+        segments = {
+            item.get("id")
+            for item in self.store.get_transcript(session_id, revision_id)
+            if isinstance(item, dict)
+        }
+        if any(item not in segments for item in self._report_citations(generated)):
+            raise SchemaError("O relatório contém citações que não existem na revisão.")
+        normalized = copy.deepcopy(envelope)
+        normalized["id"] = report_id
+        normalized.pop("report_id", None)
+        normalized["generated"] = normalized.pop("payload", generated)
+        _, size = _copy_json(normalized, "relatório")
+        if size > MAX_REPORT_BYTES:
+            raise SchemaError("O relatório excede o limite permitido.")
+        return normalized
+
+    def save_report(self, session_id, envelope):
+        normalized = self._validate_report(session_id, envelope)
+        path = self._report_path(session_id, normalized["id"], create_directory=True)
+        with _writer_lock(path):
+            if os.path.lexists(path):
+                raise FileExistsError("Uma revisão de relatório com este identificador já existe.")
+            write_json_atomic(path, normalized)
+        self._project_after_canonical_write(session_id)
+        return copy.deepcopy(normalized)
+
+    def _read_report_files(self, session_id):
+        directory = self._reports_dir(session_id)
+        if not os.path.isdir(directory):
+            return []
+        reports = []
+        with os.scandir(directory) as entries:
+            names = sorted(
+                entry.name for entry in entries
+                if entry.is_file(follow_symlinks=False) and entry.name.endswith(".json")
+            )
+        if len(names) > MAX_REPORTS:
+            raise SchemaError("Há relatórios demais nesta reunião.")
+        for name in names:
+            report_id = name[:-5]
+            path = self._report_path(session_id, report_id)
+            value = self._load_versioned(
+                path, REPORT_SCHEMA_VERSION, f"reports/{name}", MAX_REPORT_BYTES,
+            )
+            reports.append(self._validate_report(session_id, value))
+        reports.sort(key=lambda item: (item.get("created_at", ""), item["id"]))
+        return reports
+
+    def list_reports(self, session_id, *, include_legacy=True):
+        reports = self._read_report_files(session_id)
+        annotations = self.read_annotations(session_id)
+        reviewed = annotations.get("reviewed_artifacts", {})
+        result = []
+        if include_legacy:
+            metadata = self.store.get(session_id, include_events=False)
+            summary = metadata.get("summary")
+            reviewed_summary = annotations.get("reviewed_summary")
+            if summary or reviewed_summary:
+                result.append({
+                    "schema_version": 0,
+                    "id": "legacy-summary",
+                    "kind": "legacy-summary",
+                    "virtual": True,
+                    "generated": copy.deepcopy(summary),
+                    "reviewed_artifact": reviewed_summary or None,
+                    "created_at": metadata.get("updated_at") or metadata.get("created_at"),
+                })
+        for report in reports:
+            value = copy.deepcopy(report)
+            if report["id"] in reviewed:
+                value["reviewed_artifact"] = copy.deepcopy(reviewed[report["id"]])
+            result.append(value)
+        return result
+
+    def get_report(self, session_id, report_id):
+        if report_id == "legacy-summary":
+            for report in self.list_reports(session_id):
+                if report["id"] == report_id:
+                    return report
+            raise FileNotFoundError("O resumo legado não existe.")
+        path = self._report_path(session_id, report_id)
+        value = self._load_versioned(
+            path, REPORT_SCHEMA_VERSION, f"reports/{report_id}.json", MAX_REPORT_BYTES,
+        )
+        if value is None:
+            raise FileNotFoundError("O relatório não existe.")
+        report = self._validate_report(session_id, value)
+        reviewed = self.read_annotations(session_id).get("reviewed_artifacts", {})
+        if report_id in reviewed:
+            report["reviewed_artifact"] = copy.deepcopy(reviewed[report_id])
+        return report
+
+    def review_report(self, session_id, report_id, sections, *, expected_generation):
+        self.get_report(session_id, report_id)
+        if report_id == "legacy-summary":
+            raise ValueError("Regenere o resumo legado antes de revisar seções estruturadas.")
+        if not isinstance(sections, dict) or not sections or any(
+            key not in REPORT_SECTIONS or not isinstance(text, str)
+            for key, text in sections.items()
+        ):
+            raise ValueError("As seções revisadas são inválidas.")
+        annotations = self.read_annotations(session_id)
+        reviewed = copy.deepcopy(annotations.get("reviewed_artifacts", {}))
+        current = reviewed.get(report_id)
+        actual = current.get("generation", 0) if isinstance(current, dict) else 0
+        expected = _valid_generation(expected_generation, "esperada do artefato")
+        if expected != actual:
+            raise AnnotationConflict(expected, actual)
+        artifact = {
+            "generation": actual + 1,
+            "sections": copy.deepcopy(sections),
+            "updated_at": _utc_timestamp(),
+        }
+        reviewed[report_id] = artifact
+        self.update_annotations(
+            session_id,
+            {"reviewed_artifacts": reviewed, "active_report_id": report_id},
+            expected_generation=annotations["generation"],
+        )
+        return copy.deepcopy(artifact)
+
     def delete(self, session_id):
         with self._catalog_lock:
             with _writer_lock(self._session_dir(session_id)):
@@ -750,6 +991,7 @@ class MeetingLibrary:
                     annotations = self.read_annotations(session_id) if os.path.lexists(path) else None
                     result = bool(self.index.index_store_session(
                         self.store, session_id, annotations=annotations,
+                        reports=self._read_report_files(session_id),
                     ))
                     if result:
                         self._index_stale = False

@@ -271,6 +271,93 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         self.assertEqual(result["sessions"], 10_501)
         self.assertEqual(len(index.sessions), 10_501)
 
+    def test_report_revisions_are_immutable_and_listed_with_legacy_projection(self):
+        legacy = self.library.list_reports("fixture-meeting-v1")
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(legacy[0]["kind"], "legacy-summary")
+        self.assertTrue(legacy[0]["virtual"])
+
+        envelope = {
+            "schema_version": 1,
+            "id": "report-1",
+            "kind": "report",
+            "profile_id": "general",
+            "profile_version": 1,
+            "session_id": "fixture-meeting-v1",
+            "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "a" * 64, "runtime": "llama.cpp"},
+            "generated": {
+                "summary": {
+                    "text": "Confirmed milestone",
+                    "citations": ["microphone:0.000000:3.000000"],
+                },
+            },
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        saved = self.library.save_report("fixture-meeting-v1", envelope)
+        self.assertEqual(saved["id"], "report-1")
+        path = self.session_dir / "reports" / "report-1.json"
+        before = path.read_bytes()
+        with self.assertRaises(FileExistsError):
+            self.library.save_report("fixture-meeting-v1", envelope)
+        self.assertEqual(path.read_bytes(), before)
+        reports = self.library.list_reports("fixture-meeting-v1")
+        self.assertEqual([item["id"] for item in reports], ["legacy-summary", "report-1"])
+        self.assertEqual(self.library.get_report("fixture-meeting-v1", "report-1"), saved)
+
+    def test_reviewed_report_is_separate_and_generation_checked(self):
+        envelope = {
+            "schema_version": 1,
+            "id": "report-1",
+            "kind": "report",
+            "profile_id": "general",
+            "profile_version": 1,
+            "session_id": "fixture-meeting-v1",
+            "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "b" * 64, "runtime": "llama.cpp"},
+            "generated": {
+                "summary": {
+                    "text": "Generated",
+                    "citations": ["microphone:0.000000:3.000000"],
+                },
+            },
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        self.library.save_report("fixture-meeting-v1", envelope)
+        review = self.library.review_report(
+            "fixture-meeting-v1", "report-1", {"summary": "Reviewed"},
+            expected_generation=0,
+        )
+        self.assertEqual(review["generation"], 1)
+        self.assertEqual(review["sections"], {"summary": "Reviewed"})
+        with self.assertRaises(AnnotationConflict):
+            self.library.review_report(
+                "fixture-meeting-v1", "report-1", {"summary": "Stale"},
+                expected_generation=0,
+            )
+        self.assertEqual(
+            self.library.get_report("fixture-meeting-v1", "report-1")["generated"],
+            envelope["generated"],
+        )
+
+    def test_report_validation_rejects_unknown_revision_and_absolute_paths(self):
+        envelope = {
+            "schema_version": 1,
+            "id": "report-1",
+            "kind": "report",
+            "profile_id": "general",
+            "profile_version": 1,
+            "session_id": "fixture-meeting-v1",
+            "transcript_revision": "missing-revision",
+            "model": {"id": "local-model", "sha256": "c" * 64, "runtime": "llama.cpp"},
+            "generated": {"summary": {"text": str(self.home), "citations": ["segment-1"]}},
+            "created_at": "2026-09-16T12:30:00Z",
+            "source_path": str(self.home),
+        }
+        with self.assertRaises(SchemaError):
+            self.library.save_report("fixture-meeting-v1", envelope)
+        self.assertFalse((self.session_dir / "reports").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
