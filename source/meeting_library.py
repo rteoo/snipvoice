@@ -763,6 +763,8 @@ class MeetingLibrary:
 
     def _mark_index_stale_with_reason(self, reason):
         self._index_stale = True
+        if self._index is None and not os.path.lexists(os.path.join(self.home_root, "library.sqlite")):
+            return
         try:
             self.index.mark_stale(reason)
         except Exception:
@@ -830,23 +832,30 @@ class MeetingLibrary:
                             continue
                         session_ids.append(entry.name)
                     session_ids.sort()
-            except OSError:
-                session_ids = []
+            except OSError as error:
+                self._mark_index_stale_with_reason("meeting directory scan failed")
+                raise SchemaError("A biblioteca não pôde ser lida completamente; o índice não foi publicado.") from error
             for session_id in session_ids:
                 if cancel_event is not None and cancel_event.is_set():
                     break
                 try:
                     metadata = self.store.get(session_id, include_events=False)
-                except (OSError, ValueError):
-                    continue
+                except (OSError, ValueError) as error:
+                    self._mark_index_stale_with_reason("meeting metadata is unreadable")
+                    raise SchemaError("Os metadados da reunião não puderam ser lidos; o índice não foi publicado.") from error
                 annotations_path = self._annotations_path(session_id)
                 # A malformed/future sidecar is actionable corruption, not an
                 # invitation to silently rebuild from legacy metadata.
                 annotations = self.read_annotations(session_id) if os.path.lexists(annotations_path) else None
                 transcripts = {}
-                for revision in metadata.get("revisions", []):
+                revisions = metadata.get("revisions", [])
+                if not isinstance(revisions, list):
+                    self._mark_index_stale_with_reason("meeting revisions are malformed")
+                    raise SchemaError("As revisões da reunião são inválidas; o índice não foi publicado.")
+                for revision in revisions:
                     if not isinstance(revision, dict) or not isinstance(revision.get("id"), str):
-                        continue
+                        self._mark_index_stale_with_reason("meeting revision identity is malformed")
+                        raise SchemaError("A identidade da revisão é inválida; o índice não foi publicado.")
                     revision_id = revision["id"]
                     values = list(self.store.get_transcript(session_id, revision_id))
                     expected = revision.get("segments")
