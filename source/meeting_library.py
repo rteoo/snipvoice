@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 
 from meeting_store import MeetingStore
 from snippet_utils import write_json_atomic
@@ -425,14 +426,29 @@ class MeetingLibrary:
             if not isinstance(value.get(key), list) or len(value[key]) > MAX_COLLECTIONS:
                 raise SchemaError(f"A lista {key} do workspace é inválida; o arquivo foi preservado.")
             seen = set()
+            seen_names = set()
             for item in value[key]:
                 if not isinstance(item, dict) or not _valid_id(item.get("id")):
                     raise SchemaError(f"A definição {key} do workspace é inválida; o arquivo foi preservado.")
                 if item["id"] in seen:
                     raise SchemaError(f"A definição {key} do workspace é duplicada; o arquivo foi preservado.")
                 seen.add(item["id"])
-                if not isinstance(item.get("name", ""), str) or len(item.get("name", "")) > MAX_LABEL_CHARS:
+                name = item.get("name", "")
+                if (
+                    not isinstance(name, str)
+                    or not name
+                    or len(name) > MAX_LABEL_CHARS
+                    or name != unicodedata.normalize("NFC", name.strip())
+                ):
                     raise SchemaError(f"O nome de {key} do workspace é inválido; o arquivo foi preservado.")
+                folded_name = name.casefold()
+                if folded_name in seen_names:
+                    raise SchemaError(f"O nome de {key} do workspace é duplicado; o arquivo foi preservado.")
+                seen_names.add(folded_name)
+                if key == "collections" and item.get("kind", "folder") not in {"folder", "project"}:
+                    raise SchemaError("O tipo da coleção é inválido; o arquivo foi preservado.")
+                if "archived" in item and not isinstance(item["archived"], bool):
+                    raise SchemaError(f"O estado arquivado de {key} é inválido; o arquivo foi preservado.")
         for key in ("privacy_defaults", "retention_defaults"):
             if not isinstance(value.get(key), dict):
                 raise SchemaError(f"As configurações {key} do workspace são inválidas; o arquivo foi preservado.")
@@ -469,6 +485,58 @@ class MeetingLibrary:
     # Compatibility aliases for callers that use a save/read vocabulary.
     read_workspace_state = read_workspace
     save_workspace = update_workspace
+
+    @staticmethod
+    def _workspace_definition(value, *, kind):
+        if not isinstance(value, dict) or not _valid_id(value.get("id")):
+            raise ValueError(f"A definição de {kind} é inválida.")
+        name = value.get("name")
+        if not isinstance(name, str):
+            raise ValueError(f"O nome de {kind} é inválido.")
+        name = unicodedata.normalize("NFC", name.strip())
+        if not name or len(name) > MAX_LABEL_CHARS:
+            raise ValueError(f"O nome de {kind} é inválido.")
+        result = {
+            "id": value["id"],
+            "name": name,
+            "archived": bool(value.get("archived", False)),
+        }
+        if kind == "coleção":
+            collection_kind = value.get("kind", "folder")
+            if collection_kind not in {"folder", "project"}:
+                raise ValueError("O tipo da coleção é inválido.")
+            result["kind"] = collection_kind
+        return result
+
+    def _save_workspace_definition(self, key, definition, *, expected_generation):
+        workspace = self.read_workspace()
+        if workspace["generation"] != expected_generation:
+            raise WorkspaceConflict(expected_generation, workspace["generation"])
+        values = copy.deepcopy(workspace[key])
+        replaced = False
+        for index, current in enumerate(values):
+            if current.get("id") == definition["id"]:
+                values[index] = copy.deepcopy(definition)
+                replaced = True
+                break
+        if not replaced:
+            values.append(copy.deepcopy(definition))
+        updated = self.update_workspace(
+            {key: values}, expected_generation=expected_generation,
+        )
+        return next(copy.deepcopy(item) for item in updated[key] if item["id"] == definition["id"])
+
+    def save_collection(self, value, *, expected_generation):
+        definition = self._workspace_definition(value, kind="coleção")
+        return self._save_workspace_definition(
+            "collections", definition, expected_generation=expected_generation,
+        )
+
+    def save_series(self, value, *, expected_generation):
+        definition = self._workspace_definition(value, kind="série")
+        return self._save_workspace_definition(
+            "series", definition, expected_generation=expected_generation,
+        )
 
     # -- Annotations ------------------------------------------------------
 
@@ -579,6 +647,10 @@ class MeetingLibrary:
                 for item in values
             ) or len(set(values)) != len(values):
                 raise SchemaError(f"A lista {key} da anotação é inválida; o arquivo foi preservado.")
+            if key in {"tags", "people"} and any(
+                item != unicodedata.normalize("NFC", item.strip()) for item in values
+            ):
+                raise SchemaError(f"A lista {key} não está normalizada; o arquivo foi preservado.")
         series_id = value.get("series_id")
         if series_id is not None and not _valid_id(series_id, reference=True):
             raise SchemaError("A série da anotação é inválida; o arquivo foi preservado.")
@@ -716,6 +788,121 @@ class MeetingLibrary:
             raise ValueError("Há campos de reunião não reconhecidos.")
         self.update_annotations(session_id, fields, expected_generation=expected)
         return True
+
+    @staticmethod
+    def _normalized_labels(values, label, limit):
+        if not isinstance(values, list) or len(values) > limit:
+            raise ValueError(f"A lista {label} é inválida.")
+        result = []
+        seen = set()
+        for value in values:
+            if not isinstance(value, str):
+                raise ValueError(f"A lista {label} é inválida.")
+            normalized = unicodedata.normalize("NFC", value.strip())
+            if not normalized or len(normalized) > MAX_ID_CHARS or not _valid_id(normalized, reference=True):
+                raise ValueError(f"A lista {label} é inválida.")
+            folded = normalized.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            result.append(normalized)
+        return result
+
+    def assign_organization(
+        self, session_id, *, collection_ids=None, tags=None, people=None,
+        series_id=_UNSET, expected_generation,
+    ):
+        patch = {}
+        if collection_ids is not None:
+            patch["collection_ids"] = self._normalized_labels(
+                collection_ids, "de coleções", MAX_COLLECTIONS,
+            )
+        if tags is not None:
+            patch["tags"] = self._normalized_labels(tags, "de tags", MAX_TAGS)
+        if people is not None:
+            patch["people"] = self._normalized_labels(people, "de pessoas", MAX_PEOPLE)
+        if series_id is not _UNSET:
+            if series_id is not None and not _valid_id(series_id):
+                raise ValueError("A série é inválida.")
+            patch["series_id"] = series_id
+        if not patch:
+            raise ValueError("Nenhuma organização foi alterada.")
+        return self.update_annotations(
+            session_id, patch, expected_generation=expected_generation,
+        )
+
+    def _canonical_session_ids(self):
+        try:
+            with os.scandir(self.meetings_root) as entries:
+                values = [
+                    entry.name for entry in entries
+                    if _valid_id(entry.name)
+                    and entry.is_dir(follow_symlinks=False)
+                    and not _is_link_or_junction(os.path.join(self.meetings_root, entry.name))
+                ]
+        except OSError as error:
+            raise SchemaError("A biblioteca não pôde ser enumerada.") from error
+        return sorted(values)
+
+    def preview_collection_delete(self, collection_id):
+        if not _valid_id(collection_id):
+            raise ValueError("A coleção é inválida.")
+        workspace = self.read_workspace()
+        if not any(item.get("id") == collection_id for item in workspace["collections"]):
+            raise KeyError("A coleção não existe.")
+        affected = []
+        for session_id in self._canonical_session_ids():
+            annotations = self.read_annotations(session_id)
+            if collection_id in annotations.get("collection_ids", []):
+                affected.append(session_id)
+        return {
+            "collection_id": collection_id,
+            "workspace_generation": workspace["generation"],
+            "session_ids": affected,
+        }
+
+    def delete_collection(self, collection_id, *, expected_generation, confirmed_session_ids):
+        preview = self.preview_collection_delete(collection_id)
+        if preview["workspace_generation"] != expected_generation:
+            raise WorkspaceConflict(expected_generation, preview["workspace_generation"])
+        if sorted(set(confirmed_session_ids)) != preview["session_ids"]:
+            raise ValueError("A confirmação não corresponde à prévia atual da coleção.")
+        originals = {}
+        updated = []
+        try:
+            for session_id in preview["session_ids"]:
+                annotations = self.read_annotations(session_id)
+                originals[session_id] = annotations
+                memberships = [
+                    item for item in annotations["collection_ids"] if item != collection_id
+                ]
+                self.update_annotations(
+                    session_id,
+                    {"collection_ids": memberships},
+                    expected_generation=annotations["generation"],
+                )
+                updated.append(session_id)
+            workspace = self.read_workspace()
+            collections = [
+                item for item in workspace["collections"] if item.get("id") != collection_id
+            ]
+            self.update_workspace(
+                {"collections": collections}, expected_generation=expected_generation,
+            )
+        except Exception:
+            for session_id in reversed(updated):
+                original = originals[session_id]
+                current = self.read_annotations(session_id)
+                restore = {
+                    key: copy.deepcopy(value)
+                    for key, value in original.items()
+                    if key not in {"schema_version", "generation", "updated_at"}
+                }
+                self.update_annotations(
+                    session_id, restore, expected_generation=current["generation"],
+                )
+            raise
+        return {"collection_id": collection_id, "removed_from": preview["session_ids"]}
 
     # -- Catalog projection and compatibility fallback ------------------
 
