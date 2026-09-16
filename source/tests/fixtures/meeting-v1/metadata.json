@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "id": "fixture-meeting-v1",
+  "title": "Weekly product review",
+  "notes": "Human-authored fixture notes.",
+  "bookmarks": [
+    {
+      "time": 1.25,
+      "label": "Decision"
+    }
+  ],
+  "status": "completed",
+  "error": null,
+  "created_at": "2026-09-16T12:00:00Z",
+  "updated_at": "2026-09-16T12:05:00Z",
+  "duration": 3.0,
+  "settings": {
+    "profile": "balanced",
+    "language": "auto"
+  },
+  "tracks": {
+    "microphone": {
+      "rate": 16000,
+      "channels": 1,
+      "segments": [
+        {
+          "index": 0,
+          "path": "microphone/segment-000000.pcm",
+          "start": 0.0,
+          "duration": 3.0,
+          "bytes": 0,
+          "frames": 0,
+          "events": 0,
+          "rate": 16000,
+          "channels": 1,
+          "end": 3.0
+        }
+      ]
+    },
+    "system": {
+      "rate": 16000,
+      "channels": 1,
+      "segments": [
+        {
+          "index": 0,
+          "path": "system/segment-000000.pcm",
+          "start": 0.0,
+          "duration": 3.0,
+          "bytes": 0,
+          "frames": 0,
+          "events": 0,
+          "rate": 16000,
+          "channels": 1,
+          "end": 3.0
+        }
+      ]
+    }
+  },
+  "events": [],
+  "revisions": [
+    {
+      "id": "revision-1",
+      "profile": "balanced",
+      "language": "pt-BR",
+      "status": "completed",
+      "segments": 1,
+      "created_at": "2026-09-16T12:01:00Z",
+      "updated_at": "2026-09-16T12:02:00Z",
+      "error": null
+    }
+  ],
+  "summary": {
+    "summary": "A equipe confirmou o próximo marco.",
+    "revision": "revision-1",
+    "citations": ["microphone:0.000000:3.000000"]
+  },
+  "reviewed_summary": "Revisar o marco na próxima reunião.",
+  "future_metadata": {
+    "preserve": true
+  },
+  "final_audio": null
+}
