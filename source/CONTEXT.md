@@ -1,30 +1,20 @@
-# Local meeting-memory storage context
+# Local meeting-memory glossary
 
-The storage seam uses canonical meeting bundles plus a rebuildable SQLite/FTS
-catalog. `MeetingStore` owns capture/recovery and remains on the capture path;
-`MeetingLibrary` is the only user-facing library interface; `MeetingIndex` is an
-internal disposable projection.
-
-Canonical data remains in `meetings/<session-id>/`: `metadata.json`, the valid
-prefix of `events.journal`, native PCM track segments, append-only transcript
-revision JSONL, additive `annotations.json`, and generated report envelopes.
-`workspace.json` holds global workspace definitions. `library.sqlite` may be
-deleted at any point without data loss and is rebuilt from those canonical
-files. No audio or transcript BLOB is stored in SQLite.
-
-Schema-1 meetings are opened without eager migration. Missing annotations are
-projected from legacy title, notes, bookmarks, summary, and reviewed-summary
-fields at read time; the sidecar is written only after an explicit mutation.
-Known sidecars are versioned, size-limited, validated, atomically replaced,
-and compare-and-swap protected by their integer generation. Malformed or newer
-sidecars remain untouched and produce an actionable read-only error instead of
-silently falling back to legacy data.
-
-SQLite/FTS is optional for direct access. The catalog has explicit
-`ready`, `stale`, `rebuilding`, `unavailable`, and `incomplete` states. A
-canonical write wins if indexing fails; the next reconciliation repairs the
-projection. Capture, hotkey, and Tk callbacks never open SQLite or perform
-unbounded disk/model work.
-
-The active packaged interpreter must report Python `sqlite3` and FTS5 support
-through the in-memory runtime probe before search is considered releasable.
+- **Meeting bundle** — one app-owned directory containing a recording and all
+  durable material derived from it.
+- **Transcript revision** — immutable ASR output for one profile/language run.
+- **Annotation** — human-owned information layered over a meeting or transcript
+  revision without changing generated source data.
+- **Report profile** — a reusable selection of supported report sections plus
+  bounded instructions.
+- **Report revision** — one generated structured artifact bound to a transcript
+  revision, profile version, and exact model artifact.
+- **Reviewed artifact** — user-edited output derived from a report revision; it
+  never overwrites the generated payload.
+- **Collection** — a user-created folder or project grouping. Tags are
+  lightweight labels, and a series is a manually assigned recurring-meeting
+  group.
+- **Catalog index** — the disposable SQLite projection used for listing,
+  filtering, snippets, and retrieval.
+- **Retention plan** — an immutable preview of exact app-owned targets and lost
+  capabilities produced before a destructive operation.
