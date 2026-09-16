@@ -44,6 +44,8 @@ MAX_COLLECTIONS = 1024
 MAX_SPEAKER_LABELS = 10_000
 MAX_HIGHLIGHT_SEGMENTS = 512
 MAX_ID_CHARS = 128
+LOCK_TIMEOUT_SECONDS = 5.0
+LOCK_POLL_SECONDS = 0.05
 REPORT_SECTIONS = frozenset({
     "summary", "decisions", "action_items", "open_questions", "risks",
     "objections", "feedback", "follow_up_email", "answer",
@@ -219,11 +221,34 @@ def _cross_process_lock(path):
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if time.monotonic() >= deadline:
+                        raise MeetingLibraryError(
+                            "O bloqueio canônico está ocupado há muito tempo; "
+                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                        ) from error
+                    time.sleep(LOCK_POLL_SECONDS)
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (BlockingIOError, OSError) as error:
+                    if time.monotonic() >= deadline:
+                        raise MeetingLibraryError(
+                            "O bloqueio canônico está ocupado há muito tempo; "
+                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                        ) from error
+                    time.sleep(LOCK_POLL_SECONDS)
         locked = True
         yield
     finally:
@@ -1641,10 +1666,20 @@ class MeetingLibrary:
             for item in labels.values() if isinstance(item, dict)
             and item.get("revision") == active and item.get("segment_id")
         }
-        projected = copy.deepcopy(transcripts)
-        for segment in projected.get(active, []):
-            if segment.get("id") in by_segment:
-                segment["speaker"] = by_segment[segment["id"]]
+        projected = dict(transcripts)
+        values = projected.get(active, ())
+
+        def overlay():
+            for segment in values:
+                if not isinstance(segment, dict):
+                    yield segment
+                    continue
+                value = copy.deepcopy(segment)
+                if value.get("id") in by_segment:
+                    value["speaker"] = by_segment[value["id"]]
+                yield value
+
+        projected[active] = overlay()
         return projected
 
     def _project_after_canonical_write(self, session_id):
@@ -1658,7 +1693,7 @@ class MeetingLibrary:
                     reports = self._read_report_files(session_id)
                     if annotations and annotations.get("speaker_labels") and hasattr(self.index, "index_session"):
                         transcripts = {
-                            revision.get("id"): list(self.store.get_transcript(session_id, revision.get("id")))
+                            revision.get("id"): self.store.get_transcript(session_id, revision.get("id"))
                             for revision in metadata.get("revisions", [])
                             if isinstance(revision, dict) and isinstance(revision.get("id"), str)
                         }
@@ -1741,58 +1776,86 @@ class MeetingLibrary:
     def reconcile(self, cancel_event=None, progress=None):
         """Rebuild/reconcile the disposable index from canonical bundles."""
         with self._catalog_lock:
-            sessions = []
-            try:
-                with os.scandir(self.meetings_root) as entries:
-                    session_ids = []
+            def iter_sessions():
+                try:
+                    entries = os.scandir(self.meetings_root)
+                except OSError as error:
+                    self._mark_index_stale_with_reason("meeting directory scan failed")
+                    raise SchemaError(
+                        "A biblioteca não pôde ser lida completamente; o índice não foi publicado."
+                    ) from error
+                with entries:
                     for entry in entries:
                         if not _valid_id(entry.name):
                             continue
                         path = os.path.join(self.meetings_root, entry.name)
                         if _is_link_or_junction(path) or not entry.is_dir(follow_symlinks=False):
                             continue
-                        session_ids.append(entry.name)
-                    session_ids.sort()
-            except OSError as error:
-                self._mark_index_stale_with_reason("meeting directory scan failed")
-                raise SchemaError("A biblioteca não pôde ser lida completamente; o índice não foi publicado.") from error
-            for session_id in session_ids:
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-                try:
-                    metadata = self.store.get(session_id, include_events=False)
-                except (OSError, ValueError) as error:
-                    self._mark_index_stale_with_reason("meeting metadata is unreadable")
-                    raise SchemaError("Os metadados da reunião não puderam ser lidos; o índice não foi publicado.") from error
-                annotations_path = self._annotations_path(session_id)
-                # A malformed/future sidecar is actionable corruption, not an
-                # invitation to silently rebuild from legacy metadata.
-                annotations = self.read_annotations(session_id) if os.path.lexists(annotations_path) else None
-                transcripts = {}
-                revisions = metadata.get("revisions", [])
-                if not isinstance(revisions, list):
-                    self._mark_index_stale_with_reason("meeting revisions are malformed")
-                    raise SchemaError("As revisões da reunião são inválidas; o índice não foi publicado.")
-                for revision in revisions:
-                    if not isinstance(revision, dict) or not isinstance(revision.get("id"), str):
-                        self._mark_index_stale_with_reason("meeting revision identity is malformed")
-                        raise SchemaError("A identidade da revisão é inválida; o índice não foi publicado.")
-                    revision_id = revision["id"]
-                    values = list(self.store.get_transcript(session_id, revision_id))
-                    expected = revision.get("segments")
-                    if isinstance(expected, int) and not isinstance(expected, bool) and expected != len(values):
-                        self._mark_index_stale_with_reason(
-                            "transcript corruption prevents a complete rebuild"
+                        session_id = entry.name
+                        try:
+                            metadata = self.store.get(session_id, include_events=False)
+                        except (OSError, ValueError) as error:
+                            self._mark_index_stale_with_reason("meeting metadata is unreadable")
+                            raise SchemaError(
+                                "Os metadados da reunião não puderam ser lidos; o índice não foi publicado."
+                            ) from error
+                        annotations_path = self._annotations_path(session_id)
+                        # A malformed/future sidecar is actionable corruption,
+                        # not an invitation to silently rebuild from legacy metadata.
+                        annotations = (
+                            self.read_annotations(session_id)
+                            if os.path.lexists(annotations_path) else None
                         )
-                        raise SchemaError("A transcrição está incompleta; o índice não foi marcado como íntegro.")
-                    transcripts[revision_id] = values
-                projected_annotations = self._index_annotation_view(metadata, annotations)
-                projected_transcripts = self._index_transcripts(metadata, transcripts, annotations)
-                sessions.append((metadata, projected_annotations, projected_transcripts))
-            if cancel_event is not None and cancel_event.is_set():
-                # Let MeetingIndex publish its explicit cancellation state.
-                sessions = []
-            result = self.index.rebuild(sessions, cancel_event=cancel_event, progress=progress)
+                        revisions = metadata.get("revisions", [])
+                        if not isinstance(revisions, list):
+                            self._mark_index_stale_with_reason("meeting revisions are malformed")
+                            raise SchemaError(
+                                "As revisões da reunião são inválidas; o índice não foi publicado."
+                            )
+                        transcripts = {}
+                        for revision in revisions:
+                            if not isinstance(revision, dict) or not isinstance(revision.get("id"), str):
+                                self._mark_index_stale_with_reason("meeting revision identity is malformed")
+                                raise SchemaError(
+                                    "A identidade da revisão é inválida; o índice não foi publicado."
+                                )
+                            revision_id = revision["id"]
+                            expected = revision.get("segments")
+
+                            def checked_values(
+                                session_id=session_id,
+                                revision_id=revision_id,
+                                expected=expected,
+                            ):
+                                count = 0
+                                try:
+                                    for value in self.store.get_transcript(session_id, revision_id):
+                                        count += 1
+                                        yield value
+                                except (OSError, ValueError) as error:
+                                    self._mark_index_stale_with_reason(
+                                        "transcript corruption prevents a complete rebuild"
+                                    )
+                                    raise SchemaError(
+                                        "A transcrição não pôde ser lida; o índice não foi marcado como íntegro."
+                                    ) from error
+                                if (isinstance(expected, int) and not isinstance(expected, bool)
+                                        and expected != count):
+                                    self._mark_index_stale_with_reason(
+                                        "transcript corruption prevents a complete rebuild"
+                                    )
+                                    raise SchemaError(
+                                        "A transcrição está incompleta; o índice não foi marcado como íntegro."
+                                    )
+
+                            transcripts[revision_id] = checked_values()
+                        projected_annotations = self._index_annotation_view(metadata, annotations)
+                        projected_transcripts = self._index_transcripts(
+                            metadata, transcripts, annotations,
+                        )
+                        yield (metadata, projected_annotations, projected_transcripts)
+
+            result = self.index.rebuild(iter_sessions(), cancel_event=cancel_event, progress=progress)
             if result.get("state") == "ready":
                 self._index_stale = False
             return result

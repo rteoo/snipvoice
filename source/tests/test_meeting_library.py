@@ -271,6 +271,62 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         self.assertEqual(result["sessions"], 10_501)
         self.assertEqual(len(index.sessions), 10_501)
 
+    def test_reconcile_loads_one_session_and_transcript_stream_at_a_time(self):
+        consumed = {"metadata": 0, "transcripts": 0}
+
+        class FakeStore:
+            def __init__(self, root):
+                self.root = str(root)
+
+            def get(self, session_id, include_events=False):
+                consumed["metadata"] += 1
+                return {
+                    "schema_version": 1,
+                    "id": session_id,
+                    "title": session_id,
+                    "notes": "",
+                    "status": "completed",
+                    "created_at": "2026-09-16T12:00:00Z",
+                    "updated_at": "2026-09-16T12:00:00Z",
+                    "duration": 1.0,
+                    "error": None,
+                    "revisions": [{"id": "revision-1", "segments": 2, "status": "completed"}],
+                }
+
+            def get_transcript(self, session_id, revision):
+                def stream():
+                    for index in range(2):
+                        consumed["transcripts"] += 1
+                        yield {
+                            "id": f"microphone:{index}.000000:{index + 1}.000000",
+                            "track": "microphone", "start": index,
+                            "end": index + 1, "text": "streamed",
+                        }
+                return stream()
+
+        class LazyIndex:
+            state = "ready"
+
+            def rebuild(self, sessions, **_kwargs):
+                first = next(iter(sessions))
+                self.first = first
+                return {"state": "ready", "sessions": 1}
+
+        root = self.home / "lazy-meetings"
+        root.mkdir()
+        for session_id in ("meeting-a", "meeting-b", "meeting-c"):
+            (root / session_id).mkdir()
+        fake_index = LazyIndex()
+        library = MeetingLibrary(
+            root, store=FakeStore(root), index=fake_index, workspace_root=self.home,
+        )
+        result = library.reconcile()
+        self.assertEqual(result["sessions"], 1)
+        # The fake projection intentionally stops after the first yielded
+        # session; transcript bytes are not opened until the index consumes
+        # that session's stream.
+        self.assertEqual(consumed, {"metadata": 1, "transcripts": 0})
+
     def test_report_revisions_are_immutable_and_listed_with_legacy_projection(self):
         legacy = self.library.list_reports("fixture-meeting-v1")
         self.assertEqual(len(legacy), 1)

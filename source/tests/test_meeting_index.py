@@ -1,20 +1,24 @@
 import copy
+import os
 import shutil
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from meeting_index import (
     IndexCancelled,
+    IndexUnavailable,
     MeetingIndex,
     STATE_INCOMPLETE,
     STATE_READY,
     STATE_UNAVAILABLE,
     fingerprint_canonical,
+    _cross_process_lock,
 )
 from meeting_library import MeetingLibrary
 from meeting_store import MeetingStore
@@ -178,6 +182,83 @@ class MeetingIndexTests(unittest.TestCase):
         self.assertFalse(Path(str(self.path) + "-wal").exists())
         self.assertFalse(Path(str(self.path) + "-shm").exists())
         self.assertEqual(self.index.search("equipe")[0]["session_id"], "fixture-meeting-v1")
+
+    def test_rebuild_consumes_session_and_transcript_iterators_without_materializing_them(self):
+        self.index.batch_size = 1
+        consumed = {"sessions": 0, "segments": 0}
+
+        def segment_stream():
+            for index in range(3):
+                consumed["segments"] += 1
+                yield {
+                    "id": f"microphone:{index}.000000:{index + 1}.000000",
+                    "track": "microphone",
+                    "start": float(index),
+                    "end": float(index + 1),
+                    "text": f"streamed segment {index}",
+                }
+
+        def session_stream():
+            consumed["sessions"] += 1
+            yield (
+                self.metadata,
+                self.annotations,
+                {"revision-1": segment_stream()},
+                [],
+            )
+
+        progress_observations = []
+
+        def progress(processed, total):
+            progress_observations.append((processed, total, consumed["sessions"], consumed["segments"]))
+
+        result = self.index.rebuild(session_stream(), progress=progress)
+        self.assertEqual(result["sessions"], 1)
+        self.assertEqual(consumed, {"sessions": 1, "segments": 3})
+        self.assertEqual(progress_observations[-1][1], 1)
+        self.assertEqual(self.index.search("streamed segment 2")[0]["session_id"], "fixture-meeting-v1")
+
+    def test_active_report_follows_canonical_creation_order_not_uuid_sorting(self):
+        reports = [
+            {"id": "z-older", "kind": "report", "profile_id": "general", "text": "old"},
+            {"id": "a-newer", "kind": "report", "profile_id": "general", "text": "new"},
+        ]
+        self.index.index_session(
+            self.metadata, self.annotations, self.transcripts, reports,
+        )
+        connection = __import__("sqlite3").connect(self.path)
+        try:
+            active = connection.execute(
+                "SELECT active_report FROM sessions WHERE session_id=?",
+                ("fixture-meeting-v1",),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(active, "a-newer")
+
+    @unittest.skipUnless(os.name == "nt", "Windows-specific msvcrt lock behavior")
+    def test_windows_writer_lock_times_out_with_actionable_error(self):
+        import msvcrt
+
+        with mock.patch.object(__import__("meeting_index"), "LOCK_TIMEOUT_SECONDS", 0.01), \
+                mock.patch.object(__import__("meeting_index"), "LOCK_POLL_SECONDS", 0), \
+                mock.patch.object(msvcrt, "locking", side_effect=OSError("busy")):
+            with self.assertRaises(IndexUnavailable) as context:
+                with _cross_process_lock(self.path):
+                    pass
+        self.assertIn("ocupado há muito tempo", str(context.exception))
+
+    @unittest.skipIf(os.name == "nt", "POSIX-specific flock behavior")
+    def test_posix_writer_lock_times_out_with_actionable_error(self):
+        import fcntl
+
+        with mock.patch.object(__import__("meeting_index"), "LOCK_TIMEOUT_SECONDS", 0.01), \
+                mock.patch.object(__import__("meeting_index"), "LOCK_POLL_SECONDS", 0), \
+                mock.patch.object(fcntl, "flock", side_effect=BlockingIOError("busy")):
+            with self.assertRaises(IndexUnavailable) as context:
+                with _cross_process_lock(self.path):
+                    pass
+        self.assertIn("ocupado há muito tempo", str(context.exception))
 
 
 if __name__ == "__main__":

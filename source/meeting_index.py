@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import unicodedata
 import uuid
 
@@ -27,6 +28,8 @@ INDEX_STATES = frozenset({STATE_READY, STATE_STALE, STATE_REBUILDING, STATE_UNAV
 DEFAULT_BATCH_SIZE = 128
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 MAX_QUERY_CHARS = 512
+LOCK_TIMEOUT_SECONDS = 5.0
+LOCK_POLL_SECONDS = 0.05
 
 
 _PATH_LOCKS_GUARD = threading.Lock()
@@ -82,11 +85,34 @@ def _cross_process_lock(path):
         if os.name == "nt":
             import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+            while True:
+                handle.seek(0)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as error:
+                    if time.monotonic() >= deadline:
+                        raise IndexUnavailable(
+                            "O bloqueio do índice está ocupado há muito tempo; "
+                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                        ) from error
+                    threading.Event().wait(LOCK_POLL_SECONDS)
         else:
             import fcntl
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (BlockingIOError, OSError) as error:
+                    if time.monotonic() >= deadline:
+                        raise IndexUnavailable(
+                            "O bloqueio do índice está ocupado há muito tempo; "
+                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                        ) from error
+                    threading.Event().wait(LOCK_POLL_SECONDS)
         locked = True
         yield
     finally:
@@ -488,37 +514,132 @@ class MeetingIndex:
                 memberships.append((session_id, "series", str(annotations["series_id"])))
         return session_row, segments, report_rows, memberships
 
-    @classmethod
-    def _insert_projection(cls, connection, metadata, annotations=None, transcripts=None, reports=None):
-        session_row, segments, report_rows, memberships = cls._projection_rows(
-            metadata, annotations, transcripts, reports
+    def _insert_projection(self, connection, metadata, annotations=None, transcripts=None, reports=None):
+        """Insert one projection while consuming transcript sources incrementally.
+
+        Rebuild callers commonly pass JSONL-backed generators.  Keeping the
+        old ``_projection_rows`` helper for small direct projections is useful
+        for compatibility, but the write path itself must never turn a whole
+        meeting (or report collection) into Python lists.
+        """
+        if not isinstance(metadata, dict):
+            raise ValueError("A projeção exige metadados de reunião válidos.")
+        session_id = metadata.get("id")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError("A projeção exige um identificador de reunião.")
+        title = metadata.get("title", "")
+        notes = metadata.get("notes", "")
+        if annotations:
+            title = annotations.get("title", title)
+            notes = annotations.get("notes", notes)
+        revisions = metadata.get("revisions", [])
+        active_revision = revisions[-1].get("id") if revisions and isinstance(revisions[-1], dict) else None
+        generation = annotations.get("generation", 0) if annotations else 0
+        session_row = (
+            session_id,
+            str(title) if isinstance(title, str) else "",
+            str(notes) if isinstance(notes, str) else "",
+            str(metadata.get("status", "")),
+            metadata.get("created_at"),
+            metadata.get("updated_at"),
+            float(metadata.get("duration", 0.0) or 0.0),
+            metadata.get("error"),
+            active_revision,
+            None,
+            int(generation),
+            "",
         )
-        session_id = session_row[0]
-        cls._clear_session(connection, session_id)
+        self._clear_session(connection, session_id)
         connection.execute(
             "INSERT INTO sessions(session_id,title,notes,status,created_at,updated_at,duration,error,"
             "active_revision,active_report,annotation_generation,content_fingerprint) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             session_row,
         )
-        connection.executemany(
-            "INSERT INTO transcript_segments(session_id,revision_id,segment_id,start,end,track,speaker,text) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            segments,
+
+        digest = hashlib.sha256()
+
+        def add(marker, value):
+            encoded = _json_piece(value).encode("utf-8")
+            digest.update(marker.encode("ascii"))
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+
+        add("metadata\0", _metadata_without_events(metadata))
+        add("annotations\0", annotations if annotations is not None else None)
+
+        connection.execute(
+            "INSERT INTO fts(session_id,source_kind,revision_id,segment_id,report_id,content) "
+            "VALUES (?,?,?,?,?,?)",
+            (session_id, "session", None, None, None,
+             "\n".join(value for value in (session_row[1], session_row[2]) if value)),
         )
-        connection.executemany(
-            "INSERT INTO reports(session_id,report_id,profile_id,kind,reviewed,text) VALUES (?,?,?,?,?,?)",
-            [(session_id, *row) for row in report_rows],
-        )
-        connection.executemany(
-            "INSERT INTO memberships(session_id,kind,value) VALUES (?,?,?)", memberships
-        )
-        fts_rows = [(session_id, "session", None, None, None,
-                     "\n".join(value for value in (session_row[1], session_row[2]) if value))]
-        for row in segments:
-            fts_rows.append((session_id, "transcript", row[1], row[2], None, row[7]))
-        for row in report_rows:
-            fts_rows.append((session_id, "report", None, None, row[0], row[4]))
+
+        def revision_sources(value):
+            if value is None:
+                return ()
+            if isinstance(value, dict):
+                return ((str(revision_id), value[revision_id])
+                        for revision_id in sorted(value, key=str))
+            return (("", value),)
+
+        for revision_id, values in revision_sources(transcripts):
+            add("revision\0", revision_id)
+            if values is None:
+                continue
+            for segment in values:
+                if not isinstance(segment, dict):
+                    continue
+                if not revision_id:
+                    revision_id = str(segment.get("revision", ""))
+                add("segment\0", segment)
+                row = (
+                    session_id,
+                    revision_id,
+                    str(segment.get("id", "")),
+                    segment.get("start"),
+                    segment.get("end"),
+                    segment.get("track"),
+                    segment.get("speaker"),
+                    str(segment.get("text", "")),
+                )
+                connection.execute(
+                    "INSERT INTO transcript_segments(session_id,revision_id,segment_id,start,end,track,speaker,text) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    row,
+                )
+                connection.execute(
+                    "INSERT INTO fts(session_id,source_kind,revision_id,segment_id,report_id,content) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, "transcript", row[1], row[2], None, row[7]),
+                )
+
+        active_report = None
+        effective_reports = reports if reports is not None else metadata.get("reports", ())
+        if effective_reports is None:
+            effective_reports = ()
+        for report in effective_reports:
+            if not isinstance(report, dict):
+                continue
+            row = next(self._report_rows((report,)), None)
+            if row is None:
+                continue
+            report_id, profile_id, kind, reviewed, payload = row
+            add("report\0", report)
+            # Canonical report readers provide creation order; the last
+            # successfully indexed report is the active projection.  UUID
+            # lexical order is unrelated to creation time.
+            active_report = report_id
+            connection.execute(
+                "INSERT INTO reports(session_id,report_id,profile_id,kind,reviewed,text) VALUES (?,?,?,?,?,?)",
+                (session_id, report_id, profile_id, kind, reviewed, payload),
+            )
+            connection.execute(
+                "INSERT INTO fts(session_id,source_kind,revision_id,segment_id,report_id,content) "
+                "VALUES (?,?,?,?,?,?)",
+                (session_id, "report", None, None, report_id, payload),
+            )
+
         if annotations:
             values = []
             for key in ("tags", "people", "collection_ids"):
@@ -526,11 +647,27 @@ class MeetingIndex:
             if annotations.get("series_id"):
                 values.append(str(annotations["series_id"]))
             if values:
-                fts_rows.append((session_id, "annotation", None, None, None, " ".join(values)))
-        connection.executemany(
-            "INSERT INTO fts(session_id,source_kind,revision_id,segment_id,report_id,content) "
-            "VALUES (?,?,?,?,?,?)",
-            fts_rows,
+                for kind, value in (("collection", annotations.get("collection_ids", ())),
+                                    ("tag", annotations.get("tags", ())),
+                                    ("person", annotations.get("people", ()) )):
+                    connection.executemany(
+                        "INSERT INTO memberships(session_id,kind,value) VALUES (?,?,?)",
+                        ((session_id, kind, str(item)) for item in value or ()),
+                    )
+                if annotations.get("series_id") is not None:
+                    connection.execute(
+                        "INSERT INTO memberships(session_id,kind,value) VALUES (?,?,?)",
+                        (session_id, "series", str(annotations["series_id"])),
+                    )
+                connection.execute(
+                    "INSERT INTO fts(session_id,source_kind,revision_id,segment_id,report_id,content) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (session_id, "annotation", None, None, None, " ".join(values)),
+                )
+
+        connection.execute(
+            "UPDATE sessions SET active_report=?, content_fingerprint=? WHERE session_id=?",
+            (active_report, digest.hexdigest(), session_id),
         )
 
     def index_session(self, metadata, annotations=None, transcripts=None, reports=None):
@@ -800,10 +937,13 @@ class MeetingIndex:
                     connection = self._open_initialized(temp_path, create=True)
                     connection.execute("BEGIN IMMEDIATE")
                     self._write_state(connection, STATE_REBUILDING)
-                    values = sorted(list(sessions), key=lambda item: str(
-                        (item.get("id") if isinstance(item, dict) else item[0].get("id", ""))
-                    ))
-                    for raw in values:
+                    # ``sessions`` may be a generator whose transcript values
+                    # are themselves JSONL streams.  Never materialize the
+                    # catalog merely to sort it: callers that need a stable
+                    # order provide one, while SQL readers retain explicit
+                    # ordering for user-visible results.
+                    total = len(sessions) if hasattr(sessions, "__len__") else None
+                    for raw in sessions:
                         if cancel_event is not None and cancel_event.is_set():
                             raise IndexCancelled("A reconstrução do índice foi cancelada.")
                         metadata, annotations, transcripts, reports = self._normalize_rebuild_item(raw)
@@ -813,7 +953,7 @@ class MeetingIndex:
                             connection.commit()
                             connection.execute("BEGIN IMMEDIATE")
                             if progress is not None:
-                                progress(processed, len(values))
+                                progress(processed, total)
                     self._write_state(connection, STATE_READY)
                     connection.commit()
                     connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -825,7 +965,7 @@ class MeetingIndex:
                     published = True
                     self._set_memory_state(STATE_READY, f"rebuilt {processed}")
                     if progress is not None:
-                        progress(processed, processed)
+                        progress(processed, total if total is not None else processed)
                     return {"state": STATE_READY, "sessions": processed}
                 except IndexCancelled:
                     if connection is not None:
