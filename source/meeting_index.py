@@ -6,12 +6,14 @@ rebuilds are assembled in a closed temporary database and published with one
 ``os.replace`` only after all handles and WAL files are closed.
 """
 
+import contextlib
 import copy
 import hashlib
 import json
 import os
 import sqlite3
 import threading
+import unicodedata
 import uuid
 
 
@@ -25,6 +27,88 @@ INDEX_STATES = frozenset({STATE_READY, STATE_STALE, STATE_REBUILDING, STATE_UNAV
 DEFAULT_BATCH_SIZE = 128
 DEFAULT_BUSY_TIMEOUT_MS = 5000
 MAX_QUERY_CHARS = 512
+
+
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS = {}
+
+
+def _has_link_component(path):
+    """Return whether an existing path component is a link or junction."""
+    absolute = os.path.abspath(os.fspath(path))
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.sep if drive else os.sep
+    for part in tail.strip("\\/").split(os.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and (
+            os.path.islink(current)
+            or getattr(os.path, "isjunction", lambda _path: False)(current)
+        ):
+            return True
+    return False
+
+
+def _path_lock(path):
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+@contextlib.contextmanager
+def _cross_process_lock(path):
+    """Serialize index writers across processes without a dependency."""
+    lock_path = f"{os.fspath(path)}.lock"
+    if _has_link_component(os.path.dirname(lock_path)) or (
+        os.path.lexists(lock_path)
+        and (os.path.islink(lock_path)
+             or getattr(os.path, "isjunction", lambda _path: False)(lock_path))
+    ):
+        raise IndexUnavailable("O bloqueio do índice aponta para um link ou junction.")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    handle = open(lock_path, "a+b")
+    locked = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked and os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif locked:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@contextlib.contextmanager
+def _writer_lock(path):
+    with _path_lock(path):
+        with _cross_process_lock(path):
+            yield
 
 
 class MeetingIndexError(RuntimeError):
@@ -155,6 +239,8 @@ class MeetingIndex:
 
     def _safe_database_path(self, path=None):
         target = self.path if path is None else os.path.abspath(os.fspath(path))
+        if _has_link_component(os.path.dirname(target)):
+            raise IndexUnavailable("A pasta do índice não pode conter links ou junctions.")
         if os.path.lexists(target) and (
             os.path.islink(target) or getattr(os.path, "isjunction", lambda _path: False)(target)
         ):
@@ -354,10 +440,11 @@ class MeetingIndex:
             notes = annotations.get("notes", notes)
         revisions = metadata.get("revisions", [])
         active_revision = revisions[-1].get("id") if revisions and isinstance(revisions[-1], dict) else None
-        report_rows = list(MeetingIndex._report_rows(reports or metadata.get("reports", [])))
+        effective_reports = reports if reports is not None else metadata.get("reports", [])
+        report_rows = list(MeetingIndex._report_rows(effective_reports))
         active_report = report_rows[-1][0] if report_rows else None
         generation = annotations.get("generation", 0) if annotations else 0
-        fingerprint = fingerprint_canonical(metadata, annotations, transcripts, reports)
+        fingerprint = fingerprint_canonical(metadata, annotations, transcripts, effective_reports)
         session_row = (
             session_id,
             str(title) if isinstance(title, str) else "",
@@ -451,26 +538,27 @@ class MeetingIndex:
         if not isinstance(metadata, dict):
             raise ValueError("Os metadados da reunião são inválidos.")
         with self._lock:
-            connection = None
-            try:
-                connection = self._open_initialized(create=True)
-                connection.execute("BEGIN IMMEDIATE")
-                self._write_state(connection, STATE_REBUILDING)
-                self._insert_projection(connection, metadata, annotations, transcripts, reports)
-                self._write_state(connection, STATE_READY)
-                connection.commit()
-                self._set_memory_state(STATE_READY, "indexed")
-                return True
-            except Exception as error:
-                if connection is not None:
-                    connection.rollback()
-                self._set_memory_state(STATE_STALE if os.path.exists(self.path) else STATE_UNAVAILABLE, str(error))
-                if isinstance(error, (ValueError, IndexUnavailable)):
-                    raise
-                raise MeetingIndexError("Não foi possível atualizar o índice descartável.") from error
-            finally:
-                if connection is not None:
-                    connection.close()
+            with _writer_lock(self.path):
+                connection = None
+                try:
+                    connection = self._open_initialized(create=True)
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._write_state(connection, STATE_REBUILDING)
+                    self._insert_projection(connection, metadata, annotations, transcripts, reports)
+                    self._write_state(connection, STATE_READY)
+                    connection.commit()
+                    self._set_memory_state(STATE_READY, "indexed")
+                    return True
+                except Exception as error:
+                    if connection is not None:
+                        connection.rollback()
+                    self._set_memory_state(STATE_STALE if os.path.exists(self.path) else STATE_UNAVAILABLE, str(error))
+                    if isinstance(error, (ValueError, IndexUnavailable)):
+                        raise
+                    raise MeetingIndexError("Não foi possível atualizar o índice descartável.") from error
+                finally:
+                    if connection is not None:
+                        connection.close()
 
     def index_store_session(self, store, session_id, *, annotations=None, reports=None):
         metadata = store.get(session_id, include_events=False)
@@ -489,52 +577,56 @@ class MeetingIndex:
         if not isinstance(session_id, str) or not session_id:
             raise ValueError("O identificador de reunião é inválido.")
         with self._lock:
-            connection = None
-            try:
-                connection = self._open_initialized(create=False)
-                connection.execute("BEGIN IMMEDIATE")
-                self._clear_session(connection, session_id)
-                self._write_state(connection, STATE_READY)
-                connection.commit()
-                self._set_memory_state(STATE_READY, "removed")
-                return True
-            except IndexUnavailable:
-                self._set_memory_state(STATE_STALE, "missing")
-                return False
-            except Exception as error:
-                if connection is not None:
-                    connection.rollback()
-                self._set_memory_state(STATE_STALE, str(error))
-                raise MeetingIndexError("Não foi possível remover a projeção descartável.") from error
-            finally:
-                if connection is not None:
-                    connection.close()
+            with _writer_lock(self.path):
+                connection = None
+                try:
+                    connection = self._open_initialized(create=False)
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._clear_session(connection, session_id)
+                    self._write_state(connection, STATE_READY)
+                    connection.commit()
+                    self._set_memory_state(STATE_READY, "removed")
+                    return True
+                except IndexUnavailable:
+                    self._set_memory_state(STATE_STALE, "missing")
+                    return False
+                except Exception as error:
+                    if connection is not None:
+                        connection.rollback()
+                    self._set_memory_state(STATE_STALE, str(error))
+                    raise MeetingIndexError("Não foi possível remover a projeção descartável.") from error
+                finally:
+                    if connection is not None:
+                        connection.close()
 
     remove = remove_session
 
     def mark_stale(self, reason="canonical data changed"):
         with self._lock:
-            self._set_memory_state(STATE_STALE, reason)
-            if not os.path.exists(self.path):
-                return False
-            connection = None
-            try:
-                connection = self._open_initialized(create=False)
-                connection.execute("BEGIN IMMEDIATE")
-                self._write_state(connection, STATE_STALE, reason)
-                connection.commit()
-                return True
-            except Exception:
-                if connection is not None:
-                    connection.rollback()
-                return False
-            finally:
-                if connection is not None:
-                    connection.close()
+            with _writer_lock(self.path):
+                self._set_memory_state(STATE_STALE, reason)
+                if not os.path.exists(self.path):
+                    return False
+                connection = None
+                try:
+                    connection = self._open_initialized(create=False)
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._write_state(connection, STATE_STALE, reason)
+                    connection.commit()
+                    return True
+                except Exception:
+                    if connection is not None:
+                        connection.rollback()
+                    return False
+                finally:
+                    if connection is not None:
+                        connection.close()
 
     def _fts_query(self, query):
         if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS:
             raise ValueError("A busca do índice é inválida.")
+        if any(unicodedata.category(character).startswith("C") for character in query):
+            raise ValueError("A busca do índice não pode conter caracteres de controle.")
         tokens = [token for token in query.split() if token]
         # Quoting each token prevents malformed user syntax from escaping the
         # FTS expression while preserving Unicode and ordinary word search.
@@ -568,7 +660,8 @@ class MeetingIndex:
             if status:
                 sql += " WHERE s.status=?" if fts_query else " WHERE status=?"
                 params.append(status)
-            sql += " ORDER BY created_at DESC, session_id DESC LIMIT ? OFFSET ?"
+            sql += " ORDER BY s.created_at DESC, s.session_id DESC LIMIT ? OFFSET ?" if fts_query else \
+                " ORDER BY created_at DESC, session_id DESC LIMIT ? OFFSET ?"
             params.extend((limit, offset))
             rows = connection.execute(sql, params).fetchall()
             return [
@@ -626,6 +719,38 @@ class MeetingIndex:
             if connection is not None:
                 connection.close()
 
+    def _prepare_swap_target(self):
+        """Checkpoint and remove old sidecars before replacing the database."""
+        if os.path.exists(self.path):
+            connection = None
+            try:
+                connection = sqlite3.connect(
+                    self.path, timeout=self.busy_timeout_ms / 1000.0, isolation_level=None,
+                )
+                try:
+                    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except sqlite3.DatabaseError:
+                    # A corrupt disposable database can still be replaced. Its
+                    # WAL cannot be trusted and must not be carried forward.
+                    pass
+            finally:
+                if connection is not None:
+                    connection.close()
+        for suffix in ("-wal", "-shm"):
+            sidecar = self.path + suffix
+            try:
+                os.remove(sidecar)
+            except FileNotFoundError:
+                pass
+
+    @staticmethod
+    def _remove_temp_sidecars(path):
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(path + suffix)
+            except OSError:
+                pass
+
     @staticmethod
     def _normalize_rebuild_item(item):
         if isinstance(item, dict):
@@ -646,11 +771,8 @@ class MeetingIndex:
             if connection is not None:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 connection.close()
-        for suffix in ("-wal", "-shm"):
-            try:
-                os.remove(temp_path + suffix)
-            except OSError:
-                pass
+        self._remove_temp_sidecars(temp_path)
+        self._prepare_swap_target()
         os.replace(temp_path, self.path)
 
     def rebuild(self, sessions, *, cancel_event=None, progress=None):
@@ -658,116 +780,106 @@ class MeetingIndex:
         if cancel_event is not None and cancel_event.is_set():
             raise IndexCancelled("A reconstrução do índice foi cancelada.")
         with self._lock:
-            had_existing = os.path.exists(self.path) and self.state in {
-                STATE_READY, STATE_STALE, STATE_INCOMPLETE
-            }
-            prior_state = self.state
-            temp_path = f"{self.path}.rebuild-{uuid.uuid4().hex}.tmp"
-            self._set_memory_state(STATE_REBUILDING, "building replacement")
-            if had_existing:
-                try:
-                    self._set_existing_state(STATE_REBUILDING, "building replacement")
-                except Exception as error:
-                    self._set_memory_state(STATE_UNAVAILABLE, str(error))
-                    raise IndexUnavailable("O índice existente não pode ser preparado para rebuild.") from error
-            connection = None
-            published = False
-            processed = 0
-            try:
-                connection = self._open_initialized(temp_path, create=True)
-                connection.execute("BEGIN IMMEDIATE")
-                self._write_state(connection, STATE_REBUILDING)
-                values = sorted(list(sessions), key=lambda item: str(
-                    (item.get("id") if isinstance(item, dict) else item[0].get("id", ""))
-                ))
-                for raw in values:
-                    if cancel_event is not None and cancel_event.is_set():
-                        raise IndexCancelled("A reconstrução do índice foi cancelada.")
-                    metadata, annotations, transcripts, reports = self._normalize_rebuild_item(raw)
-                    self._insert_projection(connection, metadata, annotations, transcripts, reports)
-                    processed += 1
-                    if processed % self.batch_size == 0:
-                        connection.commit()
-                        connection.execute("BEGIN IMMEDIATE")
-                        if progress is not None:
-                            progress(processed, len(values))
-                self._write_state(connection, STATE_READY)
-                connection.commit()
-                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                connection.close()
-                connection = None
-                for suffix in ("-wal", "-shm"):
+            with _writer_lock(self.path):
+                had_existing = os.path.exists(self.path) and self.state in {
+                    STATE_READY, STATE_STALE, STATE_INCOMPLETE
+                }
+                prior_state = self.state
+                temp_path = f"{self.path}.rebuild-{uuid.uuid4().hex}.tmp"
+                self._set_memory_state(STATE_REBUILDING, "building replacement")
+                if had_existing:
                     try:
-                        os.remove(temp_path + suffix)
-                    except OSError:
-                        pass
-                os.replace(temp_path, self.path)
-                published = True
-                self._set_memory_state(STATE_READY, f"rebuilt {processed}")
-                if progress is not None:
-                    progress(processed, processed)
-                return {"state": STATE_READY, "sessions": processed}
-            except IndexCancelled:
-                if connection is not None:
-                    connection.rollback()
+                        self._set_existing_state(STATE_REBUILDING, "building replacement")
+                    except Exception as error:
+                        self._set_memory_state(STATE_UNAVAILABLE, str(error))
+                        raise IndexUnavailable("O índice existente não pode ser preparado para rebuild.") from error
+                connection = None
+                published = False
+                processed = 0
+                try:
+                    connection = self._open_initialized(temp_path, create=True)
+                    connection.execute("BEGIN IMMEDIATE")
+                    self._write_state(connection, STATE_REBUILDING)
+                    values = sorted(list(sessions), key=lambda item: str(
+                        (item.get("id") if isinstance(item, dict) else item[0].get("id", ""))
+                    ))
+                    for raw in values:
+                        if cancel_event is not None and cancel_event.is_set():
+                            raise IndexCancelled("A reconstrução do índice foi cancelada.")
+                        metadata, annotations, transcripts, reports = self._normalize_rebuild_item(raw)
+                        self._insert_projection(connection, metadata, annotations, transcripts, reports)
+                        processed += 1
+                        if processed % self.batch_size == 0:
+                            connection.commit()
+                            connection.execute("BEGIN IMMEDIATE")
+                            if progress is not None:
+                                progress(processed, len(values))
+                    self._write_state(connection, STATE_READY)
+                    connection.commit()
                     connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                     connection.close()
                     connection = None
-                for suffix in ("-wal", "-shm"):
+                    self._remove_temp_sidecars(temp_path)
+                    self._prepare_swap_target()
+                    os.replace(temp_path, self.path)
+                    published = True
+                    self._set_memory_state(STATE_READY, f"rebuilt {processed}")
+                    if progress is not None:
+                        progress(processed, processed)
+                    return {"state": STATE_READY, "sessions": processed}
+                except IndexCancelled:
+                    if connection is not None:
+                        connection.rollback()
+                        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                        connection.close()
+                        connection = None
+                    self._remove_temp_sidecars(temp_path)
                     try:
-                        os.remove(temp_path + suffix)
+                        os.remove(temp_path)
                     except OSError:
                         pass
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-                if had_existing:
-                    try:
-                        self._set_existing_state(prior_state if prior_state in INDEX_STATES else STATE_READY)
-                    except Exception:
-                        pass
-                    self._set_memory_state(prior_state if prior_state in INDEX_STATES else STATE_READY, "cancelled")
-                else:
-                    # There was no usable index to preserve.  Publish only an
-                    # explicitly incomplete empty disposable replacement.
-                    self._publish_incomplete(temp_path)
-                    self._set_memory_state(STATE_INCOMPLETE, "cancelled")
-                raise
-            except Exception as error:
-                if connection is not None:
-                    connection.rollback()
-                    connection.close()
-                    connection = None
-                for suffix in ("-wal", "-shm"):
-                    try:
-                        os.remove(temp_path + suffix)
-                    except OSError:
-                        pass
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
-                if had_existing:
-                    try:
-                        self._set_existing_state(prior_state if prior_state in INDEX_STATES else STATE_STALE, str(error))
-                    except Exception:
-                        pass
-                    self._set_memory_state(prior_state if prior_state in INDEX_STATES else STATE_STALE, str(error))
-                else:
-                    self._set_memory_state(STATE_UNAVAILABLE, str(error))
-                if isinstance(error, (ValueError, IndexUnavailable)):
-                    raise
-                raise MeetingIndexError("A reconstrução do índice falhou; o catálogo descartável foi preservado.") from error
-            finally:
-                if connection is not None:
-                    connection.close()
-                if not published:
-                    for suffix in ("", "-wal", "-shm"):
+                    if had_existing:
                         try:
-                            os.remove(temp_path + suffix)
-                        except OSError:
+                            self._set_existing_state(prior_state if prior_state in INDEX_STATES else STATE_READY)
+                        except Exception:
                             pass
+                        self._set_memory_state(prior_state if prior_state in INDEX_STATES else STATE_READY, "cancelled")
+                    else:
+                        # There was no usable index to preserve.  Publish only an
+                        # explicitly incomplete empty disposable replacement.
+                        self._publish_incomplete(temp_path)
+                        self._set_memory_state(STATE_INCOMPLETE, "cancelled")
+                    raise
+                except Exception as error:
+                    if connection is not None:
+                        connection.rollback()
+                        connection.close()
+                        connection = None
+                    self._remove_temp_sidecars(temp_path)
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+                    if had_existing:
+                        try:
+                            self._set_existing_state(prior_state if prior_state in INDEX_STATES else STATE_STALE, str(error))
+                        except Exception:
+                            pass
+                        self._set_memory_state(prior_state if prior_state in INDEX_STATES else STATE_STALE, str(error))
+                    else:
+                        self._set_memory_state(STATE_UNAVAILABLE, str(error))
+                    if isinstance(error, (ValueError, IndexUnavailable)):
+                        raise
+                    raise MeetingIndexError("A reconstrução do índice falhou; o catálogo descartável foi preservado.") from error
+                finally:
+                    if connection is not None:
+                        connection.close()
+                    if not published:
+                        for suffix in ("", "-wal", "-shm"):
+                            try:
+                                os.remove(temp_path + suffix)
+                            except OSError:
+                                pass
 
 
 __all__ = [

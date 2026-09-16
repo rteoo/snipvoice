@@ -7,8 +7,9 @@ small so GUI/controller code never needs to know which canonical file or
 projection supplies a value.
 """
 
+import contextlib
 import copy
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import math
 import os
@@ -79,6 +80,26 @@ class WorkspaceConflict(MeetingLibraryError):
         )
         self.expected = expected
         self.actual = actual
+
+
+class _LibraryStoreView:
+    """Read-only store-shaped view used by legacy export/playback helpers."""
+
+    def __init__(self, library):
+        self._library = library
+        self.root = library.meetings_root
+
+    def get(self, session_id, include_events=True):
+        return self._library.get_session(session_id, include_events=include_events)
+
+    def get_transcript(self, session_id, revision=None):
+        return self._library.get_transcript(session_id, revision)
+
+    def iter_events(self, session_id):
+        return self._library.store.iter_events(session_id)
+
+    def iter_audio(self, session_id, track=None, start=0.0):
+        return self._library.store.iter_audio(session_id, track=track, start=start)
 
 
 _LOCKS_GUARD = threading.Lock()
@@ -153,6 +174,69 @@ def _commonpath_is(root, path):
         return False
 
 
+def _has_link_component(path):
+    """Return whether an existing parent component is a link or junction."""
+    absolute = os.path.abspath(os.fspath(path))
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.sep if drive else os.sep
+    for part in tail.strip("\\/").split(os.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and _is_link_or_junction(current):
+            return True
+    return False
+
+
+@contextlib.contextmanager
+def _cross_process_lock(path):
+    """Serialize canonical compare-and-swap writers across processes."""
+    lock_path = f"{os.fspath(path)}.lock"
+    if _has_link_component(os.path.dirname(lock_path)) or (
+        os.path.lexists(lock_path) and _is_link_or_junction(lock_path)
+    ):
+        raise PathSafetyError("O bloqueio canônico aponta para um link ou junction.")
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    handle = open(lock_path, "a+b")
+    locked = False
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked and os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif locked:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@contextlib.contextmanager
+def _writer_lock(path):
+    with _path_lock(path):
+        with _cross_process_lock(path):
+            yield
+
+
 class MeetingLibrary:
     """User-facing canonical meeting operations and disposable-index seam.
 
@@ -189,28 +273,37 @@ class MeetingLibrary:
         self.home_root = os.path.abspath(os.fspath(workspace_root or root))
         self.meetings_root = os.path.abspath(meetings_root)
         self._store = store
+        self._store_lock = threading.RLock()
         self._index = index
         self._index_lock = threading.RLock()
         self._index_workers = set()
+        self._index_workers_by_session = {}
+        self._index_pending = set()
+        self._index_closed = False
         self._index_stale = False
+        self._catalog_lock = threading.RLock()
+        if _has_link_component(self.home_root) or _has_link_component(self.meetings_root):
+            raise PathSafetyError("As raízes da biblioteca não podem conter links ou junctions.")
         os.makedirs(self.home_root, exist_ok=True)
         os.makedirs(self.meetings_root, exist_ok=True)
 
     @property
     def store(self):
         """Return the one injected/lazily-created ``MeetingStore`` instance."""
-        if self._store is None:
-            self._store = MeetingStore(self.meetings_root)
-        return self._store
+        with self._store_lock:
+            if self._store is None:
+                self._store = MeetingStore(self.meetings_root)
+            return self._store
 
     @property
     def index(self):
         """Return the disposable index, created only when a projection is used."""
-        if self._index is None:
-            from meeting_index import MeetingIndex
+        with self._index_lock:
+            if self._index is None:
+                from meeting_index import MeetingIndex
 
-            self._index = MeetingIndex(os.path.join(self.home_root, "library.sqlite"))
-        return self._index
+                self._index = MeetingIndex(os.path.join(self.home_root, "library.sqlite"))
+            return self._index
 
     @property
     def index_state(self):
@@ -343,7 +436,7 @@ class MeetingLibrary:
         if not isinstance(patch, dict):
             raise ValueError("A alteração do workspace deve ser um objeto.")
         path = self._workspace_path()
-        with _path_lock(path):
+        with _writer_lock(path):
             current = self.read_workspace()
             actual = _valid_generation(current["generation"], "do workspace")
             if expected_generation is not _UNSET:
@@ -396,6 +489,10 @@ class MeetingLibrary:
 
     def _annotations_path(self, session_id):
         return self._canonical_path(session_id, ANNOTATIONS_FILENAME)
+
+    def has_annotation_sidecar(self, session_id):
+        """Return whether the versioned annotation file exists on disk."""
+        return os.path.lexists(self._annotations_path(session_id))
 
     def read_annotations(self, session_id):
         metadata = self.store.get(session_id, include_events=False)
@@ -531,34 +628,37 @@ class MeetingLibrary:
         if fields:
             patch = {**patch, **fields}
         path = self._annotations_path(session_id)
-        with _path_lock(path):
-            metadata = self.store.get(session_id, include_events=False)
-            current_file = self._load_versioned(
-                path, ANNOTATIONS_SCHEMA_VERSION, "annotations.json", MAX_ANNOTATIONS_BYTES
-            )
-            current = current_file or self._default_annotations(metadata)
-            self._validate_annotations(current, metadata, from_disk=bool(current_file))
-            actual = _valid_generation(current["generation"], "atual")
-            if expected_generation is not _UNSET:
-                expected = _valid_generation(expected_generation, "esperada")
-                if expected != actual:
-                    raise AnnotationConflict(expected, actual)
-            merged = copy.deepcopy(current)
-            for key, value in patch.items():
-                if key in {"schema_version", "generation", "updated_at"}:
-                    raise ValueError("Campos de versão das anotações são controlados pela biblioteca.")
-                merged[key] = copy.deepcopy(value)
-            merged["generation"] = actual + 1
-            merged["updated_at"] = _utc_timestamp()
-            self._validate_annotations(merged, metadata, from_disk=False)
-            _, size = _copy_json(merged, "annotations.json")
-            if size > MAX_ANNOTATIONS_BYTES:
-                raise ValueError("As anotações excedem o limite permitido.")
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            write_json_atomic(path, merged)
-            self._mirror_legacy_fields(session_id, merged)
-            self._project_after_canonical_write(session_id)
-            return copy.deepcopy(merged)
+        with self._catalog_lock:
+            with _writer_lock(self._session_dir(session_id)):
+                with _writer_lock(path):
+                    metadata = self.store.get(session_id, include_events=False)
+                    current_file = self._load_versioned(
+                        path, ANNOTATIONS_SCHEMA_VERSION, "annotations.json", MAX_ANNOTATIONS_BYTES
+                    )
+                    current = current_file or self._default_annotations(metadata)
+                    self._validate_annotations(current, metadata, from_disk=bool(current_file))
+                    actual = _valid_generation(current["generation"], "atual")
+                    if expected_generation is not _UNSET:
+                        expected = _valid_generation(expected_generation, "esperada")
+                        if expected != actual:
+                            raise AnnotationConflict(expected, actual)
+                    merged = copy.deepcopy(current)
+                    for key, value in patch.items():
+                        if key in {"schema_version", "generation", "updated_at"}:
+                            raise ValueError("Campos de versão das anotações são controlados pela biblioteca.")
+                        merged[key] = copy.deepcopy(value)
+                    merged["generation"] = actual + 1
+                    merged["updated_at"] = _utc_timestamp()
+                    self._validate_annotations(merged, metadata, from_disk=False)
+                    _, size = _copy_json(merged, "annotations.json")
+                    if size > MAX_ANNOTATIONS_BYTES:
+                        raise ValueError("As anotações excedem o limite permitido.")
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    write_json_atomic(path, merged)
+                    self._mirror_legacy_fields(session_id, merged)
+                    result = copy.deepcopy(merged)
+        self._project_after_canonical_write(session_id)
+        return result
 
     def _mirror_legacy_fields(self, session_id, annotations):
         """Keep old direct ``MeetingStore`` readers useful after a sidecar edit.
@@ -598,36 +698,73 @@ class MeetingLibrary:
                 return self.index.list_sessions(offset=offset, limit=limit, query=query, status=status)
         except Exception:
             self._mark_index_stale()
-        return self.store.list_sessions(offset=offset, limit=limit, query=query, status=status)
+        sessions = self.store.list_sessions(offset=offset, limit=limit, query=query, status=status)
+        projected = []
+        for item in sessions:
+            session_id = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(session_id, str) or not self.has_annotation_sidecar(session_id):
+                projected.append(item)
+                continue
+            annotations = self.read_annotations(session_id)
+            value = copy.deepcopy(item)
+            for key in ("title", "notes", "bookmarks", "reviewed_summary"):
+                if key in annotations:
+                    value[key] = copy.deepcopy(annotations[key])
+            value["annotation_generation"] = annotations["generation"]
+            projected.append(value)
+        return projected
 
     def get_transcript(self, session_id, revision=None):
         return self.store.get_transcript(session_id, revision)
 
+    def export(self, session_id, path, format="markdown", cancel_event=None):
+        """Export through the sidecar-aware metadata view."""
+        from meeting_files import export_meeting
+
+        return export_meeting(
+            _LibraryStoreView(self), session_id, path, format, cancel_event=cancel_event
+        )
+
     def delete(self, session_id):
-        result = self.store.delete(session_id)
-        try:
-            self.index.remove_session(session_id)
-        except Exception:
-            self._mark_index_stale()
-        return result
+        with self._catalog_lock:
+            with _writer_lock(self._session_dir(session_id)):
+                result = self.store.delete(session_id)
+                try:
+                    removed = self.index.remove_session(session_id)
+                    if not removed:
+                        self._mark_index_stale_with_reason("canonical deletion was not projected")
+                except Exception:
+                    # The canonical deletion wins.  Keep all indexed reads on
+                    # the canonical fallback until the disposable projection
+                    # is rebuilt, so removed plaintext cannot be surfaced.
+                    self._mark_index_stale_with_reason("canonical deletion was not projected")
+                return result
 
     delete_session = delete
 
     def _project_after_canonical_write(self, session_id):
-        try:
-            path = self._annotations_path(session_id)
-            annotations = self.read_annotations(session_id) if os.path.lexists(path) else None
-            return bool(self.index.index_store_session(
-                self.store, session_id, annotations=annotations,
-            ))
-        except Exception:
-            self._mark_index_stale()
-            return False
+        with self._catalog_lock:
+            with _writer_lock(self._session_dir(session_id)):
+                try:
+                    path = self._annotations_path(session_id)
+                    annotations = self.read_annotations(session_id) if os.path.lexists(path) else None
+                    result = bool(self.index.index_store_session(
+                        self.store, session_id, annotations=annotations,
+                    ))
+                    if result:
+                        self._index_stale = False
+                    return result
+                except Exception:
+                    self._mark_index_stale()
+                    return False
 
     def _mark_index_stale(self):
+        return self._mark_index_stale_with_reason("canonical data changed")
+
+    def _mark_index_stale_with_reason(self, reason):
         self._index_stale = True
         try:
-            self.index.mark_stale()
+            self.index.mark_stale(reason)
         except Exception:
             return
 
@@ -642,9 +779,37 @@ class MeetingLibrary:
 
     def queue_index_session(self, session_id):
         """Schedule projection work without opening SQLite on the capture loop."""
+        index_path = os.path.join(self.home_root, "library.sqlite")
+        # A missing catalog does not need to be created from the capture
+        # finalizer.  Canonical reads remain the safe fallback until an
+        # explicit rebuild or user-facing indexed operation creates it.
+        if self._index_closed:
+            return None
+        if (
+            not os.path.lexists(index_path)
+            and (self._index is None or self._index.state == "unavailable")
+        ):
+            return None
         with self._index_lock:
-            worker = threading.Thread(target=self.project_session, args=(session_id,), daemon=True)
+            existing = self._index_workers_by_session.get(session_id)
+            if existing is not None and existing.is_alive():
+                self._index_pending.add(session_id)
+                return existing
+            self._index_pending.discard(session_id)
+
+            def run():
+                while True:
+                    self.project_session(session_id)
+                    with self._index_lock:
+                        if session_id not in self._index_pending:
+                            self._index_workers.discard(threading.current_thread())
+                            self._index_workers_by_session.pop(session_id, None)
+                            return
+                        self._index_pending.discard(session_id)
+
+            worker = threading.Thread(target=run, daemon=True, name="MeetingIndexProjection")
             self._index_workers.add(worker)
+            self._index_workers_by_session[session_id] = worker
             worker.start()
             return worker
 
@@ -652,27 +817,65 @@ class MeetingLibrary:
 
     def reconcile(self, cancel_event=None, progress=None):
         """Rebuild/reconcile the disposable index from canonical bundles."""
-        sessions = []
-        for item in self.store.list_sessions(offset=0, limit=500):
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            session_id = item.get("id")
-            if not isinstance(session_id, str):
-                continue
+        with self._catalog_lock:
+            sessions = []
             try:
-                metadata = self.store.get(session_id, include_events=False)
+                with os.scandir(self.meetings_root) as entries:
+                    session_ids = []
+                    for entry in entries:
+                        if not _valid_id(entry.name):
+                            continue
+                        path = os.path.join(self.meetings_root, entry.name)
+                        if _is_link_or_junction(path) or not entry.is_dir(follow_symlinks=False):
+                            continue
+                        session_ids.append(entry.name)
+                    session_ids.sort()
+            except OSError:
+                session_ids = []
+            for session_id in session_ids:
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                try:
+                    metadata = self.store.get(session_id, include_events=False)
+                except (OSError, ValueError):
+                    continue
                 annotations_path = self._annotations_path(session_id)
-                annotations = self.read_annotations(session_id) if os.path.exists(annotations_path) else None
-                transcripts = {
-                    revision.get("id"): list(self.store.get_transcript(session_id, revision.get("id")))
-                    for revision in metadata.get("revisions", [])
-                    if isinstance(revision, dict) and isinstance(revision.get("id"), str)
-                }
+                # A malformed/future sidecar is actionable corruption, not an
+                # invitation to silently rebuild from legacy metadata.
+                annotations = self.read_annotations(session_id) if os.path.lexists(annotations_path) else None
+                transcripts = {}
+                for revision in metadata.get("revisions", []):
+                    if not isinstance(revision, dict) or not isinstance(revision.get("id"), str):
+                        continue
+                    revision_id = revision["id"]
+                    values = list(self.store.get_transcript(session_id, revision_id))
+                    expected = revision.get("segments")
+                    if isinstance(expected, int) and not isinstance(expected, bool) and expected != len(values):
+                        self._mark_index_stale_with_reason(
+                            "transcript corruption prevents a complete rebuild"
+                        )
+                        raise SchemaError("A transcrição está incompleta; o índice não foi marcado como íntegro.")
+                    transcripts[revision_id] = values
                 sessions.append((metadata, annotations, transcripts))
-            except (OSError, ValueError, SchemaError):
+            if cancel_event is not None and cancel_event.is_set():
+                # Let MeetingIndex publish its explicit cancellation state.
+                sessions = []
+            result = self.index.rebuild(sessions, cancel_event=cancel_event, progress=progress)
+            if result.get("state") == "ready":
+                self._index_stale = False
+            return result
+
+    def shutdown(self, timeout=12):
+        """Join all queued projection workers before their bundle roots close."""
+        with self._index_lock:
+            self._index_closed = True
+            workers = list(self._index_workers)
+        for worker in workers:
+            if worker is threading.current_thread():
                 continue
-        sessions.sort(key=lambda item: str(item[0].get("id", "")))
-        return self.index.rebuild(sessions, cancel_event=cancel_event, progress=progress)
+            worker.join(timeout)
+            if worker.is_alive():
+                raise RuntimeError("Uma projeção do índice de reuniões ainda está encerrando.")
 
 
 __all__ = [

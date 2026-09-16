@@ -14,9 +14,13 @@ import time
 
 from meeting_audio import NativeCapture
 from meeting_mixdown import export_mixdown
+from meeting_library import MeetingLibrary
 from meeting_settings import resolve_meeting_settings
 from meeting_store import MeetingStore
 from meeting_titles import initial_recording_title, refine_recording_title
+
+
+_UNSET = object()
 
 
 WAVEFORM_POINTS = 360
@@ -65,14 +69,21 @@ def _final_audio_path(root, settings, session_id, title=""):
 
 
 class MeetingController:
-    def __init__(self, root, voice, notify=None, capture_factory=NativeCapture, store=None):
+    def __init__(self, root, voice, notify=None, capture_factory=NativeCapture, store=None, library=None):
         self.root = root
         self.voice = voice
         self.notify = notify or (lambda message: None)
         self.capture_factory = capture_factory
         # Store initialization/recovery is lazy and runs on an IO worker.
         self._store = store
-        self._store_lock = threading.Lock()
+        self._library = library
+        if self._library is not None and self._store is not None:
+            existing = getattr(self._library, "_store", None)
+            if existing is None:
+                self._library._store = self._store
+            elif existing is not self._store:
+                raise ValueError("MeetingController recebeu dois MeetingStore diferentes.")
+        self._store_lock = threading.RLock()
         self._lock = threading.RLock()
         self._thread = None
         self._processing_thread = None
@@ -100,13 +111,26 @@ class MeetingController:
         self._processing = False
         self._last_status = ""
         self._source_errors = set()
+        self._annotation_generations = {}
 
     @property
     def store(self):
         with self._store_lock:
             if self._store is None:
-                self._store = MeetingStore(self.root)
+                if self._library is not None:
+                    self._store = self._library.store
+                else:
+                    self._store = MeetingStore(self.root)
             return self._store
+
+    @property
+    def library(self):
+        with self._store_lock:
+            if self._library is None:
+                workspace_root = os.path.dirname(os.path.abspath(self.root)) \
+                    if os.path.basename(os.path.abspath(self.root)).casefold() == "meetings" else self.root
+                self._library = MeetingLibrary(self.store, workspace_root=workspace_root)
+            return self._library
 
     def snapshot(self):
         with self._lock:
@@ -265,6 +289,8 @@ class MeetingController:
                     self.store.finish(session, final_status, error or self._error or None)
                     if not error and not self._closed:
                         self.store.begin_revision(session, settings.profile, settings.language, status="pending")
+                    if not error:
+                        self._queue_projection(session)
                 except Exception:
                     error = error or "Não foi possível finalizar os metadados; a recuperação ocorrerá ao reabrir."
             if session is not None and not error and clean_stop and not self._closed:
@@ -324,6 +350,7 @@ class MeetingController:
                 else:
                     self._refine_automatic_title(session_id)
                     transcription_ready = True
+                    self._queue_projection(session_id)
             except Exception as exc:
                 errors.append("a transcrição automática falhou: " + str(exc))
                 if getattr(exc, "resource_live", False):
@@ -336,32 +363,62 @@ class MeetingController:
                 from meeting_summary import summarize_meeting
                 summarize_meeting(self.store, session_id, settings.summary_model,
                                   cancel_event=self._cancel)
+                self._queue_projection(session_id)
             except Exception as exc:
                 errors.append("o resumo automático falhou: " + str(exc))
         with self._lock:
             self._postprocess = "Pós-processamento concluído" if not errors else "Pós-processamento parcial"
         return errors, resource_live
 
+    def _queue_projection(self, session_id):
+        """Queue disposable indexing without making capture/finalization depend on it."""
+        try:
+            return self.library.queue_index_session(session_id)
+        except Exception:
+            # Canonical metadata/transcript/audio already committed.  A missing,
+            # locked, or unavailable index is repaired by a later reconcile.
+            return None
+
     def list_sessions(self, offset=0, limit=50, query="", status=""):
-        return self.store.list_sessions(offset, limit, query, status=status)
+        return self.library.list_sessions(offset, limit, query, status=status)
 
     def get_session(self, session_id):
-        return self.store.get(session_id)
+        metadata = self.library.get_session(session_id)
+        generation = metadata.get("annotation_generation", 0)
+        if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+            with self._lock:
+                self._annotation_generations[session_id] = generation
+        metadata.setdefault("annotation_generation", 0)
+        return metadata
 
     def delete_session(self, session_id):
-        return self._file_work(lambda: self.store.delete(session_id))
+        return self._file_work(lambda: self.library.delete(session_id))
 
     def get_transcript(self, session_id):
-        return list(itertools.islice(self.store.get_transcript(session_id), 500))
+        return list(itertools.islice(self.library.get_transcript(session_id), 500))
 
-    def update_notes(self, session_id, title, notes, bookmarks=None):
+    def update_notes(self, session_id, title, notes, bookmarks=None, expected_generation=_UNSET):
         fields = {"title": title, "notes": notes}
         if bookmarks is not None:
             fields["bookmarks"] = bookmarks
-        return self.store.update(session_id, **fields)
+        expected = self._annotation_generations.get(session_id) if expected_generation is _UNSET else expected_generation
+        kwargs = ({"expected_generation": expected}
+                  if expected_generation is not _UNSET or expected is not None else {})
+        result = self.library.update_annotations(session_id, fields, **kwargs)
+        with self._lock:
+            self._annotation_generations[session_id] = result["generation"]
+        return True
 
-    def update_summary(self, session_id, text):
-        return self.store.update(session_id, reviewed_summary=text)
+    def update_summary(self, session_id, text, expected_generation=_UNSET):
+        expected = self._annotation_generations.get(session_id) if expected_generation is _UNSET else expected_generation
+        kwargs = ({"expected_generation": expected}
+                  if expected_generation is not _UNSET or expected is not None else {})
+        result = self.library.update_annotations(
+            session_id, {"reviewed_summary": text}, **kwargs,
+        )
+        with self._lock:
+            self._annotation_generations[session_id] = result["generation"]
+        return True
 
     def _launch_processing(self, function):
         with self._lock:
@@ -396,6 +453,7 @@ class MeetingController:
                                    self.voice.cache_dir, cancel_event=self._cancel)
                 if not self._cancel.is_set():
                     self._refine_automatic_title(session_id)
+                    self._queue_projection(session_id)
             except Exception as exc:
                 if getattr(exc, "resource_live", False):
                     release = False
@@ -408,15 +466,20 @@ class MeetingController:
         return self._launch_processing(work)
 
     def _refine_automatic_title(self, session_id):
-        metadata = self.store.get(session_id)
+        metadata = self.library.get_session(session_id)
+        if self.library.has_annotation_sidecar(session_id):
+            # A sidecar may contain a human title. Automatic transcription must
+            # never overwrite it, even when the generated title is better.
+            return
         current = metadata.get("title", "")
         refined = refine_recording_title(
             current,
             session_id,
-            self.store.get_transcript(session_id),
+            self.library.get_transcript(session_id),
         )
         if refined != current:
-            self.store.update(session_id, title=refined)
+            # Keep legacy bundles sidecar-free until a human mutation occurs.
+            self.library.store.update(session_id, title=refined)
 
     def cancel_processing(self):
         self._cancel.set()
@@ -433,15 +496,19 @@ class MeetingController:
 
     def import_audio(self, path, settings):
         from meeting_files import import_audio
-        return self._file_work(lambda: import_audio(self.store, path, settings, cancel_event=self._cancel))
+        def work():
+            session_id = import_audio(self.store, path, settings, cancel_event=self._cancel)
+            self._queue_projection(session_id)
+            return session_id
+        return self._file_work(work)
 
     def import_wav(self, path, settings):
         return self.import_audio(path, settings)
 
     def export(self, session_id, path, format="markdown"):
-        from meeting_files import export_meeting
-        return self._file_work(lambda: export_meeting(self.store, session_id, path, format,
-                                                    cancel_event=self._cancel))
+        return self._file_work(lambda: self.library.export(
+            session_id, path, format, cancel_event=self._cancel,
+        ))
 
     def export_mixdown(self, session_id, path, enhance_microphone=False):
         return self._file_work(lambda: export_mixdown(
@@ -470,6 +537,7 @@ class MeetingController:
             token = self.voice.reserve_for_meeting()
             try:
                 summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
+                self._queue_projection(session_id)
             finally:
                 self.voice.release_meeting(token)
         return self._launch_processing(work)
@@ -508,3 +576,5 @@ class MeetingController:
                 worker.join(12)
                 if worker.is_alive():
                     raise RuntimeError("Uma tarefa de reunião ainda está encerrando.")
+        if self._library is not None:
+            self._library.shutdown()

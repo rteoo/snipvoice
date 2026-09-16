@@ -68,6 +68,18 @@ class MeetingIndexTests(unittest.TestCase):
             connection.close()
         self.assertNotIn("BLOB", {value.upper() for value in columns.values()})
 
+    def test_indexed_filtered_list_qualifies_session_order_columns(self):
+        self.index.index_session(*self.entry)
+        self.assertEqual(self.index.list_sessions(query="marco")[0]["id"], "fixture-meeting-v1")
+
+    def test_control_fts_input_is_rejected_without_poisoning_ready_state(self):
+        self.index.index_session(*self.entry)
+        with self.assertRaises(ValueError):
+            self.index.search("marco\x00")
+        with self.assertRaises(ValueError):
+            self.index.list_sessions(query="marco\n\x01")
+        self.assertEqual(self.index.state, STATE_READY)
+
     def test_fingerprint_detects_same_ids_with_changed_transcript_report_and_annotation(self):
         original = fingerprint_canonical(*self.entry[:3], reports=[])
         changed_segment = copy.deepcopy(self.transcripts)
@@ -157,6 +169,15 @@ class MeetingIndexTests(unittest.TestCase):
         broken.rebuild([self.entry])
         self.assertEqual(broken.state, STATE_READY)
         self.assertEqual((self.meetings / "fixture-meeting-v1" / "metadata.json").read_bytes(), corrupt_before)
+
+    def test_rebuild_removes_old_wal_sidecars_before_swap(self):
+        self.index.index_session(*self.entry)
+        Path(str(self.path) + "-wal").write_bytes(b"old wal")
+        Path(str(self.path) + "-shm").write_bytes(b"old shm")
+        self.index.rebuild([self.entry])
+        self.assertFalse(Path(str(self.path) + "-wal").exists())
+        self.assertFalse(Path(str(self.path) + "-shm").exists())
+        self.assertEqual(self.index.search("equipe")[0]["session_id"], "fixture-meeting-v1")
 
 
 if __name__ == "__main__":

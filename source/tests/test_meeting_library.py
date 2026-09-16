@@ -183,6 +183,94 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         self.assertEqual(self.library.get_session("fixture-meeting-v1")["title"], "canonical title")
         self.assertEqual(self.library.index_state, "stale")
 
+    def test_export_uses_sidecar_metadata_without_bypassing_canonical_authority(self):
+        self.library.update_annotations(
+            "fixture-meeting-v1", {"title": "Exported canonical title", "notes": "Exported notes"},
+            expected_generation=0,
+        )
+        destination = self.home / "outside.md"
+        self.library.export("fixture-meeting-v1", destination, "markdown")
+        text = destination.read_text(encoding="utf-8")
+        self.assertIn("# Exported canonical title", text)
+        self.assertIn("Exported notes", text)
+
+    def test_projection_success_clears_stale_fallback(self):
+        class FakeIndex:
+            state = "ready"
+
+            def index_store_session(self, *_args, **_kwargs):
+                return True
+
+            def list_sessions(self, **_kwargs):
+                return [{"id": "indexed", "title": "from-index"}]
+
+            def mark_stale(self, *_args, **_kwargs):
+                return True
+
+        self.library._index = FakeIndex()
+        self.library._index_stale = True
+        self.assertTrue(self.library.project_session("fixture-meeting-v1"))
+        self.assertEqual(self.library.list_sessions(), [{"id": "indexed", "title": "from-index"}])
+
+    def test_canonical_fallback_projects_sidecar_title(self):
+        class UnavailableIndex:
+            state = "unavailable"
+
+        self.library._index = UnavailableIndex()
+        self.library.update_annotations(
+            "fixture-meeting-v1", {"title": "Sidecar title"}, expected_generation=0,
+        )
+        self.library._index_stale = True
+        self.assertEqual(self.library.list_sessions()[0]["title"], "Sidecar title")
+
+    def test_future_sidecar_is_not_silently_omitted_by_reconcile(self):
+        path = self.session_dir / "annotations.json"
+        value = self.library.read_annotations("fixture-meeting-v1")
+        value["schema_version"] = 99
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaises(UnsupportedSchemaError):
+            self.library.reconcile()
+
+    def test_automatic_projection_scans_beyond_legacy_list_offset(self):
+        class FakeStore:
+            def __init__(self, root):
+                self.root = str(root)
+
+            def get(self, session_id, include_events=False):
+                return {
+                    "schema_version": 1,
+                    "id": session_id,
+                    "title": session_id,
+                    "notes": "",
+                    "status": "completed",
+                    "created_at": "2026-09-16T12:00:00Z",
+                    "updated_at": "2026-09-16T12:00:00Z",
+                    "duration": 0.0,
+                    "error": None,
+                    "revisions": [],
+                }
+
+            def get_transcript(self, *_args):
+                return iter(())
+
+        class FakeIndex:
+            state = "ready"
+
+            def rebuild(self, sessions, **_kwargs):
+                self.sessions = list(sessions)
+                return {"state": "ready", "sessions": len(self.sessions)}
+
+        root = self.home / "many-meetings"
+        root.mkdir()
+        for index in range(10_501):
+            (root / f"meeting-{index:05d}").mkdir()
+        fake = FakeStore(root)
+        index = FakeIndex()
+        library = MeetingLibrary(root, store=fake, index=index, workspace_root=self.home)
+        result = library.reconcile()
+        self.assertEqual(result["sessions"], 10_501)
+        self.assertEqual(len(index.sessions), 10_501)
+
 
 if __name__ == "__main__":
     unittest.main()

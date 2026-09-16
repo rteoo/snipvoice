@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from meeting_settings import MeetingSettings, validate_hotkey_conflicts
+from meeting_library import AnnotationConflict, MeetingLibrary
 from meeting_store import MeetingStore
 from meeting_support import (
     MeetingController, WAVEFORM_POINTS, _amplitude_envelope, _final_audio_path,
@@ -238,3 +239,134 @@ class MeetingControllerTests(unittest.TestCase):
         snapshot = self.controller.snapshot()
         self.assertEqual(snapshot["postprocess"], "Pós-processamento parcial")
         self.assertIn("cancelado", snapshot["error"])
+
+
+class MeetingLibraryControllerWiringTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(__file__).parent / "tmp"
+        root.mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=root)
+        self.home = Path(self.temp.name)
+        self.meeting_root = self.home / "meetings"
+        self.voice = Mock(cache_dir=self.temp.name)
+        self.voice.reserve_for_meeting.return_value = "lease"
+        self.capture = FakeCapture()
+        self.library = MeetingLibrary(self.meeting_root, workspace_root=self.home)
+        self.controller = MeetingController(
+            self.meeting_root,
+            self.voice,
+            capture_factory=lambda: self.capture,
+            library=self.library,
+        )
+
+    def tearDown(self):
+        if self.controller.snapshot()["state"] != "unavailable":
+            self.controller.shutdown()
+        self.temp.cleanup()
+
+    def test_controller_and_library_share_one_lazy_store_and_sidecar_owns_updates(self):
+        self.assertIs(self.controller.store, self.library.store)
+        session = self.controller.store.begin({}, "Legacy")
+        self.controller.store.finish(session)
+        self.assertTrue(self.controller.update_notes(session, "Edited", "Canonical notes"))
+        self.assertEqual(self.controller.get_session(session)["title"], "Edited")
+        self.assertEqual(self.controller.get_session(session)["notes"], "Canonical notes")
+        self.assertTrue((self.meeting_root / session / "annotations.json").is_file())
+
+    def test_capture_finalization_does_not_open_missing_sqlite_catalog(self):
+        self.assertEqual(self.controller.list_sessions(), [])
+        self.assertTrue(self.controller.start(MeetingSettings()))
+        self.assertTrue(self.capture.started.wait(2))
+        self.controller.stop()
+        self.controller._thread.join(3)
+        self.assertFalse((self.home / "library.sqlite").exists())
+
+    def test_controller_generation_cas_rejects_an_external_annotation_edit(self):
+        session = self.controller.store.begin({}, "Legacy")
+        self.controller.store.finish(session)
+        self.controller.get_session(session)
+        self.library.update_annotations(session, {"notes": "external"}, expected_generation=0)
+        with self.assertRaises(AnnotationConflict) as raised:
+            self.controller.update_notes(session, "Edited", "stale")
+        self.assertIn("mudou", str(raised.exception))
+
+    def test_automatic_title_does_not_overwrite_sidecar_human_title(self):
+        session = self.controller.store.begin({}, "Legacy")
+        self.controller.store.finish(session)
+        self.library.update_annotations(session, {"title": "Human title"}, expected_generation=0)
+        with patch("meeting_support.refine_recording_title", return_value="Generated title"):
+            self.controller._refine_automatic_title(session)
+        self.assertEqual(self.library.get_session(session)["title"], "Human title")
+
+    def test_queued_projection_coalesces_updates_and_publishes_latest_snapshot(self):
+        class ControlledIndex:
+            state = "ready"
+
+            def __init__(self, store):
+                self.store = store
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.published = []
+
+            def index_store_session(self, _store, session_id, **_kwargs):
+                title = self.store.get(session_id)["title"]
+                self.published.append(title)
+                if len(self.published) == 1:
+                    self.started.set()
+                    self.release.wait(2)
+                return True
+
+            def mark_stale(self, *_args, **_kwargs):
+                return True
+
+        session = self.controller.store.begin({}, "first")
+        self.controller.store.finish(session)
+        controlled = ControlledIndex(self.controller.store)
+        self.library._index = controlled
+        worker = self.library.queue_index_session(session)
+        self.assertTrue(controlled.started.wait(2))
+        self.controller.store.update(session, title="latest")
+        self.assertIs(self.library.queue_index_session(session), worker)
+        controlled.release.set()
+        worker.join(3)
+        self.assertEqual(controlled.published[-1], "latest")
+
+    def test_delete_waits_for_projection_and_cannot_resurrect_deleted_session(self):
+        class ControlledIndex:
+            state = "ready"
+
+            def __init__(self, store):
+                self.store = store
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.rows = set()
+
+            def index_store_session(self, _store, session_id, **_kwargs):
+                self.store.get(session_id)
+                self.started.set()
+                self.release.wait(2)
+                self.rows.add(session_id)
+                return True
+
+            def remove_session(self, session_id):
+                self.rows.discard(session_id)
+                return True
+
+            def mark_stale(self, *_args, **_kwargs):
+                return True
+
+        session = self.controller.store.begin({}, "to delete")
+        self.controller.store.finish(session)
+        controlled = ControlledIndex(self.controller.store)
+        self.library._index = controlled
+        worker = self.library.queue_index_session(session)
+        self.assertTrue(controlled.started.wait(2))
+        deleted = []
+        delete_thread = threading.Thread(target=lambda: deleted.append(self.library.delete(session)))
+        delete_thread.start()
+        threading.Event().wait(0.05)
+        controlled.release.set()
+        worker.join(3)
+        delete_thread.join(3)
+        self.assertEqual(deleted, [True])
+        self.assertNotIn(session, controlled.rows)

@@ -33,8 +33,18 @@ def run_summary_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+def run_sqlite_runtime_probe_if_requested(argv=None):
+    """Run the SQLite/FTS diagnostic before desktop or user-data imports."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--sqlite-runtime-probe" not in arguments:
+        return False
+    from sqlite_runtime_probe import main as probe_main
+    raise SystemExit(probe_main())
+
+
 run_voice_runtime_probe_if_requested()
 run_summary_runtime_probe_if_requested()
+run_sqlite_runtime_probe_if_requested()
 
 if "--meeting-capture-probe" in sys.argv[1:]:
     from meeting_audio import NativeCapture
@@ -61,6 +71,7 @@ import ui_theme
 from voice_dispatch import VoiceTarget
 from voice_indicator import VoiceStatusIndicator
 from voice_support import VoiceController
+from meeting_library import MeetingLibrary
 from meeting_support import MeetingController
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
@@ -144,8 +155,14 @@ class Snipvoice:
             history_dir=os.path.join(self.data_dir, "voice-history"),
         )
         self.voice.bind_library(lambda: self.snippets, lambda: self.trigger_index)
-        self.meetings = MeetingController(os.path.join(self.data_dir, "meetings"),
-                                          self.voice, notify=self.notify_error)
+        meeting_root = os.path.join(self.data_dir, "meetings")
+        # One lazy MeetingStore is shared by the controller and its
+        # sidecar/index façade; the workspace and disposable SQLite catalog
+        # live beside ``meetings/`` under the app data home.
+        self.meeting_library = MeetingLibrary(meeting_root, workspace_root=self.data_dir)
+        self.meetings = MeetingController(
+            meeting_root, self.voice, notify=self.notify_error, library=self.meeting_library,
+        )
 
     def open_meetings(self, icon=None, item=None):
         self.gui.submit(self._show_meetings)
