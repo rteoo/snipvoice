@@ -418,6 +418,83 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
             )
         self.assertEqual((self.home / "workspace.json").read_bytes(), before)
 
+    def test_highlight_and_speaker_label_are_revision_scoped_cas_annotations(self):
+        transcript_path = self.session_dir / "transcripts" / "revision-1.jsonl"
+        transcript_before = transcript_path.read_bytes()
+        label = self.library.create_speaker_label(
+            "fixture-meeting-v1",
+            {"id": "speaker-1", "revision": "revision-1",
+             "segment_id": "microphone:0.000000:3.000000", "label": "Ana"},
+            expected_generation=0,
+        )
+        self.assertEqual(label["generation"], 1)
+        highlight = self.library.create_highlight(
+            "fixture-meeting-v1",
+            {"id": "highlight-1", "revision": "revision-1", "start": 0.5,
+             "end": 2.0, "track": "microphone",
+             "segment_ids": ["microphone:0.000000:3.000000"],
+             "label": "Decision", "note": "Review this"},
+            expected_generation=1,
+        )
+        self.assertEqual(highlight["generation"], 2)
+        edited = self.library.edit_highlight(
+            "fixture-meeting-v1", "highlight-1", {"end": 2.5}, expected_generation=2,
+        )
+        self.assertEqual(edited["highlights"][0]["end"], 2.5)
+        removed = self.library.delete_highlight(
+            "fixture-meeting-v1", "highlight-1", expected_generation=3,
+        )
+        self.assertEqual(removed["highlights"], [])
+        self.assertEqual(transcript_path.read_bytes(), transcript_before)
+
+    def test_annotation_validation_rejects_bad_revision_segment_range_track_duplicate_and_stale(self):
+        base = {
+            "id": "highlight-1", "revision": "revision-1", "start": 0.5,
+            "end": 2.0, "track": "microphone",
+            "segment_ids": ["microphone:0.000000:3.000000"],
+        }
+        for key, value in (
+            ("revision", "missing"),
+            ("segment_ids", ["missing-segment"]),
+            ("start", 2.0),
+            ("track", "unknown"),
+        ):
+            payload = dict(base)
+            payload[key] = value
+            with self.assertRaises((ValueError, SchemaError)):
+                self.library.create_highlight(
+                    "fixture-meeting-v1", payload, expected_generation=0,
+                )
+        self.library.create_highlight("fixture-meeting-v1", base, expected_generation=0)
+        with self.assertRaises(ValueError):
+            self.library.create_highlight(
+                "fixture-meeting-v1", base, expected_generation=1,
+            )
+        with self.assertRaises(AnnotationConflict):
+            self.library.create_highlight(
+                "fixture-meeting-v1",
+                {**base, "id": "highlight-2"}, expected_generation=0,
+            )
+
+    def test_reprocessing_keeps_old_annotations_but_active_filter_uses_new_revision(self):
+        self.library.create_highlight(
+            "fixture-meeting-v1",
+            {"id": "old-highlight", "revision": "revision-1", "start": 0.5,
+             "end": 2.0, "track": "microphone",
+             "segment_ids": ["microphone:0.000000:3.000000"]},
+            expected_generation=0,
+        )
+        revision = self.store.begin_revision("fixture-meeting-v1", "balanced", "pt-BR")
+        self.store.add_transcript(
+            "fixture-meeting-v1", revision,
+            {"id": "microphone:0.000000:3.000000", "track": "microphone",
+             "start": 0.0, "end": 3.0, "text": "new transcript"},
+        )
+        self.store.finish_revision("fixture-meeting-v1", revision)
+        all_annotations = self.library.read_annotations("fixture-meeting-v1")
+        self.assertEqual(all_annotations["highlights"][0]["revision"], "revision-1")
+        self.assertEqual(self.library.list_highlights("fixture-meeting-v1", active_only=True), [])
+
 
 if __name__ == "__main__":
     unittest.main()

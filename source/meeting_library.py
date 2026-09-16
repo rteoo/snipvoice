@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import unicodedata
+import uuid
 
 from meeting_store import MeetingStore
 from snippet_utils import write_json_atomic
@@ -41,6 +42,7 @@ MAX_TAGS = 512
 MAX_PEOPLE = 512
 MAX_COLLECTIONS = 1024
 MAX_SPEAKER_LABELS = 10_000
+MAX_HIGHLIGHT_SEGMENTS = 512
 MAX_ID_CHARS = 128
 REPORT_SECTIONS = frozenset({
     "summary", "decisions", "action_items", "open_questions", "risks",
@@ -571,7 +573,7 @@ class MeetingLibrary:
         """Return whether the versioned annotation file exists on disk."""
         return os.path.lexists(self._annotations_path(session_id))
 
-    def read_annotations(self, session_id):
+    def read_annotations(self, session_id, *, revision=None, active_only=False, active_revision=False):
         metadata = self.store.get(session_id, include_events=False)
         path = self._annotations_path(session_id)
         value = self._load_versioned(
@@ -580,9 +582,135 @@ class MeetingLibrary:
         if value is None:
             value = self._default_annotations(metadata)
             self._validate_annotations(value, metadata, from_disk=False)
-            return value
-        self._validate_annotations(value, metadata, from_disk=True)
-        return copy.deepcopy(value)
+            result = value
+        else:
+            self._validate_annotations(value, metadata, from_disk=True)
+            result = copy.deepcopy(value)
+        if active_revision:
+            active_only = True
+        if active_only:
+            revision = revision or self._active_revision_id(metadata)
+        if revision is not None:
+            if not isinstance(revision, str) or not _valid_id(revision, reference=True):
+                raise ValueError("A revisão de transcrição é inválida.")
+            result = self._filter_annotation_revision(result, revision)
+        return result
+
+    @staticmethod
+    def _filter_annotation_revision(value, revision):
+        result = copy.deepcopy(value)
+        result["highlights"] = [
+            item for item in result.get("highlights", [])
+            if (item.get("revision") or item.get("transcript_revision")) == revision
+        ]
+        result["speaker_labels"] = {
+            key: item for key, item in result.get("speaker_labels", {}).items()
+            if (item.get("revision") or item.get("transcript_revision")) == revision
+        }
+        result["revision_filter"] = revision
+        return result
+
+    @staticmethod
+    def _active_revision_id(metadata):
+        """Return the newest usable revision without rewriting older provenance."""
+        explicit = metadata.get("active_revision")
+        revisions = metadata.get("revisions", [])
+        known = {
+            item.get("id") for item in revisions
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        if isinstance(explicit, str) and explicit in known:
+            return explicit
+        for item in reversed(revisions):
+            if (
+                isinstance(item, dict)
+                and item.get("status") == "completed"
+                and isinstance(item.get("id"), str)
+            ):
+                return item["id"]
+        for item in reversed(revisions):
+            if isinstance(item, dict) and isinstance(item.get("id"), str):
+                return item["id"]
+        return None
+
+    @staticmethod
+    def _session_duration(metadata, track=None):
+        duration = metadata.get("duration", 0.0)
+        duration = float(duration) if _finite_number(duration) else 0.0
+        tracks = metadata.get("tracks", {})
+        if isinstance(tracks, dict):
+            selected = tracks.get(track) if track is not None else None
+            items = [selected] if isinstance(selected, dict) else list(tracks.values())
+            track_ends = []
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("segments"), list):
+                    continue
+                for segment in item["segments"]:
+                    end = segment.get("end") if isinstance(segment, dict) else None
+                    if _finite_number(end):
+                        track_ends.append(float(end))
+            if track is not None and track_ends:
+                track_duration = max(track_ends)
+                duration = min(duration, track_duration) if duration > 0 else track_duration
+        return max(0.0, duration)
+
+    @staticmethod
+    def _validate_highlight_record(highlight, metadata, transcript_segments, seen_ids):
+        if highlight["id"] in seen_ids:
+            raise SchemaError("Há destaques duplicados; o arquivo foi preservado.")
+        revision = highlight.get("revision") or highlight.get("transcript_revision")
+        if revision not in transcript_segments:
+            raise SchemaError("Um destaque referencia uma revisão inexistente; o arquivo foi preservado.")
+        start, end = highlight.get("start"), highlight.get("end")
+        if (
+            not _finite_number(start) or not _finite_number(end)
+            or float(start) < 0 or float(end) <= float(start)
+            or float(end) > MeetingLibrary._session_duration(metadata, highlight.get("track"))
+        ):
+            raise SchemaError("O intervalo de um destaque é inválido; o arquivo foi preservado.")
+        track = highlight.get("track")
+        tracks = metadata.get("tracks", {})
+        if track not in {"microphone", "system"} or not isinstance(tracks, dict) or track not in tracks:
+            raise SchemaError("A fonte de um destaque é inválida; o arquivo foi preservado.")
+        segment_ids = highlight.get("segment_ids", highlight.get("segments", []))
+        if (
+            not isinstance(segment_ids, list) or not segment_ids
+            or len(segment_ids) > MAX_HIGHLIGHT_SEGMENTS
+            or len(set(segment_ids)) != len(segment_ids)
+            or any(not _valid_id(item, reference=True) for item in segment_ids)
+        ):
+            raise SchemaError("Os segmentos de um destaque são inválidos; o arquivo foi preservado.")
+        for segment_id in segment_ids:
+            segment = transcript_segments[revision].get(segment_id)
+            if segment is None:
+                raise SchemaError("Um destaque referencia segmento inexistente; o arquivo foi preservado.")
+            if segment.get("track") not in {None, track}:
+                raise SchemaError("A fonte de um destaque não corresponde aos segmentos citados; o arquivo foi preservado.")
+        label = highlight.get("label", "")
+        note = highlight.get("note", "")
+        if not isinstance(label, str) or len(label) > MAX_LABEL_CHARS:
+            raise SchemaError("O rótulo de um destaque é inválido; o arquivo foi preservado.")
+        if not isinstance(note, str) or len(note.encode("utf-8")) > MAX_NOTES_BYTES:
+            raise SchemaError("A nota de um destaque é inválida; o arquivo foi preservado.")
+
+    def _transcript_segments(self, session_id, revision):
+        metadata = self.store.get(session_id, include_events=False)
+        revisions = {
+            item.get("id") for item in metadata.get("revisions", [])
+            if isinstance(item, dict)
+        }
+        if revision not in revisions:
+            raise ValueError("A revisão de transcrição não existe.")
+        segments = list(self.store.get_transcript(session_id, revision))
+        by_id = {}
+        for segment in segments:
+            segment_id = segment.get("id") if isinstance(segment, dict) else None
+            if not _valid_id(segment_id, reference=True):
+                raise SchemaError("A identidade de um segmento de transcrição é inválida.")
+            if segment_id in by_id:
+                raise SchemaError("Há segmentos de transcrição duplicados.")
+            by_id[segment_id] = segment
+        return metadata, by_id
 
     def _validate_annotations(self, value, metadata, *, from_disk):
         if not isinstance(value, dict) or value.get("schema_version") != ANNOTATIONS_SCHEMA_VERSION:
@@ -606,39 +734,79 @@ class MeetingLibrary:
             if "label" in bookmark and (not isinstance(bookmark["label"], str)
                                          or len(bookmark["label"]) > MAX_LABEL_CHARS):
                 raise SchemaError("O rótulo de um marcador é inválido; o arquivo foi preservado.")
+        revisions = {
+            item.get("id"): item for item in metadata.get("revisions", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        referenced_revisions = {
+            item.get("revision") or item.get("transcript_revision")
+            for item in value.get("highlights", []) if isinstance(item, dict)
+        }
+        referenced_revisions.update(
+            item.get("revision") or item.get("transcript_revision")
+            for item in value.get("speaker_labels", {}).values() if isinstance(item, dict)
+        )
+        transcript_segments = {}
+        for revision_id in referenced_revisions:
+            if revision_id not in revisions:
+                raise SchemaError("Uma anotação referencia uma revisão inexistente; o arquivo foi preservado.")
+            try:
+                segments = list(self.store.get_transcript(metadata["id"], revision_id))
+            except (OSError, ValueError, KeyError) as error:
+                raise SchemaError("A transcrição referenciada pelas anotações não pôde ser lida.") from error
+            by_id = {}
+            for segment in segments:
+                if not isinstance(segment, dict) or not _valid_id(segment.get("id"), reference=True):
+                    raise SchemaError("A identidade de um segmento de transcrição é inválida.")
+                if segment["id"] in by_id:
+                    raise SchemaError("Há segmentos de transcrição duplicados.")
+                by_id[segment["id"]] = segment
+            transcript_segments[revision_id] = by_id
+
         highlights = value.get("highlights")
         if not isinstance(highlights, list) or len(highlights) > MAX_HIGHLIGHTS:
             raise SchemaError("Os destaques da anotação são inválidos; o arquivo foi preservado.")
-        seen_highlights = set()
-        revision_ids = {item.get("id") for item in metadata.get("revisions", []) if isinstance(item, dict)}
+        seen_ids = set()
         for highlight in highlights:
             if not isinstance(highlight, dict) or not _valid_id(highlight.get("id"), reference=True):
                 raise SchemaError("Um destaque tem identificador inválido; o arquivo foi preservado.")
-            if highlight["id"] in seen_highlights:
-                raise SchemaError("Há destaques duplicados; o arquivo foi preservado.")
-            seen_highlights.add(highlight["id"])
-            revision = highlight.get("revision") or highlight.get("transcript_revision")
-            if not isinstance(revision, str) or not _valid_id(revision, reference=True) or revision not in revision_ids:
-                raise SchemaError("Um destaque referencia uma revisão inexistente; o arquivo foi preservado.")
-            start, end = highlight.get("start"), highlight.get("end")
-            if not _finite_number(start) or not _finite_number(end) or float(start) < 0 or float(end) < float(start):
-                raise SchemaError("O intervalo de um destaque é inválido; o arquivo foi preservado.")
-            if "track" in highlight and highlight["track"] not in {"microphone", "system"}:
-                raise SchemaError("A fonte de um destaque é inválida; o arquivo foi preservado.")
-            segment_ids = highlight.get("segment_ids", highlight.get("segments", []))
-            if not isinstance(segment_ids, list) or len(segment_ids) > 512 or any(
-                not _valid_id(item, reference=True) for item in segment_ids
-            ):
-                raise SchemaError("Os segmentos de um destaque são inválidos; o arquivo foi preservado.")
-            if "label" in highlight and (not isinstance(highlight["label"], str)
-                                           or len(highlight["label"]) > MAX_LABEL_CHARS):
-                raise SchemaError("O rótulo de um destaque é inválido; o arquivo foi preservado.")
+            self._validate_highlight_record(highlight, metadata, transcript_segments, seen_ids)
+            seen_ids.add(highlight["id"])
+
         speaker_labels = value.get("speaker_labels")
         if not isinstance(speaker_labels, dict) or len(speaker_labels) > MAX_SPEAKER_LABELS:
             raise SchemaError("Os rótulos de locutor são inválidos; o arquivo foi preservado.")
-        for key, label in speaker_labels.items():
-            if not _valid_id(key, reference=True) or not isinstance(label, str) or len(label) > MAX_LABEL_CHARS:
+        for key, record in speaker_labels.items():
+            if not _valid_id(key, reference=True) or not isinstance(record, dict):
+                # Empty legacy maps are retained for sidecar compatibility;
+                # non-empty unscoped maps cannot be safely projected forward.
+                if isinstance(record, str):
+                    raise SchemaError("Os rótulos de locutor precisam de revisão e segmento; o arquivo foi preservado.")
                 raise SchemaError("Os rótulos de locutor são inválidos; o arquivo foi preservado.")
+            if record.get("id", key) != key:
+                raise SchemaError("O identificador de um rótulo de locutor é inconsistente; o arquivo foi preservado.")
+            revision = record.get("revision") or record.get("transcript_revision")
+            segment_id = record.get("segment_id")
+            if revision not in transcript_segments or not _valid_id(segment_id, reference=True):
+                raise SchemaError("Um rótulo de locutor referencia revisão/segmento inválido; o arquivo foi preservado.")
+            segment = transcript_segments[revision].get(segment_id)
+            if segment is None:
+                raise SchemaError("Um rótulo de locutor referencia segmento inexistente; o arquivo foi preservado.")
+            label = record.get("label")
+            if not isinstance(label, str) or not label.strip() or len(label) > MAX_LABEL_CHARS:
+                raise SchemaError("Os rótulos de locutor são inválidos; o arquivo foi preservado.")
+            note = record.get("note", "")
+            if not isinstance(note, str) or len(note.encode("utf-8")) > MAX_NOTES_BYTES:
+                raise SchemaError("A nota do rótulo de locutor é inválida; o arquivo foi preservado.")
+            if "track" in record:
+                track = record["track"]
+                if track not in {"microphone", "system"} or (
+                    segment.get("track") not in {None, track}
+                ):
+                    raise SchemaError("A fonte do rótulo de locutor é inválida; o arquivo foi preservado.")
+            if key in seen_ids:
+                raise SchemaError("Há identificadores de anotação duplicados; o arquivo foi preservado.")
+            seen_ids.add(key)
         for key in ("collection_ids", "tags", "people"):
             limit = MAX_COLLECTIONS if key == "collection_ids" else MAX_TAGS if key == "tags" else MAX_PEOPLE
             values = value.get(key)
@@ -758,6 +926,288 @@ class MeetingLibrary:
                     result = copy.deepcopy(merged)
         self._project_after_canonical_write(session_id)
         return result
+
+    @staticmethod
+    def _generated_annotation_id(prefix):
+        return f"{prefix}-{uuid.uuid4().hex}"
+
+    def _annotation_with_generation(self, session_id, expected_generation, transform):
+        """Apply one annotation transform through the existing atomic CAS seam."""
+        current = self.read_annotations(session_id)
+        if expected_generation is not _UNSET and current["generation"] != expected_generation:
+            raise AnnotationConflict(expected_generation, current["generation"])
+        updated = transform(copy.deepcopy(current))
+        if not isinstance(updated, dict):
+            raise ValueError("A transformação da anotação deve produzir um objeto.")
+        patch = {
+            key: value for key, value in updated.items()
+            if key not in {"schema_version", "generation", "updated_at"}
+        }
+        return self.update_annotations(
+            session_id, patch, expected_generation=expected_generation,
+        )
+
+    def create_speaker_label(
+        self, session_id, value=None, *, expected_generation, revision=None,
+        segment_id=None, label=None, note="", label_id=None, **fields,
+    ):
+        """Create a revision/segment-scoped manual speaker label."""
+        if isinstance(value, dict):
+            payload = {**value, **fields}
+        else:
+            payload = {**fields, "revision": revision, "segment_id": segment_id,
+                       "label": label, "note": note}
+            if value is not None:
+                payload["revision"] = value
+        record_id = payload.get("id", payload.get("label_id", label_id))
+        if record_id is None:
+            record_id = self._generated_annotation_id("speaker")
+        payload["id"] = record_id
+        revision = payload.get("revision") or payload.get("transcript_revision")
+        segment_id = payload.get("segment_id")
+        if not isinstance(revision, str) or not isinstance(segment_id, str):
+            raise ValueError("O rótulo exige revisão e segmento de transcrição.")
+        metadata, segments = self._transcript_segments(session_id, revision)
+        if segment_id not in segments:
+            raise ValueError("O segmento de transcrição não existe nessa revisão.")
+        record = {
+            "id": record_id,
+            "revision": revision,
+            "segment_id": segment_id,
+            "label": payload.get("label"),
+        }
+        if "note" in payload and payload.get("note", "") != "":
+            record["note"] = payload["note"]
+        if "track" in payload:
+            record["track"] = payload["track"]
+
+        def add(current):
+            labels = current.setdefault("speaker_labels", {})
+            if record_id in labels:
+                raise ValueError("Já existe um rótulo de locutor com esse identificador.")
+            if any(
+                item.get("revision") == revision and item.get("segment_id") == segment_id
+                for item in labels.values() if isinstance(item, dict)
+            ):
+                raise ValueError("O segmento já possui um rótulo de locutor nessa revisão.")
+            if record_id in {item.get("id") for item in current.get("highlights", [])}:
+                raise ValueError("O identificador da anotação já está em uso.")
+            labels[record_id] = copy.deepcopy(record)
+            return current
+
+        return self._annotation_with_generation(session_id, expected_generation, add)
+
+    def update_speaker_label(
+        self, session_id, label_id, patch=None, *, expected_generation, **fields,
+    ):
+        if patch is None:
+            patch = {}
+        if not isinstance(patch, dict):
+            raise ValueError("A alteração do rótulo de locutor deve ser um objeto.")
+        patch = {**patch, **fields}
+        if "id" in patch or "label_id" in patch:
+            raise ValueError("O identificador do rótulo não pode ser alterado.")
+        allowed = {"revision", "transcript_revision", "segment_id", "label", "note", "track"}
+        if set(patch) - allowed:
+            raise ValueError("Há campos de rótulo de locutor não reconhecidos.")
+
+        def edit(current):
+            labels = current.get("speaker_labels", {})
+            if label_id not in labels:
+                raise KeyError("O rótulo de locutor não existe.")
+            record = copy.deepcopy(labels[label_id])
+            record.update(copy.deepcopy(patch))
+            if "transcript_revision" in record:
+                record["revision"] = record.pop("transcript_revision")
+            revision = record.get("revision")
+            segment_id = record.get("segment_id")
+            metadata, segments = self._transcript_segments(session_id, revision)
+            if segment_id not in segments:
+                raise ValueError("O segmento de transcrição não existe nessa revisão.")
+            if any(
+                key != label_id and isinstance(item, dict)
+                and item.get("revision") == revision and item.get("segment_id") == segment_id
+                for key, item in labels.items()
+            ):
+                raise ValueError("O segmento já possui um rótulo de locutor nessa revisão.")
+            labels[label_id] = record
+            return current
+
+        return self._annotation_with_generation(session_id, expected_generation, edit)
+
+    edit_speaker_label = update_speaker_label
+
+    def delete_speaker_label(self, session_id, label_id, *, expected_generation):
+        def remove(current):
+            labels = current.get("speaker_labels", {})
+            if label_id not in labels:
+                raise KeyError("O rótulo de locutor não existe.")
+            del labels[label_id]
+            return current
+
+        return self._annotation_with_generation(session_id, expected_generation, remove)
+
+    def set_speaker_label(
+        self, session_id, revision, segment_id, label, *, expected_generation,
+        note="", label_id=None,
+    ):
+        current = self.read_annotations(session_id)
+        for item_id, item in current.get("speaker_labels", {}).items():
+            if item.get("revision") == revision and item.get("segment_id") == segment_id:
+                return self.update_speaker_label(
+                    session_id, item_id, {"label": label, "note": note},
+                    expected_generation=expected_generation,
+                )
+        return self.create_speaker_label(
+            session_id,
+            {"id": label_id, "revision": revision, "segment_id": segment_id,
+             "label": label, "note": note} if label_id else {
+                 "revision": revision, "segment_id": segment_id,
+                 "label": label, "note": note,
+             },
+            expected_generation=expected_generation,
+        )
+
+    def add_speaker_label(
+        self, session_id, revision, segment_id, label, *, expected_generation,
+        note="", label_id=None,
+    ):
+        return self.create_speaker_label(
+            session_id,
+            {"id": label_id, "revision": revision, "segment_id": segment_id,
+             "label": label, "note": note} if label_id else {
+                 "revision": revision, "segment_id": segment_id,
+                 "label": label, "note": note,
+             },
+            expected_generation=expected_generation,
+        )
+
+    save_speaker_label = add_speaker_label
+    remove_speaker_label = delete_speaker_label
+
+    def create_highlight(
+        self, session_id, value=None, *, expected_generation, revision=None,
+        start=None, end=None, track=None, segment_ids=None, label="", note="",
+        highlight_id=None, **fields,
+    ):
+        """Create a bounded, revision-scoped highlight without editing JSONL."""
+        if isinstance(value, dict):
+            payload = {**value, **fields}
+        else:
+            payload = {**fields, "revision": revision, "start": start, "end": end,
+                       "track": track, "segment_ids": segment_ids, "label": label,
+                       "note": note}
+            if value is not None:
+                payload["revision"] = value
+        record_id = payload.get("id", payload.get("highlight_id", highlight_id))
+        if record_id is None:
+            record_id = self._generated_annotation_id("highlight")
+        payload["id"] = record_id
+        revision = payload.get("revision") or payload.get("transcript_revision")
+        if not isinstance(revision, str):
+            raise ValueError("O destaque exige uma revisão de transcrição.")
+        metadata, segments = self._transcript_segments(session_id, revision)
+        record = {
+            "id": record_id,
+            "revision": revision,
+            "start": payload.get("start"),
+            "end": payload.get("end"),
+            "track": payload.get("track"),
+            "segment_ids": copy.deepcopy(payload.get("segment_ids", payload.get("segments"))),
+            "label": payload.get("label", ""),
+            "note": payload.get("note", ""),
+        }
+        if "transcript_revision" in payload and "revision" not in payload:
+            record["revision"] = payload["transcript_revision"]
+        # Validate before touching the sidecar so malformed requests cannot
+        # create an empty generation or alter transcript source files.
+        self._validate_highlight_record(record, metadata, {revision: segments}, set())
+
+        def add(current):
+            if any(item.get("id") == record_id for item in current.get("highlights", [])):
+                raise ValueError("Já existe um destaque com esse identificador.")
+            if record_id in current.get("speaker_labels", {}):
+                raise ValueError("O identificador da anotação já está em uso.")
+            current.setdefault("highlights", []).append(copy.deepcopy(record))
+            return current
+
+        return self._annotation_with_generation(session_id, expected_generation, add)
+
+    def update_highlight(
+        self, session_id, highlight_id, patch=None, *, expected_generation, **fields,
+    ):
+        if patch is None:
+            patch = {}
+        if not isinstance(patch, dict):
+            raise ValueError("A alteração do destaque deve ser um objeto.")
+        patch = {**patch, **fields}
+        if "id" in patch or "highlight_id" in patch:
+            raise ValueError("O identificador do destaque não pode ser alterado.")
+        allowed = {"revision", "transcript_revision", "start", "end", "track",
+                   "segment_ids", "segments", "label", "note"}
+        if set(patch) - allowed:
+            raise ValueError("Há campos de destaque não reconhecidos.")
+
+        def edit(current):
+            highlights = current.get("highlights", [])
+            for index, item in enumerate(highlights):
+                if item.get("id") != highlight_id:
+                    continue
+                record = copy.deepcopy(item)
+                record.update(copy.deepcopy(patch))
+                if "transcript_revision" in record:
+                    record["revision"] = record.pop("transcript_revision")
+                revision = record.get("revision")
+                metadata, segments = self._transcript_segments(session_id, revision)
+                self._validate_highlight_record(record, metadata, {revision: segments}, set())
+                highlights[index] = record
+                return current
+            raise KeyError("O destaque não existe.")
+
+        return self._annotation_with_generation(session_id, expected_generation, edit)
+
+    edit_highlight = update_highlight
+
+    def delete_highlight(self, session_id, highlight_id, *, expected_generation):
+        def remove(current):
+            highlights = current.get("highlights", [])
+            for index, item in enumerate(highlights):
+                if item.get("id") == highlight_id:
+                    del highlights[index]
+                    return current
+            raise KeyError("O destaque não existe.")
+
+        return self._annotation_with_generation(session_id, expected_generation, remove)
+
+    def add_highlight(
+        self, session_id, revision, start, end, track, segment_ids, *,
+        expected_generation, label="", note="", highlight_id=None,
+    ):
+        value = {
+            "revision": revision, "start": start, "end": end, "track": track,
+            "segment_ids": segment_ids, "label": label, "note": note,
+        }
+        if highlight_id is not None:
+            value["id"] = highlight_id
+        return self.create_highlight(
+            session_id, value, expected_generation=expected_generation,
+        )
+
+    save_highlight = add_highlight
+    remove_highlight = delete_highlight
+
+    def list_highlights(self, session_id, *, revision=None, active_only=False):
+        return self.read_annotations(
+            session_id, revision=revision, active_only=active_only,
+        ).get("highlights", [])
+
+    def list_speaker_labels(self, session_id, *, revision=None, active_only=False):
+        return list(self.read_annotations(
+            session_id, revision=revision, active_only=active_only,
+        ).get("speaker_labels", {}).values())
+
+    def active_annotations(self, session_id):
+        return self.read_annotations(session_id, active_only=True)
 
     def _mirror_legacy_fields(self, session_id, annotations):
         """Keep old direct ``MeetingStore`` readers useful after a sidecar edit.
@@ -1170,16 +1620,58 @@ class MeetingLibrary:
 
     delete_session = delete
 
+    @staticmethod
+    def _index_annotation_view(metadata, annotations):
+        """Keep canonical history intact while projecting only active overlays."""
+        if annotations is None:
+            return None
+        active = MeetingLibrary._active_revision_id(metadata)
+        return MeetingLibrary._filter_annotation_revision(annotations, active) if active else copy.deepcopy(annotations)
+
+    @staticmethod
+    def _index_transcripts(metadata, transcripts, annotations):
+        if annotations is None:
+            return transcripts
+        active = MeetingLibrary._active_revision_id(metadata)
+        if not active:
+            return transcripts
+        labels = annotations.get("speaker_labels", {})
+        by_segment = {
+            item.get("segment_id"): item.get("label")
+            for item in labels.values() if isinstance(item, dict)
+            and item.get("revision") == active and item.get("segment_id")
+        }
+        projected = copy.deepcopy(transcripts)
+        for segment in projected.get(active, []):
+            if segment.get("id") in by_segment:
+                segment["speaker"] = by_segment[segment["id"]]
+        return projected
+
     def _project_after_canonical_write(self, session_id):
         with self._catalog_lock:
             with _writer_lock(self._session_dir(session_id)):
                 try:
                     path = self._annotations_path(session_id)
+                    metadata = self.store.get(session_id, include_events=False)
                     annotations = self.read_annotations(session_id) if os.path.lexists(path) else None
-                    result = bool(self.index.index_store_session(
-                        self.store, session_id, annotations=annotations,
-                        reports=self._read_report_files(session_id),
-                    ))
+                    projected_annotations = self._index_annotation_view(metadata, annotations)
+                    reports = self._read_report_files(session_id)
+                    if annotations and annotations.get("speaker_labels") and hasattr(self.index, "index_session"):
+                        transcripts = {
+                            revision.get("id"): list(self.store.get_transcript(session_id, revision.get("id")))
+                            for revision in metadata.get("revisions", [])
+                            if isinstance(revision, dict) and isinstance(revision.get("id"), str)
+                        }
+                        transcripts = self._index_transcripts(metadata, transcripts, annotations)
+                        result = bool(self.index.index_session(
+                            metadata, annotations=projected_annotations,
+                            transcripts=transcripts, reports=reports,
+                        ))
+                    else:
+                        result = bool(self.index.index_store_session(
+                            self.store, session_id, annotations=projected_annotations,
+                            reports=reports,
+                        ))
                     if result:
                         self._index_stale = False
                     return result
@@ -1294,7 +1786,9 @@ class MeetingLibrary:
                         )
                         raise SchemaError("A transcrição está incompleta; o índice não foi marcado como íntegro.")
                     transcripts[revision_id] = values
-                sessions.append((metadata, annotations, transcripts))
+                projected_annotations = self._index_annotation_view(metadata, annotations)
+                projected_transcripts = self._index_transcripts(metadata, transcripts, annotations)
+                sessions.append((metadata, projected_annotations, projected_transcripts))
             if cancel_event is not None and cancel_event.is_set():
                 # Let MeetingIndex publish its explicit cancellation state.
                 sessions = []
