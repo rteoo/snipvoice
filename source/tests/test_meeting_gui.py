@@ -11,9 +11,9 @@ from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, add_meeting_tabs,
-    destination_display, endpoint_options, format_recording_status, format_time,
-    open_meeting_window, validated_settings,
+    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, TRANSCRIPT_PAGE_SIZE,
+    add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
+    format_time, open_meeting_window, validated_settings,
 )
 from meeting_settings import EndpointSelection, resolve_meeting_settings
 
@@ -400,6 +400,72 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertTrue(metadata["truncated"])
         self.assertNotIn("events", metadata)
         self.assertEqual(len(segments[0]["text"]), 8000)
+
+    def test_transcript_page_projection_is_bounded_and_keeps_navigation_metadata(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.controller = mock.Mock()
+        view.controller.get_transcript_page.return_value = {
+            "segments": [
+                {"id": str(index), "start": index, "end": index + 1,
+                 "track": "microphone", "text": "x" * 10000}
+                for index in range(TRANSCRIPT_PAGE_SIZE + 1)
+            ],
+            "offset": TRANSCRIPT_PAGE_SIZE,
+            "has_previous": True,
+            "has_more": True,
+        }
+        page = view._read_transcript_page("session", "revision", TRANSCRIPT_PAGE_SIZE)
+        self.assertEqual(len(page["segments"]), TRANSCRIPT_PAGE_SIZE)
+        self.assertEqual(len(page["segments"][0]["text"]), 8000)
+        self.assertTrue(page["has_previous"])
+        self.assertTrue(page["has_more"])
+
+    def test_transcript_fallback_consumes_only_one_bounded_page(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.controller = mock.Mock()
+        view.controller.get_transcript_page.side_effect = AttributeError("legacy controller")
+        consumed = []
+
+        def segments():
+            for index in range(10_000):
+                consumed.append(index)
+                yield {"id": str(index), "start": index, "end": index + 1,
+                       "track": "microphone", "text": "bounded"}
+
+        view.controller.get_transcript.return_value = segments()
+        page = view._read_transcript_page("session", "revision", 0)
+        self.assertEqual(len(page["segments"]), TRANSCRIPT_PAGE_SIZE)
+        self.assertEqual(len(consumed), TRANSCRIPT_PAGE_SIZE + 1)
+        self.assertTrue(page["has_more"])
+
+    def test_manual_speaker_label_overrides_generated_projection(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.speaker_labels = {
+            "speaker-1": {"segment_id": "segment-1", "label": "Manual label"},
+        }
+        self.assertEqual(
+            view._speaker_for_segment({"id": "segment-1", "speaker": "Generated label"}),
+            "Manual label",
+        )
+
+    def test_stale_playback_snapshot_does_not_update_tk_state(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.playback_generation = 4
+        view.playback_status = Variable("current")
+        view.selected = "session"
+        view.segments = {}
+        view.transcript = mock.Mock()
+        view._apply_playback_snapshot({
+            "playback": {"generation": 3, "active": True, "position": 9,
+                         "session_id": "session", "track": "microphone"},
+        })
+        self.assertEqual(view.playback_status.get(), "current")
+        view._apply_playback_snapshot({
+            "playback": {"generation": 5, "active": False, "position": 9,
+                         "session_id": "session", "track": "microphone"},
+        })
+        self.assertEqual(view.playback_status.get(), "Reprodução parada.")
 
     def test_embedded_close_runs_owner_callback_without_destroying_shared_window(self):
         view = MeetingWindow.__new__(MeetingWindow)

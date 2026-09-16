@@ -25,6 +25,9 @@ _UNSET = object()
 
 WAVEFORM_POINTS = 360
 WAVEFORM_BLOCK_POINTS = 24
+TRANSCRIPT_PAGE_SIZE = 100
+TRANSCRIPT_LIMIT = 500
+PLAYBACK_PROGRESS_INTERVAL = 0.25
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
 
@@ -69,11 +72,13 @@ def _final_audio_path(root, settings, session_id, title=""):
 
 
 class MeetingController:
-    def __init__(self, root, voice, notify=None, capture_factory=NativeCapture, store=None, library=None):
+    def __init__(self, root, voice, notify=None, capture_factory=NativeCapture, store=None,
+                 library=None, clock=None):
         self.root = root
         self.voice = voice
         self.notify = notify or (lambda message: None)
         self.capture_factory = capture_factory
+        self._clock = time.monotonic if clock is None else clock
         # Store initialization/recovery is lazy and runs on an IO worker.
         self._store = store
         self._library = library
@@ -89,6 +94,14 @@ class MeetingController:
         self._processing_thread = None
         self._play_thread = None
         self._play_stop = threading.Event()
+        self._playback_generation = 0
+        self._playback_active = False
+        self._playback_session = None
+        self._playback_track = None
+        self._playback_start = 0.0
+        self._playback_position = 0.0
+        self._playback_started = 0.0
+        self._playback_error = ""
         self._cancel = threading.Event()
         self._file_done = threading.Event()
         self._file_done.set()
@@ -134,6 +147,15 @@ class MeetingController:
 
     def snapshot(self):
         with self._lock:
+            playback_position = self._playback_position
+            if self._playback_active:
+                elapsed = max(0.0, self._clock() - self._playback_started)
+                # Playback is intentionally reported at controller-poll granularity.  The
+                # native writer remains the owner of actual audio timing; this bounded value
+                # is only used to select the visible transcript chunk.
+                playback_position = max(self._playback_start, self._playback_start + elapsed)
+                if elapsed >= PLAYBACK_PROGRESS_INTERVAL:
+                    self._playback_position = playback_position
             return {"state": self._state, "session_id": self._session_id,
                     "error": self._error, "processing": self._processing,
                     "last_status": self._last_status, "partial": bool(self._source_errors),
@@ -142,7 +164,16 @@ class MeetingController:
                     "levels": dict(self._levels),
                     "waveforms": {track: list(values) for track, values in self._waveforms.items()},
                     "final_audio": self._output_path,
-                    "postprocess": self._postprocess}
+                    "postprocess": self._postprocess,
+                    "playback": {
+                        "active": self._playback_active,
+                        "session_id": self._playback_session,
+                        "track": self._playback_track,
+                        "start": self._playback_start,
+                        "position": playback_position,
+                        "generation": self._playback_generation,
+                        "error": self._playback_error,
+                    }}
 
     def devices(self):
         return self.capture_factory().list_devices()
@@ -394,8 +425,141 @@ class MeetingController:
     def delete_session(self, session_id):
         return self._file_work(lambda: self.library.delete(session_id))
 
-    def get_transcript(self, session_id):
-        return list(itertools.islice(self.library.get_transcript(session_id), 500))
+    def get_transcript(self, session_id, revision=None, offset=0, limit=TRANSCRIPT_LIMIT):
+        """Return one bounded transcript window without retaining the full JSONL file."""
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento da transcrição é inválido.")
+        if limit is None:
+            limit = TRANSCRIPT_LIMIT
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("O limite da transcrição é inválido.")
+        limit = min(limit, TRANSCRIPT_LIMIT)
+        return list(itertools.islice(self.library.get_transcript(session_id, revision), offset, offset + limit))
+
+    def get_transcript_page(self, session_id, revision=None, offset=0, limit=TRANSCRIPT_PAGE_SIZE):
+        """Return a bounded page plus navigation metadata for the transcript workspace."""
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("O deslocamento da transcrição é inválido.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("O limite da transcrição é inválido.")
+        limit = min(limit, TRANSCRIPT_LIMIT)
+        values = list(itertools.islice(
+            self.library.get_transcript(session_id, revision), offset, offset + limit + 1,
+        ))
+        return {
+            "segments": values[:limit],
+            "offset": offset,
+            "limit": limit,
+            "has_previous": offset > 0,
+            "has_more": len(values) > limit,
+            "revision": revision,
+        }
+
+    def _annotation_expected_generation(self, session_id, expected_generation):
+        if expected_generation is not _UNSET:
+            return expected_generation
+        with self._lock:
+            cached = self._annotation_generations.get(session_id)
+        if cached is not None:
+            return cached
+        current = self.library.read_annotations(session_id)
+        generation = current.get("generation", 0)
+        with self._lock:
+            self._annotation_generations[session_id] = generation
+        return generation
+
+    def _annotation_result(self, session_id, result):
+        generation = result.get("generation") if isinstance(result, dict) else None
+        if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+            with self._lock:
+                self._annotation_generations[session_id] = generation
+        return result
+
+    def get_annotations(self, session_id, revision=None, active_only=False):
+        result = self.library.read_annotations(
+            session_id, revision=revision, active_only=active_only,
+        )
+        return self._annotation_result(session_id, result)
+
+    def create_speaker_label(self, session_id, value=None, *, expected_generation=_UNSET, **fields):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.create_speaker_label(
+            session_id, value, expected_generation=expected, **fields,
+        ))
+
+    def add_speaker_label(self, session_id, revision, segment_id, label, *, expected_generation=_UNSET,
+                          note="", label_id=None):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.add_speaker_label(
+            session_id, revision, segment_id, label, expected_generation=expected,
+            note=note, label_id=label_id,
+        ))
+
+    save_speaker_label = add_speaker_label
+
+    def set_speaker_label(self, session_id, revision, segment_id, label, *, expected_generation=_UNSET,
+                          note="", label_id=None):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.set_speaker_label(
+            session_id, revision, segment_id, label, expected_generation=expected,
+            note=note, label_id=label_id,
+        ))
+
+    def update_speaker_label(self, session_id, label_id, patch=None, *, expected_generation=_UNSET,
+                             **fields):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.update_speaker_label(
+            session_id, label_id, patch, expected_generation=expected, **fields,
+        ))
+
+    edit_speaker_label = update_speaker_label
+
+    def delete_speaker_label(self, session_id, label_id, *, expected_generation=_UNSET):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.delete_speaker_label(
+            session_id, label_id, expected_generation=expected,
+        ))
+
+    remove_speaker_label = delete_speaker_label
+
+    def create_highlight(self, session_id, value=None, *, expected_generation=_UNSET, **fields):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.create_highlight(
+            session_id, value, expected_generation=expected, **fields,
+        ))
+
+    def add_highlight(self, session_id, revision, start, end, track, segment_ids, *,
+                      expected_generation=_UNSET, label="", note="", highlight_id=None):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.add_highlight(
+            session_id, revision, start, end, track, segment_ids,
+            expected_generation=expected, label=label, note=note, highlight_id=highlight_id,
+        ))
+
+    save_highlight = add_highlight
+
+    def update_highlight(self, session_id, highlight_id, patch=None, *, expected_generation=_UNSET,
+                         **fields):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.update_highlight(
+            session_id, highlight_id, patch, expected_generation=expected, **fields,
+        ))
+
+    edit_highlight = update_highlight
+
+    def delete_highlight(self, session_id, highlight_id, *, expected_generation=_UNSET):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        return self._annotation_result(session_id, self.library.delete_highlight(
+            session_id, highlight_id, expected_generation=expected,
+        ))
+
+    remove_highlight = delete_highlight
+
+    def export_highlight_clip(self, session_id, highlight, path):
+        from meeting_files import export_highlight_clip
+        return self._file_work(lambda: export_highlight_clip(
+            self.store, session_id, highlight, path, cancel_event=self._cancel,
+        ))
 
     def update_notes(self, session_id, title, notes, bookmarks=None, expected_generation=_UNSET):
         fields = {"title": title, "notes": notes}
@@ -550,18 +714,67 @@ class MeetingController:
             if self._play_thread and self._play_thread.is_alive():
                 return False
             self._play_stop.clear()
+            self._playback_generation += 1
+            generation = self._playback_generation
+            self._playback_active = True
+            self._playback_session = session_id
+            self._playback_track = track
+            self._playback_start = float(start)
+            self._playback_position = float(start)
+            self._playback_started = self._clock()
+            self._playback_error = ""
 
             def work():
-                try:
-                    play_audio(self.store, session_id, track, start, self._play_stop)
-                except Exception as exc:
-                    self.notify(str(exc))
+                done = threading.Event()
+                error_holder = []
+
+                def native_worker():
+                    try:
+                        play_audio(self.store, session_id, track, start, self._play_stop)
+                    except Exception as exc:
+                        error_holder.append(str(exc))
+                    finally:
+                        done.set()
+
+                native = threading.Thread(target=native_worker, daemon=True,
+                                          name="MeetingPlaybackAudio")
+                native.start()
+                # Keep progress publication bounded and worker-owned while the native
+                # stream blocks in sounddevice.write().  Tk only observes snapshots.
+                while not done.wait(PLAYBACK_PROGRESS_INTERVAL):
+                    with self._lock:
+                        if generation != self._playback_generation or self._closed:
+                            continue
+                        self._playback_position = max(
+                            self._playback_start,
+                            self._playback_start + max(0.0, self._clock() - self._playback_started),
+                        )
+                native.join()
+                error = error_holder[0] if error_holder else ""
+                with self._lock:
+                    if generation != self._playback_generation or self._closed:
+                        return
+                    self._playback_active = False
+                    self._playback_position = max(
+                        self._playback_position,
+                        self._playback_start + max(0.0, self._clock() - self._playback_started),
+                    )
+                    self._playback_error = error
+                if error and not self._closed:
+                    self.notify(error)
             self._play_thread = threading.Thread(target=work, daemon=True)
             self._play_thread.start()
             return True
 
     def stop_playback(self):
         self._play_stop.set()
+        with self._lock:
+            if self._playback_active:
+                # Invalidate the worker's eventual completion update.  This keeps a
+                # stopped or replaced playback from selecting a stale transcript row.
+                self._playback_generation += 1
+                self._playback_active = False
+                self._playback_error = ""
 
     def shutdown(self):
         with self._lock:

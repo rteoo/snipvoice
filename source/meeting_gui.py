@@ -24,6 +24,7 @@ from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY
 
 PAGE_SIZE = 50
 TRANSCRIPT_LIMIT = 500
+TRANSCRIPT_PAGE_SIZE = 100
 NOTES_LIMIT = 1024 * 1024
 BOOKMARK_LIMIT = 1000
 STATE_LABELS = {"idle": "Pronto", "starting": "Iniciando", "recording": "Gravando",
@@ -48,6 +49,55 @@ def format_time(seconds):
         seconds = 0
     whole = int(seconds)
     return f"{whole // 3600:02d}:{whole // 60 % 60:02d}:{whole % 60:02d}"
+
+
+def active_transcript_revision(metadata):
+    """Choose the library's active revision without loading transcript content."""
+    if not isinstance(metadata, dict):
+        return None
+    revisions = metadata.get("revisions", [])
+    known = {
+        item.get("id") for item in revisions
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    explicit = metadata.get("active_revision")
+    if isinstance(explicit, str) and explicit in known:
+        return explicit
+    for item in reversed(revisions):
+        if isinstance(item, dict) and item.get("status") == "completed" and item.get("id") in known:
+            return item["id"]
+    for item in reversed(revisions):
+        if isinstance(item, dict) and item.get("id") in known:
+            return item["id"]
+    return None
+
+
+def annotations_for_revision(annotations, revision):
+    """Project only annotations that belong to the visible transcript revision."""
+    if not isinstance(annotations, dict):
+        return {"generation": 0, "speaker_labels": {}, "highlights": []}
+    if not revision:
+        return {
+            "generation": annotations.get("generation", 0),
+            "speaker_labels": dict(annotations.get("speaker_labels", {}) or {}),
+            "highlights": list(annotations.get("highlights", []) or []),
+        }
+    labels = {
+        key: value for key, value in (annotations.get("speaker_labels", {}) or {}).items()
+        if isinstance(value, dict)
+        and (value.get("revision") or value.get("transcript_revision")) == revision
+    }
+    highlights = [
+        value for value in (annotations.get("highlights", []) or ())
+        if isinstance(value, dict)
+        and (value.get("revision") or value.get("transcript_revision")) == revision
+    ]
+    return {
+        "generation": annotations.get("generation", 0),
+        "speaker_labels": labels,
+        "highlights": highlights,
+        "revision_filter": revision,
+    }
 
 
 def destination_display(path):
@@ -207,6 +257,17 @@ class MeetingWindow:
         self.offset = 0
         self.selected = None
         self.bookmarks = []
+        self.transcript_offset = 0
+        self.transcript_revision = None
+        self.transcript_has_more = False
+        self.transcript_has_previous = False
+        self.transcript_request = 0
+        self.annotation_generation = 0
+        self.speaker_labels = {}
+        self.highlights = []
+        self.selected_segment_id = None
+        self.selected_speaker_label_id = None
+        self.selected_highlight_id = None
         self.dirty = False
         self.loading = False
         self.truncated = False
@@ -220,6 +281,7 @@ class MeetingWindow:
         self.previous_state = None
         self.previous_processing = False
         self.snapshot = {}
+        self.playback_generation = -1
         self._mousewheel_bindings = []
         self._build()
         if not self.embedded:
@@ -796,18 +858,89 @@ class MeetingWindow:
         self.bookmark_picker = ttk.Combobox(right, textvariable=self.bookmark_choice, state="readonly")
         self.bookmark_picker.pack(fill="x", padx=(12, 0), pady=4)
         self.bookmark_picker.bind("<<ComboboxSelected>>", self._bookmark_selected)
-        self._label(right, "Transcrição · horários por trecho de áudio", anchor="w").pack(fill="x", padx=12, pady=(10, 4))
-        self.transcript = ttk.Treeview(right, columns=("time", "track", "text"), show="headings", height=4,
-                                      selectmode="browse", style="Meeting.Treeview")
-        for column, label, width in (("time", "Início", 75), ("track", "Fonte", 80), ("text", "Texto", 360)):
+        transcript_header = ttk.Frame(right, style="Meeting.TFrame")
+        transcript_header.pack(fill="x", padx=12, pady=(10, 4))
+        self._label(
+            transcript_header, "Transcrição · horários por trecho de áudio", anchor="w",
+        ).pack(side="left")
+        self.transcript_timing = tk.StringVar(self.window, "Os horários indicam trechos de áudio, não palavras.")
+        self._label(
+            transcript_header, "", textvariable=self.transcript_timing, anchor="e",
+            fg=self.ui.text_muted,
+        ).pack(side="right")
+        self.transcript = ttk.Treeview(
+            right, columns=("time", "track", "speaker", "text"), show="headings", height=4,
+            selectmode="browse", style="Meeting.Treeview")
+        for column, label, width in (("time", "Início", 75), ("track", "Fonte", 80),
+                                     ("speaker", "Rótulo manual", 120), ("text", "Texto", 360)):
             self.transcript.heading(column, text=label)
             self.transcript.column(column, width=width, stretch=column == "text")
         self.transcript.pack(fill="both", expand=True, padx=(12, 0))
         self.transcript.bind("<<TreeviewSelect>>", self._transcript_selected)
+        transcript_pages = ttk.Frame(right, style="Meeting.TFrame")
+        transcript_pages.pack(fill="x", padx=(12, 0), pady=(4, 0))
+        self.transcript_previous_button = self._button(
+            transcript_pages, "Trechos anteriores", lambda: self.change_transcript_page(-1),
+        )
+        self.transcript_previous_button.pack(side="left")
+        self.transcript_next_button = self._button(
+            transcript_pages, "Próximos trechos", lambda: self.change_transcript_page(1),
+        )
+        self.transcript_next_button.pack(side="left", padx=8)
+        self.transcript_page_label = tk.StringVar(self.window, "Página de transcrição")
+        self._label(
+            transcript_pages, "", textvariable=self.transcript_page_label, anchor="w",
+            fg=self.ui.text_muted,
+        ).pack(side="left")
         self.segment_text = tk.Text(right, height=3, wrap="word", font=self.ui.font(), **self.ui.text_colors())
         self.segment_text.pack(fill="x", padx=(12, 0), pady=4)
         self.segment_text.configure(state="disabled")
         self.segments = {}
+        self._label(
+            right, "Rótulo manual do locutor (não é identificação biométrica)", anchor="w",
+            fg=self.ui.text_muted,
+        ).pack(fill="x", padx=12, pady=(4, 2))
+        speaker_row = ttk.Frame(right, style="Meeting.TFrame")
+        speaker_row.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        self.speaker_name = tk.StringVar(self.window)
+        self._entry(speaker_row, self.speaker_name, 24).pack(side="left", fill="x", expand=True)
+        self.speaker_save_button = self._button(speaker_row, "Salvar rótulo", self.save_speaker_label)
+        self.speaker_save_button.pack(side="left", padx=(6, 0))
+        self.speaker_delete_button = self._button(speaker_row, "Excluir rótulo", self.delete_speaker_label, danger=True)
+        self.speaker_delete_button.configure(state="disabled")
+        self.speaker_delete_button.pack(side="left", padx=(6, 0))
+        highlight_row = ttk.Frame(right, style="Meeting.TFrame")
+        highlight_row.pack(fill="x", padx=(12, 0), pady=(2, 4))
+        self._label(highlight_row, "Destaque", fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
+        self.highlight_start = tk.StringVar(self.window)
+        self.highlight_end = tk.StringVar(self.window)
+        self.highlight_label = tk.StringVar(self.window)
+        self.highlight_note = tk.StringVar(self.window)
+        self._entry(highlight_row, self.highlight_start, 8).pack(side="left")
+        self._label(highlight_row, "até", fg=self.ui.text_muted).pack(side="left", padx=4)
+        self._entry(highlight_row, self.highlight_end, 8).pack(side="left")
+        self._entry(highlight_row, self.highlight_label, 20).pack(side="left", fill="x", expand=True, padx=6)
+        self._entry(highlight_row, self.highlight_note, 24).pack(side="left", fill="x", expand=True)
+        self.highlight_choice = tk.StringVar(self.window)
+        self.highlight_picker = ttk.Combobox(
+            right, textvariable=self.highlight_choice, state="readonly", width=42,
+        )
+        self.highlight_picker.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        self.highlight_picker.bind("<<ComboboxSelected>>", self._highlight_selected)
+        highlight_actions = ttk.Frame(right, style="Meeting.TFrame")
+        highlight_actions.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        self.highlight_save_button = self._button(highlight_actions, "Salvar destaque", self.save_highlight)
+        self.highlight_save_button.pack(side="left")
+        self.highlight_delete_button = self._button(
+            highlight_actions, "Excluir destaque", self.delete_highlight, danger=True,
+        )
+        self.highlight_delete_button.configure(state="disabled")
+        self.highlight_delete_button.pack(side="left", padx=6)
+        self.highlight_export_button = self._button(
+            highlight_actions, "Exportar clipe…", self.export_highlight_clip,
+        )
+        self.highlight_export_button.configure(state="disabled")
+        self.highlight_export_button.pack(side="left")
         self.track = tk.StringVar(self.window, "Microfone")
         playback = ttk.Frame(right, style="Meeting.TFrame")
         playback.pack(fill="x", padx=(12, 0), pady=8)
@@ -816,6 +949,9 @@ class MeetingWindow:
         self.play_button = self._button(playback, "Ouvir neste horário", self.play)
         self.play_button.pack(side="left", padx=8)
         self._button(playback, "Parar reprodução", lambda: self._action("stop_playback", urgent=True)).pack(side="left")
+        self.playback_status = tk.StringVar(self.window, "Reprodução parada.")
+        self._label(playback, "", textvariable=self.playback_status, anchor="w",
+                    fg=self.ui.text_muted).pack(side="left", padx=(8, 0))
         actions = ttk.Frame(right, style="Meeting.TFrame")
         actions.pack(fill="x", padx=(12, 0), pady=4)
         self._button(actions, "Transcrever novamente", self.transcribe).pack(side="left", padx=(0, 6))
@@ -1098,6 +1234,17 @@ class MeetingWindow:
     def load_session(self, session_id):
         self.selected = session_id
         self.detail_ready = False
+        self.transcript_offset = 0
+        self.transcript_revision = None
+        self.transcript_has_more = False
+        self.transcript_has_previous = False
+        self.transcript_request = getattr(self, "transcript_request", 0) + 1
+        self.annotation_generation = 0
+        self.speaker_labels = {}
+        self.highlights = []
+        self.selected_segment_id = None
+        self.selected_speaker_label_id = None
+        self.selected_highlight_id = None
         self.delete_button.configure(state="disabled")
         self.loading = True
         self.title.set("")
@@ -1110,11 +1257,13 @@ class MeetingWindow:
         self.bookmarks = []
         self.transcript.delete(*self.transcript.get_children())
         self.segments.clear()
+        self._render_annotations({}, 0)
         self.segment_text.configure(state="normal")
         self.segment_text.delete("1.0", "end")
         self.segment_text.configure(state="disabled")
         self.bridge.invalidate("detail")
         self.bridge.invalidate("outputs")
+        self.bridge.invalidate("transcript_page")
         def read():
             raw = self.controller.get_session(session_id)
             notes = str(raw.get("notes", ""))
@@ -1124,13 +1273,23 @@ class MeetingWindow:
             summary = raw.get("reviewed_summary") or raw.get("summary")
             if isinstance(summary, dict):
                 summary = json.dumps(summary, ensure_ascii=False, indent=2)
+            revision = active_transcript_revision(raw)
+            page = self._read_transcript_page(session_id, revision, 0)
+            annotations = raw.get("annotations") if isinstance(raw.get("annotations"), dict) else {}
+            annotations = annotations_for_revision(annotations, revision)
+            speaker_labels = annotations.get("speaker_labels", {})
+            highlights = annotations.get("highlights", [])
             metadata.update(notes=notes[:NOTES_LIMIT], truncated=len(notes) > NOTES_LIMIT
                             or len(bookmarks) > BOOKMARK_LIMIT or invalid_bookmarks,
-                            bookmarks=bookmarks[:BOOKMARK_LIMIT], summary=str(summary or "")[:65536])
-            segments = [{key: segment.get(key) for key in ("id", "start", "end", "track")}
-                        | {"text": str(segment.get("text", ""))[:8000]}
-                        for segment in islice(self.controller.get_transcript(session_id), TRANSCRIPT_LIMIT)]
-            return metadata, segments
+                            bookmarks=bookmarks[:BOOKMARK_LIMIT], summary=str(summary or "")[:65536],
+                            transcript_revision=revision,
+                            transcript_offset=page["offset"],
+                            transcript_has_previous=page["has_previous"],
+                            transcript_has_more=page["has_more"],
+                            annotation_generation=raw.get("annotation_generation", annotations.get("generation", 0)),
+                            speaker_labels=speaker_labels,
+                            highlights=highlights[:2000])
+            return metadata, page["segments"]
         self.status.set("Carregando gravação…")
         self._submit("detail", read, lambda data, error: self._detail_loaded(session_id, data, error))
 
@@ -1148,6 +1307,14 @@ class MeetingWindow:
         self.notes.delete("1.0", "end")
         self.notes.insert("1.0", metadata["notes"])
         self.truncated = metadata["truncated"]
+        self.transcript_revision = metadata.get("transcript_revision")
+        self.transcript_offset = metadata.get("transcript_offset", 0)
+        self.transcript_has_previous = bool(metadata.get("transcript_has_previous"))
+        self.transcript_has_more = bool(metadata.get("transcript_has_more"))
+        generation = metadata.get("annotation_generation", 0)
+        self.annotation_generation = generation if isinstance(generation, int) else 0
+        self.speaker_labels = metadata.get("speaker_labels", {})
+        self.highlights = metadata.get("highlights", [])
         self.detail_ready = True
         self.delete_button.configure(state="disabled" if metadata.get("status") == "recording" else "normal")
         if self.truncated:
@@ -1158,19 +1325,182 @@ class MeetingWindow:
         self.loading = False
         self._render_bookmarks()
         self._render_transcript(segments)
+        self._render_annotations(self.speaker_labels, self.annotation_generation)
+        self._update_transcript_paging_controls()
         self._show_summary(metadata.get("summary"))
         self.status.set("Notas extensas: visualização parcial, somente leitura." if self.truncated else
-                        f"Gravação carregada · {len(segments)} trechos exibidos (limite {TRANSCRIPT_LIMIT})."
+                        f"Gravação carregada · página de transcrição com {len(segments)} trechos."
                         + (" · Uma etapa anterior não foi concluída." if metadata.get("error") else ""))
 
     def _render_transcript(self, segments):
         self.transcript.delete(*self.transcript.get_children())
         self.segments.clear()
         for index, segment in enumerate(segments):
-            key = str(index)
+            if not isinstance(segment, dict):
+                continue
+            key = str(segment.get("id") or self.transcript_offset + index)
+            if key in self.segments:
+                key = f"{self.transcript_offset + index}:{key}"
             self.segments[key] = segment
+            speaker = self._speaker_for_segment(segment)
             self.transcript.insert("", "end", iid=key, values=(format_time(segment.get("start", 0)),
-                "Microfone" if segment.get("track") == "microphone" else "Sistema", str(segment.get("text", ""))[:8000]))
+                "Microfone" if segment.get("track") == "microphone" else "Sistema",
+                speaker, str(segment.get("text", ""))[:8000]))
+
+    def _speaker_for_segment(self, segment):
+        segment_id = segment.get("id") if isinstance(segment, dict) else None
+        for record in (self.speaker_labels or {}).values():
+            if isinstance(record, dict) and record.get("segment_id") == segment_id:
+                return str(record.get("label", ""))[:256]
+        if isinstance(segment.get("speaker"), str) and segment.get("speaker").strip():
+            return segment["speaker"][:256]
+        return ""
+
+    def _render_annotations(self, speaker_labels, generation=None):
+        if isinstance(speaker_labels, dict):
+            self.speaker_labels = {
+                key: value for key, value in speaker_labels.items() if isinstance(value, dict)
+            }
+        if generation is not None and isinstance(generation, int):
+            self.annotation_generation = generation
+        if hasattr(self, "speaker_name"):
+            self.speaker_name.set("")
+        self.selected_speaker_label_id = None
+        if hasattr(self, "speaker_delete_button"):
+            self.speaker_delete_button.configure(state="disabled")
+        if hasattr(self, "highlight_picker"):
+            values = []
+            for item in self.highlights[:2000]:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label", "")).strip() or "Destaque sem rótulo"
+                values.append(
+                    f'{format_time(item.get("start", 0))}–{format_time(item.get("end", 0))} · {label}'
+                )
+            self.highlight_picker.configure(values=values)
+            if hasattr(self, "highlight_choice"):
+                self.highlight_choice.set("")
+        self.selected_highlight_id = None
+        for widget_name in ("highlight_delete_button", "highlight_export_button"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.configure(state="disabled")
+        if hasattr(self, "highlight_start"):
+            self.highlight_start.set("")
+            self.highlight_end.set("")
+            self.highlight_label.set("")
+            self.highlight_note.set("")
+        if hasattr(self, "transcript") and hasattr(self, "segments"):
+            # Speaker labels are part of the row projection and never alter JSONL text.
+            for key, segment in self.segments.items():
+                try:
+                    values = list(self.transcript.item(key, "values"))
+                    if len(values) >= 4:
+                        values[2] = self._speaker_for_segment(segment)
+                        self.transcript.item(key, values=values)
+                except (tk.TclError, TypeError, AttributeError):
+                    pass
+
+    def _update_transcript_paging_controls(self):
+        previous = getattr(self, "transcript_previous_button", None)
+        next_button = getattr(self, "transcript_next_button", None)
+        if previous is not None:
+            previous.configure(
+                state="normal" if self.detail_ready and self.transcript_has_previous else "disabled",
+            )
+        if next_button is not None:
+            next_button.configure(
+                state="normal" if self.detail_ready and self.transcript_has_more else "disabled",
+            )
+        label = getattr(self, "transcript_page_label", None)
+        if label is not None:
+            page = self.transcript_offset // TRANSCRIPT_PAGE_SIZE + 1
+            suffix = " · há mais trechos" if self.transcript_has_more else ""
+            label.set(f"Página {page} · {len(self.segments)} trechos{suffix}")
+
+    def change_transcript_page(self, delta):
+        if not self.selected or not self.detail_ready or not isinstance(delta, int):
+            return
+        target = self.transcript_offset + (delta * TRANSCRIPT_PAGE_SIZE)
+        if target < 0 or (delta > 0 and not self.transcript_has_more):
+            return
+        self._load_transcript_page(target)
+
+    def _load_transcript_page(self, offset):
+        if not self.selected or not self.detail_ready or offset < 0:
+            return
+        session_id, revision = self.selected, self.transcript_revision
+        self.transcript_request += 1
+        request = self.transcript_request
+        self.bridge.invalidate("transcript_page")
+        self.status.set("Carregando trechos da transcrição…")
+
+        def read():
+            return self._read_transcript_page(session_id, revision, offset)
+
+        def loaded(page, error):
+            if self.closed or request != self.transcript_request or self.selected != session_id:
+                return
+            if error:
+                self._remember_operation_error(error)
+                self.status.set("Não foi possível carregar a página da transcrição. Veja os detalhes na aba Gravação.")
+                return
+            page = page or {}
+            self.transcript_offset = int(page.get("offset", offset))
+            self.transcript_has_previous = bool(page.get("has_previous", self.transcript_offset > 0))
+            self.transcript_has_more = bool(page.get("has_more"))
+            self._render_transcript(page.get("segments", []))
+            self._update_transcript_paging_controls()
+            self.status.set(
+                f"Página de transcrição carregada · {len(self.segments)} trechos"
+                + (" · horários por trecho de áudio." if self.transcript_has_more else ".")
+            )
+
+        self._submit("transcript_page", read, loaded)
+
+    def _read_transcript_page(self, session_id, revision, offset):
+        """Read one bounded page through the controller's worker-facing API."""
+        limit = TRANSCRIPT_PAGE_SIZE
+
+        def bounded(values):
+            result = []
+            for segment in islice(values or (), limit):
+                if not isinstance(segment, dict):
+                    continue
+                result.append(
+                    {key: segment.get(key) for key in ("id", "start", "end", "track", "speaker")}
+                    | {"text": str(segment.get("text", ""))[:8000]}
+                )
+            return result
+
+        try:
+            page = self.controller.get_transcript_page(
+                session_id, revision=revision, offset=offset, limit=limit,
+            )
+            if isinstance(page, dict) and isinstance(page.get("segments"), list):
+                values = page.get("segments", [])
+                return {
+                    "segments": bounded(values),
+                    "offset": max(0, int(page.get("offset", offset))),
+                    "has_previous": bool(page.get("has_previous", offset > 0)),
+                    "has_more": bool(page.get("has_more")),
+                }
+        except (AttributeError, TypeError):
+            # Keep compatibility with older controller doubles and embedded callers.
+            pass
+        try:
+            values = self.controller.get_transcript(
+                session_id, revision=revision, offset=offset, limit=limit + 1,
+            )
+        except TypeError:
+            values = self.controller.get_transcript(session_id)
+        values = list(islice(values or (), limit + 1))
+        return {
+            "segments": bounded(values),
+            "offset": offset,
+            "has_previous": offset > 0,
+            "has_more": len(values) > limit,
+        }
 
     def _mark_dirty(self, *_args):
         if not self.loading and self.selected:
@@ -1247,10 +1577,22 @@ class MeetingWindow:
     def _clear_library_detail(self):
         self.bridge.invalidate("detail")
         self.bridge.invalidate("outputs")
+        self.bridge.invalidate("transcript_page")
+        self.transcript_request += 1
         self.selected = None
         self.detail_ready = False
         self.dirty = False
         self.truncated = False
+        self.transcript_offset = 0
+        self.transcript_revision = None
+        self.transcript_has_more = False
+        self.transcript_has_previous = False
+        self.annotation_generation = 0
+        self.speaker_labels = {}
+        self.highlights = []
+        self.selected_segment_id = None
+        self.selected_speaker_label_id = None
+        self.selected_highlight_id = None
         self.loading = True
         self.title.set("")
         self.notes.configure(state="normal")
@@ -1262,6 +1604,7 @@ class MeetingWindow:
         self._render_bookmarks()
         self.transcript.delete(*self.transcript.get_children())
         self.segments.clear()
+        self._render_annotations({}, 0)
         self.segment_text.configure(state="normal")
         self.segment_text.delete("1.0", "end")
         self.segment_text.configure(state="disabled")
@@ -1317,6 +1660,7 @@ class MeetingWindow:
     def _transcript_selected(self, _event=None):
         selected = self.transcript.selection()
         if selected and selected[0] in self.segments:
+            self.selected_segment_id = self.segments[selected[0]].get("id")
             segment = self.segments[selected[0]]
             self.position.set(str(segment.get("start", 0)))
             self.track.set("Microfone" if segment.get("track") == "microphone" else "Sistema")
@@ -1324,6 +1668,195 @@ class MeetingWindow:
             self.segment_text.delete("1.0", "end")
             self.segment_text.insert("1.0", segment.get("text", ""))
             self.segment_text.configure(state="disabled")
+            label_id, label = self._speaker_label_for_segment(segment)
+            self.selected_speaker_label_id = label_id
+            if hasattr(self, "speaker_name"):
+                self.speaker_name.set(label)
+            if hasattr(self, "speaker_delete_button"):
+                self.speaker_delete_button.configure(state="normal" if label_id else "disabled")
+            if hasattr(self, "highlight_start"):
+                self.highlight_start.set(str(segment.get("start", 0)))
+                self.highlight_end.set(str(segment.get("end", segment.get("start", 0))))
+            self.transcript_timing.set(
+                "Trecho selecionado · horários representam blocos de áudio, não palavras."
+            )
+
+    def _speaker_label_for_segment(self, segment):
+        segment_id = segment.get("id") if isinstance(segment, dict) else None
+        for label_id, record in (self.speaker_labels or {}).items():
+            if isinstance(record, dict) and record.get("segment_id") == segment_id:
+                return label_id, str(record.get("label", ""))[:400]
+        return None, ""
+
+    def _highlight_selected(self, _event=None):
+        index = self.highlight_picker.current() if hasattr(self, "highlight_picker") else -1
+        if not (0 <= index < len(self.highlights)):
+            return
+        item = self.highlights[index]
+        if not isinstance(item, dict):
+            return
+        self.selected_highlight_id = item.get("id")
+        self.highlight_start.set(str(item.get("start", "")))
+        self.highlight_end.set(str(item.get("end", "")))
+        self.highlight_label.set(str(item.get("label", "")))
+        self.highlight_note.set(str(item.get("note", "")))
+        self.highlight_delete_button.configure(state="normal")
+        self.highlight_export_button.configure(state="normal")
+
+    def _annotation_saved(self, value, error, message="Anotações salvas."):
+        if error or value is False:
+            if error:
+                self._remember_operation_error(error)
+            self.status.set(
+                "Não foi possível salvar as anotações. Veja os detalhes na aba Gravação."
+                if error else "Não foi possível salvar as anotações. Tente novamente."
+            )
+            return
+        if isinstance(value, dict):
+            generation = value.get("generation")
+            if isinstance(generation, int):
+                self.annotation_generation = generation
+            visible = annotations_for_revision(value, self.transcript_revision)
+            labels = visible.get("speaker_labels")
+            if isinstance(labels, dict):
+                self.speaker_labels = labels
+            highlights = visible.get("highlights")
+            if isinstance(highlights, list):
+                self.highlights = highlights[:2000]
+        self._render_annotations(self.speaker_labels, self.annotation_generation)
+        self._render_transcript(list(self.segments.values()))
+        self.status.set(message)
+
+    def save_speaker_label(self):
+        if not self.selected or not self.detail_ready or not self.selected_segment_id:
+            self.status.set("Selecione um trecho antes de salvar o rótulo manual.")
+            return
+        label = self.speaker_name.get().strip() if hasattr(self, "speaker_name") else ""
+        if not label:
+            self.status.set("Informe um rótulo manual, por exemplo “Pessoa 1”.")
+            return
+        if len(label) > 256:
+            self.status.set("O rótulo manual deve ter até 256 caracteres.")
+            return
+        session_id = self.selected
+        revision = self.transcript_revision
+        segment_id = self.selected_segment_id
+        expected = self.annotation_generation
+        label_id = self.selected_speaker_label_id
+        note = ""
+        if label_id:
+            operation = lambda: self.controller.update_speaker_label(
+                session_id, label_id, {"label": label, "note": note},
+                expected_generation=expected,
+            )
+        else:
+            operation = lambda: self.controller.set_speaker_label(
+                session_id, revision, segment_id, label, note=note,
+                expected_generation=expected,
+            )
+        self._submit("speaker_label", operation, lambda value, error: self._annotation_saved(
+            value, error, "Rótulo manual salvo; o texto original da transcrição foi preservado."
+        ))
+
+    def delete_speaker_label(self):
+        if not self.selected or not self.selected_speaker_label_id:
+            return
+        session_id, label_id = self.selected, self.selected_speaker_label_id
+        expected = self.annotation_generation
+        self._submit(
+            "speaker_label", lambda: self.controller.delete_speaker_label(
+                session_id, label_id, expected_generation=expected,
+            ), lambda value, error: self._annotation_saved(
+                value, error, "Rótulo manual excluído; a transcrição original não foi alterada."
+            ),
+        )
+
+    def _highlight_interval(self):
+        try:
+            start, end = float(self.highlight_start.get()), float(self.highlight_end.get())
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Informe início e fim do destaque em segundos.") from exc
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+            raise ValueError("O intervalo do destaque deve ser finito e ter fim maior que o início.")
+        return start, end
+
+    def save_highlight(self):
+        if not self.selected or not self.detail_ready:
+            self.status.set("Selecione uma gravação antes de salvar o destaque.")
+            return
+        try:
+            start, end = self._highlight_interval()
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+        label = self.highlight_label.get().strip()[:256]
+        note = self.highlight_note.get()[:1024]
+        session_id, expected = self.selected, self.annotation_generation
+        if self.selected_highlight_id:
+            highlight_id = self.selected_highlight_id
+            operation = lambda: self.controller.update_highlight(
+                session_id, highlight_id,
+                {"start": start, "end": end, "label": label, "note": note},
+                expected_generation=expected,
+            )
+        else:
+            selected = self.transcript.selection() if hasattr(self, "transcript") else ()
+            segment = self.segments.get(selected[0]) if selected else None
+            segment_id = segment.get("id") if isinstance(segment, dict) else self.selected_segment_id
+            if not isinstance(segment_id, str) or not self.transcript_revision:
+                self.status.set("Selecione um trecho de transcrição para criar o destaque.")
+                return
+            track = segment.get("track") or TRACK_LABELS.get(self.track.get())
+            operation = lambda: self.controller.add_highlight(
+                session_id, self.transcript_revision, start, end, track, [segment_id],
+                expected_generation=expected, label=label, note=note,
+            )
+        self._submit("highlight", operation, lambda value, error: self._annotation_saved(
+            value, error, "Destaque salvo com proveniência da revisão e do trecho."
+        ))
+
+    def delete_highlight(self):
+        if not self.selected or not self.selected_highlight_id:
+            return
+        session_id, highlight_id = self.selected, self.selected_highlight_id
+        expected = self.annotation_generation
+        self._submit(
+            "highlight", lambda: self.controller.delete_highlight(
+                session_id, highlight_id, expected_generation=expected,
+            ), lambda value, error: self._annotation_saved(
+                value, error, "Destaque excluído; o áudio original foi preservado."
+            ),
+        )
+
+    def export_highlight_clip(self):
+        if not self.selected or not self.selected_highlight_id:
+            self.status.set("Selecione um destaque antes de exportar o clipe.")
+            return
+        item = next((value for value in self.highlights
+                     if isinstance(value, dict) and value.get("id") == self.selected_highlight_id), None)
+        if item is None:
+            self.status.set("O destaque selecionado não está mais disponível; atualize a gravação.")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.window, title="Exportar clipe do destaque", defaultextension=".wav",
+            filetypes=(("Áudio WAV", "*.wav"), ("Todos os arquivos", "*")),
+        )
+        if not path:
+            return
+        session_id = self.selected
+
+        def exported(value, error):
+            if error:
+                self._remember_operation_error(error)
+                self.status.set("Não foi possível exportar o clipe. Veja os detalhes na aba Gravação.")
+            else:
+                self.status.set("Clipe do destaque exportado sem alterar o áudio original.")
+
+        self._submit(
+            "export_highlight", lambda: self.controller.export_highlight_clip(
+                session_id, dict(item), path,
+            ), exported,
+        )
 
     def play(self):
         if not self.selected:
@@ -1449,10 +1982,10 @@ class MeetingWindow:
             raw = self.controller.get_session(session_id)
             summary = raw.get("summary")
             summary = json.dumps(summary, ensure_ascii=False, indent=2) if isinstance(summary, dict) else str(summary or "")
-            segments = [{key: segment.get(key) for key in ("id", "start", "end", "track")}
-                        | {"text": str(segment.get("text", ""))[:8000]}
-                        for segment in islice(self.controller.get_transcript(session_id), TRANSCRIPT_LIMIT)]
-            return summary[:65536], segments
+            revision = active_transcript_revision(raw) or self.transcript_revision
+            page = self._read_transcript_page(session_id, revision, self.transcript_offset)
+            annotations = raw.get("annotations") if isinstance(raw.get("annotations"), dict) else {}
+            return summary[:65536], page, annotations_for_revision(annotations, revision)
         def loaded(data, error):
             if self.selected != session_id or not self.detail_ready:
                 return
@@ -1460,9 +1993,24 @@ class MeetingWindow:
                 self._remember_operation_error(error)
                 self.status.set("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação.")
                 return
-            summary, segments = data
+            summary, page, annotations = data
+            self.transcript_revision = annotations.get("revision_filter", self.transcript_revision)
+            generation = annotations.get("generation")
+            if isinstance(generation, int):
+                self.annotation_generation = generation
+            labels = annotations.get("speaker_labels")
+            if isinstance(labels, dict):
+                self.speaker_labels = labels
+            highlights = annotations.get("highlights")
+            if isinstance(highlights, list):
+                self.highlights = highlights[:2000]
             self._show_summary(summary)
-            self._render_transcript(segments)
+            self.transcript_offset = page.get("offset", self.transcript_offset)
+            self.transcript_has_previous = page.get("has_previous", self.transcript_offset > 0)
+            self.transcript_has_more = page.get("has_more", False)
+            self._render_transcript(page.get("segments", []))
+            self._render_annotations(self.speaker_labels, self.annotation_generation)
+            self._update_transcript_paging_controls()
             self.status.set("Resultado local atualizado. Revise a transcrição e o resumo.")
         self._submit("outputs", read, loaded)
 
@@ -1502,6 +2050,53 @@ class MeetingWindow:
         self.summary.insert("1.0", text[:65536])
         self.summary.configure(state="normal")
 
+    def _apply_playback_snapshot(self, snapshot):
+        """Apply controller-owned progress on Tk, ignoring stale generations."""
+        if self.closed:
+            return
+        playback = snapshot.get("playback") if isinstance(snapshot, dict) else None
+        if not isinstance(playback, dict):
+            return
+        generation = playback.get("generation")
+        if not isinstance(generation, int) or generation < self.playback_generation:
+            return
+        self.playback_generation = generation
+        active = bool(playback.get("active"))
+        position = playback.get("position", playback.get("start", 0))
+        try:
+            position = max(0.0, float(position))
+        except (TypeError, ValueError):
+            position = 0.0
+        if active:
+            track = playback.get("track")
+            track_label = "Microfone" if track == "microphone" else "Sistema"
+            self.playback_status.set(
+                f"Reproduzindo {track_label} · {format_time(position)} · horários por trecho de áudio"
+            )
+            if self.selected == playback.get("session_id"):
+                self._select_playback_segment(position, track)
+        else:
+            error = str(playback.get("error") or "")
+            if error:
+                self.playback_status.set("A reprodução falhou; veja os detalhes da operação.")
+            else:
+                self.playback_status.set("Reprodução parada.")
+
+    def _select_playback_segment(self, position, track):
+        for key, segment in self.segments.items():
+            if not isinstance(segment, dict) or segment.get("track") != track:
+                continue
+            try:
+                start = float(segment.get("start", 0))
+                end = float(segment.get("end", start))
+            except (TypeError, ValueError):
+                continue
+            if start <= position < max(start, end) or (end <= start and position >= start):
+                if self.transcript.selection() != (key,):
+                    self.transcript.selection_set(key)
+                    self.transcript.see(key)
+                return
+
     def _poll(self):
         if self.closed:
             return
@@ -1516,6 +2111,7 @@ class MeetingWindow:
                     f"Baixando {name}: {percent}% · verificação SHA-256 antes da instalação"
                 )
             self.snapshot = self.controller.snapshot()
+            self._apply_playback_snapshot(self.snapshot)
             state = self.snapshot.get("state", "idle")
             active = state in ("starting", "recording", "paused", "stopping")
             processing = self.snapshot.get("processing")
@@ -1590,8 +2186,15 @@ class MeetingWindow:
         if self.closed:
             return
         self.closed = True
+        self.playback_generation = getattr(self, "playback_generation", -1) + 1
+        self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:
             self.summary_download_cancel.set()
+        try:
+            self.controller.stop_playback()
+        except (AttributeError, RuntimeError):
+            # Older controller doubles and an already-torn-down controller are safe.
+            pass
         self._unbind_mousewheel_regions()
         self.bridge.close()
         if self.after_id is not None:

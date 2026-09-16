@@ -52,6 +52,14 @@ class FakeCapture:
         self.closed = True
 
 
+class FakeClock:
+    def __init__(self, value=0.0):
+        self.value = value
+
+    def __call__(self):
+        return self.value
+
+
 class MeetingControllerTests(unittest.TestCase):
     def setUp(self):
         root = Path(__file__).parent / "tmp"
@@ -240,6 +248,70 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(snapshot["postprocess"], "Pós-processamento parcial")
         self.assertIn("cancelado", snapshot["error"])
 
+    def test_transcript_pages_are_bounded_and_navigable_past_the_legacy_limit(self):
+        session = self.controller.store.begin(
+            {"tracks": {"microphone": {"segments": []}}, "duration": 600}, "Long"
+        )
+        self.controller.store.finish(session)
+        revision = self.controller.store.begin_revision(session, "balanced", "auto")
+        for index in range(505):
+            self.controller.store.add_transcript(session, revision, {
+                "id": f"microphone:{index}:1", "track": "microphone",
+                "start": float(index), "end": float(index + 1), "text": str(index),
+            })
+        self.controller.store.finish_revision(session, revision)
+
+        first = self.controller.get_transcript_page(session, revision, 0, 100)
+        last = self.controller.get_transcript_page(session, revision, 500, 100)
+        self.assertEqual(len(first["segments"]), 100)
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["segments"][0]["id"], "microphone:0:1")
+        self.assertEqual(len(last["segments"]), 5)
+        self.assertFalse(last["has_more"])
+        self.assertEqual(last["segments"][-1]["id"], "microphone:504:1")
+
+    def test_playback_progress_is_controller_owned_and_stale_completion_is_ignored(self):
+        clock = FakeClock()
+        first_started = threading.Event()
+        release_first = threading.Event()
+        second_started = threading.Event()
+        calls = []
+
+        def fake_play(_store, _session, _track, _start, stop_event):
+            calls.append(len(calls) + 1)
+            if calls[-1] == 1:
+                first_started.set()
+                release_first.wait(2)
+            else:
+                second_started.set()
+                stop_event.wait(2)
+
+        with patch("meeting_files.play_audio", side_effect=fake_play):
+            playback = MeetingController(
+                self.temp.name, self.voice, capture_factory=lambda: self.capture, clock=clock,
+            )
+            self.assertTrue(playback.play("one", "microphone", start=4.0))
+            self.assertTrue(first_started.wait(1))
+            clock.value = 3.0
+            self.assertEqual(playback.snapshot()["playback"]["position"], 7.0)
+            first_generation = playback.snapshot()["playback"]["generation"]
+            playback.stop_playback()
+            release_first.set()
+            playback._play_thread.join(2)
+            self.assertFalse(playback.snapshot()["playback"]["active"])
+            self.assertGreater(playback.snapshot()["playback"]["generation"], first_generation)
+
+            self.assertTrue(playback.play("two", "system", start=10.0))
+            self.assertTrue(second_started.wait(1))
+            clock.value = 4.0
+            state = playback.snapshot()["playback"]
+            self.assertEqual(state["session_id"], "two")
+            self.assertEqual(state["track"], "system")
+            self.assertEqual(state["position"], 11.0)
+            playback.stop_playback()
+            playback._play_thread.join(2)
+            playback.shutdown()
+
 
 class MeetingLibraryControllerWiringTests(unittest.TestCase):
     def setUp(self):
@@ -289,6 +361,44 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         with self.assertRaises(AnnotationConflict) as raised:
             self.controller.update_notes(session, "Edited", "stale")
         self.assertIn("mudou", str(raised.exception))
+
+    def test_controller_annotation_helpers_keep_revision_scope_and_generation_cas(self):
+        session = self.controller.store.begin({}, "Annotated")
+        self.controller.store.append_audio(session, {
+            "type": "audio", "track": "microphone", "rate": 16000, "channels": 1, "frames": 16000,
+            "timestamp": 0.0, "sequence": 0, "generation": 0,
+        }, b"\0" * (16000 * 4))
+        self.controller.store.finish(session)
+        revision = self.controller.store.begin_revision(session, "balanced", "auto")
+        self.controller.store.add_transcript(session, revision, {
+            "id": "microphone:0:1", "track": "microphone", "start": 0.0,
+            "end": 1.0, "text": "hello",
+        })
+        self.controller.store.finish_revision(session, revision)
+        self.controller.get_session(session)
+
+        labeled = self.controller.set_speaker_label(
+            session, revision, "microphone:0:1", "Pessoa 1",
+        )
+        self.assertEqual(labeled["generation"], 1)
+        highlighted = self.controller.add_highlight(
+            session, revision, 0.1, 0.9, "microphone", ["microphone:0:1"],
+            label="Decisão", note="revisar",
+        )
+        self.assertEqual(highlighted["generation"], 2)
+        self.assertEqual(highlighted["highlights"][0]["note"], "revisar")
+        self.controller.delete_highlight(session, highlighted["highlights"][0]["id"])
+        self.assertEqual(self.controller.get_annotations(session)["generation"], 3)
+
+    def test_highlight_clip_export_uses_file_worker_bridge_operation(self):
+        with patch("meeting_files.export_highlight_clip", return_value="clip.wav") as export:
+            result = self.controller.export_highlight_clip(
+                "session", {"id": "highlight-1", "track": "microphone",
+                             "start": 0.0, "end": 1.0}, "clip.wav",
+            )
+        self.assertEqual(result, "clip.wav")
+        export.assert_called_once()
+        self.assertIsNotNone(export.call_args.kwargs["cancel_event"])
 
     def test_automatic_title_does_not_overwrite_sidecar_human_title(self):
         session = self.controller.store.begin({}, "Legacy")
