@@ -16,6 +16,35 @@ from voice_history import (
 
 
 class VoiceHistoryTests(unittest.TestCase):
+    def test_retention_removes_only_expired_known_inactive_files(self):
+        recording = self._recording()
+        recording.finish_capture([0.25])
+        self.store.complete(recording.record_id, "synthetic text", "copied")
+        metadata = self.store.get(recording.record_id)
+        metadata["updated_at"] = "2000-01-01T00:00:00Z"
+        self.store._write_metadata(recording.record_id, metadata)
+        self.assertEqual(self.store.prune(now=946684800 + 30 * 86400), [])
+        self.assertEqual(self.store.prune(now=946684800 + 30 * 86400 + 1), [recording.record_id])
+        self.assertIsNone(self.store.get(recording.record_id))
+
+    def test_retention_preserves_active_malformed_and_unknown_files(self):
+        recording = self._recording()
+        metadata = self.store.get(recording.record_id)
+        metadata["created_at"] = "2000-01-01T00:00:00Z"
+        self.store._write_metadata(recording.record_id, metadata)
+        self.assertEqual(self.store.prune(now=1000000000), [])
+        recording.finish_capture([0.25])
+        metadata = self.store.get(recording.record_id)
+        metadata["updated_at"] = "invalid"
+        self.store._write_metadata(recording.record_id, metadata)
+        self.assertEqual(self.store.prune(now=1000000000), [])
+        metadata["updated_at"] = "2000-01-01T00:00:00Z"
+        self.store._write_metadata(recording.record_id, metadata)
+        with open(os.path.join(self.root, recording.record_id, "keep.txt"), "w") as handle:
+            handle.write("user-owned")
+        self.assertEqual(self.store.prune(now=1000000000), [])
+        self.assertIsNotNone(self.store.get(recording.record_id))
+
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.store = VoiceHistoryStore(self.root)

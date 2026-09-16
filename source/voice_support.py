@@ -171,7 +171,9 @@ class VoiceController:
         )
         if history_store is None:
             resolved_history_dir = history_dir or os.path.join(self.cache_dir, "history")
-            history_store = VoiceHistoryStore(resolved_history_dir)
+            history_store = VoiceHistoryStore(
+                resolved_history_dir, retention_days=self.settings.history_retention_days
+            )
         self._history = history_store
         self._lock = threading.Lock()
         self._state = STATE_UNAVAILABLE

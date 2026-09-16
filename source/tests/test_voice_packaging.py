@@ -196,7 +196,11 @@ class PackagingExcludeTests(unittest.TestCase):
             }
         self.assertEqual(
             requirements,
-            {"setuptools==84.0.0", "Cython==3.3.0", "wheel==0.48.0"},
+            {
+                "setuptools==84.0.0", "Cython==3.3.0", "wheel==0.48.0",
+                'delvewheel==1.13.0; sys_platform == "win32"',
+                'delocate==0.13.0; sys_platform == "darwin"',
+            },
         )
 
     def test_release_metadata_is_stable_and_synchronized(self):

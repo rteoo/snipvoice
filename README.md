@@ -165,8 +165,13 @@ final-recording folder live under
 separate non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
 `SNIPVOICE_SUMMARY_CACHE`.
 
-Audio and transcripts remain until the user removes them. There is no automatic
-retention policy, telemetry, transcript logging, or implicit upload. Do not
+Inactive dictation audio and transcripts expire after 30 days, checked when the
+voice controller starts. Set `voice_history_retention_days` in `settings.json`
+to an integer from 1 to 3650 to change this period. Active, malformed, and
+unrecognized entries are preserved. This applies to existing dictation history;
+export anything you want to keep before upgrading. Meeting recordings remain
+until the user removes them. Files are plaintext; use OS disk encryption and
+protect your user account. There is no telemetry, transcript logging, or implicit upload. Do not
 commit or share live recordings, personal commands, settings, model files, or
 logs. Playback is blocked during recording so Snipvoice does not capture itself.
 
@@ -200,6 +205,15 @@ promotion. See the [development guide](source/docs/development.md) and
 [release validation](source/docs/offline-meeting-validation.md).
 
 Release history is documented in [CHANGELOG.md](CHANGELOG.md).
+
+## Release dependencies
+
+Release Python dependencies are hash-locked in `requirements-release.lock` and
+`packaging/requirements-build.lock`; bundle CI installs both with
+`--require-hashes`. Regenerate them with `uv pip compile --universal
+--python-version 3.12 --generate-hashes`, using the existing source requirements
+and packaging requirements as inputs. Native OS packages and SDKs are separate
+build inputs; a lockfile alone does not make the whole binary reproducible.
 
 ## License
 

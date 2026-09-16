@@ -133,7 +133,7 @@ if not exist "%TARGET_EXE%" (
     goto finish
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $shortcut = $ws.CreateShortcut('%SHORTCUT_PATH%'); $shortcut.TargetPath = '%TARGET_EXE%'; $shortcut.WorkingDirectory = '%TARGET_DIR%'; $shortcut.IconLocation = '%TARGET_EXE%,0'; $shortcut.Save()"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $shortcut = $ws.CreateShortcut($env:SHORTCUT_PATH); $shortcut.TargetPath = $env:TARGET_EXE; $shortcut.WorkingDirectory = $env:TARGET_DIR; $shortcut.IconLocation = $env:TARGET_EXE + [char]44 + [char]48; $shortcut.Save()"
 if errorlevel 1 (
     echo Failed to create the Startup shortcut.
 ) else (

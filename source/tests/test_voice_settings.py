@@ -46,6 +46,7 @@ class VoiceSettingsTests(unittest.TestCase):
                 "voice_hotkey",
                 "voice_command_hotkey",
                 "voice_replacements",
+                "voice_history_retention_days",
             },
         )
         self.assertTrue(payload["voice_enabled"])

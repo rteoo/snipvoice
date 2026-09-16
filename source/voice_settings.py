@@ -26,6 +26,7 @@ class VoiceSettings:
         "command_hotkey",
         "cache_dir",
         "voice_replacements",
+        "history_retention_days",
     )
 
     def __init__(
@@ -37,6 +38,7 @@ class VoiceSettings:
         command_hotkey,
         cache_dir,
         voice_replacements=None,
+        history_retention_days=30,
     ):
         self.enabled = enabled
         self.profile = profile
@@ -45,6 +47,7 @@ class VoiceSettings:
         self.command_hotkey = command_hotkey
         self.cache_dir = cache_dir
         self.voice_replacements = voice_replacements or {}
+        self.history_retention_days = history_retention_days
 
 
 def _as_bool(value, default=False):
@@ -120,6 +123,11 @@ def resolve_voice_settings(settings, warnings=None):
     ):
         notes.append("voice_replacements inválido; usando nenhuma correção.")
 
+    retention = data.get("voice_history_retention_days", 30)
+    if type(retention) is not int or not 1 <= retention <= 3650:
+        notes.append("voice_history_retention_days inválido; usando 30 dias.")
+        retention = 30
+
     return VoiceSettings(
         enabled=enabled,
         profile=profile,
@@ -128,6 +136,7 @@ def resolve_voice_settings(settings, warnings=None):
         command_hotkey=command_hotkey,
         cache_dir=_as_optional_dir(data.get("voice_cache_dir")),
         voice_replacements=voice_replacements,
+        history_retention_days=retention,
     )
 
 
@@ -140,4 +149,5 @@ def voice_settings_payload(voice_settings):
         "voice_hotkey": voice_settings.hotkey,
         "voice_command_hotkey": voice_settings.command_hotkey,
         "voice_replacements": dict(voice_settings.voice_replacements),
+        "voice_history_retention_days": voice_settings.history_retention_days,
     }

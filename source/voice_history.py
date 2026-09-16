@@ -3,11 +3,13 @@
 Audio is an append-only float32 journal. Metadata is replaced atomically after
 each state transition, so a process crash can leave at worst an item marked as
 ``recording``; the next process classifies it as ``interrupted`` and keeps it
-retryable. No automatic retention deletes user recordings.
+retryable. Inactive dictation history expires after the configured retention period.
 """
 
 import array
+from datetime import datetime, timezone
 import json
+import logging
 import os
 import threading
 import time
@@ -119,13 +121,56 @@ class VoiceRecording:
 class VoiceHistoryStore:
     """Persistent recording index with atomic lifecycle updates."""
 
-    def __init__(self, root_dir):
-        # ceiling: history is intentionally unbounded until the product exposes
-        # an explicit retention/delete policy; add one before broad voice rollout.
+    def __init__(self, root_dir, retention_days=30):
+        if type(retention_days) is not int or not 1 <= retention_days <= 3650:
+            raise ValueError("retention_days must be an integer from 1 to 3650")
+        self.retention_days = retention_days
         self.root_dir = os.path.abspath(root_dir)
         self._lock = threading.Lock()
         os.makedirs(self.root_dir, exist_ok=True)
+        self.prune()
         self.recover_interrupted()
+
+    def prune(self, now=None):
+        """Expire inactive entries; preserve unknown files and linked directories."""
+        cutoff = (time.time() if now is None else now) - self.retention_days * 86400
+        removed = []
+        with self._lock:
+            for entry in self.list_entries():
+                if entry.get("status") not in {
+                    STATUS_COMPLETED, STATUS_CANCELLED, STATUS_FAILED,
+                    STATUS_INTERRUPTED, STATUS_PENDING, STATUS_TRANSCRIBED,
+                }:
+                    continue
+                try:
+                    timestamp = datetime.strptime(
+                        entry.get("updated_at") or entry["created_at"],
+                        "%Y-%m-%dT%H:%M:%SZ",
+                    ).replace(tzinfo=timezone.utc).timestamp()
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if timestamp >= cutoff:
+                    continue
+                item_dir = self._item_dir(entry["id"])
+                # Resolve junctions as well as symlinks before any deletion.
+                expected = os.path.join(os.path.realpath(self.root_dir), entry["id"])
+                if os.path.normcase(os.path.realpath(item_dir)) != os.path.normcase(expected):
+                    continue
+                try:
+                    names = set(os.listdir(item_dir))
+                    if not names <= {METADATA_NAME, AUDIO_NAME}:
+                        continue
+                    paths = [os.path.join(item_dir, name) for name in names]
+                    if any(os.path.islink(path) or not os.path.isfile(path) for path in paths):
+                        continue
+                    # No recursive deletion: only this store's known files.
+                    for path in paths:
+                        os.unlink(path)
+                    os.rmdir(item_dir)
+                    removed.append(entry["id"])
+                except OSError:
+                    logging.getLogger(__name__).warning("Could not expire a voice history entry")
+        return removed
 
     def begin(self, mode, provider, profile, language, target_kind):
         record_id = time.strftime("%Y%m%d-%H%M%S", time.localtime()) + "-" + uuid.uuid4().hex[:8]

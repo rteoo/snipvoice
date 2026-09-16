@@ -9,6 +9,7 @@ Pure helpers here are unit-tested; the clipboard backends live in
 mutex remains in ``snipvoice`` (see README "Cross-platform status").
 """
 
+import base64
 import ctypes
 import ntpath
 import os
@@ -1185,6 +1186,12 @@ def _join_command(argv):
 
 
 def _ps_quote(value):
+    value = str(value)
+    # Smart quotes are PowerShell delimiters; encode unusual characters so
+    # neither delimiters nor newlines can change the generated command.
+    if any(ord(char) < 32 or ord(char) > 126 for char in value):
+        payload = base64.b64encode(value.encode("utf-8")).decode("ascii")
+        return "([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + payload + "')))"
     return "'" + str(value).replace("'", "''") + "'"
 
 
