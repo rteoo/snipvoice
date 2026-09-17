@@ -11,6 +11,7 @@ import itertools
 import json
 import math
 import time
+import uuid
 
 from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
@@ -177,12 +178,15 @@ def validate_profile(profile, *, language=None, builtin=False):
     allowed = {
         "schema_version", "id", "name", "instructions", "sections", "version",
         "profile_hash", "language", "max_items", "max_section_chars", "builtin",
+        "disabled",
     }
     unknown = set(candidate) - allowed
     if unknown:
         raise ValueError("O perfil contém campos não reconhecidos.")
     if "builtin" in candidate and not isinstance(candidate["builtin"], bool):
         raise ValueError("A marca interna do perfil é inválida.")
+    if "disabled" in candidate and not isinstance(candidate["disabled"], bool):
+        raise ValueError("O estado do perfil é inválido.")
     identifier = candidate.get("id")
     if (not isinstance(identifier, str) or not identifier or len(identifier) > MAX_PROFILE_ID_CHARS
             or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in identifier)):
@@ -228,6 +232,7 @@ def validate_profile(profile, *, language=None, builtin=False):
         "language": profile_language,
         "max_items": max_items,
         "max_section_chars": max_chars,
+        "disabled": bool(candidate.get("disabled", False)),
     }
     if builtin:
         if identifier not in BUILTIN_PROFILE_IDS:
@@ -270,14 +275,19 @@ class MeetingIntelligence:
 
     MAX_CONTEXT = MAX_CONTEXT
 
-    def __init__(self, store, *, runtime_factory=None, model_path_resolver=None,
-                 runtime=None, max_context=MAX_CONTEXT):
+    def __init__(self, store, *, library=None, runtime_factory=None,
+                 model_path_resolver=None, runtime=None, max_context=MAX_CONTEXT):
         if store is None:
             raise ValueError("O armazenamento da reunião é obrigatório.")
         if (isinstance(max_context, bool) or not isinstance(max_context, int)
                 or max_context < 2048):
             raise ValueError("O contexto do modelo local é inválido.")
         self.store = store
+        # ``MeetingStore`` remains a useful compatibility seam for callers that
+        # predate the library.  New structured reports are persisted only when
+        # an explicit library (or a store-shaped object exposing save_report)
+        # is supplied; the legacy wrapper keeps its old summary projection.
+        self.library = library
         if runtime is not None and runtime_factory is not None:
             raise ValueError("Escolha runtime ou runtime_factory, não ambos.")
         self.runtime_factory = runtime_factory or (
@@ -306,7 +316,10 @@ class MeetingIntelligence:
                 return next(item for item in builtin_profiles(selected_language)
                             if item["id"] == identifier)
             raise ValueError("O perfil de relatório selecionado não existe.")
-        return validate_profile(profile, language=language)
+        selected = validate_profile(profile, language=language)
+        if selected.get("disabled"):
+            raise ValueError("O perfil de relatório selecionado está desativado.")
+        return selected
 
     def read_profiles(self, library=None, *, language=None):
         """Read built-ins plus validated custom profiles from a workspace seam."""
@@ -318,14 +331,19 @@ class MeetingIntelligence:
         custom = workspace.get("profiles", [])
         if not isinstance(custom, list):
             raise ValueError("Os perfis personalizados do workspace são inválidos.")
-        result = builtin_profiles(language or "pt-BR")
+        requested_language = _language(language) if language is not None else None
+        result = builtin_profiles(requested_language or "pt-BR")
         seen = set(BUILTIN_PROFILE_IDS)
         for item in custom:
-            profile = validate_profile(item, language=language)
+            # Validate against the profile's own declared language first so a
+            # mixed-language workspace remains readable and manageable.  The
+            # selector then filters to the requested UI language.
+            profile = validate_profile(item)
             if profile["id"] in seen:
                 raise ValueError("O workspace contém um perfil duplicado ou reservado.")
             seen.add(profile["id"])
-            result.append(profile)
+            if requested_language is None or profile["language"] == requested_language:
+                result.append(profile)
         return result
 
     list_profiles = read_profiles
@@ -365,6 +383,72 @@ class MeetingIntelligence:
 
     upsert_profile = save_custom_profile
     update_profile = save_custom_profile
+
+    def set_custom_profile_enabled(self, profile_id, enabled, library=None, *,
+                                   expected_generation=None):
+        """Enable or disable one custom profile with workspace CAS semantics."""
+        owner = library or self.library or self.store
+        reader = getattr(owner, "read_workspace", None)
+        updater = getattr(owner, "update_workspace", None)
+        if not callable(reader) or not callable(updater):
+            raise ValueError("O armazenamento não oferece escrita segura do workspace.")
+        if (not isinstance(profile_id, str) or not profile_id
+                or profile_id in BUILTIN_PROFILE_IDS):
+            raise ValueError("Somente perfis personalizados podem ser desativados.")
+        if not isinstance(enabled, bool):
+            raise ValueError("O estado do perfil é inválido.")
+        workspace = reader()
+        profiles = workspace.get("profiles", [])
+        if not isinstance(profiles, list):
+            raise ValueError("Os perfis personalizados do workspace são inválidos.")
+        found = False
+        replacement = []
+        for item in profiles:
+            clean = validate_profile(item)
+            if clean["id"] == profile_id:
+                clean["disabled"] = not enabled
+                clean["profile_hash"] = profile_hash(clean)
+                found = True
+            replacement.append(clean)
+        if not found:
+            raise ValueError("O perfil personalizado selecionado não existe.")
+        if expected_generation is None:
+            expected_generation = workspace.get("generation")
+        updated = updater({"profiles": replacement}, expected_generation=expected_generation)
+        return next(item for item in updated["profiles"] if item["id"] == profile_id)
+
+    enable_profile = set_custom_profile_enabled
+
+    def delete_custom_profile(self, profile_id, library=None, *, expected_generation=None):
+        """Delete one custom profile through the versioned workspace CAS seam."""
+        owner = library or self.library or self.store
+        reader = getattr(owner, "read_workspace", None)
+        updater = getattr(owner, "update_workspace", None)
+        if not callable(reader) or not callable(updater):
+            raise ValueError("O armazenamento não oferece escrita segura do workspace.")
+        if (not isinstance(profile_id, str) or not profile_id
+                or profile_id in BUILTIN_PROFILE_IDS):
+            raise ValueError("Somente perfis personalizados podem ser excluídos.")
+        workspace = reader()
+        profiles = workspace.get("profiles", [])
+        if not isinstance(profiles, list):
+            raise ValueError("Os perfis personalizados do workspace são inválidos.")
+        replacement = []
+        found = False
+        for item in profiles:
+            clean = validate_profile(item)
+            if clean["id"] == profile_id:
+                found = True
+                continue
+            replacement.append(clean)
+        if not found:
+            raise ValueError("O perfil personalizado selecionado não existe.")
+        if expected_generation is None:
+            expected_generation = workspace.get("generation")
+        updater({"profiles": replacement}, expected_generation=expected_generation)
+        return True
+
+    remove_profile = delete_custom_profile
 
     def _metadata(self, session_id):
         getter = getattr(self.store, "get", None)
@@ -530,6 +614,28 @@ class MeetingIntelligence:
         if budget < 512:
             raise ValueError("O contexto do modelo local é pequeno demais para gerar um resultado seguro.")
         return entry, model_file, context, budget
+
+    def _provenance_model(self, provenance):
+        """Validate an ask-time model snapshot without reopening its file."""
+        if not isinstance(provenance, dict) or set(provenance) != {"revision", "model"}:
+            raise ValueError("A proveniência da resposta é inválida.")
+        revision = provenance.get("revision")
+        if not isinstance(revision, str) or not revision or len(revision) > MAX_SEGMENT_ID_CHARS:
+            raise ValueError("A revisão da resposta é inválida.")
+        snapshot = provenance.get("model")
+        if (not isinstance(snapshot, dict)
+                or set(snapshot) != {"id", "sha256", "runtime", "context_limit"}):
+            raise ValueError("A proveniência do modelo é inválida.")
+        model_id = snapshot.get("id")
+        entry = summary_catalog_entry(model_id)
+        if entry is None or snapshot.get("sha256") != entry.get("sha256"):
+            raise ValueError("A proveniência do modelo não corresponde ao catálogo local.")
+        if snapshot.get("runtime") != "llama.cpp":
+            raise ValueError("O runtime da resposta não é suportado.")
+        context = min(self.max_context, entry.get("context_length", self.max_context))
+        if snapshot.get("context_limit") != context:
+            raise ValueError("O limite de contexto da resposta não corresponde ao catálogo local.")
+        return revision, model_id, entry, context
 
     @staticmethod
     def _prompt(_profile):
@@ -728,6 +834,64 @@ class MeetingIntelligence:
         else:
             levels[level] = current
 
+    def _report_owner(self):
+        owner = self.library or self.store
+        saver = getattr(owner, "save_report", None)
+        return owner if callable(saver) else None
+
+    @staticmethod
+    def _report_id():
+        # UUID hex is deliberately used instead of a timestamp so two workers
+        # finishing in the same second cannot collide or overwrite history.
+        return uuid.uuid4().hex
+
+    @staticmethod
+    def _library_report_sections(generated):
+        """Adapt the model schema to the library's section envelope schema."""
+        if not isinstance(generated, dict):
+            raise ValueError("O relatório gerado é inválido.")
+        citations = list(generated.get("segment_ids", ()))
+        result = {}
+        for key, value in generated.items():
+            if key == "segment_ids":
+                continue
+            if key == "summary" and isinstance(value, str):
+                result[key] = {"text": value, "citations": citations}
+            else:
+                result[key] = copy.deepcopy(value)
+        return result
+
+    def _report_envelope(self, session_id, selected, profile, model, entry, context,
+                         generated, *, kind="report", question=None):
+        if kind not in {"report", "qa"}:
+            raise ValueError("O tipo do relatório é inválido.")
+        value = (self._library_report_sections(generated)
+                 if kind == "report" else copy.deepcopy(generated))
+        if question is not None and kind == "qa":
+            answer = value.get("answer") if isinstance(value, dict) else None
+            if isinstance(answer, dict):
+                answer = dict(answer)
+                answer["question"] = question
+                value["answer"] = answer
+        return {
+            "schema_version": 1,
+            "id": self._report_id(),
+            "kind": kind,
+            "profile_id": profile["id"],
+            "profile_version": profile["version"],
+            "session_id": session_id,
+            "transcript_revision": selected["id"],
+            "model": {
+                "id": model,
+                "sha256": entry["sha256"],
+                "runtime": "llama.cpp",
+                "context_limit": context,
+            },
+            "generated": value,
+            "status": "completed",
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
     def generate_report(self, session_id, model, *, profile=None, revision=None,
                         language=None, cancel_event=None, legacy=False):
         """Generate and atomically save one structured report revision."""
@@ -789,6 +953,7 @@ class MeetingIntelligence:
         finally:
             runtime.close()
         final = final[0]
+        self._cancel(cancel_event, "O resumo foi cancelado; o resultado anterior foi preservado.")
         result = dict(final,
                       model=model,
                       model_sha256=entry["sha256"],
@@ -803,14 +968,33 @@ class MeetingIntelligence:
             result.update(profile_id=selected_profile["id"],
                           profile_version=selected_profile["version"],
                           profile_hash=selected_profile["profile_hash"])
-        saver = getattr(self.store, "save_summary", None)
-        if not callable(saver):
-            raise ValueError("O armazenamento da reunião não oferece gravação de relatórios.")
-        saver(session_id, result)
+        if not legacy:
+            owner = self._report_owner()
+            if owner is not None:
+                envelope = self._report_envelope(
+                    session_id, selected, selected_profile, model, entry, context, final,
+                )
+                saved = owner.save_report(session_id, envelope)
+                # Keep the returned compatibility projection useful to callers
+                # that render a newly-created report without another disk read.
+                result["report_id"] = saved["id"]
+            else:
+                # Old integrations pass a bare MeetingStore.  Preserve their
+                # summary projection until they opt into MeetingLibrary.
+                saver = getattr(self.store, "save_summary", None)
+                if not callable(saver):
+                    raise ValueError("O armazenamento da reunião não oferece gravação de relatórios.")
+                saver(session_id, result)
+        else:
+            saver = getattr(self.store, "save_summary", None)
+            if not callable(saver):
+                raise ValueError("O armazenamento da reunião não oferece gravação de relatórios.")
+            saver(session_id, result)
         return result
 
     def ask_this_meeting(self, session_id, question, model, *, revision=None,
-                         revision_id=None, language=None, cancel_event=None):
+                         revision_id=None, language=None, cancel_event=None,
+                         include_provenance=False):
         """Answer one question from one transcript revision without writing it."""
         if not isinstance(question, str) or not question.strip():
             raise ValueError("A pergunta não pode ficar vazia.")
@@ -860,9 +1044,95 @@ class MeetingIntelligence:
                 if item is not None:
                     final = item if final is None else reduce_pair(final, item)
             self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+            if include_provenance:
+                final = dict(final)
+                final["_provenance"] = {
+                    "revision": selected["id"],
+                    "model": {
+                        "id": model,
+                        "sha256": entry["sha256"],
+                        "runtime": "llama.cpp",
+                        "context_limit": context,
+                    },
+                }
             return final
         finally:
             runtime.close()
+
+    def save_answer(self, session_id, answer, model, *, question="", revision=None,
+                    revision_id=None, provenance=None):
+        """Persist a previously displayed answer only after explicit user action."""
+        if not isinstance(answer, dict) or set(answer) != {"answer", "citations", "uncertainty"}:
+            raise ValueError("A resposta a salvar é inválida.")
+        normalized_question = question.strip() if isinstance(question, str) else ""
+        if len(normalized_question) > MAX_QUESTION_CHARS:
+            raise ValueError("A pergunta excede o limite permitido.")
+        if revision is not None and revision_id is not None and revision != revision_id:
+            raise ValueError("A revisão de transcrição foi informada duas vezes.")
+        selected_revision = revision if revision is not None else revision_id
+        if isinstance(provenance, dict):
+            provenance_revision = provenance.get("revision")
+            if selected_revision is not None and selected_revision != provenance_revision:
+                raise ValueError("A revisão de transcrição foi informada duas vezes.")
+            if selected_revision is None:
+                selected_revision = provenance_revision
+        metadata = self._metadata(session_id)
+        selected = self._revision(session_id, metadata, selected_revision)
+        raw_citations = answer.get("citations")
+        if (not isinstance(raw_citations, list) or len(raw_citations) > MAX_CITATIONS
+                or any(not isinstance(item, str) for item in raw_citations)
+                or len(set(raw_citations)) != len(raw_citations)):
+            raise ValueError("As citações da resposta são inválidas.")
+        needed = set(raw_citations)
+        found = set()
+        if needed:
+            for segment in self._segments(session_id, selected):
+                if segment["id"] in needed:
+                    found.add(segment["id"])
+                    if found == needed:
+                        break
+        citations = self._references(raw_citations, found, required=False)
+        answer_text = answer.get("answer")
+        if not isinstance(answer_text, str):
+            raise ValueError("A resposta a salvar é inválida.")
+        value = {
+            "answer": {
+                "answer": answer_text.strip(),
+                "citations": citations,
+                "uncertainty": answer.get("uncertainty"),
+            }
+        }
+        if not isinstance(value["answer"]["answer"], str) or len(value["answer"]["answer"]) > MAX_ANSWER_CHARS:
+            raise ValueError("A resposta a salvar é inválida.")
+        if value["answer"]["uncertainty"] not in {"low", "medium", "high"}:
+            raise ValueError("O grau de incerteza da resposta é inválido.")
+        if (not value["answer"]["answer"] and value["answer"]["uncertainty"] != "high") or (
+                value["answer"]["answer"] and not citations
+                and value["answer"]["uncertainty"] != "high"):
+            raise ValueError("A resposta a salvar não tem evidência suficiente.")
+        if normalized_question:
+            value["answer"]["question"] = normalized_question
+        if provenance is None:
+            entry, _model_file, context, _budget = self._model(model)
+            effective_model = model
+        else:
+            _provenance_revision, effective_model, entry, context = self._provenance_model(provenance)
+        profile = validate_profile({
+            "id": "ask_this_meeting",
+            "name": "Ask this meeting",
+            "sections": ["summary"],
+            "instructions": "",
+        })
+        owner = self._report_owner()
+        if owner is None:
+            raise ValueError("A biblioteca de reuniões é necessária para salvar respostas.")
+        return owner.save_report(
+            session_id,
+            self._report_envelope(
+                session_id, selected, profile, effective_model, entry, context, value,
+                kind="qa", question=None,
+            ),
+        )
 
     def summarize_meeting(self, session_id, model, cancel_event=None):
         """Legacy-shaped General report for callers using the deep seam."""
@@ -897,6 +1167,33 @@ def ask_this_meeting(store, session_id, question, model, *, revision=None,
     )
 
 
+def report_section_projection(report, section=None, *, reviewed=True, limit=MAX_PROFILE_OUTPUT_BYTES):
+    """Return a bounded clipboard/export-friendly projection of one report section.
+
+    The projection intentionally contains no filesystem paths and prefers the
+    separately stored reviewed section when one exists.  It is presentation
+    data only; saving it never mutates the generated report envelope.
+    """
+    if not isinstance(report, dict):
+        raise ValueError("O relatório deve ser um objeto.")
+    generated = report.get("generated", report.get("payload"))
+    if not isinstance(generated, dict):
+        raise ValueError("As seções geradas são inválidas.")
+    reviewed_artifact = report.get("reviewed_artifact") if reviewed else None
+    reviewed_sections = reviewed_artifact.get("sections") if isinstance(reviewed_artifact, dict) else {}
+    selected = copy.deepcopy(generated)
+    if isinstance(reviewed_sections, dict):
+        selected.update(copy.deepcopy(reviewed_sections))
+    if section is not None:
+        if not isinstance(section, str) or section not in selected:
+            raise ValueError("A seção selecionada não existe neste relatório.")
+        selected = {section: selected[section]}
+    serialized = json.dumps(selected, ensure_ascii=False, indent=2)
+    if len(serialized.encode("utf-8")) > limit:
+        raise ValueError("A seção do relatório excede o limite de cópia/exportação.")
+    return serialized
+
+
 __all__ = [
     "BUILTIN_PROFILES",
     "BUILTIN_PROFILE_IDS",
@@ -907,6 +1204,7 @@ __all__ = [
     "builtin_profiles",
     "generate_report",
     "profile_hash",
+    "report_section_projection",
     "summarize_meeting",
     "validate_profile",
 ]

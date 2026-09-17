@@ -16,6 +16,7 @@ from meeting_files import (
     IMPORT_FRAMES,
     export_highlight_clip,
     export_meeting,
+    export_report,
     import_audio,
     import_wav,
     play_audio,
@@ -210,6 +211,23 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertNotIn("meeting_destination", document["metadata"]["settings"])
         self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
         self.assertNotIn(str(self.root), exported.read_text(encoding="utf-8"))
+
+    def test_report_export_is_atomic_bounded_and_path_free(self):
+        destination = self.root / "report.md"
+        report = {
+            "id": "report-1", "kind": "report", "profile_id": "general",
+            "profile_version": 1, "session_id": "session-1",
+            "transcript_revision": "revision-1",
+            "model": {"id": "local", "sha256": "a" * 64, "runtime": "llama.cpp",
+                      "path": str(self.root / "secret.gguf")},
+            "generated": {"summary": {"text": "Confirmed", "citations": ["s1"]}},
+            "created_at": "2026-09-16T12:00:00Z",
+        }
+        self.assertEqual(export_report(report, destination, section="summary"), str(destination))
+        content = destination.read_text(encoding="utf-8")
+        self.assertIn("Confirmed", content)
+        self.assertNotIn(str(self.root), content)
+        self.assertEqual(list(self.root.glob(".report.md-*.tmp")), [])
 
     def test_export_failure_keeps_previous_destination(self):
         sid = self.session()

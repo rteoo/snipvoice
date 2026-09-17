@@ -33,6 +33,7 @@ MAX_WORKSPACE_BYTES = 2 * 1024 * 1024
 MAX_ANNOTATIONS_BYTES = 2 * 1024 * 1024
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 MAX_REPORTS = 10_000
+REPORT_HISTORY_LIMIT = 500
 MAX_TITLE_CHARS = 400
 MAX_NOTES_BYTES = 1024 * 1024
 MAX_BOOKMARKS = 10_000
@@ -1865,6 +1866,150 @@ class MeetingLibrary:
                 value["reviewed_artifact"] = copy.deepcopy(reviewed[report["id"]])
             result.append(value)
         return result
+
+    @staticmethod
+    def _report_history_projection(report, reviewed_artifact=None):
+        """Return only bounded metadata suitable for a report history list.
+
+        The report body and reviewed sections deliberately never cross this
+        seam.  A caller that needs either must select the report id and call
+        ``get_report`` explicitly.
+        """
+        if not isinstance(report, dict):
+            raise SchemaError("O relatório não tem metadados utilizáveis.")
+        identifier = report.get("id", report.get("report_id"))
+        if not _valid_id(identifier, reference=True):
+            raise SchemaError("O identificador do relatório é inválido.")
+        result = {"id": identifier}
+        for key in (
+            "schema_version", "kind", "profile_id", "profile_version",
+            "session_id", "transcript_revision", "status", "created_at",
+            "completed_at", "virtual",
+        ):
+            if key in report:
+                value = report[key]
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    result[key] = value
+        model = report.get("model")
+        if isinstance(model, dict):
+            result["model"] = {
+                key: model[key]
+                for key in ("id", "sha256", "runtime", "context_limit")
+                if key in model and isinstance(model[key], (str, int, float, bool))
+            }
+        if reviewed_artifact is not None:
+            result["reviewed"] = True
+            if isinstance(reviewed_artifact, dict):
+                generation = reviewed_artifact.get("generation")
+                if isinstance(generation, int) and not isinstance(generation, bool):
+                    result["review_generation"] = generation
+        else:
+            result["reviewed"] = False
+        return result
+
+    @staticmethod
+    def _validate_report_history_envelope(session_id, report_id, value):
+        """Validate only fields needed to expose one report's metadata.
+
+        The complete envelope remains validated by ``get_report`` on select.
+        This path intentionally avoids transcript and generated-payload work.
+        """
+        if not isinstance(value, dict):
+            raise SchemaError("O relatório deve ser um objeto.")
+        if value.get("schema_version") != REPORT_SCHEMA_VERSION:
+            raise SchemaError("A versão do relatório é incompatível.")
+        if value.get("id", value.get("report_id")) != report_id:
+            raise SchemaError("O identificador do relatório não corresponde ao arquivo.")
+        if value.get("session_id") != session_id:
+            raise SchemaError("O relatório referencia outra reunião.")
+        if value.get("kind") not in {"report", "qa"}:
+            raise SchemaError("O tipo do relatório é inválido.")
+        if not _valid_id(value.get("profile_id")):
+            raise SchemaError("O perfil do relatório é inválido.")
+        profile_version = value.get("profile_version")
+        if (isinstance(profile_version, bool) or not isinstance(profile_version, int)
+                or profile_version < 1):
+            raise SchemaError("A versão do perfil é inválida.")
+        if not isinstance(value.get("transcript_revision"), str):
+            raise SchemaError("A revisão do relatório é inválida.")
+        model = value.get("model")
+        if not isinstance(model, dict) or not _valid_id(model.get("id"), reference=True):
+            raise SchemaError("A proveniência do modelo é inválida.")
+        if not _valid_timestamp(value.get("created_at")):
+            raise SchemaError("A data do relatório é inválida.")
+
+    def list_report_metadata(self, session_id, *, include_legacy=True,
+                             limit=REPORT_HISTORY_LIMIT):
+        """List a bounded history projection without retaining report bodies.
+
+        Each report file is read and reduced one at a time.  Only the selected
+        metadata rows remain in memory; generated sections and reviewed text
+        are available through ``get_report`` after an explicit selection.
+        """
+        try:
+            requested = int(limit)
+        except (TypeError, ValueError):
+            requested = REPORT_HISTORY_LIMIT
+        if isinstance(limit, bool):
+            requested = REPORT_HISTORY_LIMIT
+        requested = max(1, min(REPORT_HISTORY_LIMIT, requested))
+        annotations = self.read_annotations(session_id)
+        reviewed_values = annotations.get("reviewed_artifacts", {})
+        reviewed = {}
+        if isinstance(reviewed_values, dict):
+            for report_id, artifact in reviewed_values.items():
+                if isinstance(artifact, dict):
+                    generation = artifact.get("generation")
+                    reviewed[report_id] = {
+                        "generation": generation,
+                    } if isinstance(generation, int) and not isinstance(generation, bool) else {}
+                else:
+                    reviewed[report_id] = {}
+        has_reviewed_summary = bool(annotations.get("reviewed_summary"))
+        del reviewed_values, annotations
+        metadata = self.store.get(session_id, include_events=False)
+        has_legacy = bool(metadata.get("summary") or has_reviewed_summary)
+        legacy_created = metadata.get("updated_at") or metadata.get("created_at")
+        del metadata
+        structured_limit = requested - 1 if include_legacy and has_legacy else requested
+        structured = []
+        directory = self._reports_dir(session_id)
+        if os.path.isdir(directory):
+            with os.scandir(directory) as entries:
+                names = sorted(
+                    entry.name for entry in entries
+                    if entry.is_file(follow_symlinks=False) and entry.name.endswith(".json")
+                )
+            if len(names) > MAX_REPORTS:
+                raise SchemaError("Há relatórios demais nesta reunião.")
+            for name in names:
+                report_id = name[:-5]
+                path = self._report_path(session_id, report_id)
+                value = self._load_versioned(
+                    path, REPORT_SCHEMA_VERSION, f"reports/{name}", MAX_REPORT_BYTES,
+                )
+                self._validate_report_history_envelope(session_id, report_id, value)
+                row = self._report_history_projection(
+                    value, reviewed.get(report_id) if isinstance(reviewed, dict) else None,
+                )
+                del value
+                structured.append(row)
+                structured.sort(key=lambda item: (str(item.get("created_at") or ""), item["id"]))
+                if len(structured) > max(1, structured_limit):
+                    del structured[:-max(1, structured_limit)]
+        structured.sort(key=lambda item: (str(item.get("created_at") or ""), item["id"]))
+        result = []
+        if include_legacy and has_legacy:
+            result.append({
+                "schema_version": 0,
+                "id": "legacy-summary",
+                "kind": "legacy-summary",
+                "virtual": True,
+                "session_id": session_id,
+                "created_at": legacy_created,
+                "reviewed": has_reviewed_summary,
+            })
+        return (result + structured)[-requested:]
 
     def get_report(self, session_id, report_id):
         if report_id == "legacy-summary":

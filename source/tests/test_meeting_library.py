@@ -418,6 +418,10 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         reports = self.library.list_reports("fixture-meeting-v1")
         self.assertEqual([item["id"] for item in reports], ["legacy-summary", "report-1"])
         self.assertEqual(self.library.get_report("fixture-meeting-v1", "report-1"), saved)
+        history = self.library.list_report_metadata("fixture-meeting-v1", limit=10)
+        self.assertEqual([item["id"] for item in history], ["legacy-summary", "report-1"])
+        self.assertTrue(all("generated" not in item for item in history))
+        self.assertTrue(all("reviewed_artifact" not in item for item in history))
 
     def test_reviewed_report_is_separate_and_generation_checked(self):
         envelope = {

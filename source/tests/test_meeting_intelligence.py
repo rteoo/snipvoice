@@ -78,6 +78,33 @@ class MeetingIntelligenceProfileTests(unittest.TestCase):
             self.assertEqual(library.read_workspace()["profiles"][0]["profile_hash"],
                              second["profile_hash"])
 
+    def test_mixed_language_profiles_are_validated_independently_and_filtered_for_selector(self):
+        with tempfile.TemporaryDirectory(dir=self.temp_dir()) as root:
+            library = MeetingLibrary(root)
+            intelligence = MeetingIntelligence(library.store)
+            intelligence.save_custom_profile({
+                "id": "pt-follow-up", "name": "Acompanhamento",
+                "instructions": "Use fatos confirmados.", "sections": ["summary"],
+                "language": "pt-BR",
+            }, library)
+            intelligence.save_custom_profile({
+                "id": "en-follow-up", "name": "Follow-up",
+                "instructions": "Use confirmed facts.", "sections": ["summary"],
+                "language": "en-US",
+            }, library)
+
+            pt_profiles = intelligence.read_profiles(library, language="pt-BR")
+            en_profiles = intelligence.read_profiles(library, language="en-US")
+            all_profiles = intelligence.read_profiles(library)
+
+        self.assertIn("pt-follow-up", {item["id"] for item in pt_profiles})
+        self.assertNotIn("en-follow-up", {item["id"] for item in pt_profiles})
+        self.assertIn("en-follow-up", {item["id"] for item in en_profiles})
+        self.assertNotIn("pt-follow-up", {item["id"] for item in en_profiles})
+        self.assertTrue({"pt-follow-up", "en-follow-up"}.issubset(
+            {item["id"] for item in all_profiles}
+        ))
+
     @staticmethod
     def temp_dir():
         path = Path(__file__).resolve().parent / "tmp"
@@ -158,6 +185,66 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(result["revision"], self.revision)
         self.assertTrue(runtime.closed)
         self.assertEqual(self.store.get(self.session_id)["summary"]["summary"], result["summary"])
+
+    def test_library_generation_persists_immutable_report_with_model_provenance(self):
+        library = MeetingLibrary(self.store, workspace_root=self.temp.name)
+        intelligence, runtime = self._intelligence()
+        intelligence.library = library
+        profile = validate_profile({
+            "id": "focused", "name": "Focused", "instructions": "",
+            "sections": ["summary", "decisions", "action_items"],
+        })
+        result = intelligence.generate_report(
+            self.session_id, DEFAULT_SUMMARY_MODEL, profile=profile,
+        )
+        reports = library.list_reports(self.session_id, include_legacy=False)
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(result["report_id"], reports[0]["id"])
+        self.assertEqual(len(reports[0]["model"]["sha256"]), 64)
+        self.assertEqual(reports[0]["generated"]["summary"]["citations"], ["s1"])
+        with self.assertRaises(FileExistsError):
+            library.save_report(self.session_id, reports[0])
+
+    def test_explicit_answer_save_is_a_qa_report_and_memory_answer_stays_unwritten(self):
+        library = MeetingLibrary(self.store, workspace_root=self.temp.name)
+        intelligence, _runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Alice will review the report by Friday.",
+            "citations": [evidence[0]["id"]], "uncertainty": "low",
+        }))
+        intelligence.library = library
+        answer = intelligence.ask_this_meeting(
+            self.session_id, "When is the review due?", DEFAULT_SUMMARY_MODEL,
+            revision=self.revision,
+        )
+        self.assertEqual(library.list_reports(self.session_id, include_legacy=False), [])
+        saved = intelligence.save_answer(
+            self.session_id, answer, DEFAULT_SUMMARY_MODEL,
+            question="When is the review due?", revision=self.revision,
+        )
+        self.assertEqual(saved["kind"], "qa")
+        self.assertEqual(saved["generated"]["answer"]["citations"], ["s1"])
+
+    def test_saved_answer_uses_ask_provenance_when_model_is_changed_or_uninstalled(self):
+        library = MeetingLibrary(self.store, workspace_root=self.temp.name)
+        intelligence, _runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Alice will review the report by Friday.",
+            "citations": [evidence[0]["id"]], "uncertainty": "low",
+        }))
+        intelligence.library = library
+        answer = intelligence.ask_this_meeting(
+            self.session_id, "When is the review due?", DEFAULT_SUMMARY_MODEL,
+            revision=self.revision, include_provenance=True,
+        )
+        provenance = answer.pop("_provenance")
+        intelligence.model_path_resolver = lambda _model: None
+        saved = intelligence.save_answer(
+            self.session_id, answer, "model-selected-later", question="When is the review due?",
+            provenance=provenance,
+        )
+
+        self.assertEqual(saved["kind"], "qa")
+        self.assertEqual(saved["model"]["id"], DEFAULT_SUMMARY_MODEL)
+        self.assertEqual(saved["transcript_revision"], self.revision)
 
     def test_untrusted_profile_and_question_are_user_evidence_not_system_prompt(self):
         marker = "DO_NOT_PUT_THIS_IN_SYSTEM_PROMPT"

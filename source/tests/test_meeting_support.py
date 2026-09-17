@@ -12,7 +12,8 @@ from meeting_settings import MeetingSettings, validate_hotkey_conflicts
 from meeting_library import AnnotationConflict, MeetingLibrary
 from meeting_store import MeetingStore
 from meeting_support import (
-    MeetingController, WAVEFORM_POINTS, _amplitude_envelope, _final_audio_path,
+    MeetingController, REPORT_HISTORY_LIMIT, WAVEFORM_POINTS, _amplitude_envelope,
+    _final_audio_path,
 )
 
 
@@ -389,6 +390,70 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         self.assertEqual(highlighted["highlights"][0]["note"], "revisar")
         self.controller.delete_highlight(session, highlighted["highlights"][0]["id"])
         self.assertEqual(self.controller.get_annotations(session)["generation"], 3)
+
+    def test_report_history_is_bounded_and_drops_full_payloads_before_gui(self):
+        rows = [
+            {
+                "id": f"report-{index}",
+                "kind": "report",
+                "profile_id": "general",
+                "generated": {"summary": "secret " * 2000},
+                "payload": {"secret": "secret " * 2000},
+                "reviewed_artifact": {"sections": {"summary": "secret"}},
+            }
+            for index in range(REPORT_HISTORY_LIMIT * 2 + 37)
+        ]
+        with patch.object(self.library, "list_report_metadata", return_value=rows) as reader:
+            result = self.controller.list_reports("session")
+
+        reader.assert_called_once_with(
+            "session", include_legacy=True, limit=REPORT_HISTORY_LIMIT,
+        )
+        self.assertEqual(len(result), REPORT_HISTORY_LIMIT)
+        self.assertTrue(all("generated" not in item for item in result))
+        self.assertTrue(all("payload" not in item for item in result))
+        self.assertTrue(all("reviewed_artifact" not in item for item in result))
+
+    def test_controller_ask_result_can_be_saved_without_metadata_leaking_to_answer(self):
+        intelligence = Mock()
+        intelligence.ask_this_meeting.return_value = {
+            "answer": "A decisão foi aprovada.",
+            "citations": ["segment-1"],
+            "uncertainty": "low",
+            "_provenance": {
+                "revision": "revision-1",
+                "model": {
+                    "id": "qwen3.5-2b-q4",
+                    "sha256": "a" * 64,
+                    "runtime": "llama.cpp",
+                    "context_limit": 4096,
+                },
+            },
+        }
+        intelligence.save_answer.return_value = {"kind": "qa", "id": "qa-1"}
+        with patch.object(self.controller, "_intelligence", return_value=intelligence):
+            answer = self.controller.ask_this_meeting(
+                "session", "Qual foi a decisão?", "qwen3.5-2b-q4", revision="revision-1",
+            )
+            self.controller.save_answer(
+                "session", answer, "different-current-model", question="Qual foi a decisão?",
+            )
+
+        clean_answer = intelligence.save_answer.call_args.args[1]
+        self.assertEqual(
+            clean_answer,
+            {
+                "answer": "A decisão foi aprovada.",
+                "citations": ["segment-1"],
+                "uncertainty": "low",
+            },
+        )
+        self.assertNotIn("revision", clean_answer)
+        self.assertEqual(intelligence.save_answer.call_args.kwargs["revision"], "revision-1")
+        self.assertEqual(
+            intelligence.save_answer.call_args.kwargs["provenance"],
+            answer["_provenance"],
+        )
 
     def test_highlight_clip_export_uses_file_worker_bridge_operation(self):
         with patch("meeting_files.export_highlight_clip", return_value="clip.wav") as export:

@@ -1,6 +1,7 @@
 """Worker-owned, bounded WAV import, provenance exports, and native playback."""
 
 import array
+import copy
 import itertools
 import json
 import math
@@ -513,6 +514,101 @@ def export_meeting(store, session_id, path, format="markdown", cancel_event=None
                 _json_export(handle, store, session_id, metadata, cancel_event)
             else:
                 _text_export(handle, store, session_id, metadata, format == "markdown", cancel_event)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _cancel(cancel_event)
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return str(destination)
+
+
+def _report_export_value(value, key=None):
+    """Detach report data and redact path-shaped fields before export."""
+    if isinstance(key, str) and key.casefold() in {
+            "path", "file_path", "filepath", "absolute_path", "destination"}:
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {str(child_key): _report_export_value(child, child_key)
+                for child_key, child in value.items()
+                if not (isinstance(child_key, str) and child_key.casefold() in {
+                    "path", "file_path", "filepath", "absolute_path", "destination"})}
+    if isinstance(value, list):
+        return [_report_export_value(child) for child in value]
+    if isinstance(value, str) and os.path.isabs(value):
+        return "[redacted]"
+    return copy.deepcopy(value)
+
+
+def report_export_projection(report, *, section=None):
+    """Return a detached, path-free report projection for copy/export flows."""
+    if not isinstance(report, dict):
+        raise ValueError("O relatório deve ser um objeto.")
+    generated = report.get("generated", report.get("payload"))
+    if not isinstance(generated, dict):
+        raise ValueError("As seções geradas são inválidas.")
+    reviewed = report.get("reviewed_artifact")
+    reviewed_sections = reviewed.get("sections") if isinstance(reviewed, dict) else None
+    selected = copy.deepcopy(generated)
+    if isinstance(reviewed_sections, dict):
+        selected.update(copy.deepcopy(reviewed_sections))
+    if section is not None:
+        if not isinstance(section, str) or section not in selected:
+            raise ValueError("A seção selecionada não existe neste relatório.")
+        selected = {section: selected[section]}
+    return {
+        "report_id": report.get("id", report.get("report_id")),
+        "kind": report.get("kind"),
+        "profile_id": report.get("profile_id"),
+        "profile_version": report.get("profile_version"),
+        "session_id": report.get("session_id"),
+        "transcript_revision": report.get("transcript_revision"),
+        "model": _report_export_value(report.get("model", {})),
+        "created_at": report.get("created_at"),
+        "sections": _report_export_value(selected),
+    }
+
+
+def export_report(report, path, format="markdown", *, section=None, cancel_event=None):
+    """Atomically export a selected report or section without local paths."""
+    _cancel(cancel_event)
+    if format not in {"markdown", "plain", "text", "json"}:
+        raise ValueError("Escolha Markdown, texto ou JSON para exportar o relatório.")
+    destination = Path(path).absolute()
+    if not destination.parent.is_dir() or destination.is_dir():
+        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+    projection = report_export_projection(report, section=section)
+    if format == "json":
+        content = json.dumps(projection, ensure_ascii=False, indent=2) + "\n"
+    else:
+        title = projection.get("report_id") or "Relatório local"
+        lines = [("# " if format == "markdown" else "") + str(title),
+                 f"Tipo: {projection.get('kind')}; perfil: {projection.get('profile_id')}",
+                 f"Revisão de transcrição: {projection.get('transcript_revision')}", ""]
+        for name, value in projection["sections"].items():
+            lines.append(("## " if format == "markdown" else "") + str(name))
+            if isinstance(value, str):
+                lines.append(value)
+            else:
+                lines.append(json.dumps(value, ensure_ascii=False, indent=2))
+            lines.append("")
+        content = "\n".join(lines)
+        if not content.endswith("\n"):
+            content += "\n"
+    encoded_length = len(content.encode("utf-8"))
+    if encoded_length > 2 * 1024 * 1024:
+        raise ValueError("O relatório excede o limite permitido para exportação.")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            _cancel(cancel_event)
+            handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         _cancel(cancel_event)

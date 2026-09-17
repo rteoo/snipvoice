@@ -7,8 +7,10 @@ import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from clipboard_support import Clipboard
+from meeting_files import report_export_projection
 from meeting_settings import EndpointSelection, resolve_meeting_settings, validate_hotkey_conflicts
 from meeting_waveform import MeetingWaveform
 from summary_catalog import format_model_size, summary_catalog, summary_catalog_entry
@@ -27,6 +29,8 @@ TRANSCRIPT_LIMIT = 500
 TRANSCRIPT_PAGE_SIZE = 100
 NOTES_LIMIT = 1024 * 1024
 BOOKMARK_LIMIT = 1000
+MAX_ANSWER_CHARS = 4_000
+REPORT_HISTORY_LIMIT = 500
 STATE_LABELS = {"idle": "Pronto", "starting": "Iniciando", "recording": "Gravando",
                 "paused": "Pausado", "stopping": "Finalizando", "postprocessing": "Processando",
                 "completed": "Concluído",
@@ -282,6 +286,18 @@ class MeetingWindow:
         self.previous_processing = False
         self.snapshot = {}
         self.playback_generation = -1
+        # Report/Q&A requests carry their own generation so a late worker
+        # result can never replace a different meeting's selected output.
+        self.report_request = 0
+        self.ask_request = 0
+        self.citation_request = 0
+        self.report_profiles = []
+        self.report_profile_by_label = {}
+        self.report_history = []
+        self.report_history_ids = []
+        self.selected_report = None
+        self.report_sections = {}
+        self.unsaved_answer = None
         self._mousewheel_bindings = []
         self._build()
         if not self.embedded:
@@ -961,7 +977,7 @@ class MeetingWindow:
         self._button(exports, "Exportar Markdown…", lambda: self.export("markdown")).pack(side="left", padx=(0, 6))
         self._button(exports, "Exportar texto…", lambda: self.export("text")).pack(side="left", padx=(0, 6))
         self._button(exports, "Exportar áudio final…", self.export_audio).pack(side="left", padx=(0, 6))
-        self._button(exports, "Gerar resumo local", self.summarize).pack(side="left")
+        self._button(exports, "Gerar relatório local", self.generate_report).pack(side="left")
         self._label(right, "Resumo editável · copie a revisão para notas antes de salvar", anchor="w").pack(
             fill="x", padx=12, pady=(8, 0))
         self.summary = tk.Text(right, height=3, wrap="word", font=self.ui.font(), **self.ui.text_colors())
@@ -970,6 +986,98 @@ class MeetingWindow:
         self.summary.configure(state="disabled")
         self._button(right, "Copiar resumo revisado para notas", self.summary_to_notes).pack(anchor="w", padx=12, pady=4)
         self._button(right, "Salvar resumo revisado", self.save_summary).pack(anchor="w", padx=12, pady=4)
+
+        # Structured local reports.  The generated envelope remains immutable;
+        # the editor below writes only a reviewed artifact through the library.
+        report_frame = self._card(right, padx=12, pady=8)
+        report_frame.pack(fill="x", padx=(12, 0), pady=(8, 0))
+        self._label(report_frame, "Relatórios locais", bg=self.ui.card,
+                    fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(anchor="w")
+        self._label(
+            report_frame,
+            "Perfis são receitas locais versionadas; o modelo nunca recebe dados fora do computador.",
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720,
+        ).pack(fill="x", pady=(2, 6))
+        profile_row = tk.Frame(report_frame, bg=self.ui.card)
+        profile_row.pack(fill="x", pady=2)
+        self.report_profile_choice = tk.StringVar(self.window, "Geral")
+        self.report_profile_box = ttk.Combobox(
+            profile_row, textvariable=self.report_profile_choice, state="readonly", width=28,
+        )
+        self.report_profile_box.pack(side="left", fill="x", expand=True)
+        self.report_profile_box.bind("<<ComboboxSelected>>", self._report_profile_changed)
+        self._button(profile_row, "Criar", self.create_report_profile).pack(side="left", padx=(6, 0))
+        self._button(profile_row, "Duplicar", self.duplicate_report_profile).pack(side="left", padx=(6, 0))
+        self._button(profile_row, "Editar", self.edit_report_profile).pack(side="left", padx=(6, 0))
+        self.report_disable_button = self._button(profile_row, "Desativar", self.disable_report_profile)
+        self.report_disable_button.pack(side="left", padx=(6, 0))
+        self.report_enable_button = self._button(profile_row, "Ativar", self.enable_report_profile)
+        self.report_enable_button.pack(side="left", padx=(6, 0))
+        self._button(profile_row, "Excluir", self.delete_report_profile, danger=True).pack(side="left", padx=(6, 0))
+        history_row = tk.Frame(report_frame, bg=self.ui.card)
+        history_row.pack(fill="x", pady=2)
+        self._label(history_row, "Histórico", bg=self.ui.card).pack(side="left", padx=(0, 6))
+        self.report_history_choice = tk.StringVar(self.window)
+        self.report_history_box = ttk.Combobox(
+            history_row, textvariable=self.report_history_choice, state="readonly", width=48,
+        )
+        self.report_history_box.pack(side="left", fill="x", expand=True)
+        self.report_history_box.bind("<<ComboboxSelected>>", self._report_history_changed)
+        self._button(history_row, "Atualizar", self.refresh_reports).pack(side="left", padx=(6, 0))
+        section_row = tk.Frame(report_frame, bg=self.ui.card)
+        section_row.pack(fill="x", pady=2)
+        self._label(section_row, "Seção", bg=self.ui.card).pack(side="left", padx=(0, 6))
+        self.report_section_choice = tk.StringVar(self.window)
+        self.report_section_box = ttk.Combobox(
+            section_row, textvariable=self.report_section_choice, state="readonly", width=24,
+        )
+        self.report_section_box.pack(side="left", fill="x", expand=True)
+        self.report_section_box.bind("<<ComboboxSelected>>", self._report_section_changed)
+        self._button(section_row, "Copiar seção", self.copy_report_section).pack(side="left", padx=(6, 0))
+        self._button(section_row, "Exportar…", self.export_report).pack(side="left", padx=(6, 0))
+        self.report_provenance = tk.StringVar(self.window, "Nenhum relatório selecionado.")
+        self._label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720).pack(fill="x", pady=2)
+        self.report_editor = tk.Text(report_frame, height=5, wrap="word", font=self.ui.font(),
+                                    **self.ui.text_colors())
+        self.report_editor.pack(fill="x", pady=(4, 2))
+        report_actions = tk.Frame(report_frame, bg=self.ui.card)
+        report_actions.pack(fill="x", pady=2)
+        self._button(report_actions, "Salvar revisão", self.save_report_review, accent=True).pack(side="left")
+        self._label(report_actions, "Citações", bg=self.ui.card, fg=self.ui.text_muted).pack(side="left", padx=(12, 4))
+        self.report_citations = tk.Listbox(report_actions, height=2, width=42,
+                                           font=self.ui.font(), **self.ui.listbox_colors())
+        self.report_citations.pack(side="left", fill="x", expand=True)
+        self.report_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_report_citation())
+        self._button(report_actions, "Ir à fonte", self.jump_to_report_citation).pack(side="left", padx=(6, 0))
+
+        ask_frame = self._card(right, padx=12, pady=8)
+        ask_frame.pack(fill="x", padx=(12, 0), pady=(8, 0))
+        self._label(ask_frame, "Perguntar sobre esta reunião", bg=self.ui.card,
+                    fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(anchor="w")
+        self.ask_question = tk.StringVar(self.window)
+        ask_row = tk.Frame(ask_frame, bg=self.ui.card)
+        ask_row.pack(fill="x", pady=3)
+        self._entry(ask_row, self.ask_question, 60).pack(side="left", fill="x", expand=True)
+        self._button(ask_row, "Perguntar", self.ask_this_meeting, accent=True).pack(side="left", padx=(6, 0))
+        self.ask_answer = tk.Text(ask_frame, height=3, wrap="word", font=self.ui.font(),
+                                  **self.ui.text_colors())
+        self.ask_answer.pack(fill="x", pady=(2, 2))
+        ask_citation_row = tk.Frame(ask_frame, bg=self.ui.card)
+        ask_citation_row.pack(fill="x", pady=(0, 2))
+        self._label(ask_citation_row, "Citações", bg=self.ui.card,
+                    fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
+        self.ask_citations = tk.Listbox(ask_citation_row, height=2, width=42,
+                                        font=self.ui.font(), **self.ui.listbox_colors())
+        self.ask_citations.pack(side="left", fill="x", expand=True)
+        self.ask_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_ask_citation())
+        self._button(ask_citation_row, "Ir à fonte", self.jump_to_ask_citation).pack(side="left", padx=(6, 0))
+        ask_actions = tk.Frame(ask_frame, bg=self.ui.card)
+        ask_actions.pack(fill="x")
+        self._button(ask_actions, "Salvar resposta", self.save_answer).pack(side="left")
+        self.ask_status = tk.StringVar(self.window, "Respostas ficam somente na memória até você salvar.")
+        self._label(ask_actions, "", textvariable=self.ask_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w", wraplength=580).pack(side="left", padx=(8, 0))
 
     def _submit(self, key, operation, callback=None, urgent=False):
         if not self.bridge.submit(key, operation, callback or self._done, urgent):
@@ -985,6 +1093,587 @@ class MeetingWindow:
         else:
             self.status.set("A operação não foi aceita. Verifique o estado atual."
                             if _value is False else "Operação concluída.")
+
+    # -- Local report profiles, history, and Q&A ----------------------
+
+    @staticmethod
+    def _profile_label(profile):
+        suffix = " · desativado" if profile.get("disabled") else ""
+        return f'{profile.get("name", profile.get("id", "perfil"))} · v{profile.get("version", 1)}{suffix}'
+
+    def refresh_report_profiles(self):
+        """Load bounded profile definitions off Tk and retain a safe fallback."""
+        reader = getattr(self.controller, "list_report_profiles", None)
+        if not callable(reader):
+            self._set_report_profiles([])
+            return
+
+        def loaded(profiles, error):
+            if self.closed:
+                return
+            if error or not isinstance(profiles, list):
+                self._remember_operation_error(error) if error else None
+                self._set_report_profiles([])
+                return
+            self._set_report_profiles(profiles)
+
+        language = self.language.get()
+        language = "pt-BR" if language == "auto" else language
+        self._submit("report_profiles", lambda: reader(language=language), loaded)
+
+    def _set_report_profiles(self, profiles):
+        try:
+            from meeting_intelligence import MeetingIntelligence
+            language = self.language.get() or "pt-BR"
+            fallback = MeetingIntelligence.builtin_profiles("pt-BR" if language == "auto" else language)
+        except Exception:
+            fallback = []
+        values = profiles if isinstance(profiles, list) and profiles else fallback
+        clean = [item for item in values if isinstance(item, dict)]
+        if not clean:
+            clean = fallback
+        self.report_profiles = clean[:128]
+        self.report_profile_by_label = {
+            self._profile_label(item): item for item in self.report_profiles
+        }
+        labels = list(self.report_profile_by_label)
+        if hasattr(self, "report_profile_box"):
+            self.report_profile_box.configure(values=labels)
+            current = self.report_profile_choice.get()
+            if current not in labels:
+                preferred = next((label for label, item in self.report_profile_by_label.items()
+                                  if item.get("id") == "general"), labels[0] if labels else "")
+                self.report_profile_choice.set(preferred)
+        self._sync_report_profile_actions()
+
+    def _selected_report_profile(self):
+        return self.report_profile_by_label.get(self.report_profile_choice.get())
+
+    def _report_profile_changed(self, _event=None):
+        # Selection is intentionally local; the profile is read again by the
+        # worker before generation so a stale window cannot mutate workspace.
+        self._sync_report_profile_actions()
+        return self._selected_report_profile()
+
+    def _sync_report_profile_actions(self):
+        current = self._selected_report_profile()
+        custom = bool(current and not current.get("builtin"))
+        disabled = bool(current and current.get("disabled"))
+        for attribute, state in (
+            ("report_enable_button", "normal" if custom and disabled else "disabled"),
+            ("report_disable_button", "normal" if custom and not disabled else "disabled"),
+        ):
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.configure(state=state)
+
+    def _profile_saved(self, value, error):
+        if error:
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível salvar o perfil. Veja os detalhes na aba Gravação.")
+            return
+        self.status.set("Perfil de relatório salvo.")
+        self.refresh_report_profiles()
+
+    def create_report_profile(self):
+        name = simpledialog.askstring("Novo perfil", "Nome do perfil:", parent=self.window)
+        if not name:
+            return
+        identifier = simpledialog.askstring(
+            "Novo perfil", "Identificador (a-z, 0-9, hífen ou sublinhado):", parent=self.window,
+        )
+        if not identifier:
+            return
+        base = self._selected_report_profile() or {
+            "sections": ["summary"], "instructions": "",
+        }
+        profile = {
+            "id": identifier.strip(), "name": name.strip(),
+            "instructions": str(base.get("instructions", "")),
+            "sections": list(base.get("sections", ["summary"])),
+            "language": ("pt-BR" if self.language.get() == "auto"
+                         else self.language.get() or "pt-BR"),
+        }
+        self._submit("save_report_profile", lambda: self.controller.save_report_profile(profile),
+                     self._profile_saved)
+
+    def duplicate_report_profile(self):
+        current = self._selected_report_profile()
+        if not current:
+            self.status.set("Selecione um perfil para duplicar.")
+            return
+        identifier = simpledialog.askstring("Duplicar perfil", "Novo identificador:", parent=self.window)
+        if not identifier:
+            return
+        profile = dict(current)
+        profile.pop("version", None)
+        profile.pop("profile_hash", None)
+        profile.pop("builtin", None)
+        profile["disabled"] = False
+        profile["id"] = identifier.strip()
+        profile["name"] = f'{current.get("name", "Perfil")} (cópia)'
+        self._submit("save_report_profile", lambda: self.controller.save_report_profile(profile),
+                     self._profile_saved)
+
+    def edit_report_profile(self):
+        current = self._selected_report_profile()
+        if not current or current.get("builtin"):
+            self.status.set("Perfis internos não podem ser editados; duplique um para personalizar.")
+            return
+        name = simpledialog.askstring("Editar perfil", "Nome:", initialvalue=current.get("name", ""), parent=self.window)
+        if name is None:
+            return
+        instructions = simpledialog.askstring(
+            "Editar perfil", "Instruções adicionais (texto não confiável):",
+            initialvalue=current.get("instructions", ""), parent=self.window,
+        )
+        if instructions is None:
+            return
+        profile = dict(current, name=name, instructions=instructions)
+        profile.pop("version", None)
+        profile.pop("profile_hash", None)
+        profile.pop("builtin", None)
+        self._submit("save_report_profile", lambda: self.controller.save_report_profile(profile),
+                     self._profile_saved)
+
+    def disable_report_profile(self):
+        current = self._selected_report_profile()
+        if not current or current.get("builtin"):
+            self.status.set("Selecione um perfil personalizado para desativar.")
+            return
+        identifier = current.get("id")
+        self._submit("disable_report_profile",
+                     lambda: self.controller.disable_report_profile(identifier),
+                     self._profile_saved)
+
+    def enable_report_profile(self):
+        current = self._selected_report_profile()
+        if not current or current.get("builtin"):
+            self.status.set("Selecione um perfil personalizado desativado para ativar.")
+            return
+        identifier = current.get("id")
+        self._submit("enable_report_profile",
+                     lambda: self.controller.enable_report_profile(identifier),
+                     self._profile_saved)
+
+    def delete_report_profile(self):
+        current = self._selected_report_profile()
+        if not current or current.get("builtin"):
+            self.status.set("Selecione um perfil personalizado para excluir.")
+            return
+        if not messagebox.askyesno("Excluir perfil", "Excluir este perfil personalizado?", parent=self.window):
+            return
+        identifier = current.get("id")
+        self._submit("delete_report_profile",
+                     lambda: self.controller.delete_report_profile(identifier),
+                     self._profile_saved)
+
+    def generate_report(self):
+        if not self.selected or not self.detail_ready:
+            self.status.set("Selecione uma gravação na biblioteca.")
+            return
+        profile = self._selected_report_profile()
+        if not profile:
+            self.status.set("Selecione um perfil de relatório.")
+            return
+        if profile.get("disabled"):
+            self.status.set("Ative o perfil de relatório antes de gerar.")
+            return
+        model = self.summary_model.get().strip()
+        if not self.summary_model_installed.get(model):
+            self.status.set("Baixe o modelo selecionado em Configurações antes de gerar o relatório.")
+            return
+        session_id = self.selected
+        self._action(
+            "generate_report", session_id, model, profile=profile,
+            revision=self.transcript_revision,
+            callback=lambda value, error: self._report_generated(session_id, value, error),
+        )
+
+    def _report_generated(self, session_id, value, error):
+        if self.closed or self.selected != session_id:
+            return
+        if error:
+            self._remember_operation_error(error)
+            self.status.set("O relatório não foi salvo; o resultado anterior continua disponível.")
+            return
+        self.status.set("Relatório local salvo como nova revisão imutável.")
+        self.refresh_reports(session_id)
+
+    def refresh_reports(self, session_id=None):
+        session_id = session_id or self.selected
+        if not session_id:
+            return
+        self.report_request += 1
+        request = self.report_request
+        reader = getattr(self.controller, "list_reports", None)
+        if not callable(reader):
+            return
+
+        def loaded(reports, error):
+            if self.closed or request != self.report_request or session_id != self.selected:
+                return
+            if error:
+                self._remember_operation_error(error)
+                self.status.set("Não foi possível carregar o histórico de relatórios.")
+                return
+            self._set_report_history(reports)
+
+        self._submit("reports", lambda: reader(session_id, limit=REPORT_HISTORY_LIMIT), loaded)
+
+    @staticmethod
+    def _report_history_metadata(item):
+        """Keep only the bounded list-row projection in the Tk object."""
+        if not isinstance(item, dict):
+            return None
+        identifier = item.get("id", item.get("report_id"))
+        if not isinstance(identifier, str) or not identifier:
+            return None
+        result = {"id": identifier}
+        for key in (
+            "schema_version", "kind", "profile_id", "profile_version",
+            "session_id", "transcript_revision", "status", "created_at",
+            "completed_at", "virtual", "reviewed", "review_generation",
+        ):
+            if key in item:
+                value = item[key]
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    result[key] = value
+        model = item.get("model")
+        if isinstance(model, dict):
+            result["model"] = {
+                key: model[key]
+                for key in ("id", "sha256", "runtime", "context_limit")
+                if key in model and isinstance(model[key], (str, int, float, bool))
+            }
+        return result
+
+    def _set_report_history(self, reports):
+        self.report_history = []
+        for item in reports or ():
+            if len(self.report_history) >= REPORT_HISTORY_LIMIT:
+                break
+            metadata = self._report_history_metadata(item)
+            if metadata is not None:
+                self.report_history.append(metadata)
+        labels, ids = [], []
+        for item in self.report_history:
+            identifier = str(item.get("id", ""))
+            kind = "Pergunta" if item.get("kind") == "qa" else "Relatório"
+            profile = item.get("profile_id") or "legado"
+            created = str(item.get("created_at") or "")[:19].replace("T", " ")
+            labels.append(f"{kind} · {profile} · {created} · {identifier[:12]}")
+            ids.append(identifier)
+        self.report_history_ids = ids
+        self.report_history_box.configure(values=labels)
+        if not labels:
+            self.report_history_choice.set("")
+            self.selected_report = None
+            self.report_sections = {}
+            self.report_provenance.set("Nenhum relatório selecionado.")
+            self.report_editor.delete("1.0", "end")
+            self.report_citations.delete(0, "end")
+            return
+        if self.selected_report and self.selected_report.get("id") in ids:
+            index = ids.index(self.selected_report["id"])
+        else:
+            index = len(ids) - 1
+        self.report_history_box.current(index)
+        self._load_report(ids[index])
+
+    def _report_history_changed(self, _event=None):
+        index = self.report_history_box.current()
+        if 0 <= index < len(self.report_history_ids):
+            self._load_report(self.report_history_ids[index])
+
+    def _load_report(self, report_id):
+        session_id = self.selected
+        if not session_id or not report_id:
+            return
+        self.report_request += 1
+        request = self.report_request
+
+        def loaded(report, error):
+            if self.closed or request != self.report_request or session_id != self.selected:
+                return
+            if error:
+                self._remember_operation_error(error)
+                self.status.set("Não foi possível abrir este relatório.")
+                return
+            self._show_report(report)
+
+        self._submit("report_detail", lambda: self.controller.get_report(session_id, report_id), loaded)
+
+    def _show_report(self, report):
+        self.selected_report = report if isinstance(report, dict) else None
+        if not self.selected_report:
+            return
+        selected = self.selected_report.get("reviewed_artifact")
+        sections = selected.get("sections") if isinstance(selected, dict) else None
+        generated = self.selected_report.get("generated", {})
+        merged = dict(generated) if isinstance(generated, dict) else {}
+        if isinstance(sections, dict):
+            merged.update(sections)
+        self.report_sections = merged
+        names = list(self.report_sections)[:64]
+        self.report_section_box.configure(values=names)
+        if names:
+            self.report_section_choice.set(names[0])
+        else:
+            self.report_section_choice.set("")
+        model = self.selected_report.get("model", {})
+        self.report_provenance.set(
+            f'Perfil {self.selected_report.get("profile_id", "legado")} '
+            f'v{self.selected_report.get("profile_version", "?")} · '
+            f'revisão {self.selected_report.get("transcript_revision", "?")} · '
+            f'modelo {model.get("id", "?")} · SHA-256 {str(model.get("sha256", ""))[:16]}…'
+        )
+        self._render_report_section()
+        self._render_report_citations()
+
+    def _report_section_changed(self, _event=None):
+        self._render_report_section()
+
+    def _render_report_section(self):
+        value = self.report_sections.get(self.report_section_choice.get(), "")
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+        self.report_editor.delete("1.0", "end")
+        self.report_editor.insert("1.0", str(text)[:65536])
+
+    @staticmethod
+    def _citation_ids(value):
+        result = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key in {"segment_ids", "citations"} and isinstance(child, list):
+                    result.extend(item for item in child if isinstance(item, str))
+                else:
+                    result.extend(MeetingWindow._citation_ids(child))
+        elif isinstance(value, list):
+            for child in value:
+                result.extend(MeetingWindow._citation_ids(child))
+        return result
+
+    def _render_report_citations(self):
+        self.report_citations.delete(0, "end")
+        generated = self.selected_report.get("generated", {}) if self.selected_report else {}
+        seen = set()
+        self.report_citation_refs = []
+        for identifier in self._citation_ids(generated):
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            self.report_citation_refs.append(identifier)
+            self.report_citations.insert("end", identifier[:128])
+        self.report_citations.selection_clear(0, "end")
+
+    def copy_report_section(self):
+        if not self.selected_report:
+            self.status.set("Selecione um relatório primeiro.")
+            return
+        try:
+            projection = report_export_projection(
+                self.selected_report, section=self.report_section_choice.get() or None,
+            )
+            text = json.dumps(projection["sections"], ensure_ascii=False, indent=2)
+        except (TypeError, ValueError) as exc:
+            self.status.set(str(exc))
+            return
+        if not Clipboard.set_content(text):
+            self.status.set("Não foi possível copiar a seção para a área de transferência.")
+            return
+        self.status.set("Seção copiada sem alterar o relatório gerado.")
+
+    def save_report_review(self):
+        if not self.selected or not self.selected_report:
+            self.status.set("Selecione um relatório estruturado primeiro.")
+            return
+        report_id = self.selected_report.get("id")
+        section = self.report_section_choice.get()
+        if not report_id or report_id == "legacy-summary" or not section:
+            self.status.set("O resumo legado não aceita revisão por seção; gere um relatório novo.")
+            return
+        text = self.report_editor.get("1.0", "end-1c")[:65536]
+        artifact = self.selected_report.get("reviewed_artifact")
+        expected = artifact.get("generation", 0) if isinstance(artifact, dict) else 0
+        session_id = self.selected
+
+        def saved(_value, error):
+            if self.closed or session_id != self.selected:
+                return
+            if error:
+                self._remember_operation_error(error)
+                self.status.set("A revisão não foi salva; o relatório gerado continua intacto.")
+                return
+            self.status.set("Revisão salva separadamente do relatório gerado.")
+            self.refresh_reports(session_id)
+
+        self._action("review_report", session_id, report_id, {section: text},
+                     expected_generation=expected, callback=saved)
+
+    def export_report(self):
+        if not self.selected or not self.selected_report:
+            self.status.set("Selecione um relatório primeiro.")
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.window, title="Exportar relatório", defaultextension=".md",
+            filetypes=(("Markdown", "*.md"), ("Texto", "*.txt"), ("JSON", "*.json")),
+        )
+        if not path:
+            return
+        suffix = os.path.splitext(path)[1].casefold()
+        fmt = "json" if suffix == ".json" else "text" if suffix == ".txt" else "markdown"
+        session_id, report_id = self.selected, self.selected_report.get("id")
+        self._action("export_report", session_id, report_id, path, format=fmt,
+                     callback=lambda value, error: self._report_exported(session_id, value, error))
+
+    def _report_exported(self, session_id, value, error):
+        if self.closed or session_id != self.selected:
+            return
+        if error:
+            self._remember_operation_error(error)
+            self.status.set("Não foi possível exportar o relatório.")
+        else:
+            self.status.set("Relatório exportado atomicamente sem caminhos locais.")
+
+    def ask_this_meeting(self):
+        if not self.selected or not self.detail_ready:
+            self.status.set("Selecione uma gravação na biblioteca.")
+            return
+        question = self.ask_question.get().strip()
+        if not question:
+            self.status.set("Digite uma pergunta sobre a reunião.")
+            return
+        model = self.summary_model.get().strip()
+        if not self.summary_model_installed.get(model):
+            self.status.set("Baixe o modelo selecionado em Configurações antes de perguntar.")
+            return
+        session_id = self.selected
+        self.ask_request += 1
+        request = self.ask_request
+        self.ask_status.set("Processando localmente; nada será salvo automaticamente.")
+        self._action(
+            "ask_this_meeting", session_id, question, model,
+            revision=self.transcript_revision,
+            callback=lambda value, error: self._answer_loaded(session_id, request, question, value, error),
+        )
+
+    def _answer_loaded(self, session_id, request, question, value, error):
+        if self.closed or request != self.ask_request or session_id != self.selected:
+            return
+        if error:
+            self._remember_operation_error(error)
+            self.ask_status.set("A pergunta não foi concluída; nenhuma resposta foi salva.")
+            return
+        if not isinstance(value, dict):
+            self.ask_status.set("A resposta local não tinha um formato utilizável.")
+            return
+        self.unsaved_answer = dict(value)
+        self.unsaved_answer["question"] = question
+        self.ask_answer.delete("1.0", "end")
+        self.ask_answer.insert("1.0", str(value.get("answer", ""))[:MAX_ANSWER_CHARS])
+        self.ask_citation_refs = [item for item in value.get("citations", []) if isinstance(item, str)][:16]
+        self.ask_citations.delete(0, "end")
+        for identifier in self.ask_citation_refs:
+            self.ask_citations.insert("end", identifier[:128])
+        self.ask_status.set(
+            f'Resposta em memória · incerteza {value.get("uncertainty", "alta")} · '
+            f'{len(value.get("citations", []))} citações. Salve explicitamente se quiser persistir.'
+        )
+
+    def save_answer(self):
+        if not self.selected or not isinstance(self.unsaved_answer, dict):
+            self.ask_status.set("Não há uma resposta em memória para salvar.")
+            return
+        answer = dict(self.unsaved_answer)
+        question = str(answer.pop("question", ""))
+        model = self.summary_model.get().strip()
+        session_id = self.selected
+        revision = answer.pop("revision", None) or answer.pop("revision_id", None) or self.transcript_revision
+
+        def saved(value, error):
+            if self.closed or session_id != self.selected:
+                return
+            if error:
+                self._remember_operation_error(error)
+                self.ask_status.set("A resposta não foi salva; ela continua somente na memória.")
+                return
+            self.unsaved_answer = None
+            self.ask_status.set("Resposta salva como uma revisão Q&A explícita.")
+            self.refresh_reports(session_id)
+
+        self._action("save_answer", session_id, answer, model,
+                     question=question, revision=revision, callback=saved)
+
+    def jump_to_report_citation(self):
+        index = self.report_citations.curselection()
+        if not index or index[0] >= len(getattr(self, "report_citation_refs", [])):
+            return
+        identifier = self.report_citation_refs[index[0]]
+        session_id = self.selected
+        revision = self.selected_report.get("transcript_revision") if self.selected_report else None
+        if not session_id or not revision:
+            return
+        self.citation_request = getattr(self, "citation_request", 0) + 1
+        request = self.citation_request
+
+        def read():
+            # Probe bounded transcript pages through the worker-facing
+            # controller API.  No full JSONL transcript is retained in Tk.
+            for offset in range(0, TRANSCRIPT_LIMIT + TRANSCRIPT_PAGE_SIZE, TRANSCRIPT_PAGE_SIZE):
+                page = self.controller.get_transcript_page(
+                    session_id, revision=revision, offset=offset, limit=TRANSCRIPT_PAGE_SIZE,
+                )
+                values = page.get("segments", []) if isinstance(page, dict) else []
+                if any(isinstance(item, dict) and item.get("id") == identifier for item in values):
+                    return page
+                if not isinstance(page, dict) or not page.get("has_more"):
+                    break
+            return None
+
+        def loaded(page, error):
+            if self.closed or request != self.citation_request or session_id != self.selected:
+                return
+            if error or not page:
+                self.status.set(f"A fonte {identifier[:128]} não está disponível na revisão selecionada.")
+                return
+            self.transcript_offset = int(page.get("offset", 0))
+            self.transcript_has_previous = bool(page.get("has_previous"))
+            self.transcript_has_more = bool(page.get("has_more"))
+            self._render_transcript(page.get("segments", []))
+            self._update_transcript_paging_controls()
+            for key, segment in self.segments.items():
+                if isinstance(segment, dict) and segment.get("id") == identifier:
+                    try:
+                        self.transcript.selection_set(key)
+                        self.transcript.see(key)
+                    except (tk.TclError, AttributeError):
+                        pass
+                    break
+            self.status.set(f"Fonte da citação {identifier[:128]} carregada.")
+
+        self._submit("citation_jump", read, loaded)
+
+    def jump_to_ask_citation(self):
+        index = self.ask_citations.curselection()
+        if not index or index[0] >= len(getattr(self, "ask_citation_refs", [])):
+            return
+        identifier = self.ask_citation_refs[index[0]]
+        if self.selected_report and self.selected_report.get("transcript_revision"):
+            revision = self.selected_report["transcript_revision"]
+        else:
+            revision = self.transcript_revision
+        # Reuse the report citation worker after projecting the selected Q&A
+        # citation into the same bounded source-navigation path.
+        self.report_citation_refs = [identifier]
+        self.report_citations.selection_clear(0, "end")
+        self.report_citations.selection_set(0)
+        original = self.selected_report
+        if original is None:
+            self.selected_report = {"transcript_revision": revision}
+        self.jump_to_report_citation()
+        if original is None:
+            self.selected_report = None
 
     def _settings_loaded(self, raw, error):
         if error:
@@ -1018,6 +1707,8 @@ class MeetingWindow:
         self._sync_source_controls()
         self._automation_toggled()
         self.settings_loaded = True
+        if hasattr(self, "controller"):
+            self.refresh_report_profiles()
         self.status.set("Gravações ficam neste computador. Inicie somente quando quiser gravar.")
 
     def _profile_changed(self, _event=None):
@@ -1233,6 +1924,19 @@ class MeetingWindow:
 
     def load_session(self, session_id):
         self.selected = session_id
+        self.report_request = getattr(self, "report_request", 0) + 1
+        self.ask_request = getattr(self, "ask_request", 0) + 1
+        self.citation_request = getattr(self, "citation_request", 0) + 1
+        self.selected_report = None
+        self.report_sections = {}
+        self.unsaved_answer = None
+        if hasattr(self, "ask_answer"):
+            self.ask_answer.delete("1.0", "end")
+        if hasattr(self, "ask_citations"):
+            self.ask_citations.delete(0, "end")
+        self.ask_citation_refs = []
+        if hasattr(self, "ask_status"):
+            self.ask_status.set("Respostas ficam somente na memória até você salvar.")
         self.detail_ready = False
         self.transcript_offset = 0
         self.transcript_revision = None
@@ -1328,6 +2032,7 @@ class MeetingWindow:
         self._render_annotations(self.speaker_labels, self.annotation_generation)
         self._update_transcript_paging_controls()
         self._show_summary(metadata.get("summary"))
+        self.refresh_reports(session_id)
         self.status.set("Notas extensas: visualização parcial, somente leitura." if self.truncated else
                         f"Gravação carregada · página de transcrição com {len(segments)} trechos."
                         + (" · Uma etapa anterior não foi concluída." if metadata.get("error") else ""))
@@ -2011,6 +2716,7 @@ class MeetingWindow:
             self._render_transcript(page.get("segments", []))
             self._render_annotations(self.speaker_labels, self.annotation_generation)
             self._update_transcript_paging_controls()
+            self.refresh_reports(session_id)
             self.status.set("Resultado local atualizado. Revise a transcrição e o resumo.")
         self._submit("outputs", read, loaded)
 
@@ -2186,6 +2892,10 @@ class MeetingWindow:
         if self.closed:
             return
         self.closed = True
+        self.report_request = getattr(self, "report_request", 0) + 1
+        self.ask_request = getattr(self, "ask_request", 0) + 1
+        self.citation_request = getattr(self, "citation_request", 0) + 1
+        self.unsaved_answer = None
         self.playback_generation = getattr(self, "playback_generation", -1) + 1
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:

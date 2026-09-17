@@ -14,7 +14,7 @@ import time
 
 from meeting_audio import NativeCapture
 from meeting_mixdown import export_mixdown
-from meeting_library import MeetingLibrary
+from meeting_library import MeetingLibrary, REPORT_HISTORY_LIMIT as LIBRARY_REPORT_HISTORY_LIMIT
 from meeting_settings import resolve_meeting_settings
 from meeting_store import MeetingStore
 from meeting_titles import initial_recording_title, refine_recording_title
@@ -27,8 +27,76 @@ WAVEFORM_POINTS = 360
 WAVEFORM_BLOCK_POINTS = 24
 TRANSCRIPT_PAGE_SIZE = 100
 TRANSCRIPT_LIMIT = 500
+REPORT_HISTORY_LIMIT = LIBRARY_REPORT_HISTORY_LIMIT
 PLAYBACK_PROGRESS_INTERVAL = 0.25
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+
+
+def _report_history_projection(report):
+    """Detach only bounded report metadata for controller/UI history calls."""
+    if not isinstance(report, dict):
+        return None
+    identifier = report.get("id", report.get("report_id"))
+    if not isinstance(identifier, str) or not identifier:
+        return None
+    result = {"id": identifier}
+    for key in (
+        "schema_version", "kind", "profile_id", "profile_version",
+        "session_id", "transcript_revision", "status", "created_at",
+        "completed_at", "virtual",
+    ):
+        value = report.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if key in report:
+                result[key] = value
+    model = report.get("model")
+    if isinstance(model, dict):
+        result["model"] = {
+            key: model[key]
+            for key in ("id", "sha256", "runtime", "context_limit")
+            if key in model and isinstance(model[key], (str, int, float, bool))
+        }
+    reviewed = report.get("reviewed_artifact")
+    result["reviewed"] = reviewed is not None or bool(report.get("reviewed"))
+    if isinstance(reviewed, dict) and isinstance(reviewed.get("generation"), int):
+        result["review_generation"] = reviewed["generation"]
+    return result
+
+
+def _normalize_saved_answer(answer, question="", revision=None, revision_id=None):
+    """Remove controller/UI metadata before crossing the intelligence seam."""
+    if not isinstance(answer, dict):
+        return answer, question, revision if revision is not None else revision_id, None
+    clean = dict(answer)
+    provenance = clean.pop("_provenance", None)
+    embedded_question = clean.pop("question", None)
+    embedded_revision = clean.pop("revision", None)
+    embedded_revision_id = clean.pop("revision_id", None)
+    if (embedded_revision is not None and embedded_revision_id is not None
+            and embedded_revision != embedded_revision_id):
+        raise ValueError("A revisão de transcrição foi informada duas vezes.")
+    embedded_revision = (embedded_revision if embedded_revision is not None
+                         else embedded_revision_id)
+    provenance_revision = provenance.get("revision") if isinstance(provenance, dict) else None
+    selected_revision = revision if revision is not None else revision_id
+    if selected_revision is not None and embedded_revision is not None and selected_revision != embedded_revision:
+        raise ValueError("A revisão de transcrição foi informada duas vezes.")
+    if selected_revision is None:
+        selected_revision = embedded_revision if embedded_revision is not None else provenance_revision
+    selected_question = question
+    if not selected_question and isinstance(embedded_question, str):
+        selected_question = embedded_question
+    return clean, selected_question, selected_revision, provenance
+
+
+def _bounded_report_history_limit(value):
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = REPORT_HISTORY_LIMIT
+    if isinstance(value, bool):
+        result = REPORT_HISTORY_LIMIT
+    return max(1, min(REPORT_HISTORY_LIMIT, result))
 
 
 def _amplitude_envelope(values, channels, points=WAVEFORM_BLOCK_POINTS):
@@ -705,6 +773,154 @@ class MeetingController:
             finally:
                 self.voice.release_meeting(token)
         return self._launch_processing(work)
+
+    def _intelligence(self):
+        """Build the installed-only intelligence seam on the IO worker."""
+        from meeting_intelligence import MeetingIntelligence
+        return MeetingIntelligence(self.store, library=self.library)
+
+    def list_report_profiles(self, language=None):
+        return self._intelligence().read_profiles(self.library, language=language)
+
+    get_report_profiles = list_report_profiles
+
+    def save_report_profile(self, profile, expected_generation=None):
+        return self._intelligence().save_custom_profile(
+            profile, self.library, expected_generation=expected_generation,
+        )
+
+    create_report_profile = save_report_profile
+    update_report_profile = save_report_profile
+
+    def set_report_profile_enabled(self, profile_id, enabled, expected_generation=None):
+        return self._intelligence().set_custom_profile_enabled(
+            profile_id, enabled, self.library, expected_generation=expected_generation,
+        )
+
+    def disable_report_profile(self, profile_id, expected_generation=None):
+        return self.set_report_profile_enabled(
+            profile_id, False, expected_generation=expected_generation,
+        )
+
+    def enable_report_profile(self, profile_id, expected_generation=None):
+        return self.set_report_profile_enabled(
+            profile_id, True, expected_generation=expected_generation,
+        )
+
+    def delete_report_profile(self, profile_id, expected_generation=None):
+        return self._intelligence().delete_custom_profile(
+            profile_id, self.library, expected_generation=expected_generation,
+        )
+
+    remove_report_profile = delete_report_profile
+
+    def list_reports(self, session_id, include_legacy=True, limit=REPORT_HISTORY_LIMIT):
+        limit = _bounded_report_history_limit(limit)
+        reader = getattr(self.library, "list_report_metadata", None)
+        if callable(reader):
+            rows = reader(
+                session_id,
+                include_legacy=include_legacy,
+                limit=limit,
+            )
+            result = []
+            for row in rows or ():
+                if len(result) >= limit:
+                    break
+                projection = _report_history_projection(row)
+                if projection is not None:
+                    result.append(projection)
+            return result
+        # Compatibility for older library adapters: project and cap before
+        # returning anything to Tk rather than retaining full report bodies.
+        reports = self.library.list_reports(session_id, include_legacy=include_legacy)
+        result = []
+        for report in reports or ():
+            if len(result) >= limit:
+                break
+            projection = _report_history_projection(report)
+            if projection is not None:
+                result.append(projection)
+        return result
+
+    def get_report(self, session_id, report_id):
+        return self.library.get_report(session_id, report_id)
+
+    def review_report(self, session_id, report_id, sections, expected_generation=0):
+        return self.library.review_report(
+            session_id, report_id, sections, expected_generation=expected_generation,
+        )
+
+    def generate_report(self, session_id, model, *, profile=None, revision=None,
+                        language=None):
+        """Generate one immutable structured report off the GUI thread."""
+        def work():
+            token = self.voice.reserve_for_meeting()
+            try:
+                return self._intelligence().generate_report(
+                    session_id, model, profile=profile, revision=revision,
+                    language=language, cancel_event=self._cancel,
+                )
+            finally:
+                self.voice.release_meeting(token)
+        return self._file_work(work)
+
+    def ask_this_meeting(self, session_id, question, model, *, revision=None,
+                         revision_id=None, language=None):
+        """Run a memory-only answer; nothing is saved until save_answer()."""
+        def work():
+            token = self.voice.reserve_for_meeting()
+            try:
+                result = self._intelligence().ask_this_meeting(
+                    session_id, question, model, revision=revision,
+                    revision_id=revision_id, language=language,
+                    cancel_event=self._cancel, include_provenance=True,
+                )
+                if isinstance(result, dict):
+                    result = dict(result)
+                    provenance = result.get("_provenance")
+                    selected_revision = revision if revision is not None else revision_id
+                    if selected_revision is None and isinstance(provenance, dict):
+                        selected_revision = provenance.get("revision")
+                    if selected_revision is None:
+                        metadata = self.library.get_session(session_id, include_events=False)
+                        revisions = metadata.get("revisions", [])
+                        selected_revision = (
+                            revisions[-1].get("id") if revisions and isinstance(revisions[-1], dict)
+                            else None
+                        )
+                    result["revision"] = selected_revision
+                return result
+            finally:
+                self.voice.release_meeting(token)
+        return self._file_work(work)
+
+    def save_answer(self, session_id, answer, model, *, question="", revision=None,
+                    revision_id=None):
+        normalized, selected_question, selected_revision, provenance = _normalize_saved_answer(
+            answer, question=question, revision=revision, revision_id=revision_id,
+        )
+        def work():
+            return self._intelligence().save_answer(
+                session_id, normalized, model, question=selected_question,
+                revision=selected_revision, provenance=provenance,
+            )
+        return self._file_work(work)
+
+    def export_report(self, session_id, report_id, path, format="markdown", section=None):
+        from meeting_files import export_report
+        destination = Path(path).absolute()
+        library_root = Path(self.library.meetings_root).absolute()
+        try:
+            inside_library = os.path.commonpath((str(library_root), str(destination))) == str(library_root)
+        except ValueError:
+            inside_library = False
+        if inside_library:
+            raise ValueError("Escolha uma pasta fora da biblioteca de reuniões para exportar o relatório.")
+        return self._file_work(lambda: export_report(
+            self.library.get_report(session_id, report_id), path, format=format, section=section,
+            cancel_event=self._cancel,
+        ))
 
     def play(self, session_id, track, start=0.0):
         from meeting_files import play_audio

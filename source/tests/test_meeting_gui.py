@@ -401,6 +401,94 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertNotIn("events", metadata)
         self.assertEqual(len(segments[0]["text"]), 8000)
 
+    def test_report_history_projection_drops_payloads_and_keeps_only_metadata(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        row = view._report_history_metadata({
+            "id": "report-1", "kind": "report", "profile_id": "general",
+            "created_at": "2026-09-16T12:00:00Z",
+            "generated": {"summary": "private transcript" * 10_000},
+            "payload": {"private": "private transcript" * 10_000},
+            "reviewed_artifact": {"sections": {"summary": "private"}},
+        })
+
+        self.assertEqual(row["id"], "report-1")
+        self.assertNotIn("generated", row)
+        self.assertNotIn("payload", row)
+        self.assertNotIn("reviewed_artifact", row)
+
+    def test_disabled_custom_profile_remains_visible_and_can_be_enabled(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.language = Variable("pt-BR")
+        view.report_profile_choice = Variable("")
+        view.report_profile_box = mock.Mock()
+        view.report_enable_button = mock.Mock()
+        view.report_disable_button = mock.Mock()
+        view._set_report_profiles([{
+            "id": "custom", "name": "Custom", "version": 2,
+            "sections": ["summary"], "instructions": "", "disabled": True,
+        }])
+
+        label = view.report_profile_choice.get()
+        self.assertIn("desativado", label)
+        view.status = Variable()
+        view.controller = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+        view.enable_report_profile()
+        key, operation, _callback = view._submit.call_args.args
+        self.assertEqual(key, "enable_report_profile")
+        operation()
+        view.controller.enable_report_profile.assert_called_once_with("custom")
+        view.report_enable_button.configure.assert_any_call(state="normal")
+        view.report_disable_button.configure.assert_any_call(state="disabled")
+
+    def test_builtin_profile_can_be_duplicated_as_an_enabled_custom_copy(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.status = Variable()
+        view.window = mock.Mock()
+        view.report_profile_choice = Variable("Geral · v1")
+        view.report_profile_by_label = {
+            "Geral · v1": {
+                "id": "general", "name": "Geral", "version": 1,
+                "builtin": True, "language": "pt-BR", "instructions": "Use facts.",
+                "sections": ["summary"],
+            },
+        }
+        view._submit = mock.Mock(return_value=True)
+        view.controller = mock.Mock()
+        with mock.patch("meeting_gui.simpledialog.askstring", return_value="custom-copy"):
+            view.duplicate_report_profile()
+
+        operation = view._submit.call_args.args[1]
+        operation()
+        copied = view.controller.save_report_profile.call_args.args[0]
+        self.assertEqual(copied["id"], "custom-copy")
+        self.assertNotIn("builtin", copied)
+        self.assertFalse(copied["disabled"])
+
+    def test_create_profile_maps_automatic_language_to_portuguese(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        view.language = Variable("auto")
+        view.report_profile_choice = Variable("Geral · v1")
+        view.report_profile_by_label = {
+            "Geral · v1": {
+                "id": "general", "name": "Geral", "version": 1,
+                "builtin": True, "instructions": "Use facts.", "sections": ["summary"],
+            },
+        }
+        view._submit = mock.Mock(return_value=True)
+        view.controller = mock.Mock()
+        with mock.patch(
+            "meeting_gui.simpledialog.askstring",
+            side_effect=["Perfil", "custom-profile"],
+        ):
+            view.create_report_profile()
+
+        operation = view._submit.call_args.args[1]
+        operation()
+        created = view.controller.save_report_profile.call_args.args[0]
+        self.assertEqual(created["language"], "pt-BR")
+
     def test_transcript_page_projection_is_bounded_and_keeps_navigation_metadata(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.controller = mock.Mock()
