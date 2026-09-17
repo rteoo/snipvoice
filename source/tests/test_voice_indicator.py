@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from voice_indicator import VISIBLE_STATES, indicator_content
+from voice_indicator import VISIBLE_STATES, indicator_content, indicator_subtitle
 
 
 MAIN_TK_AVAILABLE = (
@@ -27,8 +27,10 @@ class VoiceIndicatorContentTests(unittest.TestCase):
 
     def test_recording_explains_release_and_cancel(self):
         title, accent = indicator_content("recording", "dictation")
-        self.assertEqual(title, "Ouvindo…")
+        self.assertEqual(title, "Ouvindo")
         self.assertEqual(accent, "warning")
+        self.assertIn("Solte para transcrever", indicator_subtitle("recording", "dictation"))
+        self.assertIn("Esc cancela", indicator_subtitle("recording", "dictation"))
 
     def test_command_mode_is_distinct(self):
         title, _accent = indicator_content("recording", "command")
@@ -51,7 +53,7 @@ class MacVoiceIndicatorRoutingTests(unittest.TestCase):
             indicator.hide()
             indicator.destroy()
 
-        panel.update.assert_called_once_with("Ouvindo…", "warning")
+        panel.update.assert_called_once_with("Ouvindo", "warning")
         panel.hide.assert_called_once_with()
         panel.destroy.assert_called_once_with()
         self.assertIsNone(indicator.window)
@@ -85,7 +87,9 @@ class VoiceIndicatorGuiSmokeTests(unittest.TestCase):
                 assert indicator._mac_panel.is_visible()
             else:
                 assert indicator.window.state() == "normal"
-                assert indicator.title_label.cget("text") == "Ouvindo…"
+                assert indicator.title_label.cget("text") == "Ouvindo"
+                assert "Solte para transcrever" in indicator.subtitle_label.cget("text")
+                assert len(indicator.waveform_bars) == 5
             if current_os() == "windows":
                 user32 = _windows_user32()
                 widget_hwnd = indicator.window.winfo_id()

@@ -11,7 +11,8 @@ from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    BackgroundBridge, BOOKMARK_LIMIT, MAX_PAGE_BACKSTACK, MeetingWindow, NOTES_LIMIT,
+    APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, MAX_PAGE_BACKSTACK,
+    MeetingWindow, NOTES_LIMIT,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, open_meeting_window, retention_plan_projection, validated_settings,
@@ -68,6 +69,38 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_appearance_save_persists_then_requests_a_safe_rebuild(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.appearance_display = Variable(APPEARANCE_LABELS["dark"])
+        view.appearance_status = Variable()
+        view.persist_settings = mock.Mock(return_value=True)
+        view.on_appearance_changed = mock.Mock()
+        view.raw_settings = {}
+        view.window = mock.Mock()
+        view.window.after_idle.side_effect = lambda callback: callback()
+        view._remember_operation_error = mock.Mock()
+
+        def submit(_key, operation, callback, urgent=False):
+            self.assertTrue(urgent)
+            callback(operation(), None)
+            return True
+
+        view._submit = submit
+        view.save_appearance()
+
+        view.persist_settings.assert_called_once_with({"appearance": "dark"})
+        self.assertEqual(view.raw_settings["appearance"], "dark")
+        view.on_appearance_changed.assert_called_once_with("dark")
+
+    def test_invalid_appearance_label_never_persists(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.appearance_display = Variable("Solarized")
+        view.appearance_status = Variable()
+        view.persist_settings = mock.Mock()
+        view.save_appearance()
+        view.persist_settings.assert_not_called()
+        self.assertIn("válida", view.appearance_status.get())
+
     def test_operation_error_redacts_drive_unc_and_spaced_paths(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.record_details_button = mock.Mock()
@@ -1105,6 +1138,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.root.update()
             titles = [notebook.tab(tab_id, "text") for tab_id in notebook.tabs()]
             self.assertTrue(view.embedded)
+            self.assertEqual(
+                tuple(view.appearance_box.cget("values")),
+                tuple(APPEARANCE_LABELS.values()),
+            )
             self.assertIs(view.window, manager)
             self.assertIs(view.notebook, notebook)
             self.assertEqual(

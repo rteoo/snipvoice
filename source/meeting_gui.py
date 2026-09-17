@@ -30,6 +30,16 @@ PAGE_SIZE = 50
 MAX_PAGE_BACKSTACK = 32
 MAX_SEARCH_RESULTS = 32
 TRANSCRIPT_LIMIT = 500
+APPEARANCE_LABELS = {
+    "system": "Sistema",
+    "light": "Claro",
+    "dark": "Escuro",
+}
+APPEARANCE_STATUS = {
+    "system": "Segue o tema do sistema.",
+    "light": "Tema claro fixo.",
+    "dark": "Tema escuro fixo.",
+}
 TRANSCRIPT_PAGE_SIZE = 100
 NOTES_LIMIT = 1024 * 1024
 BOOKMARK_LIMIT = 1000
@@ -305,12 +315,14 @@ class BackgroundBridge:
 
 class MeetingWindow:
     def __init__(self, root, controller, settings_getter, persist_settings,
-                 on_settings_changed=None, on_recording_state_changed=None, *,
+                 on_settings_changed=None, on_recording_state_changed=None,
+                 on_appearance_changed=None, *,
                  window=None, notebook=None):
         self.root, self.controller = root, controller
         self.settings_getter, self.persist_settings = settings_getter, persist_settings
         self.on_settings_changed = on_settings_changed
         self.on_recording_state_changed = on_recording_state_changed
+        self.on_appearance_changed = on_appearance_changed
         if (window is None) != (notebook is None):
             raise ValueError("window and notebook must be supplied together")
         self.embedded = window is not None
@@ -320,7 +332,7 @@ class MeetingWindow:
             self.window.title("Gravações e reuniões")
             self.window.geometry("1120x820")
             self.window.minsize(920, 700)
-        self.ui = ui_theme.bind(self.window)
+        self.ui = ui_theme.theme() if self.embedded else ui_theme.bind(self.window)
         self.window.configure(bg=self.ui.surface)
         self.bridge = BackgroundBridge()
         self.closed = False
@@ -498,7 +510,7 @@ class MeetingWindow:
 
     def _build(self):
         style = ttk.Style(self.window)
-        ui_theme.apply_ttk_theme(style)
+        ui_theme.apply_ttk_theme(style, resolved=self.ui)
         ui_theme.configure_manager_styles(style, self.ui)
         style.configure("Meeting.TFrame", background=self.ui.surface)
         style.configure(
@@ -550,7 +562,7 @@ class MeetingWindow:
         self._page_header(
             self.settings_tab,
             "Configurações",
-            "Gerencie os modelos locais usados para transcrição e resumo sem enviar conteúdo à nuvem.",
+            "Ajuste a aparência, a privacidade e os modelos locais sem enviar conteúdo à nuvem.",
         )
         self.status = tk.StringVar(self.window, "Carregando configurações…")
         for tab in (self.recording_tab, self.library_tab, self.settings_tab):
@@ -595,6 +607,7 @@ class MeetingWindow:
         self._bind_mousewheel_region(settings_view, settings_canvas)
         self.settings_canvas = settings_canvas
         self.settings_content = settings_content
+        self._build_appearance_card(settings_content)
         self.recording_defaults_parent = self._card(settings_content)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
         self._build_privacy_card(settings_content)
@@ -1470,6 +1483,94 @@ class MeetingWindow:
         card.columnconfigure(2, weight=1)
         self._sync_raw_policy_controls()
 
+    def _build_appearance_card(self, parent):
+        """Build a local appearance preference with a safe manager rebuild."""
+        card = self._card(parent)
+        card.pack(fill="x", pady=(0, self.ui.space_md))
+        self.appearance_card = card
+        self._label(
+            card,
+            "Aparência",
+            bg=self.ui.card,
+            fg=self.ui.text_strong,
+            font=self.ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        self._label(
+            card,
+            "Use o tema do sistema ou escolha uma aparência fixa. A mudança reconstrói "
+            "esta janela sem reiniciar o Snipvoice.",
+            bg=self.ui.card,
+            fg=self.ui.text_muted,
+            anchor="w",
+            justify="left",
+            wraplength=760,
+        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
+        preference = ui_theme.normalize_preference(
+            getattr(self.ui, "preference", None),
+        )
+        self.appearance_display = tk.StringVar(
+            self.window,
+            APPEARANCE_LABELS[preference],
+        )
+        self.appearance_box = ttk.Combobox(
+            card,
+            textvariable=self.appearance_display,
+            values=tuple(APPEARANCE_LABELS.values()),
+            state="readonly",
+            width=18,
+        )
+        self.appearance_box.grid(row=2, column=0, sticky="w")
+        self.appearance_status = tk.StringVar(
+            self.window,
+            APPEARANCE_STATUS[preference],
+        )
+        self._label(
+            card,
+            "",
+            textvariable=self.appearance_status,
+            bg=self.ui.card,
+            fg=self.ui.text_muted,
+            anchor="w",
+        ).grid(row=2, column=1, sticky="w", padx=(self.ui.space_md, 0))
+        self._button(
+            card,
+            "Aplicar aparência",
+            self.save_appearance,
+            accent=True,
+        ).grid(row=2, column=2, sticky="e")
+        card.columnconfigure(1, weight=1)
+
+    def save_appearance(self):
+        selected = self.appearance_display.get()
+        try:
+            preference = next(
+                key for key, label in APPEARANCE_LABELS.items() if label == selected
+            )
+        except StopIteration:
+            self.appearance_status.set("Escolha uma aparência válida.")
+            return
+        self.appearance_status.set("Salvando aparência local…")
+
+        def save():
+            result = self.persist_settings({"appearance": preference})
+            if result is False:
+                raise ValueError("Não foi possível salvar a aparência.")
+            return preference
+
+        self._submit("save_appearance", save, self._appearance_saved, urgent=True)
+
+    def _appearance_saved(self, preference, error):
+        if error:
+            self._remember_operation_error(error)
+            self.appearance_status.set("Não foi possível salvar a aparência.")
+            return
+        preference = ui_theme.normalize_preference(preference)
+        self.raw_settings["appearance"] = preference
+        self.appearance_display.set(APPEARANCE_LABELS[preference])
+        self.appearance_status.set("Aparência salva. Atualizando a janela…")
+        if self.on_appearance_changed:
+            self.window.after_idle(lambda: self.on_appearance_changed(preference))
+
     def _sync_raw_policy_controls(self):
         enabled = self.raw_audio_policy.get() == "raw_tracks"
         for widget in (
@@ -2253,6 +2354,10 @@ class MeetingWindow:
             self.status.set("Não foi possível carregar as configurações. Veja os detalhes na aba Gravação.")
             return
         self.raw_settings = dict(raw or {})
+        if hasattr(self, "appearance_display"):
+            preference = ui_theme.normalize_preference(self.raw_settings.get("appearance"))
+            self.appearance_display.set(APPEARANCE_LABELS[preference])
+            self.appearance_status.set(APPEARANCE_STATUS[preference])
         try:
             settings = resolve_meeting_settings(self.raw_settings)
         except ValueError as exc:
@@ -4650,19 +4755,21 @@ class MeetingWindow:
 
 
 def open_meeting_window(root, controller, settings_getter, persist_settings, on_settings_changed=None,
-                        on_recording_state_changed=None):
+                        on_recording_state_changed=None, on_appearance_changed=None):
     view = MeetingWindow(root, controller, settings_getter, persist_settings,
-                         on_settings_changed, on_recording_state_changed)
+                         on_settings_changed, on_recording_state_changed,
+                         on_appearance_changed)
     view.window._meeting_view = view
     return view.window
 
 
 def add_meeting_tabs(root, window, notebook, controller, settings_getter,
-                     persist_settings, on_settings_changed=None, on_recording_state_changed=None):
+                     persist_settings, on_settings_changed=None,
+                     on_recording_state_changed=None, on_appearance_changed=None):
     """Attach recording and library tabs to the shared application window."""
     view = MeetingWindow(
         root, controller, settings_getter, persist_settings, on_settings_changed,
-        on_recording_state_changed,
+        on_recording_state_changed, on_appearance_changed,
         window=window, notebook=notebook,
     )
     window._meeting_view = view

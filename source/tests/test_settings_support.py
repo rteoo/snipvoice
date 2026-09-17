@@ -43,6 +43,7 @@ class SettingsSupportTests(unittest.TestCase):
         # A wrongly-typed known key or an unknown key must pass through untouched
         # (degrade gracefully), not crash or get dropped.
         weird = {
+            "appearance": "neon",
             "terminator_mode": "yes",   # app expects bool; loader must not coerce
             "mirror_dir": 5,            # app expects str
             "sync_export_dir": None,
@@ -70,6 +71,7 @@ class SettingsSupportTests(unittest.TestCase):
 class RuntimeSettingsNormalizationTests(unittest.TestCase):
     def test_malformed_known_values_fall_back_without_dropping_unknown_keys(self):
         normalized, invalid = normalize_runtime_settings({
+            "appearance": "sepia",
             "terminator_mode": "false",
             "bcb_timeout": "3",
             "bcb_cache_seconds": True,
@@ -88,6 +90,7 @@ class RuntimeSettingsNormalizationTests(unittest.TestCase):
             set(invalid),
             {
                 "terminator_mode",
+                "appearance",
                 "bcb_timeout",
                 "bcb_cache_seconds",
                 "stock_cache_seconds",
@@ -97,6 +100,7 @@ class RuntimeSettingsNormalizationTests(unittest.TestCase):
 
     def test_valid_runtime_values_are_preserved(self):
         settings = {
+            "appearance": "dark",
             "terminator_mode": True,
             "bcb_timeout": 0.5,
             "bcb_cache_seconds": 0,
@@ -106,6 +110,7 @@ class RuntimeSettingsNormalizationTests(unittest.TestCase):
         normalized, invalid = normalize_runtime_settings(settings)
 
         self.assertEqual(invalid, {})
+        self.assertEqual(normalized["appearance"], "dark")
         self.assertTrue(normalized["terminator_mode"])
         self.assertEqual(normalized["bcb_timeout"], 0.5)
         self.assertEqual(normalized["bcb_cache_seconds"], 0)
