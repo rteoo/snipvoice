@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 3.2.0 - 2026-09-17
+
+- Add a private local meeting-memory workspace with recoverable recordings, searchable metadata, transcript navigation, annotations, and rebuildable local indexing.
+- Add revision-scoped meeting reports and questions with citations, cross-meeting search, consent and retention controls, and privacy-aware export workflows.
+- Modernize the dark appearance and initialize persisted appearance settings reliably.
+- Consolidate cross-platform CI validation with native runtime and capture-helper checks across the supported platforms.
+
 ## 3.1.0 - 2026-09-15
 
 - Refine the recording workspace with a responsive layout, full-width automation controls, and recording defaults in Configurações.

@@ -43,7 +43,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v3.1.0 release](https://github.com/rteoo/snipvoice/releases/tag/v3.1.0).
+[stable v3.2.0 release](https://github.com/rteoo/snipvoice/releases/tag/v3.2.0).
 To run from source with Python installed:
 
 ```powershell
@@ -65,7 +65,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v3.1.0`](https://github.com/rteoo/snipvoice/releases/tag/v3.1.0):
+[`v3.2.0`](https://github.com/rteoo/snipvoice/releases/tag/v3.2.0):
 
 | Platform | Package |
 | --- | --- |
@@ -77,12 +77,12 @@ macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
 
-### What's new in v3.1.0
+### What's new in v3.2.0
 
-- The recording workspace now adapts cleanly to narrow windows and groups each audio source with its waveform.
-- Processing failures use concise messages with optional technical details, and the default recording destination can be restored in one click.
-- Recordings can be deleted safely from the library after confirmation; separately exported audio remains untouched.
-- The Settings model list now scrolls with the mouse wheel, with clearer disabled controls and consistent Portuguese labels.
+- Meeting memory now supports transcript navigation, revision-scoped annotations, searchable collections, cited reports, and questions across meetings.
+- Consent, retention, restore, purge, and export workflows keep local meeting data recoverable and privacy-aware.
+- The application follows the system appearance more reliably, with a refreshed dark theme and stable persisted theme settings.
+- CI now exercises the supported Windows, macOS, and Linux boundaries with native runtime and capture-helper validation.
 
 ## First use
 
