@@ -39,7 +39,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SNIPVOICE_VERSION: "3.1.0"
+  SNIPVOICE_VERSION: "3.2.0"
 
 jobs:
   windows:
