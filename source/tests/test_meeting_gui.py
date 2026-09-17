@@ -14,7 +14,7 @@ from meeting_gui import (
     BackgroundBridge, BOOKMARK_LIMIT, MAX_PAGE_BACKSTACK, MeetingWindow, NOTES_LIMIT,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
-    format_time, open_meeting_window, validated_settings,
+    format_time, open_meeting_window, retention_plan_projection, validated_settings,
 )
 from meeting_settings import EndpointSelection, resolve_meeting_settings
 
@@ -68,6 +68,276 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_operation_error_redacts_drive_unc_and_spaced_paths(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.record_details_button = mock.Mock()
+        view._remember_operation_error(
+            r"failed C:\Users\Alice Smith\meeting; then \\server\share\Bob Jones\audio"
+        )
+        self.assertNotIn("Alice", view.record_details)
+        self.assertNotIn("server", view.record_details)
+        self.assertNotIn("Bob", view.record_details)
+        self.assertEqual(view.record_details.count("[caminho local]"), 2)
+
+    def test_start_waits_for_inflight_privacy_save(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.privacy_save_inflight = True
+        view.status = Variable()
+        view._validated_recording_request = mock.Mock()
+        self.assertFalse(view.request_start("hotkey"))
+        view._validated_recording_request.assert_not_called()
+        self.assertIn("privacidade", view.status.get())
+
+    def test_startup_failure_disables_recording_and_retention_controls(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.start_button = mock.Mock()
+        view.delete_button = mock.Mock()
+        view.raw_remove_button = mock.Mock()
+        view.status = Variable("Preparando privacidade e recuperação local…")
+        view.privacy_status = Variable()
+        view.set_startup_status(False, r"failed at C:\Users\private\meeting")
+        view.start_button.configure.assert_called_with(state="disabled")
+        view.delete_button.configure.assert_called_with(state="disabled")
+        view.raw_remove_button.configure.assert_called_with(state="disabled")
+        self.assertNotIn("C:\\Users", view.status.get())
+
+    def test_shared_start_path_routes_window_hotkey_and_tray_to_notice(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.retention_ready = True
+        view.privacy_ready = True
+        view.controller = mock.Mock()
+        view.controller.recording_notice_required.return_value = True
+        view._validated_recording_request = mock.Mock(return_value=("settings", "title"))
+        view._show_recording_notice = mock.Mock()
+        view.status = Variable()
+        for origin in ("window", "hotkey", "tray"):
+            view.request_start(origin)
+        self.assertEqual([item.args[0] for item in view._show_recording_notice.call_args_list],
+                         ["window", "hotkey", "tray"])
+
+    def test_start_consent_cancel_never_submits_and_confirm_is_one_start(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.retention_ready = True
+        view.privacy_ready = True
+        view.controller = mock.Mock()
+        view.controller.recording_notice_required.return_value = False
+        view._validated_recording_request = mock.Mock(return_value=("settings", "title"))
+        view._submit = mock.Mock(return_value=True)
+        view.status = Variable()
+        self.assertTrue(view.request_start("hotkey"))
+        operation = view._submit.call_args.args[1]
+        operation()
+        view.controller.start.assert_called_once_with("settings", title="title")
+        view._started(False, None, "hotkey")
+        view.controller.revoke_recording_consent.assert_called_once_with()
+
+    def test_recording_notice_projection_never_discloses_local_paths(self):
+        projection = retention_plan_projection({
+            "session_id": "meeting-1",
+            "operation": "whole_meeting",
+            "eligible": True,
+            "byte_estimate": 12,
+            "targets": [{"kind": "bundle", "path": r"C:\Users\private\meetings\meeting-1", "bytes": 12}],
+            "reasons": [r"could not inspect C:\Users\private\meetings\meeting-1"],
+            "recovery_mode": "same-root-trash",
+        })
+        view = MeetingWindow.__new__(MeetingWindow)
+        text = view._retention_preview_text(projection, "meeting-1")
+        self.assertNotIn("C:\\Users", text)
+        self.assertIn("[caminho local]", text)
+
+    def test_raw_capability_gating_keeps_transcript_surface_available(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.raw_unavailable_tracks = set()
+        view.raw_capabilities = {}
+        view.raw_remove_microphone = Variable()
+        view.raw_remove_system = Variable()
+        view.raw_remove_microphone_check = mock.Mock()
+        view.raw_remove_system_check = mock.Mock()
+        view.play_button = mock.Mock()
+        view.transcribe_button = mock.Mock()
+        view.export_audio_button = mock.Mock()
+        view.raw_remove_button = mock.Mock()
+        view.highlight_export_button = mock.Mock()
+        view.audio_capability_status = Variable()
+        view.track = Variable("Microfone")
+        view._set_audio_capabilities({
+            "microphone": {"available": False, "raw_removed": True},
+            "system": {"available": True},
+        })
+        self.assertEqual(view.raw_unavailable_tracks, {"microphone"})
+        view.play_button.configure.assert_called_with(state="disabled")
+        view.transcribe_button.configure.assert_called_with(state="normal")
+        self.assertIn("transcrição", view.audio_capability_status.get().lower())
+
+    def test_raw_capability_gating_keeps_remaining_source_actions_available(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.retention_ready = True
+        view.raw_remove_microphone = Variable()
+        view.raw_remove_system = Variable()
+        view.raw_remove_microphone_check = mock.Mock()
+        view.raw_remove_system_check = mock.Mock()
+        view.play_button = mock.Mock()
+        view.transcribe_button = mock.Mock()
+        view.export_audio_button = mock.Mock()
+        view.raw_remove_button = mock.Mock()
+        view.highlight_export_button = mock.Mock()
+        view.audio_capability_status = Variable()
+        view.track = Variable("Sistema")
+        view._set_audio_capabilities({
+            "microphone": {"available": False, "raw_removed": True},
+            "system": {"available": True},
+        })
+        view.play_button.configure.assert_called_with(state="normal")
+        view.transcribe_button.configure.assert_called_with(state="normal")
+        view.export_audio_button.configure.assert_called_with(state="normal")
+
+    def test_memory_only_q_and_a_does_not_submit_save(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.qa_mode = Variable("memory_only")
+        view.ask_status = Variable()
+        view.unsaved_answer = {"answer": "local", "question": "q"}
+        view.selected = "meeting-1"
+        view._sync_qa_controls = mock.Mock()
+        view.ask_save_button = mock.Mock()
+        view.save_answer()
+        self.assertIn("memory_only", view.ask_status.get())
+
+    def test_stale_summary_save_does_not_replace_new_selection_status(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.summary = Text("reviewed")
+        view.status = Variable("working")
+        view.controller = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+        view._remember_operation_error = mock.Mock()
+        view.save_summary()
+        callback = view._submit.call_args.args[2]
+        view.selected = "meeting-2"
+        callback(True, None)
+        self.assertEqual(view.status.get(), "working")
+
+    def test_stale_trash_result_is_ignored_after_close_or_refresh(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.trash_request = 4
+        view.trash_tree = mock.Mock()
+        view.trash_status = Variable()
+        view.trash_entries = []
+        view._trash_loaded([], None, 3)
+        view.trash_tree.delete.assert_not_called()
+
+    def test_retention_delete_previews_and_applies_the_exact_plan(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.retention_ready = True
+        view.retention_request = 0
+        view.controller = mock.Mock()
+        view.title = Variable("Planning")
+        view.delete_button = mock.Mock()
+        view.status = Variable()
+        view.window = object()
+        view._remember_operation_error = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+        plan = {
+            "session_id": "meeting-1",
+            "operation": "whole_meeting",
+            "eligible": True,
+            "byte_estimate": 128,
+            "targets": [{"path": r"C:\Users\private\meetings\meeting-1", "bytes": 128}],
+            "reasons": [r"target C:\Users\private\meetings\meeting-1"],
+            "recovery_mode": "same-root-trash",
+            "excluded_external_exports": [r"D:\exports\meeting-1.wav"],
+        }
+        view.controller.retention_plan.return_value = plan
+
+        view.delete_selected()
+        preview_call = view._submit.call_args
+        self.assertEqual(preview_call.args[0], "retention_plan")
+        self.assertEqual(preview_call.args[1](), plan)
+        view.controller.retention_plan.assert_called_once_with(
+            "meeting-1", policy={"mode": "whole_meeting", "after_days": 0},
+        )
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm:
+            preview_call.args[2](plan, None)
+        prompt = confirm.call_args.args[1]
+        self.assertNotIn("C:\\Users", prompt)
+        self.assertNotIn("D:\\exports", prompt)
+        apply_call = view._submit.call_args_list[-1]
+        self.assertEqual(apply_call.args[0], "retention_apply")
+        apply_call.args[1]()
+        view.controller.apply_retention.assert_called_once_with(plan, confirm=True)
+
+    def test_trash_restore_purge_and_expired_empty_use_worker_confirmations(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.trash_request = 7
+        view.trash_tree = mock.Mock()
+        view.trash_tree.selection.return_value = ("0",)
+        view.trash_entries = [{"session_id": "meeting-1"}]
+        view.trash_status = Variable()
+        view.trash_dialog = object()
+        view.controller = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+
+        view.restore_selected_trash()
+        restore_call = view._submit.call_args
+        self.assertEqual(restore_call.args[0], "trash_restore")
+        restore_call.args[1]()
+        view.controller.restore_session.assert_called_once_with("meeting-1")
+
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True):
+            view.purge_selected_trash()
+            purge_call = view._submit.call_args
+            self.assertEqual(purge_call.args[0], "trash_purge")
+            purge_call.args[1]()
+            view.empty_expired_trash()
+            empty_call = view._submit.call_args
+            self.assertEqual(empty_call.args[0], "trash_empty_expired")
+            empty_call.args[1]()
+        view.controller.purge_session.assert_called_once_with("meeting-1", confirm=True)
+        view.controller.empty_trash.assert_called_once_with(confirm=True)
+
+    def test_raw_track_removal_preview_applies_only_selected_track_plan(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.retention_ready = True
+        view.retention_request = 0
+        view.raw_remove_button = mock.Mock()
+        view.status = Variable()
+        view.window = object()
+        view._remember_operation_error = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+        view.controller = mock.Mock()
+        plan = {
+            "session_id": "meeting-1", "operation": "raw_tracks", "eligible": True,
+            "byte_estimate": 64, "targets": [], "raw_tracks": ["microphone"],
+            "lost_capabilities": ["playback:microphone"],
+        }
+        view.controller.plan_raw_tracks.return_value = plan
+
+        view.preview_raw_tracks(("microphone",))
+        preview_call = view._submit.call_args
+        self.assertEqual(preview_call.args[0], "raw_retention_plan")
+        self.assertEqual(preview_call.args[1](), plan)
+        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True):
+            preview_call.args[2](plan, None)
+        apply_call = view._submit.call_args_list[-1]
+        self.assertEqual(apply_call.args[0], "raw_retention_apply")
+        apply_call.args[1]()
+        view.controller.plan_raw_tracks.assert_called_once_with("meeting-1", tracks=("microphone",))
+        view.controller.apply_raw_tracks.assert_called_once_with(plan, confirm=True)
+
     def test_label_allows_an_explicit_font_override(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.ui = mock.Mock(surface="surface", text="text")
@@ -467,7 +737,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         callback(True, None)
         view._clear_library_detail.assert_called_once_with()
         view.refresh_library.assert_called_once_with()
-        self.assertIn("excluída", view.status.get())
+        self.assertIn("lixeira", view.status.get())
 
     def test_delete_selected_cancel_preserves_the_recording(self):
         view = self.make_edit_view()

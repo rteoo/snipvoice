@@ -224,6 +224,46 @@ class MeetingController:
             self._privacy_defaults = value
         return copy.deepcopy(value)
 
+    def read_workspace(self):
+        """Read the detached workspace projection on a background worker.
+
+        The GUI uses this small controller seam instead of reaching through to
+        ``MeetingLibrary``.  Keeping the read here also makes it possible for
+        the application to swap the controller's library without teaching Tk
+        about the canonical storage layout.
+        """
+        return self.library.read_workspace()
+
+    def update_workspace(self, patch, *, expected_generation=_UNSET):
+        """Atomically merge workspace settings and refresh controller caches."""
+        kwargs = {}
+        if expected_generation is not _UNSET:
+            kwargs["expected_generation"] = expected_generation
+        result = self.library.update_workspace(patch, **kwargs)
+        if not isinstance(result, dict):
+            raise ValueError("A atualização do workspace retornou um estado inválido.")
+        privacy = result.get("privacy_defaults", {})
+        if not isinstance(privacy, dict):
+            raise ValueError("As configurações de privacidade retornadas são inválidas.")
+        with self._lock:
+            self._privacy_defaults = copy.deepcopy(privacy)
+        # The retention service captures its trash deadline at construction;
+        # discard it after a policy edit so the next operation reads the new
+        # validated defaults.  No active operation can overlap this call.
+        with self._store_lock:
+            self._retention_service = None
+        return copy.deepcopy(result)
+
+    save_workspace = update_workspace
+
+    def update_privacy_defaults(self, patch, *, expected_generation=_UNSET):
+        """Merge only the privacy section while preserving unknown keys."""
+        return self.update_workspace({"privacy_defaults": patch}, expected_generation=expected_generation)
+
+    def update_retention_defaults(self, patch, *, expected_generation=_UNSET):
+        """Merge only retention settings while preserving future policy keys."""
+        return self.update_workspace({"retention_defaults": patch}, expected_generation=expected_generation)
+
     def privacy_defaults(self):
         with self._lock:
             cached = self._privacy_defaults

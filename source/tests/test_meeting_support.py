@@ -642,6 +642,30 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
                 "fixture-meeting-v1", {"answer": "local"}, "model",
             )
 
+    def test_workspace_adapter_merges_nested_settings_and_refreshes_privacy_cache(self):
+        initial = self.controller.read_workspace()
+        first = self.controller.update_workspace(
+            {
+                "privacy_defaults": {
+                    "qa_mode": "memory_only",
+                    "future_setting": {"enabled": True},
+                },
+                "retention_defaults": {"whole_meeting": {"after_days": 7}},
+            },
+            expected_generation=initial["generation"],
+        )
+        self.assertEqual(first["generation"], initial["generation"] + 1)
+        self.assertEqual(self.controller.privacy_defaults()["qa_mode"], "memory_only")
+        self.assertTrue(self.controller.privacy_defaults()["future_setting"]["enabled"])
+
+        second = self.controller.update_workspace(
+            {"privacy_defaults": {"recording_notice": {"enabled": True}}},
+            expected_generation=first["generation"],
+        )
+        self.assertTrue(second["privacy_defaults"]["recording_notice"]["enabled"])
+        self.assertTrue(second["privacy_defaults"]["future_setting"]["enabled"])
+        self.assertEqual(second["retention_defaults"]["whole_meeting"]["mode"], "whole_meeting")
+
     def test_retention_lease_checker_does_not_self_block_its_own_operation(self):
         plan = self.controller.retention_plan("fixture-meeting-v1")
         self.assertTrue(plan.eligible)

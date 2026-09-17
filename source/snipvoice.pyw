@@ -139,6 +139,9 @@ class Snipvoice:
         self._notification_times = {}
         self.voice = None
         self._meeting_monitor = None
+        self._meeting_startup_ready = False
+        self._meeting_startup_status = "Preparando privacidade e recuperação local…"
+        self._meeting_startup_error = ""
         self._settings_lock = threading.RLock()
         self.snippets = {}
         self.trigger_index = compile_trigger_index({}, set())
@@ -185,7 +188,7 @@ class Snipvoice:
             if self._meeting_monitor is not None:
                 self._meeting_monitor.stop()
                 self._meeting_monitor = None
-            if self._quitting.is_set():
+            if self._quitting.is_set() or not self._meeting_startup_ready:
                 return
             try:
                 validate_hotkey_conflicts(self.settings)
@@ -194,12 +197,74 @@ class Snipvoice:
                     return
                 chord = parse_chord(settings.hotkey)
                 monitor = VoiceHotkeyMonitor(chord, chord,
-                    on_press=lambda mode: self.meetings.toggle(settings),
+                    # Keyboard callbacks only enqueue a GUI request.  They do
+                    # not read settings, open capture devices, show Tk, or join.
+                    on_press=lambda mode: self._meeting_hotkey_request(),
                     on_release=lambda mode: None)
                 monitor.start()
                 self._meeting_monitor = monitor
             except Exception:
                 self.notify_error("Atalho de gravação indisponível. Revise os atalhos nas configurações.")
+
+    def _meeting_hotkey_request(self):
+        """Bounded keyboard callback: enqueue the shared GUI toggle path."""
+        if self._quitting.is_set() or not self._meeting_startup_ready:
+            return False
+        try:
+            return bool(self.gui.submit(self._meeting_hotkey_on_gui))
+        except Exception:
+            return False
+
+    def _meeting_hotkey_on_gui(self, root):
+        if self._quitting.is_set() or not self._meeting_startup_ready:
+            return
+        view = self._manager_meeting_view
+        if view is None or getattr(view, "closed", False):
+            self._show_manager_window(root)
+            view = self._manager_meeting_view
+        if view is None:
+            return
+        snapshot = self.meetings.snapshot()
+        state = snapshot.get("state", "idle") if isinstance(snapshot, dict) else "idle"
+        if state in {"starting", "recording", "paused", "stopping"}:
+            view.stop()
+        else:
+            view.request_start("hotkey")
+
+    def request_meeting_start(self, icon=None, item=None):
+        """Tray callback routed to the same GUI-thread start path."""
+        if self._quitting.is_set():
+            return False
+        try:
+            return bool(self.gui.submit(self._request_meeting_start_on_gui))
+        except Exception:
+            return False
+
+    def _request_meeting_start_on_gui(self, root):
+        if not self._meeting_startup_ready:
+            self.notify_error("A gravação aguarda a recuperação local do Snipvoice.", key="meeting-startup")
+            return
+        self._show_manager_window(root)
+        if self._manager_meeting_view is not None:
+            self._manager_meeting_view.request_start("tray")
+
+    def request_meeting_stop(self, icon=None, item=None):
+        """Tray stop action; the controller stop request stays worker-owned."""
+        if self._quitting.is_set():
+            return False
+        try:
+            return bool(self.gui.submit(self._request_meeting_stop_on_gui))
+        except Exception:
+            return False
+
+    def _request_meeting_stop_on_gui(self, root):
+        view = self._manager_meeting_view
+        if view is not None and not getattr(view, "closed", False):
+            view.stop()
+        else:
+            # A closed manager has no BackgroundBridge to own this request.
+            # Keep the controller stop off Tk just as the visible window does.
+            self.task_runner.start(self.meetings.stop, name="meeting-stop")
 
     def _load_commands(self):
         path = os.path.join(self.data_dir, "commands.json")
@@ -313,10 +378,15 @@ class Snipvoice:
             lambda: dict(self.settings), self._persist_voice_settings,
             on_settings_changed=lambda: self.task_runner.start(
                 self._rebuild_meeting_monitor, name="meeting-hotkey"),
+            on_recording_state_changed=lambda _state, _snapshot: self.refresh_tray_menu(),
         )
         self._manager_meeting_view = meeting_view
         self._manager_recording_tab = meeting_view.recording_tab
         self._manager_library_tab = meeting_view.library_tab
+        meeting_view.set_startup_status(
+            self._meeting_startup_ready,
+            self._meeting_startup_status,
+        )
         settings_tab = getattr(meeting_view, "settings_tab", None)
         tab = tk.Frame(notebook, bg=ui.surface)
         self._manager_voice_tab = tab
@@ -396,6 +466,28 @@ class Snipvoice:
         self.task_runner.start(self._resolve_startup, name="startup-checks")
 
     def _resolve_startup(self):
+        startup_error = ""
+        startup_status = "Privacidade e recuperação local verificadas."
+        # Privacy defaults and interrupted retention journals are resolved in
+        # one worker before the meeting hotkey or destructive UI is admitted.
+        # Expired trash is deliberately left untouched here.
+        try:
+            self.meetings.refresh_privacy_defaults()
+            recovered = self.meetings.recover_retention_operations()
+            if recovered:
+                startup_status = "Recuperação local concluída; revise a lixeira se necessário."
+            else:
+                startup_status = "Privacidade e recuperação local verificadas."
+        except Exception as exc:
+            startup_error = type(exc).__name__
+            startup_status = (
+                "A recuperação local exige reconciliação manual; gravação, hotkeys e exclusões estão bloqueadas."
+            )
+        # Keep only an internal classification; exception text may contain a
+        # workspace path and must never reach status/tray/log surfaces.
+        self._meeting_startup_error = startup_error
+        self._meeting_startup_status = startup_status
+        self._meeting_startup_ready = not bool(startup_error)
         self._autostart_state = platform_support.autostart_state()
         if platform_support.IS_MAC:
             status = macos_permissions.check_permissions()
@@ -403,7 +495,25 @@ class Snipvoice:
                 self.notify_error("Conceda Monitoramento de Entrada e Acessibilidade ao Snipvoice e reinicie.")
         if self.voice.is_enabled():
             self.voice.enable()
+        if self._meeting_startup_ready:
+            self._rebuild_meeting_monitor()
+        else:
+            self.notify_error(
+                "A recuperação local do Snipvoice precisa de revisão manual; o atalho de reunião foi desativado.",
+                key="meeting-recovery",
+            )
+        try:
+            self.gui.submit(
+                lambda root: self._surface_meeting_startup(root),
+            )
+        except Exception:
+            pass
         self.refresh_tray_menu()
+
+    def _surface_meeting_startup(self, _root=None):
+        view = self._manager_meeting_view
+        if view is not None and not getattr(view, "closed", False):
+            view.set_startup_status(self._meeting_startup_ready, self._meeting_startup_status)
 
     def toggle_autostart(self, icon=None, item=None):
         self.task_runner.start(self._toggle_autostart, name="autostart-toggle")
@@ -451,6 +561,10 @@ class Snipvoice:
             platform_support.hide_dock_icon()
         menu = pystray.Menu(
             pystray.MenuItem("Abrir Gravação…", self.open_meetings, default=True),
+            pystray.MenuItem(self._meeting_menu_label, self.request_meeting_start,
+                             enabled=self._meeting_start_enabled),
+            pystray.MenuItem("Parar gravação", self.request_meeting_stop,
+                             enabled=self._meeting_stop_enabled),
             pystray.MenuItem(self._voice_menu_label, self.toggle_voice, checked=self._voice_menu_checked),
             pystray.MenuItem("Configurar ditado…", self.open_voice_settings),
             pystray.MenuItem("Iniciar com o sistema", self.toggle_autostart,
@@ -463,7 +577,6 @@ class Snipvoice:
             tray_image = image.copy()
         self.icon = pystray.Icon("snipvoice", tray_image, APP_DISPLAY_NAME, menu,
                                  **platform_support.tray_icon_options())
-        self.task_runner.start(self._rebuild_meeting_monitor, name="meeting-hotkey")
         if show_settings:
             self.open_meetings()
         if platform_support.tk_runs_on_main_thread():
@@ -512,6 +625,33 @@ class Snipvoice:
         if self.voice is None:
             return "Entrada por voz"
         return self.voice.status_label()
+
+    def _meeting_menu_label(self, _item=None):
+        try:
+            snapshot = self.meetings.snapshot()
+            state = snapshot.get("state", "idle") if isinstance(snapshot, dict) else "idle"
+        except Exception:
+            state = "idle"
+        if state in {"starting", "recording", "paused", "stopping"}:
+            return "Gravação em andamento"
+        return "Iniciar gravação"
+
+    def _meeting_start_enabled(self, _item=None):
+        if not self._meeting_startup_ready:
+            return False
+        try:
+            snapshot = self.meetings.snapshot()
+            state = snapshot.get("state", "idle")
+            return state == "idle" and not snapshot.get("processing", False)
+        except Exception:
+            return False
+
+    def _meeting_stop_enabled(self, _item=None):
+        try:
+            state = self.meetings.snapshot().get("state", "idle")
+            return state in {"starting", "recording", "paused", "stopping"}
+        except Exception:
+            return False
 
 
     def _voice_status_changed(self):

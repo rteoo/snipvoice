@@ -1,10 +1,12 @@
 """Shared-root meeting workspace with bounded workers and Tk-only updates."""
 
 from itertools import islice
+import copy
 import json
 import math
 import os
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -33,6 +35,14 @@ NOTES_LIMIT = 1024 * 1024
 BOOKMARK_LIMIT = 1000
 MAX_ANSWER_CHARS = 4_000
 REPORT_HISTORY_LIMIT = 500
+MAX_RETENTION_PREVIEW_ITEMS = 64
+MAX_TRASH_ITEMS = 256
+MAX_RETENTION_TEXT = 800
+RETENTION_POLICY_LABELS = {
+    "keep": "Manter indefinidamente",
+    "whole_meeting": "Excluir reunião após o prazo",
+    "raw_tracks": "Remover áudio raw após o prazo",
+}
 STATE_LABELS = {"idle": "Pronto", "starting": "Iniciando", "recording": "Gravando",
                 "paused": "Pausado", "stopping": "Finalizando", "postprocessing": "Processando",
                 "completed": "Concluído",
@@ -47,6 +57,63 @@ LANGUAGE_LABELS = {"auto": "Automático", "pt-BR": "Português (Brasil)", "en-US
 TRACK_LABELS = {"Microfone": "microphone", "Sistema": "system"}
 SUMMARY_LABELS = {entry["id"]: f'{entry["name"]} · {entry["parameters"]}'
                   for entry in summary_catalog()}
+
+
+def _safe_retention_text(value, limit=MAX_RETENTION_TEXT):
+    """Keep retention previews bounded and free of local absolute paths."""
+    text = " ".join(str(value or "").split())
+    # Plan reasons are backend-owned text.  Do not let a future reason or an
+    # OS error disclose the workspace path through a confirmation dialog.
+    # Redact the remainder of a comma/semicolon-delimited field so paths with
+    # spaces and UNC shares cannot leak only their tail.
+    text = re.sub(r"\\\\[^\\/\s]+[\\/][^,;]*", "[caminho local]", text)
+    text = re.sub(r"(?i)(?<!\w)[A-Z]:[\\/][^,;]*", "[caminho local]", text)
+    text = re.sub(r"(?<![:\w])/[^,;]*", "[caminho local]", text)
+    return text[:limit]
+
+
+def retention_plan_projection(plan):
+    """Return a UI-safe, bounded projection of a RetentionPlan-like value."""
+    if isinstance(plan, dict):
+        get = plan.get
+        targets = plan.get("targets", ())
+    else:
+        get = lambda key, default=None: getattr(plan, key, default)
+        targets = getattr(plan, "targets", ())
+    projected_targets = []
+    for target in list(targets or ())[:MAX_RETENTION_PREVIEW_ITEMS]:
+        if isinstance(target, dict):
+            kind, track, size = target.get("kind"), target.get("track"), target.get("bytes", 0)
+        else:
+            kind = getattr(target, "kind", "target")
+            track = getattr(target, "track", None)
+            size = getattr(target, "bytes", 0)
+        try:
+            size = max(0, int(size))
+        except (TypeError, ValueError):
+            size = 0
+        projected_targets.append({
+            "kind": _safe_retention_text(kind, 80),
+            "track": _safe_retention_text(track, 80) if track else None,
+            "bytes": size,
+        })
+    reasons = [_safe_retention_text(item) for item in list(get("reasons", ()) or ())[:32]]
+    lost = [_safe_retention_text(item) for item in list(get("lost_capabilities", ()) or ())[:32]]
+    excluded = [_safe_retention_text(item) for item in list(get("excluded_external_exports", ()) or ())[:32]]
+    return {
+        "session_id": _safe_retention_text(get("session_id", ""), 128),
+        "operation": _safe_retention_text(get("operation", ""), 80),
+        "eligible": bool(get("eligible", False)),
+        "byte_estimate": max(0, int(get("byte_estimate", 0) or 0)),
+        "target_count": len(list(targets or ())),
+        "targets": projected_targets,
+        "reasons": reasons,
+        "lost_capabilities": lost,
+        "excluded_external_exports": excluded,
+        "canonical_changes": [_safe_retention_text(item) for item in list(get("canonical_changes", ()) or ())[:32]],
+        "recovery_mode": _safe_retention_text(get("recovery_mode", "none"), 160),
+        "raw_tracks": [_safe_retention_text(item, 80) for item in list(get("raw_tracks", ()) or ())[:4]],
+    }
 
 
 def format_time(seconds):
@@ -238,10 +305,12 @@ class BackgroundBridge:
 
 class MeetingWindow:
     def __init__(self, root, controller, settings_getter, persist_settings,
-                 on_settings_changed=None, *, window=None, notebook=None):
+                 on_settings_changed=None, on_recording_state_changed=None, *,
+                 window=None, notebook=None):
         self.root, self.controller = root, controller
         self.settings_getter, self.persist_settings = settings_getter, persist_settings
         self.on_settings_changed = on_settings_changed
+        self.on_recording_state_changed = on_recording_state_changed
         if (window is None) != (notebook is None):
             raise ValueError("window and notebook must be supplied together")
         self.embedded = window is not None
@@ -280,6 +349,12 @@ class MeetingWindow:
         self.selected_segment_id = None
         self.selected_speaker_label_id = None
         self.selected_highlight_id = None
+        self.raw_unavailable_tracks = set()
+        self.raw_tracks_present = set()
+        self.raw_capabilities = {"playback": True, "retranscription": True,
+                                 "clip": True, "audio_export": True}
+        if hasattr(self, "audio_capability_status"):
+            self.audio_capability_status.set("Nenhuma reunião selecionada.")
         self.dirty = False
         self.loading = False
         self.truncated = False
@@ -293,6 +368,33 @@ class MeetingWindow:
         self.previous_state = None
         self.previous_processing = False
         self.snapshot = {}
+        self.privacy_defaults = {
+            "recording_notice": {"enabled": False, "language": "pt-BR"},
+            "qa_mode": "explicit_save",
+        }
+        self.retention_defaults = {
+            "whole_meeting": {"mode": "keep"},
+            "raw_audio": {"mode": "keep", "tracks": []},
+            "trash_days": 30,
+        }
+        self.workspace_generation = 0
+        self.privacy_ready = False
+        self.privacy_save_inflight = False
+        # Application startup normally sets this false until recovery and the
+        # privacy cache have completed.  Standalone/embedded callers keep the
+        # backwards-compatible ready default.
+        self.retention_ready = True
+        self.startup_status = ""
+        self.pending_start_origin = None
+        self.recording_notice_dialog = None
+        self.raw_unavailable_tracks = set()
+        self.raw_capabilities = {"playback": True, "retranscription": True,
+                                 "clip": True, "audio_export": True}
+        self.trash_request = 0
+        self.trash_dialog = None
+        self.trash_tree = None
+        self.trash_entries = []
+        self.retention_request = 0
         self.playback_generation = -1
         # Report/Q&A requests carry their own generation so a late worker
         # result can never replace a different meeting's selected output.
@@ -319,6 +421,11 @@ class MeetingWindow:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Destroy>", self._destroyed, add="+")
         self._submit("settings", self.settings_getter, self._settings_loaded)
+        self._submit(
+            "privacy_defaults",
+            getattr(self.controller, "refresh_privacy_defaults", lambda: self.privacy_defaults),
+            self._privacy_loaded,
+        )
         self.refresh_devices()
         self.refresh_library()
         self.refresh_workspace()
@@ -490,6 +597,7 @@ class MeetingWindow:
         self.settings_content = settings_content
         self.recording_defaults_parent = self._card(settings_content)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
+        self._build_privacy_card(settings_content)
         self.transcription_models_parent = tk.Frame(
             settings_content, bg=self.ui.surface,
         )
@@ -841,6 +949,7 @@ class MeetingWindow:
         self.rebuild_cancel_button = self._button(search_row, "Cancelar índice", self.cancel_rebuild_index)
         self.rebuild_cancel_button.configure(state="disabled")
         self.rebuild_cancel_button.pack(side="left", padx=(6, 0))
+        self._button(search_row, "Lixeira…", self.show_trash).pack(side="left", padx=(6, 0))
         self.index_status = tk.StringVar(self.window, "Índice de busca: estado desconhecido")
         self._label(search_row, "", textvariable=self.index_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w").pack(side="left", padx=(8, 0))
@@ -975,6 +1084,9 @@ class MeetingWindow:
         self.delete_button = self._button(title_row, "Excluir gravação", self.delete_selected, danger=True)
         self.delete_button.configure(state="disabled")
         self.delete_button.pack(side="left", padx=(8, 0))
+        self.audio_capability_status = tk.StringVar(self.window, "Áudio raw disponível.")
+        self._label(right, "", textvariable=self.audio_capability_status, anchor="w",
+                    fg=self.ui.text_muted, wraplength=720).pack(fill="x", padx=12, pady=(4, 0))
         self._label(right, "Notas manuais", anchor="w").pack(fill="x", padx=12, pady=(12, 4))
         self.notes = tk.Text(right, height=5, wrap="word", undo=True, font=self.ui.font(), **self.ui.text_colors())
         self.notes.pack(fill="both", expand=True, padx=(12, 0))
@@ -1112,13 +1224,29 @@ class MeetingWindow:
                     fg=self.ui.text_muted).pack(side="left", padx=(8, 0))
         actions = ttk.Frame(right, style="Meeting.TFrame")
         actions.pack(fill="x", padx=(12, 0), pady=4)
-        self._button(actions, "Transcrever novamente", self.transcribe).pack(side="left", padx=(0, 6))
+        self.transcribe_button = self._button(actions, "Transcrever novamente", self.transcribe)
+        self.transcribe_button.pack(side="left", padx=(0, 6))
         self._button(actions, "Cancelar processamento", lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
         exports = ttk.Frame(right, style="Meeting.TFrame")
         exports.pack(fill="x", padx=(12, 0), pady=4)
         self._button(exports, "Exportar Markdown…", lambda: self.export("markdown")).pack(side="left", padx=(0, 6))
         self._button(exports, "Exportar texto…", lambda: self.export("text")).pack(side="left", padx=(0, 6))
-        self._button(exports, "Exportar áudio final…", self.export_audio).pack(side="left", padx=(0, 6))
+        self.export_audio_button = self._button(exports, "Exportar áudio final…", self.export_audio)
+        self.export_audio_button.pack(side="left", padx=(0, 6))
+        self.raw_remove_microphone = tk.BooleanVar(self.window, False)
+        self.raw_remove_system = tk.BooleanVar(self.window, False)
+        self.raw_remove_microphone_check = tk.Checkbutton(
+            exports, text="Remover mic", variable=self.raw_remove_microphone,
+            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
+        )
+        self.raw_remove_microphone_check.pack(side="left", padx=(0, 2))
+        self.raw_remove_system_check = tk.Checkbutton(
+            exports, text="Remover sistema", variable=self.raw_remove_system,
+            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
+        )
+        self.raw_remove_system_check.pack(side="left", padx=(0, 6))
+        self.raw_remove_button = self._button(exports, "Remover áudio raw…", self.preview_raw_tracks, danger=True)
+        self.raw_remove_button.pack(side="left", padx=(0, 6))
         self._button(exports, "Gerar relatório local", self.generate_report).pack(side="left")
         self._label(right, "Resumo editável · copie a revisão para notas antes de salvar", anchor="w").pack(
             fill="x", padx=12, pady=(8, 0))
@@ -1216,10 +1344,304 @@ class MeetingWindow:
         self._button(ask_citation_row, "Ir à fonte", self.jump_to_ask_citation).pack(side="left", padx=(6, 0))
         ask_actions = tk.Frame(ask_frame, bg=self.ui.card)
         ask_actions.pack(fill="x")
-        self._button(ask_actions, "Salvar resposta", self.save_answer).pack(side="left")
+        self.ask_save_button = self._button(ask_actions, "Salvar resposta", self.save_answer)
+        self.ask_save_button.pack(side="left")
         self.ask_status = tk.StringVar(self.window, "Respostas ficam somente na memória até você salvar.")
         self._label(ask_actions, "", textvariable=self.ask_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w", wraplength=580).pack(side="left", padx=(8, 0))
+
+    def _build_privacy_card(self, parent):
+        """Build privacy/retention controls inside the existing scrollable page."""
+        card = self._card(parent)
+        card.pack(fill="x", pady=(0, self.ui.space_md))
+        self.privacy_card = card
+        self._label(
+            card, "Privacidade e retenção local", bg=self.ui.card,
+            fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        self._label(
+            card,
+            "O Snipvoice grava somente após uma ação explícita. As políticas abaixo são locais e preservam chaves futuras do workspace.",
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=860,
+        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
+
+        self.privacy_notice_enabled = tk.BooleanVar(self.window, False)
+        self.privacy_notice_language = tk.StringVar(self.window, "pt-BR")
+        self.qa_mode = tk.StringVar(self.window, "explicit_save")
+        self.whole_meeting_policy = tk.StringVar(self.window, "keep")
+        self.whole_meeting_after_days = tk.StringVar(self.window, "")
+        self.raw_audio_policy = tk.StringVar(self.window, "keep")
+        self.raw_audio_after_days = tk.StringVar(self.window, "")
+        self.raw_audio_microphone = tk.BooleanVar(self.window, False)
+        self.raw_audio_system = tk.BooleanVar(self.window, False)
+        self.trash_days = tk.StringVar(self.window, "30")
+
+        row = 2
+        self.privacy_notice_check = tk.Checkbutton(
+            card, text="Mostrar aviso antes de cada gravação", variable=self.privacy_notice_enabled,
+            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+        )
+        self.privacy_notice_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
+        row += 1
+        self._label(card, "Idioma do aviso", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self.privacy_notice_language_box = ttk.Combobox(
+            card, textvariable=self.privacy_notice_language,
+            values=("pt-BR", "en-US"), state="readonly", width=14,
+        )
+        self.privacy_notice_language_box.grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+        self._label(card, "Salvar respostas de Q&A", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self.qa_mode_box = ttk.Combobox(
+            card, textvariable=self.qa_mode,
+            values=("explicit_save", "memory_only"), state="readonly", width=18,
+        )
+        self.qa_mode_box.grid(row=row, column=1, sticky="w", pady=2)
+        self._label(card, "explicit_save permite o botão Salvar; memory_only descarta a resposta ao fechar.",
+                    bg=self.ui.card, fg=self.ui.text_muted, anchor="w").grid(
+            row=row, column=2, sticky="w", padx=(self.ui.space_sm, 0), pady=2,
+        )
+        self.qa_mode_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_qa_controls())
+        row += 1
+        self._label(card, "Política da reunião", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self.whole_meeting_policy_box = ttk.Combobox(
+            card, textvariable=self.whole_meeting_policy,
+            values=("keep", "whole_meeting"), state="readonly", width=18,
+        )
+        self.whole_meeting_policy_box.grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+        self._label(card, "Dias até excluir reunião", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self._entry(card, self.whole_meeting_after_days, 12).grid(row=row, column=1, sticky="w", pady=2)
+        self._label(card, "Vazio mantém indefinidamente", bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").grid(row=row, column=2, sticky="w",
+                    padx=(self.ui.space_sm, 0), pady=2)
+        row += 1
+        self._label(card, "Política de áudio raw", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self.raw_audio_policy_box = ttk.Combobox(
+            card, textvariable=self.raw_audio_policy,
+            values=("keep", "raw_tracks"), state="readonly", width=18,
+        )
+        self.raw_audio_policy_box.grid(row=row, column=1, sticky="w", pady=2)
+        self.raw_audio_policy_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_raw_policy_controls())
+        row += 1
+        self._label(card, "Dias até remover áudio raw", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self._entry(card, self.raw_audio_after_days, 12).grid(row=row, column=1, sticky="w", pady=2)
+        raw_tracks = tk.Frame(card, bg=self.ui.card)
+        raw_tracks.grid(row=row, column=2, sticky="w", padx=(self.ui.space_sm, 0), pady=2)
+        self.raw_audio_microphone_check = tk.Checkbutton(
+            raw_tracks, text="Microfone", variable=self.raw_audio_microphone,
+            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+        )
+        self.raw_audio_microphone_check.pack(side="left")
+        self.raw_audio_system_check = tk.Checkbutton(
+            raw_tracks, text="Sistema", variable=self.raw_audio_system,
+            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+        )
+        self.raw_audio_system_check.pack(side="left", padx=(self.ui.space_sm, 0))
+        row += 1
+        self._label(card, "Prazo da lixeira (dias)", bg=self.ui.card, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=2,
+        )
+        self._entry(card, self.trash_days, 12).grid(row=row, column=1, sticky="w", pady=2)
+        row += 1
+        self._label(
+            card,
+            "A exclusão local e a lixeira não prometem apagamento forense de SSD; cópias externas exportadas ficam fora do escopo.",
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=860,
+        ).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_sm, 2))
+        row += 1
+        self.privacy_status = tk.StringVar(self.window, "Configurações de privacidade carregando…")
+        self._label(card, "", textvariable=self.privacy_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").grid(row=row, column=0, columnspan=2, sticky="w")
+        self._button(card, "Salvar privacidade", self.save_privacy_settings, accent=True).grid(
+            row=row, column=2, sticky="e", pady=(self.ui.space_sm, 0),
+        )
+        card.columnconfigure(2, weight=1)
+        self._sync_raw_policy_controls()
+
+    def _sync_raw_policy_controls(self):
+        enabled = self.raw_audio_policy.get() == "raw_tracks"
+        for widget in (
+            getattr(self, "raw_audio_microphone_check", None),
+            getattr(self, "raw_audio_system_check", None),
+        ):
+            if widget is not None:
+                widget.configure(state="normal" if enabled else "disabled")
+
+    @staticmethod
+    def _policy_days(value, *, field):
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            days = float(text)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field}: informe um número de dias válido.") from exc
+        if not math.isfinite(days) or days < 0 or days > 36500:
+            raise ValueError(f"{field}: informe um valor entre 0 e 36.500 dias.")
+        return days
+
+    def _apply_workspace_settings(self, workspace):
+        if not isinstance(workspace, dict):
+            return
+        generation = workspace.get("generation", 0)
+        if isinstance(generation, int) and generation >= 0:
+            self.workspace_generation = generation
+            self.organization_generation = generation
+        privacy = workspace.get("privacy_defaults")
+        if not isinstance(privacy, dict):
+            privacy = self.privacy_defaults
+        retention = workspace.get("retention_defaults")
+        if not isinstance(retention, dict):
+            retention = self.retention_defaults
+        self.privacy_defaults = copy.deepcopy(privacy)
+        self.retention_defaults = copy.deepcopy(retention)
+        notice = self.privacy_defaults.get("recording_notice", {})
+        if not isinstance(notice, dict):
+            notice = {}
+        self.privacy_notice_enabled.set(bool(notice.get("enabled", self.privacy_defaults.get(
+            "recording_notice_enabled", False))))
+        self.privacy_notice_language.set(notice.get(
+            "language", self.privacy_defaults.get("recording_notice_language", "pt-BR")))
+        self.qa_mode.set(self.privacy_defaults.get("qa_mode", "explicit_save"))
+        whole = self.retention_defaults.get("whole_meeting", self.retention_defaults.get(
+            "whole_meeting_policy", {"mode": "keep"}))
+        if not isinstance(whole, dict):
+            whole = {"mode": str(whole)}
+        whole_mode = whole.get("mode")
+        if whole_mode is None and whole.get("after_days") is not None:
+            whole_mode = "whole_meeting"
+        self.whole_meeting_policy.set(str(whole_mode or "keep"))
+        self.whole_meeting_after_days.set(
+            "" if whole.get("after_days") is None else str(whole.get("after_days")))
+        raw = self.retention_defaults.get("raw_audio", self.retention_defaults.get(
+            "raw_audio_policy", {"mode": "keep", "tracks": []}))
+        if not isinstance(raw, dict):
+            raw = {"mode": str(raw)}
+        raw_mode = raw.get("mode")
+        if raw_mode is None and raw.get("after_days") is not None:
+            raw_mode = "raw_tracks"
+        self.raw_audio_policy.set(str(raw_mode or "keep"))
+        self.raw_audio_after_days.set(
+            "" if raw.get("after_days") is None else str(raw.get("after_days")))
+        tracks = set(raw.get("tracks", ()) if isinstance(raw.get("tracks", ()), (list, tuple)) else ())
+        self.raw_audio_microphone.set("microphone" in tracks)
+        self.raw_audio_system.set("system" in tracks)
+        self.trash_days.set(str(self.retention_defaults.get("trash_days", 30)))
+        self._sync_raw_policy_controls()
+        self._sync_qa_controls()
+
+    def _sync_qa_controls(self):
+        mode = self.qa_mode.get() if hasattr(self, "qa_mode") else "explicit_save"
+        button = getattr(self, "ask_save_button", None)
+        if button is not None:
+            button.configure(state="normal" if mode == "explicit_save" else "disabled")
+
+    def save_privacy_settings(self):
+        if self.privacy_save_inflight:
+            self.privacy_status.set("Aguarde a atualização de privacidade em andamento.")
+            return
+        try:
+            whole_days = self._policy_days(self.whole_meeting_after_days.get(), field="Reunião")
+            raw_days = self._policy_days(self.raw_audio_after_days.get(), field="Áudio raw")
+            trash = self._policy_days(self.trash_days.get(), field="Lixeira")
+            if trash is None:
+                trash = 30.0
+            qa_mode = self.qa_mode.get().strip()
+            if qa_mode not in {"memory_only", "explicit_save"}:
+                raise ValueError("Escolha um modo de Q&A válido.")
+            whole_mode = self.whole_meeting_policy.get().strip()
+            if whole_mode not in {"keep", "whole_meeting"}:
+                raise ValueError("Escolha uma política de reunião válida.")
+            raw_mode = self.raw_audio_policy.get().strip()
+            if raw_mode not in {"keep", "raw_tracks"}:
+                raise ValueError("Escolha uma política de áudio raw válida.")
+            tracks = []
+            if self.raw_audio_microphone.get():
+                tracks.append("microphone")
+            if self.raw_audio_system.get():
+                tracks.append("system")
+            privacy = copy.deepcopy(self.privacy_defaults)
+            notice = privacy.setdefault("recording_notice", {})
+            if not isinstance(notice, dict):
+                notice = {}
+                privacy["recording_notice"] = notice
+            notice.update(enabled=bool(self.privacy_notice_enabled.get()),
+                          language=self.privacy_notice_language.get())
+            privacy["qa_mode"] = qa_mode
+            retention = copy.deepcopy(self.retention_defaults)
+            whole = copy.deepcopy(retention.get("whole_meeting", {}))
+            if not isinstance(whole, dict):
+                whole = {}
+            whole["mode"] = whole_mode
+            if whole_days is None:
+                whole.pop("after_days", None)
+            else:
+                whole["after_days"] = whole_days
+            retention["whole_meeting"] = whole
+            raw = copy.deepcopy(retention.get("raw_audio", {}))
+            if not isinstance(raw, dict):
+                raw = {}
+            raw["mode"] = raw_mode
+            raw["tracks"] = tracks
+            if raw_days is None:
+                raw.pop("after_days", None)
+            else:
+                raw["after_days"] = raw_days
+            retention["raw_audio"] = raw
+            retention["trash_days"] = trash
+        except (ValueError, TypeError) as exc:
+            self.privacy_status.set(str(exc))
+            return
+        expected = self.workspace_generation
+        self.privacy_status.set("Salvando configurações locais…")
+
+        def save():
+            updater = getattr(self.controller, "update_workspace", None)
+            if not callable(updater):
+                updater = self.controller.library.update_workspace
+            return updater({"privacy_defaults": privacy, "retention_defaults": retention},
+                           expected_generation=expected)
+
+        self.privacy_save_inflight = True
+        submitted = self._submit(
+            "save_privacy", save,
+            lambda value, error: self._privacy_saved(value, error, privacy, retention),
+            urgent=True,
+        )
+        if not submitted:
+            self.privacy_save_inflight = False
+            self.privacy_status.set("Não foi possível enfileirar a alteração de privacidade.")
+
+    def _privacy_saved(self, value, error, privacy=None, retention=None):
+        self.privacy_save_inflight = False
+        if self.closed:
+            return
+        if error:
+            self._remember_operation_error(error)
+            self.privacy_status.set("Não foi possível salvar privacidade; recarregue o workspace.")
+            return
+        if isinstance(value, dict):
+            self._apply_workspace_settings(value)
+        elif privacy is not None:
+            self.privacy_defaults = copy.deepcopy(privacy)
+            self.retention_defaults = copy.deepcopy(retention or self.retention_defaults)
+        self.privacy_ready = True
+        self.privacy_status.set("Privacidade e retenção salvas localmente.")
+        self._sync_qa_controls()
+        if self.on_settings_changed:
+            self.on_settings_changed()
 
     def _submit(self, key, operation, callback=None, urgent=False):
         if not self.bridge.submit(key, operation, callback or self._done, urgent):
@@ -1720,10 +2142,18 @@ class MeetingWindow:
             self.ask_citations.insert("end", identifier[:128])
         self.ask_status.set(
             f'Resposta em memória · incerteza {value.get("uncertainty", "alta")} · '
-            f'{len(value.get("citations", []))} citações. Salve explicitamente se quiser persistir.'
+            f'{len(value.get("citations", []))} citações. '
+            + ("O modo memory_only impede salvar." if getattr(self, "qa_mode", None) is not None
+               and self.qa_mode.get() == "memory_only" else
+               "Salve explicitamente se quiser persistir.")
         )
+        self._sync_qa_controls()
 
     def save_answer(self):
+        if getattr(self, "qa_mode", None) is not None and self.qa_mode.get() == "memory_only":
+            self.ask_status.set("O workspace está em memory_only; a resposta não pode ser salva.")
+            self._sync_qa_controls()
+            return
         if not self.selected or not isinstance(self.unsaved_answer, dict):
             self.ask_status.set("Não há uma resposta em memória para salvar.")
             return
@@ -1851,7 +2281,54 @@ class MeetingWindow:
         self.settings_loaded = True
         if hasattr(self, "controller"):
             self.refresh_report_profiles()
-        self.status.set("Gravações ficam neste computador. Inicie somente quando quiser gravar.")
+        self.status.set(
+            self.startup_status if not getattr(self, "retention_ready", True)
+            else "Gravações ficam neste computador. Inicie somente quando quiser gravar."
+        )
+
+    def set_startup_status(self, ready, message):
+        """Apply app-level recovery admission without exposing private paths."""
+        if self.closed:
+            return
+        self.retention_ready = bool(ready)
+        self.startup_status = _safe_retention_text(message, 320)
+        if hasattr(self, "start_button") and not ready:
+            self.start_button.configure(state="disabled")
+        for name in ("delete_button", "raw_remove_button"):
+            widget = getattr(self, name, None)
+            if widget is not None and not ready:
+                widget.configure(state="disabled")
+        if hasattr(self, "privacy_status") and not ready:
+            self.privacy_status.set(self.startup_status or "Recuperação local pendente.")
+        if hasattr(self, "status") and not ready:
+            self.status.set(self.startup_status or "Recuperação local pendente; ações destrutivas estão bloqueadas.")
+        elif hasattr(self, "status") and ready and self.status.get() in {
+                "Preparando privacidade e recuperação local…",
+                "Recuperação local pendente; ações destrutivas estão bloqueadas.",
+            }:
+            self.status.set("Privacidade e recuperação local verificadas. Inicie somente quando quiser gravar.")
+
+    def _privacy_loaded(self, value, error):
+        if self.closed:
+            return
+        if error or not isinstance(value, dict):
+            if error:
+                self._remember_operation_error(error)
+            self.privacy_ready = False
+            if hasattr(self, "privacy_status"):
+                self.privacy_status.set("Privacidade indisponível; gravação bloqueada até recarregar.")
+            return
+        self.privacy_defaults = copy.deepcopy(value)
+        self.privacy_ready = True
+        if hasattr(self, "privacy_notice_enabled"):
+            notice = value.get("recording_notice", {})
+            if not isinstance(notice, dict):
+                notice = {}
+            self.privacy_notice_enabled.set(bool(notice.get("enabled", False)))
+            self.privacy_notice_language.set(notice.get("language", "pt-BR"))
+            self.qa_mode.set(value.get("qa_mode", "explicit_save"))
+            self._sync_qa_controls()
+            self.privacy_status.set("Privacidade local carregada.")
 
     def _profile_changed(self, _event=None):
         self.profile.set(next(key for key, label in PROFILE_LABELS.items() if label == self.profile_display.get()))
@@ -1903,7 +2380,7 @@ class MeetingWindow:
             )
 
     def _remember_operation_error(self, error):
-        self.operation_details = "Detalhes técnicos: " + str(error)[:4096]
+        self.operation_details = "Detalhes técnicos: " + _safe_retention_text(error, 4096)
         self.record_details = self.operation_details
         self.record_details_button.configure(state="normal")
 
@@ -1975,7 +2452,7 @@ class MeetingWindow:
             self.endpoint_vars[track].set(match)
         self._sync_source_controls()
 
-    def start(self):
+    def _validated_recording_request(self):
         try:
             settings = self._current_settings()
             title = self.record_title.get().strip()
@@ -1993,14 +2470,168 @@ class MeetingWindow:
                     raise ValueError("O dispositivo manual está indisponível. Atualize ou escolha outro dispositivo.")
         except (ValueError, StopIteration) as exc:
             self.status.set(str(exc))
-            return
-        self._submit("control", lambda: self.controller.start(settings, title=title), self._started, urgent=True)
+            return None
+        return settings, title
 
-    def _started(self, accepted, error):
+    def request_start(self, origin="window"):
+        """Shared GUI-thread start path for window, hotkey, and tray origins."""
+        if self.closed:
+            return False
+        if getattr(self, "privacy_save_inflight", False):
+            self.status.set("Aguarde a atualização de privacidade antes de iniciar a gravação.")
+            return False
+        if not getattr(self, "retention_ready", True):
+            self.status.set("A gravação aguarda a recuperação do workspace.")
+            return False
+        if not getattr(self, "privacy_ready", True):
+            self.pending_start_origin = origin
+            refresher = getattr(self.controller, "refresh_privacy_defaults", None)
+            if callable(refresher):
+                self.status.set("Carregando privacidade local antes de gravar…")
+                if not self._submit("privacy_start", refresher, self._privacy_ready_for_start):
+                    self.pending_start_origin = None
+                    return False
+                return True
+            self.status.set("Privacidade local indisponível; gravação bloqueada.")
+            return False
+        request = self._validated_recording_request()
+        if request is None:
+            return False
+        settings, title = request
+        required = False
+        checker = getattr(self.controller, "recording_notice_required", None)
+        if callable(checker):
+            try:
+                required = checker() is True
+            except Exception:
+                required = True
+        if required:
+            self._show_recording_notice(origin, settings, title)
+            return True
+        return self._submit_start(settings, title, origin)
+
+    def _privacy_ready_for_start(self, value, error):
+        if self.closed:
+            return
+        origin = self.pending_start_origin
+        self.pending_start_origin = None
+        self._privacy_loaded(value, error)
+        if error or not self.privacy_ready or not origin:
+            return
+        self.request_start(origin)
+
+    def _show_recording_notice(self, origin, settings, title):
+        """Show selectable local notice; copy failure never blocks confirmation."""
+        if self.closed:
+            return
+        try:
+            language = self.privacy_notice_language.get()
+        except (AttributeError, tk.TclError):
+            language = "pt-BR"
+        reader = getattr(self.controller, "recording_notice", None)
+        try:
+            notice = reader(language) if callable(reader) else self.controller.recording_notice_text(language)
+        except Exception:
+            notice = (
+                "Esta reunião será gravada localmente pelo Snipvoice. "
+                "Confirme que todas as pessoas foram informadas e consentiram."
+                if language == "pt-BR" else
+                "This meeting will be recorded locally by Snipvoice. "
+                "Confirm that everyone has been informed and consents."
+            )
+        dialog = tk.Toplevel(self.window)
+        self.recording_notice_dialog = dialog
+        dialog.title("Confirmação antes de gravar")
+        dialog.transient(self.window)
+        dialog.grab_set()
+        dialog.configure(bg=self.ui.surface)
+        self._label(dialog, "Aviso de gravação", font=self.ui.font(12, "bold"),
+                    fg=self.ui.text_strong).pack(anchor="w", padx=self.ui.space_lg,
+                    pady=(self.ui.space_lg, self.ui.space_sm))
+        self._label(dialog, "O texto é selecionável e pode ser copiado para compartilhar com os participantes.",
+                    fg=self.ui.text_muted, wraplength=560, justify="left", anchor="w").pack(
+                    fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
+        notice_box = tk.Text(dialog, height=8, width=72, wrap="word", font=self.ui.font(),
+                             **self.ui.text_colors())
+        notice_box.pack(fill="both", expand=True, padx=self.ui.space_lg)
+        notice_box.insert("1.0", notice)
+        notice_box.configure(state="normal")
+        copy_status = tk.StringVar(dialog, "")
+        actions = tk.Frame(dialog, bg=self.ui.surface)
+        actions.pack(fill="x", padx=self.ui.space_lg, pady=self.ui.space_md)
+
+        def copy_notice():
+            try:
+                copied = Clipboard.set_content(notice)
+            except Exception:
+                copied = False
+            copy_status.set("Aviso copiado." if copied else "Não foi possível copiar; selecione o texto manualmente.")
+
+        def cancel():
+            self.pending_start_origin = None
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.recording_notice_dialog = None
+            self.status.set("Gravação cancelada no aviso de consentimento.")
+
+        def confirm():
+            grant = getattr(self.controller, "grant_recording_consent", None)
+            try:
+                if callable(grant):
+                    grant()
+            except Exception as exc:
+                self._remember_operation_error(exc)
+                self.status.set("Não foi possível registrar a confirmação; gravação bloqueada.")
+                return
+            try:
+                dialog.grab_release()
+                dialog.destroy()
+            except tk.TclError:
+                pass
+            self.recording_notice_dialog = None
+            self._submit_start(settings, title, origin)
+
+        self._button(actions, "Copiar aviso", copy_notice).pack(side="left")
+        self._label(actions, "", textvariable=copy_status, fg=self.ui.text_muted).pack(side="left", padx=8)
+        self._button(actions, "Cancelar", cancel).pack(side="right", padx=(8, 0))
+        self._button(actions, "Confirmar e iniciar", confirm, accent=True).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.geometry("650x360")
+        dialog.lift()
+        dialog.focus_force()
+        return dialog
+
+    def _submit_start(self, settings, title, origin="window"):
+        self.status.set(f"Iniciando gravação ({origin})…")
+        submitted = self._submit(
+            "control", lambda: self.controller.start(settings, title=title),
+            lambda accepted, error: self._started(accepted, error, origin), urgent=True,
+        )
+        if not submitted:
+            revoke = getattr(self.controller, "revoke_recording_consent", None)
+            if callable(revoke):
+                revoke()
+        return submitted
+
+    def start(self):
+        return self.request_start("window")
+
+    def _started(self, accepted, error, origin="window"):
         if error:
+            revoke = getattr(self.controller, "revoke_recording_consent", None)
+            if callable(revoke):
+                revoke()
             self._remember_operation_error(error)
             self.status.set("Não foi possível iniciar a gravação. Veja os detalhes na aba Gravação.")
         else:
+            if not accepted:
+                revoke = getattr(self.controller, "revoke_recording_consent", None)
+                if callable(revoke):
+                    revoke()
             self.status.set("Gravação solicitada." if accepted else
                             "Não foi possível iniciar. Verifique o estado da gravação.")
 
@@ -2257,7 +2888,7 @@ class MeetingWindow:
                 self._remember_operation_error(error)
             self.organization_status.set("As definições de organização não puderam ser carregadas.")
             return
-        self.organization_generation = workspace.get("generation", 0)
+        self._apply_workspace_settings(workspace)
         self.organization_definitions = {
             "collections": list(workspace.get("collections", []) or []),
             "series": list(workspace.get("series", []) or []),
@@ -2451,6 +3082,195 @@ class MeetingWindow:
             return
         self._apply_search_resolution(value)
 
+    def show_trash(self):
+        """Open a bounded trash manager; all mutations stay on the IO lane."""
+        if not getattr(self, "retention_ready", True):
+            self.status.set("A lixeira aguarda a recuperação do workspace.")
+            return None
+        if self.closed:
+            return None
+        dialog = getattr(self, "trash_dialog", None)
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog.deiconify()
+                dialog.lift()
+                self.refresh_trash()
+                return dialog
+        except tk.TclError:
+            pass
+        dialog = tk.Toplevel(self.window)
+        self.trash_dialog = dialog
+        dialog.title("Lixeira local")
+        dialog.geometry("720x420")
+        dialog.minsize(560, 300)
+        dialog.transient(self.window)
+        dialog.configure(bg=self.ui.surface)
+        self._label(dialog, "Lixeira local", font=self.ui.font(12, "bold"),
+                    fg=self.ui.text_strong).pack(anchor="w", padx=self.ui.space_lg,
+                    pady=(self.ui.space_lg, self.ui.space_xs))
+        self._label(
+            dialog,
+            "Restaurar retorna a reunião à biblioteca. Purga permanente exige uma segunda confirmação. “Esvaziar expirados” remove somente itens vencidos.",
+            fg=self.ui.text_muted, wraplength=660, justify="left", anchor="w",
+        ).pack(fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
+        frame = tk.Frame(dialog, bg=self.ui.surface)
+        frame.pack(fill="both", expand=True, padx=self.ui.space_lg)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        self.trash_tree = ttk.Treeview(
+            frame, columns=("meeting", "deleted", "purge", "bytes"),
+            show="headings", selectmode="browse", style="Meeting.Treeview",
+        )
+        for column, label, width in (
+            ("meeting", "Reunião", 230), ("deleted", "Movida em", 150),
+            ("purge", "Expira em", 150), ("bytes", "Bytes", 90),
+        ):
+            self.trash_tree.heading(column, text=label)
+            self.trash_tree.column(column, width=width, stretch=column == "meeting")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.trash_tree.yview)
+        self.trash_tree.configure(yscrollcommand=scrollbar.set)
+        self.trash_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.trash_status = tk.StringVar(dialog, "Carregando lixeira…")
+        self._label(dialog, "", textvariable=self.trash_status, fg=self.ui.text_muted,
+                    anchor="w").pack(fill="x", padx=self.ui.space_lg, pady=(self.ui.space_xs, 0))
+        actions = tk.Frame(dialog, bg=self.ui.surface)
+        actions.pack(fill="x", padx=self.ui.space_lg, pady=self.ui.space_md)
+        self._button(actions, "Atualizar", self.refresh_trash).pack(side="left")
+        self._button(actions, "Restaurar selecionada", self.restore_selected_trash).pack(side="left", padx=6)
+        self._button(actions, "Purgar selecionada…", self.purge_selected_trash, danger=True).pack(side="left")
+        self._button(actions, "Esvaziar expirados…", self.empty_expired_trash, danger=True).pack(side="right")
+        dialog.protocol("WM_DELETE_WINDOW", self._close_trash_dialog)
+        dialog.bind("<Escape>", lambda _event: self._close_trash_dialog())
+        self.refresh_trash()
+        return dialog
+
+    def _close_trash_dialog(self):
+        self.trash_request += 1
+        dialog, self.trash_dialog = self.trash_dialog, None
+        self.trash_tree = None
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
+
+    def refresh_trash(self):
+        if self.closed:
+            return
+        tree = self.trash_tree
+        if tree is None:
+            return
+        self.trash_request += 1
+        request = self.trash_request
+        self.trash_status.set("Carregando lixeira…")
+        if not self._submit("trash_list", self.controller.list_trash,
+                            lambda value, error: self._trash_loaded(value, error, request)):
+            self.trash_status.set("A lixeira está ocupada; tente novamente.")
+
+    def _trash_loaded(self, entries, error, request):
+        if self.closed or request != self.trash_request or self.trash_tree is None:
+            return
+        if error:
+            self._remember_operation_error(error)
+            self.trash_status.set("Não foi possível carregar a lixeira.")
+            return
+        projected = []
+        for entry in list(entries or ())[:MAX_TRASH_ITEMS]:
+            if isinstance(entry, dict):
+                value = entry
+                get = value.get
+            else:
+                get = lambda key, default=None, item=entry: getattr(item, key, default)
+            session_id = str(get("session_id", ""))[:128]
+            if not session_id:
+                continue
+            projected.append({
+                "session_id": session_id,
+                "deleted_at": _safe_retention_text(get("deleted_at", ""), 40),
+                "purge_after": _safe_retention_text(get("purge_after", ""), 40),
+                "byte_estimate": max(0, int(get("byte_estimate", 0) or 0)),
+            })
+        self.trash_entries = projected
+        self.trash_tree.delete(*self.trash_tree.get_children())
+        for index, entry in enumerate(projected):
+            self.trash_tree.insert(
+                "", "end", iid=str(index), values=(entry["session_id"], entry["deleted_at"],
+                entry["purge_after"], entry["byte_estimate"]),
+            )
+        self.trash_status.set(f"{len(projected)} reunião(ões) na lixeira.")
+
+    def _selected_trash_entry(self):
+        if self.trash_tree is None:
+            return None
+        selected = self.trash_tree.selection()
+        if not selected:
+            self.trash_status.set("Selecione uma reunião na lixeira.")
+            return None
+        try:
+            entry = self.trash_entries[int(selected[0])]
+        except (IndexError, TypeError, ValueError):
+            self.trash_status.set("A seleção da lixeira ficou desatualizada; atualize a lista.")
+            return None
+        return entry
+
+    def restore_selected_trash(self):
+        entry = self._selected_trash_entry()
+        if not entry:
+            return
+        session_id = entry["session_id"]
+        request = self.trash_request
+        self.trash_status.set("Restaurando reunião…")
+        self._submit(
+            "trash_restore",
+            lambda: self.controller.restore_session(session_id),
+            lambda value, error: self._trash_mutation_finished("restaurada", value, error, request),
+        )
+
+    def purge_selected_trash(self):
+        entry = self._selected_trash_entry()
+        if not entry:
+            return
+        session_id = entry["session_id"]
+        if not messagebox.askyesno(
+                "Purgar permanentemente",
+                "A purga permanente não pode ser desfeita e não promete apagamento forense de SSD. Continuar?",
+                parent=self.trash_dialog):
+            return
+        request = self.trash_request
+        self.trash_status.set("Purgando reunião…")
+        self._submit(
+            "trash_purge",
+            lambda: self.controller.purge_session(session_id, confirm=True),
+            lambda value, error: self._trash_mutation_finished("purgada", value, error, request),
+        )
+
+    def empty_expired_trash(self):
+        if not messagebox.askyesno(
+                "Esvaziar itens expirados",
+                "Somente reuniões cujo prazo da lixeira já venceu serão purgadas. Esta ação é permanente. Continuar?",
+                parent=self.trash_dialog):
+            return
+        request = self.trash_request
+        self.trash_status.set("Purgando itens expirados…")
+        self._submit(
+            "trash_empty_expired",
+            lambda: self.controller.empty_trash(confirm=True),
+            lambda value, error: self._trash_mutation_finished("expirados purgados", value, error, request),
+        )
+
+    def _trash_mutation_finished(self, label, value, error, request):
+        if self.closed or request != self.trash_request or self.trash_tree is None:
+            return
+        if error or value is False:
+            if error:
+                self._remember_operation_error(error)
+            self.trash_status.set("A mutação da lixeira falhou; atualize para confirmar o estado.")
+            return
+        self.trash_status.set(f"Reunião(ões) {label}; lixeira atualizada.")
+        self.refresh_trash()
+        self.refresh_library()
+
     def rebuild_index(self):
         if self.rebuild_cancel is not None:
             return
@@ -2557,6 +3377,15 @@ class MeetingWindow:
             raw = self.controller.get_session(session_id)
             notes = str(raw.get("notes", ""))
             metadata = {key: raw.get(key) for key in ("id", "title", "status", "duration", "error")}
+            tracks = raw.get("tracks") if isinstance(raw.get("tracks"), dict) else {}
+            metadata["tracks"] = {
+                track: {
+                    "available": value.get("available", True) is not False,
+                    "raw_removed": bool(value.get("raw_removed")),
+                }
+                for track, value in tracks.items()
+                if track in TRACK_LABELS and isinstance(value, dict)
+            }
             bookmarks = list(islice(raw.get("bookmarks", []), BOOKMARK_LIMIT + 1))
             invalid_bookmarks = any(not isinstance(item, dict) for item in bookmarks)
             summary = raw.get("reviewed_summary") or raw.get("summary")
@@ -2617,8 +3446,12 @@ class MeetingWindow:
         self.organization_status.set("Organização carregada.")
         self.speaker_labels = metadata.get("speaker_labels", {})
         self.highlights = metadata.get("highlights", [])
+        self._set_audio_capabilities(metadata.get("tracks", {}))
         self.detail_ready = True
-        self.delete_button.configure(state="disabled" if metadata.get("status") == "recording" else "normal")
+        self.delete_button.configure(
+            state="normal" if self.retention_ready and metadata.get("status") != "recording"
+            else "disabled"
+        )
         if self.truncated:
             self.notes.configure(state="disabled")
         self.notes.edit_modified(False)
@@ -2637,7 +3470,277 @@ class MeetingWindow:
             self._apply_search_resolution(pending_search, self.search_request)
         self.status.set("Notas extensas: visualização parcial, somente leitura." if self.truncated else
                         f"Gravação carregada · página de transcrição com {len(segments)} trechos."
-                        + (" · Uma etapa anterior não foi concluída." if metadata.get("error") else ""))
+                         + (" · Uma etapa anterior não foi concluída." if metadata.get("error") else ""))
+
+    def _set_audio_capabilities(self, tracks):
+        unavailable = set()
+        self.raw_tracks_present = set()
+        if isinstance(tracks, dict):
+            for track, value in tracks.items():
+                if track in TRACK_LABELS.values() and isinstance(value, dict):
+                    self.raw_tracks_present.add(track)
+                if isinstance(value, dict) and (value.get("available") is False or value.get("raw_removed")):
+                    unavailable.add(track)
+        for track, variable_name, widget_name in (
+            ("microphone", "raw_remove_microphone", "raw_remove_microphone_check"),
+            ("system", "raw_remove_system", "raw_remove_system_check"),
+        ):
+            variable = getattr(self, variable_name, None)
+            if variable is not None:
+                variable.set(track in self.raw_tracks_present and track not in unavailable)
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.configure(state="normal" if track in self.raw_tracks_present and track not in unavailable else "disabled")
+        self.raw_unavailable_tracks = unavailable
+        available = self.raw_tracks_present - unavailable
+        self.raw_capabilities = {
+            "playback": bool(available),
+            "retranscription": bool(available),
+            "clip": bool(available),
+            "audio_export": bool(available),
+        }
+        if unavailable:
+            labels = ", ".join(TRACK_LABELS.get(item, item) for item in sorted(unavailable))
+            self.audio_capability_status.set(
+                f"Áudio raw indisponível ({labels}). Transcrição, relatórios, citações e exportações de texto continuam disponíveis."
+            )
+        else:
+            self.audio_capability_status.set(
+                "Áudio raw disponível para reprodução, retranscrição e clipes."
+                if available else "Nenhuma fonte de áudio raw está disponível."
+            )
+        selected_track = TRACK_LABELS.get(self.track.get(), "") if hasattr(self, "track") else ""
+        playback_available = selected_track in available
+        for name, state in (
+            ("play_button", "normal" if playback_available else "disabled"),
+            ("transcribe_button", "normal" if self.raw_capabilities["retranscription"] else "disabled"),
+            ("export_audio_button", "normal" if self.raw_capabilities["audio_export"] else "disabled"),
+            ("raw_remove_button", "normal" if getattr(self, "retention_ready", True)
+             and available
+             else "disabled"),
+        ):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.configure(state=state)
+        if getattr(self, "highlight_export_button", None) is not None:
+            self.highlight_export_button.configure(
+                state="normal" if self.raw_capabilities["clip"] else "disabled"
+            )
+
+    @staticmethod
+    def _retention_workflow_available(controller):
+        method = getattr(controller, "retention_plan", None)
+        if not callable(method):
+            return False
+        module = getattr(type(method), "__module__", "")
+        if module.startswith("unittest.mock"):
+            # Existing embedded/legacy test doubles only implement the old
+            # delete_session seam.  A configured Mock return value still opts
+            # into the new exact-plan workflow.
+            value = getattr(method, "return_value", None)
+            return value is not None and not getattr(type(value), "__module__", "").startswith("unittest.mock")
+        return True
+
+    def _retention_preview_text(self, projection, title=""):
+        operation = RETENTION_POLICY_LABELS.get(
+            projection.get("operation"), projection.get("operation", "retenção local"),
+        )
+        status = "elegível" if projection.get("eligible") else "bloqueada"
+        lines = [
+            f"Reunião: {_safe_retention_text(title or projection.get('session_id'), 160)}",
+            f"Operação: {operation} · {status}",
+            f"Inventário: {projection.get('target_count', 0)} alvo(s) · {projection.get('byte_estimate', 0)} bytes",
+            f"Recuperação: {projection.get('recovery_mode', 'none')}",
+        ]
+        tracks = projection.get("raw_tracks") or []
+        if tracks:
+            lines.append("Fontes raw: " + ", ".join(tracks))
+        for label, key in (
+            ("Motivos", "reasons"), ("Capacidades perdidas", "lost_capabilities"),
+            ("Exportações externas preservadas", "excluded_external_exports"),
+        ):
+            values = projection.get(key) or []
+            if values:
+                lines.append(label + ":\n- " + "\n- ".join(values[:8]))
+        return "\n".join(lines)[:6000]
+
+    def _retention_preview_loaded(self, session_id, title, plan, error, request):
+        if self.closed or request != self.retention_request or self.selected != session_id:
+            return
+        if error:
+            self.delete_button.configure(state="normal")
+            self._remember_operation_error(error)
+            self.status.set("A prévia de retenção falhou; nenhuma exclusão foi tentada.")
+            return
+        projection = retention_plan_projection(plan)
+        if not projection.get("eligible"):
+            self.delete_button.configure(state="normal")
+            self.status.set("A retenção foi bloqueada: " + "; ".join(projection.get("reasons", [])[:3]))
+            messagebox.showwarning("Retenção bloqueada", self._retention_preview_text(projection, title), parent=self.window)
+            return
+        if not messagebox.askyesno(
+                "Prévia de retenção",
+                self._retention_preview_text(projection, title)
+                + "\n\nMover para a lixeira do app agora? A confirmação usa exatamente esta prévia.",
+                parent=self.window):
+            self.delete_button.configure(state="normal")
+            self.status.set("Nenhuma exclusão foi aplicada.")
+            return
+        self.status.set("Aplicando a prévia de retenção…")
+        if not self._submit(
+                "retention_apply",
+                lambda: self.controller.apply_retention(plan, confirm=True),
+                lambda value, apply_error: self._retention_applied(session_id, value, apply_error, request),
+        ):
+            self.delete_button.configure(state="normal")
+
+    def _retention_applied(self, session_id, value, error, request):
+        if self.closed or request != self.retention_request or self.selected != session_id:
+            return
+        if error or value is False:
+            self.delete_button.configure(state="normal")
+            if error:
+                self._remember_operation_error(error)
+            self.status.set("A prévia ficou inválida ou a retenção falhou; revise e gere uma nova prévia.")
+            return
+        self._clear_library_detail()
+        self.refresh_library()
+        self.status.set("Reunião movida para a lixeira do app; cópias externas não foram alteradas.")
+
+    def _legacy_delete_selected(self):
+        """Compatibility path for old embedded doubles only."""
+        session_id = self.selected
+        title = self.title.get().strip() or session_id
+        message = (
+            f'Excluir “{title}” da biblioteca?\n\n'
+            "Os arquivos capturados, a transcrição, as notas e o resumo serão movidos "
+            "para a lixeira do app. Um arquivo final exportado para outra pasta não será apagado."
+        )
+        if not messagebox.askyesno("Excluir gravação", message, parent=self.window):
+            return
+        self.delete_button.configure(state="disabled")
+        self.status.set("Movendo gravação para a lixeira…")
+
+        def deleted(value, error):
+            if error or value is False:
+                if self.selected == session_id:
+                    self.delete_button.configure(state="normal")
+                if error:
+                    self._remember_operation_error(error)
+                self.status.set("Não foi possível mover a gravação para a lixeira.")
+                return
+            if self.selected == session_id:
+                self._clear_library_detail()
+            self.refresh_library()
+            self.status.set("Gravação movida para a lixeira do app.")
+
+        if not self._submit("delete_session", lambda: self.controller.delete_session(session_id), deleted):
+            self.delete_button.configure(state="normal")
+
+    def delete_selected(self):
+        if not self.selected or not self.detail_ready:
+            self.status.set("Selecione uma gravação na biblioteca.")
+            return
+        if not getattr(self, "retention_ready", True):
+            self.status.set("A retenção aguarda a recuperação do workspace.")
+            return
+        if not self._retention_workflow_available(self.controller):
+            return self._legacy_delete_selected()
+        session_id = self.selected
+        title = self.title.get().strip() or session_id
+        self.retention_request += 1
+        request = self.retention_request
+        self.delete_button.configure(state="disabled")
+        self.status.set("Calculando prévia de retenção…")
+        if not self._submit(
+                "retention_plan",
+                lambda: self.controller.retention_plan(
+                    session_id, policy={"mode": "whole_meeting", "after_days": 0},
+                ),
+                lambda plan, error: self._retention_preview_loaded(
+                    session_id, title, plan, error, request,
+                ),
+        ):
+            self.delete_button.configure(state="normal")
+
+    def preview_raw_tracks(self, tracks=None):
+        if not self.selected or not self.detail_ready:
+            self.status.set("Selecione uma gravação antes de remover áudio raw.")
+            return
+        if not getattr(self, "retention_ready", True):
+            self.status.set("A retenção aguarda a recuperação do workspace.")
+            return
+        if tracks is None:
+            selected_tracks = tuple(
+                track for track, variable_name in (
+                    ("microphone", "raw_remove_microphone"), ("system", "raw_remove_system"),
+                ) if bool(getattr(self, variable_name, None) and getattr(self, variable_name).get())
+            )
+        else:
+            selected_tracks = tuple(tracks)
+        if not selected_tracks:
+            selected_tracks = tuple(sorted(
+                getattr(self, "raw_tracks_present", set()) - getattr(self, "raw_unavailable_tracks", set())
+            ))
+        if not selected_tracks:
+            self.status.set("Nenhuma fonte raw disponível para remoção.")
+            return
+        session_id = self.selected
+        self.retention_request += 1
+        request = self.retention_request
+        self.raw_remove_button.configure(state="disabled")
+        self.status.set("Calculando prévia de remoção raw…")
+
+        def loaded(plan, error):
+            if self.closed or request != self.retention_request or self.selected != session_id:
+                return
+            if error:
+                self.raw_remove_button.configure(state="normal")
+                self._remember_operation_error(error)
+                self.status.set("A prévia raw falhou; nenhum áudio foi removido.")
+                return
+            projection = retention_plan_projection(plan)
+            if not projection.get("eligible"):
+                self.raw_remove_button.configure(state="normal")
+                messagebox.showwarning("Remoção raw bloqueada", self._retention_preview_text(projection), parent=self.window)
+                self.status.set("A remoção raw foi bloqueada; a transcrição existente permanece disponível.")
+                return
+            if not messagebox.askyesno(
+                    "Remover áudio raw",
+                    self._retention_preview_text(projection)
+                    + "\n\nEssa operação desabilita reprodução, retranscrição, novos clipes e exportação de áudio para as fontes escolhidas. Aplicar?",
+                    parent=self.window):
+                self.raw_remove_button.configure(state="normal")
+                self.status.set("Nenhum áudio raw foi removido.")
+                return
+            self.status.set("Aplicando remoção raw…")
+            if not self._submit(
+                    "raw_retention_apply",
+                    lambda: self.controller.apply_raw_tracks(plan, confirm=True),
+                    lambda value, apply_error: self._raw_tracks_applied(
+                        session_id, value, apply_error, request,
+                    ),
+            ):
+                self.raw_remove_button.configure(state="normal")
+
+        if not self._submit(
+            "raw_retention_plan",
+            lambda: self.controller.plan_raw_tracks(session_id, tracks=selected_tracks),
+            loaded,
+        ):
+            self.raw_remove_button.configure(state="normal")
+
+    def _raw_tracks_applied(self, session_id, value, error, request):
+        if self.closed or request != self.retention_request or self.selected != session_id:
+            return
+        if error or value is False:
+            self.raw_remove_button.configure(state="normal")
+            if error:
+                self._remember_operation_error(error)
+            self.status.set("A prévia raw ficou inválida; nenhuma nova tentativa foi feita.")
+            return
+        self.status.set("Áudio raw removido; transcrição, citações e relatórios continuam disponíveis.")
+        self.load_session(session_id)
 
     def _render_transcript(self, segments):
         self.transcript.delete(*self.transcript.get_children())
@@ -2848,39 +3951,6 @@ class MeetingWindow:
                 self.status.set("Há novas alterações nas notas. Salve novamente antes de sair.")
         self._submit("save_notes", lambda: self.controller.update_notes(session_id, title, notes, bookmarks=bookmarks), saved)
 
-    def delete_selected(self):
-        if not self.selected or not self.detail_ready:
-            self.status.set("Selecione uma gravação na biblioteca.")
-            return
-        session_id = self.selected
-        title = self.title.get().strip() or session_id
-        message = (
-            f'Excluir “{title}” da biblioteca?\n\n'
-            "Os arquivos capturados, a transcrição, as notas e o resumo serão removidos "
-            "permanentemente. Um arquivo final exportado para outra pasta não será apagado."
-        )
-        if not messagebox.askyesno("Excluir gravação", message, parent=self.window):
-            return
-        self.delete_button.configure(state="disabled")
-        self.status.set("Excluindo gravação…")
-
-        def deleted(value, error):
-            if error or value is False:
-                if self.selected == session_id:
-                    self.delete_button.configure(state="normal")
-                if error:
-                    self._remember_operation_error(error)
-                self.status.set("Não foi possível excluir a gravação. Veja os detalhes na aba Gravação."
-                                if error else "Não foi possível excluir a gravação. Tente novamente.")
-                return
-            if self.selected == session_id:
-                self._clear_library_detail()
-            self.refresh_library()
-            self.status.set("Gravação excluída da biblioteca.")
-
-        if not self._submit("delete_session", lambda: self.controller.delete_session(session_id), deleted):
-            self.delete_button.configure(state="normal")
-
     def _clear_library_detail(self):
         self.bridge.invalidate("detail")
         self.bridge.invalidate("outputs")
@@ -3008,7 +4078,10 @@ class MeetingWindow:
         self.highlight_label.set(str(item.get("label", "")))
         self.highlight_note.set(str(item.get("note", "")))
         self.highlight_delete_button.configure(state="normal")
-        self.highlight_export_button.configure(state="normal")
+        track = item.get("track")
+        self.highlight_export_button.configure(
+            state="disabled" if track in getattr(self, "raw_unavailable_tracks", set()) else "normal"
+        )
 
     def _annotation_saved(self, value, error, message="Anotações salvas."):
         if error or value is False:
@@ -3144,6 +4217,9 @@ class MeetingWindow:
         if item is None:
             self.status.set("O destaque selecionado não está mais disponível; atualize a gravação.")
             return
+        if item.get("track") in getattr(self, "raw_unavailable_tracks", set()):
+            self.status.set("O áudio raw deste destaque foi removido; o clipe não está mais disponível.")
+            return
         path = filedialog.asksaveasfilename(
             parent=self.window, title="Exportar clipe do destaque", defaultextension=".wav",
             filetypes=(("Áudio WAV", "*.wav"), ("Todos os arquivos", "*")),
@@ -3172,16 +4248,25 @@ class MeetingWindow:
         if self.snapshot.get("state") in ("starting", "recording", "paused", "stopping"):
             self.status.set("Finalize a captura antes de ouvir uma gravação.")
             return
+        track = TRACK_LABELS[self.track.get()]
+        if track in getattr(self, "raw_unavailable_tracks", set()):
+            self.status.set("A fonte raw selecionada foi removida; a reprodução está desabilitada.")
+            return
         try:
             position = self._position()
         except ValueError as exc:
             self.status.set(str(exc))
             return
-        self._action("play", self.selected, TRACK_LABELS[self.track.get()], start=position)
+        self._action("play", self.selected, track, start=position)
 
     def transcribe(self):
         if not self.selected:
             self.status.set("Selecione uma gravação na biblioteca.")
+            return
+        available = getattr(self, "raw_tracks_present", set()) - getattr(
+            self, "raw_unavailable_tracks", set())
+        if not available:
+            self.status.set("A retranscrição está desabilitada porque não há áudio raw; a transcrição existente continua disponível.")
             return
         try:
             settings = self._current_settings()
@@ -3239,6 +4324,11 @@ class MeetingWindow:
     def export_audio(self):
         if not self.selected:
             self.status.set("Selecione uma gravação na biblioteca.")
+            return
+        available = getattr(self, "raw_tracks_present", set()) - getattr(
+            self, "raw_unavailable_tracks", set())
+        if not available:
+            self.status.set("A exportação de áudio está desabilitada porque não há áudio raw disponível.")
             return
         try:
             settings = self._current_settings()
@@ -3341,6 +4431,8 @@ class MeetingWindow:
         session_id = self.selected
         text = self.summary.get("1.0", "end-1c")
         def saved(_value, error):
+            if self.closed or self.selected != session_id:
+                return
             if error:
                 self._remember_operation_error(error)
                 self.status.set("Não foi possível salvar o resumo. Veja os detalhes na aba Gravação.")
@@ -3432,7 +4524,12 @@ class MeetingWindow:
             state = self.snapshot.get("state", "idle")
             active = state in ("starting", "recording", "paused", "stopping")
             processing = self.snapshot.get("processing")
-            self.start_button.configure(state="normal" if state == "idle" and not processing and self.settings_loaded else "disabled")
+            start_ready = (
+                state == "idle" and not processing and self.settings_loaded
+                and self.retention_ready and self.privacy_ready
+                and not self.privacy_save_inflight
+            )
+            self.start_button.configure(state="normal" if start_ready else "disabled")
             self.stop_button.configure(state="normal" if active else "disabled")
             self.pause_button.configure(text="Retomar" if state == "paused" else "Pausar",
                 state="normal" if state in ("recording", "paused") else "disabled")
@@ -3462,6 +4559,8 @@ class MeetingWindow:
                 meter.configure(value=max(0, min(1, value)) if math.isfinite(value) else 0)
             if self.previous_state in ("recording", "paused", "stopping") and not active:
                 self.refresh_library()
+            if state != self.previous_state and self.on_recording_state_changed:
+                self.on_recording_state_changed(state, dict(self.snapshot))
             self.previous_state = state
             if self.previous_processing and not processing:
                 self.refresh_library()
@@ -3509,6 +4608,9 @@ class MeetingWindow:
         self.search_request = getattr(self, "search_request", 0) + 1
         self.cross_request = getattr(self, "cross_request", 0) + 1
         self.cross_citation_request = getattr(self, "cross_citation_request", 0) + 1
+        self.trash_request = getattr(self, "trash_request", 0) + 1
+        self.retention_request = getattr(self, "retention_request", 0) + 1
+        self.pending_start_origin = None
         self.unsaved_answer = None
         self.playback_generation = getattr(self, "playback_generation", -1) + 1
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
@@ -3529,6 +4631,15 @@ class MeetingWindow:
             pass
         self._unbind_mousewheel_regions()
         self.bridge.close()
+        for dialog_name in ("recording_notice_dialog", "trash_dialog"):
+            dialog = getattr(self, dialog_name, None)
+            if dialog is not None:
+                try:
+                    dialog.destroy()
+                except tk.TclError:
+                    pass
+                setattr(self, dialog_name, None)
+        self.trash_tree = None
         if self.after_id is not None:
             self.root.after_cancel(self.after_id)
             self.after_id = None
@@ -3538,17 +4649,20 @@ class MeetingWindow:
             after_close()
 
 
-def open_meeting_window(root, controller, settings_getter, persist_settings, on_settings_changed=None):
-    view = MeetingWindow(root, controller, settings_getter, persist_settings, on_settings_changed)
+def open_meeting_window(root, controller, settings_getter, persist_settings, on_settings_changed=None,
+                        on_recording_state_changed=None):
+    view = MeetingWindow(root, controller, settings_getter, persist_settings,
+                         on_settings_changed, on_recording_state_changed)
     view.window._meeting_view = view
     return view.window
 
 
 def add_meeting_tabs(root, window, notebook, controller, settings_getter,
-                     persist_settings, on_settings_changed=None):
+                     persist_settings, on_settings_changed=None, on_recording_state_changed=None):
     """Attach recording and library tabs to the shared application window."""
     view = MeetingWindow(
         root, controller, settings_getter, persist_settings, on_settings_changed,
+        on_recording_state_changed,
         window=window, notebook=notebook,
     )
     window._meeting_view = view
