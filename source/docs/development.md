@@ -6,9 +6,21 @@ Use an existing interpreter; do not implicitly update host tooling or packages.
 
 Run all tests from `source` with `python -m unittest discover -s tests -v`.
 Run focused correctness lint from root with `python -m ruff check source`.
-The test/native CI matrices cover Windows/macOS/Linux, Python 3.12 and 3.14.
-Core-only tests may skip optional native imports; the native CI lane requires
-the pinned imports and rejects skipped runtime/resampler tests.
+CI uses three consolidated lanes: Windows and macOS run the release Python
+3.12 runtime, while Linux runs Python 3.14 plus focused Ruff checks. Every lane
+installs the pinned native voice dependencies, requires their imports, rejects
+skipped runtime/resampler tests, builds the applicable capture helper, and runs
+the complete suite. This preserves all supported operating-system and Python
+version boundaries without a Cartesian matrix.
+
+Desktop bundle jobs remain the release proof, but run on pull requests only
+when packaging, native-helper, dependency, icon, installer, or workflow inputs
+change. They always run for version tags and manual dispatch. Pull-request
+bundle artifacts are not uploaded; tag/manual artifacts expire after 14 days
+and should be moved to a GitHub Release when they are intended for distribution.
+Branch protection should require only `tests (ubuntu-latest, py3.14)`,
+`tests (windows-latest, py3.12)`, and `tests (macos-latest, py3.12)`; lint and
+native voice are enforced inside those jobs rather than as separate contexts.
 
 Windows: `build_release.bat`, then `build_installer.bat` (Inno Setup 6 required).
 macOS: `./build_release_macos.sh`, optionally with an existing `PYTHON` interpreter

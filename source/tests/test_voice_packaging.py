@@ -9,6 +9,45 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class PackagingExcludeTests(unittest.TestCase):
+    def test_ci_consolidates_platform_native_and_lint_coverage(self):
+        path = os.path.join(ROOT, ".github", "workflows", "ci.yml")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+
+        matrix = re.findall(
+            r'^\s+- os: (ubuntu-latest|windows-latest|macos-latest)$',
+            text,
+            re.M,
+        )
+        self.assertEqual(matrix, ["ubuntu-latest", "windows-latest", "macos-latest"])
+        self.assertNotIn("\n  lint:", text)
+        self.assertNotIn("\n  voice-native:", text)
+        self.assertIn("requirements.txt -r requirements-voice.txt", text)
+        self.assertIn("python -m ruff check source", text)
+        self.assertIn("Run native voice tests without skips", text)
+        self.assertEqual(text.count("python -m unittest discover -s tests -q"), 2)
+        self.assertLess(
+            text.index("Run focused lint"),
+            text.index("Install application and native voice dependencies"),
+        )
+
+    def test_bundle_prs_are_path_scoped_and_do_not_upload_artifacts(self):
+        path = os.path.join(ROOT, ".github", "workflows", "bundles.yml")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+
+        self.assertIn("pull_request:\n    paths:", text)
+        for required_path in (
+            '".github/workflows/bundles.yml"',
+            '"packaging/**"',
+            '"requirements-release.lock"',
+            '"source/native/**"',
+        ):
+            self.assertIn(required_path, text)
+        self.assertEqual(text.count("if: github.event_name != 'pull_request'"), 2)
+        self.assertEqual(text.count("retention-days: 14"), 2)
+        self.assertEqual(text.count("timeout-minutes: 30"), 2)
+
     def test_windows_and_macos_scripts_exclude_the_dead_ml_stack(self):
         expected = (
             "torch",
