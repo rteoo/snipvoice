@@ -63,7 +63,7 @@ Focused unit coverage exists for canonical sidecars, report/profile validation,
 citation handling, Q&A save semantics, annotations, clips, organization,
 SQLite/FTS5 search and rebuild, GUI/controller routing, hotkey/tray dispatch,
 privacy/consent, and retention failure/recovery paths. On 2026-09-17,
-`python -m unittest discover -s tests -q` ran 1,191 tests successfully with 53
+`python -m unittest discover -s tests -q` ran 1,195 tests successfully with 53
 environment/platform skips and the SQLite runtime probe passed. Ruff is
 unavailable in this validation context and must not be called
 passed without running the pinned development tool.

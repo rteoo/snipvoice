@@ -48,7 +48,7 @@ copied fixtures under `source/tests/tmp`; never point them at a live
 data-deletion test. The SQLite/FTS runtime probe, repair/rebuild UI, report and
 Q&A controls, organization filters, consent settings, retention preview, trash,
 restore, and purge routes are implemented. On 2026-09-17,
-`python -m unittest discover -s tests -q` ran 1,191 tests successfully with 53
+`python -m unittest discover -s tests -q` ran 1,195 tests successfully with 53
 environment/platform skips. Ruff is unavailable in this validation context and
 must not be described as passed until it is run with the pinned development
 tool. Physical Tk/tray interaction, native capture, packaged startup, and

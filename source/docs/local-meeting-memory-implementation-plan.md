@@ -31,7 +31,7 @@ requires a physical host or release environment:
 | Package probes, native capture, packaged startup, signing, and physical acceptance | Open validation | These are release/environment checks, not missing local-memory features. |
 
 The implementation is therefore usable as a local development surface. On
-2026-09-17, `python -m unittest discover -s tests -q` ran 1,191 tests
+2026-09-17, `python -m unittest discover -s tests -q` ran 1,195 tests
 successfully with 53 environment/platform skips. Ruff is unavailable in this
 validation context. Physical Tk/tray,
 native capture, packaged startup, signing, migration/downgrade, and long-run
@@ -94,7 +94,7 @@ task execution, sentiment scoring, MCP, or a local network server.
   cross-meeting answers with validated transcript citations. The GUI exposes
   profiles, report history, Q&A, organization, search, repair, consent, and
   retention controls through worker-backed controller seams.
-- Focused tests cover these seams. The 2026-09-17 full run completed 1,191
+- Focused tests cover these seams. The 2026-09-17 full run completed 1,195
   tests successfully with 53 environment/platform skips; this record is not a
   physical-capture or packaged-acceptance certification.
 

@@ -158,7 +158,7 @@ recreated; it does not erase canonical meeting data.
 Unit tests cover canonical sidecars, reports, annotations, index behavior,
 profiles/intelligence seams, clips, GUI/controller routing, privacy/consent,
 hotkey/tray dispatch, and retention failure paths. On 2026-09-17,
-`python -m unittest discover -s tests -q` ran 1,191 tests successfully with 53
+`python -m unittest discover -s tests -q` ran 1,195 tests successfully with 53
 environment/platform skips. Ruff is unavailable in this validation context. No
 unit test proves microphone capture,
 Core Audio/WASAPI behavior, physical playback, two-hour drift, permissions,
