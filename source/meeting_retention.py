@@ -609,7 +609,32 @@ class MeetingRetention:
         if not isinstance(value, dict):
             return None
         defaults = value.get("retention_defaults")
-        return defaults if isinstance(defaults, dict) else None
+        if not isinstance(defaults, dict):
+            return None
+        # Workspace settings contain separate policies for whole meetings and
+        # raw audio.  The legacy RetentionPolicy seam accepts one policy at a
+        # time, so the default destructive action is the whole-meeting rule;
+        # callers explicitly planning raw removal pass the raw policy.
+        whole = defaults.get("whole_meeting", defaults.get("whole_meeting_policy"))
+        if whole is not None:
+            return whole
+        if any(key in defaults for key in (
+            "raw_audio", "raw_audio_policy", "raw_tracks", "raw_audio_tracks", "trash_days",
+        )):
+            # A legacy workspace may first persist only raw-audio or trash
+            # preferences.  Their absence of a whole-meeting rule means keep,
+            # not "feed the whole settings object to RetentionPolicy".
+            return {"mode": "keep"}
+        # Compatibility with the original single-policy workspace shape;
+        # ``trash_days`` belongs to the workspace adapter, not RetentionPolicy.
+        if any(key in defaults for key in (
+            "mode", "action", "kind", "policy", "after_days", "age_days",
+            "whole_meeting_after_days", "whole_after_days",
+            "raw_track_after_days", "raw_after_days", "tracks", "track",
+            "purge_after_days", "trash_after_days", "override",
+        )):
+            return {key: value for key, value in defaults.items() if key != "trash_days"}
+        return defaults
 
     def _resolve_policy(self, policy, session_id, metadata, override):
         annotations = None
@@ -766,41 +791,52 @@ class MeetingRetention:
     def _transcript_state(self, session_id, metadata):
         revisions = metadata.get("revisions")
         if not isinstance(revisions, list):
-            return False, False, set(), "As revisões de transcrição são inválidas."
+            return False, False, set(), (), "As revisões de transcrição são inválidas."
         completed = [item for item in revisions if isinstance(item, dict) and item.get("status") == "completed"]
         pending = [item for item in revisions if isinstance(item, dict) and item.get("status") in {"pending", "processing"}]
         if pending:
-            return False, bool(completed), set(), "Há uma revisão de transcrição ainda em processamento."
+            return False, bool(completed), set(), (), "Há uma revisão de transcrição ainda em processamento."
         if not completed:
-            return False, False, set(), "A reunião ainda não tem uma revisão de transcrição concluída."
+            return False, False, set(), (), "A reunião ainda não tem uma revisão de transcrição concluída."
         ids = set()
+        ranges = []
         total_bytes = 0
         for revision in completed:
             revision_id = revision.get("id")
             if not _valid_id(revision_id):
-                return False, True, ids, "Uma revisão concluída tem um identificador inválido."
+                return False, True, ids, tuple(ranges), "Uma revisão concluída tem um identificador inválido."
             reader = getattr(self.library, "get_transcript", None) if self.library is not None else None
             if reader is None:
                 reader = getattr(self.store, "get_transcript", None)
             if reader is None:
-                return False, True, ids, "O colaborador não oferece leitura de transcrições."
+                return False, True, ids, tuple(ranges), "O colaborador não oferece leitura de transcrições."
             try:
                 segments = list(reader(session_id, revision_id))
             except Exception as error:
-                return False, True, ids, f"A revisão de transcrição não pôde ser lida: {error}"
+                return False, True, ids, tuple(ranges), f"A revisão de transcrição não pôde ser lida: {error}"
             if len(segments) > MAX_TRANSCRIPT_SEGMENTS:
-                return False, True, ids, "A revisão de transcrição excede o limite de retenção."
+                return False, True, ids, tuple(ranges), "A revisão de transcrição excede o limite de retenção."
             expected = revision.get("segments")
             if isinstance(expected, int) and not isinstance(expected, bool) and expected != len(segments):
-                return False, True, ids, "A revisão de transcrição está incompleta."
+                return False, True, ids, tuple(ranges), "A revisão de transcrição está incompleta."
             for segment in segments:
                 if not isinstance(segment, dict) or not _valid_segment_id(segment.get("id")):
-                    return False, True, ids, "A revisão de transcrição contém um segmento inválido."
+                    return False, True, ids, tuple(ranges), "A revisão de transcrição contém um segmento inválido."
                 ids.add(segment["id"])
+                track = segment.get("track")
+                start, end = segment.get("start"), segment.get("end")
+                if (
+                    track in _TRACK_ORDER
+                    and isinstance(start, (int, float)) and not isinstance(start, bool)
+                    and isinstance(end, (int, float)) and not isinstance(end, bool)
+                    and math.isfinite(float(start)) and math.isfinite(float(end))
+                    and 0 <= float(start) <= float(end)
+                ):
+                    ranges.append((track, float(start), float(end)))
                 total_bytes += _json_size(segment)
                 if total_bytes > MAX_TRANSCRIPT_BYTES:
-                    return False, True, ids, "As transcrições excedem o limite de retenção."
-        return True, True, ids, ""
+                    return False, True, ids, tuple(ranges), "As transcrições excedem o limite de retenção."
+        return True, True, ids, tuple(ranges), ""
 
     def _transcript_snapshot(self, session_id, metadata):
         """Read the completed revisions used by the raw-retention gate."""
@@ -893,7 +929,7 @@ class MeetingRetention:
             for child in value:
                 yield from MeetingRetention._iter_citations(child, key)
 
-    def _citations_resolve(self, metadata, annotations, segment_ids):
+    def _citations_resolve(self, metadata, annotations, segment_ids, segment_ranges):
         sources = [metadata.get("summary"), annotations.get("reviewed_artifacts")]
         sources.extend(self._report_sources(metadata.get("id")))
         if not segment_ids:
@@ -911,13 +947,18 @@ class MeetingRetention:
                         # They remain resolvable as provenance while the
                         # transcript revision survives, even if raw audio does not.
                         pieces = item.split(":")
-                        if len(pieces) != 3:
+                        if len(pieces) != 3 or pieces[0] not in _TRACK_ORDER:
                             return False, "Uma citação do relatório não pode mais ser resolvida."
                         try:
                             start, end = float(pieces[1]), float(pieces[2])
                         except ValueError:
                             return False, "Uma citação do relatório não pode mais ser resolvida."
                         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
+                            return False, "Uma citação do relatório não pode mais ser resolvida."
+                        if not any(
+                            track == pieces[0] and start <= segment_end and end >= segment_start
+                            for track, segment_start, segment_end in segment_ranges
+                        ):
                             return False, "Uma citação do relatório não pode mais ser resolvida."
         return True, ""
 
@@ -978,14 +1019,18 @@ class MeetingRetention:
                 reasons.append("Raw-audio removal requires a completed or partial meeting, not an interrupted/failed state.")
                 eligible = False
             annotations = self._annotations(session_id, metadata)
-            complete, _has_revision, segment_ids, transcript_reason = self._transcript_state(session_id, metadata)
+            complete, _has_revision, segment_ids, segment_ranges, transcript_reason = self._transcript_state(
+                session_id, metadata,
+            )
             if not complete:
                 reasons.append(transcript_reason)
                 eligible = False
             if not self._review_exists(metadata, annotations):
                 reasons.append("Raw-audio removal waits for a reviewed transcript or report.")
                 eligible = False
-            citations_ok, citation_reason = self._citations_resolve(metadata, annotations, segment_ids)
+            citations_ok, citation_reason = self._citations_resolve(
+                metadata, annotations, segment_ids, segment_ranges,
+            )
             if not citations_ok:
                 reasons.append(citation_reason)
                 eligible = False
@@ -1132,17 +1177,28 @@ class MeetingRetention:
         active, reason = self._active_lease(plan.session_id, current_metadata)
         if active:
             raise ActiveLeaseError(reason)
+        # Inventory equality alone does not preserve the approved eligibility
+        # boundary: metadata can change status or age without changing file
+        # lengths.  Re-run the exact approved policy before any mutation.
+        current = self.plan(
+            plan.session_id,
+            plan.policy,
+            tracks=plan.raw_tracks if plan.operation == "raw_tracks" else None,
+        )
+        if (
+            not current.eligible
+            or current.operation != plan.operation
+            or (plan.operation == "whole_meeting" and current.policy != plan.policy)
+        ):
+            joined = " ".join(current.reasons)
+            if "lease" in joined.casefold() or "gravação" in joined.casefold():
+                raise ActiveLeaseError(joined)
+            raise PlanConflict("A elegibilidade mudou depois da prévia de retenção.")
         if plan.operation == "raw_tracks":
             # Eligibility is a compound promise over annotations, completed
             # transcript revisions, reviewed report provenance, and citations.
             # Re-run the gate immediately before moving bytes; an inventory
             # fingerprint alone cannot detect a stale review or citation.
-            current = self.plan(plan.session_id, plan.policy, tracks=plan.raw_tracks)
-            if not current.eligible:
-                joined = " ".join(current.reasons)
-                if "lease" in joined.casefold() or "gravação" in joined.casefold():
-                    raise ActiveLeaseError(joined)
-                raise PlanConflict("A elegibilidade do raw mudou depois da prévia de retenção.")
             if (
                 current.operation != plan.operation
                 or current.raw_tracks != plan.raw_tracks

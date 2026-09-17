@@ -1,6 +1,7 @@
 """Worker-owned meeting lifecycle; keyboard and Tk callbacks only enqueue work."""
 
 import array
+import copy
 from collections import deque
 import itertools
 import math
@@ -190,12 +191,156 @@ class MeetingController:
         self._output_path = ""
         self._postprocess = ""
         self._processing = False
+        self._processing_session = None
+        self._retention_active = False
+        self._retention_service = None
+        self._privacy_defaults = None
+        self._recording_consent_granted = False
         self._last_status = ""
         self._source_errors = set()
         self._annotation_generations = {}
         self._index_rebuild_lock = threading.Lock()
         self._index_rebuild_cancel = threading.Event()
         self._index_rebuild_progress = {"done": 0, "total": None, "state": "idle"}
+
+    # -- Privacy and retention admission --------------------------------
+
+    def refresh_privacy_defaults(self):
+        """Load validated privacy settings on an IO/UI worker and cache them.
+
+        Hotkey callbacks must not read workspace files.  The application can
+        call this seam during startup or when the settings view is opened;
+        ``start`` only consults the resulting in-memory snapshot.
+        """
+        reader = getattr(self.library, "read_privacy_defaults", None)
+        if callable(reader):
+            value = reader()
+        else:
+            workspace = self.library.read_workspace()
+            value = workspace.get("privacy_defaults", {})
+        if not isinstance(value, dict):
+            raise ValueError("As configurações de privacidade são inválidas.")
+        with self._lock:
+            self._privacy_defaults = value
+        return copy.deepcopy(value)
+
+    def privacy_defaults(self):
+        with self._lock:
+            cached = self._privacy_defaults
+        if cached is not None:
+            return copy.deepcopy(cached)
+        return self.refresh_privacy_defaults()
+
+    @staticmethod
+    def recording_notice_text(language="pt-BR"):
+        if language == "en-US":
+            language = "en"
+        if language == "en":
+            return (
+                "This meeting is being recorded locally by Snipvoice. "
+                "Audio and transcripts stay on this device and are not uploaded by the app. "
+                "Please confirm that everyone has been informed and consents before recording."
+            )
+        if language != "pt-BR":
+            raise ValueError("O idioma do aviso de gravação é inválido.")
+        return (
+            "Esta reunião está sendo gravada localmente pelo Snipvoice. "
+            "O áudio e as transcrições ficam neste dispositivo e não são enviados pelo app. "
+            "Confirme que todas as pessoas foram informadas e consentiram antes de gravar."
+        )
+
+    def recording_notice(self, language=None):
+        defaults = self.privacy_defaults()
+        notice = defaults.get("recording_notice")
+        if not isinstance(notice, dict):
+            notice = {}
+        if language is None:
+            language = notice.get("language", defaults.get("recording_notice_language", "pt-BR"))
+        return self.recording_notice_text(language)
+
+    def recording_notice_required(self):
+        with self._lock:
+            defaults = self._privacy_defaults
+            granted = self._recording_consent_granted
+        if not isinstance(defaults, dict):
+            return False
+        notice = defaults.get("recording_notice")
+        enabled = notice.get("enabled", False) if isinstance(notice, dict) else defaults.get(
+            "recording_notice_enabled", False,
+        )
+        return bool(enabled) and not granted
+
+    def grant_recording_consent(self):
+        with self._lock:
+            self._recording_consent_granted = True
+        return True
+
+    def revoke_recording_consent(self):
+        with self._lock:
+            self._recording_consent_granted = False
+        return True
+
+    def _retention_lease_checker(self, _session_id=None):
+        """Report capture/process/playback leases, excluding retention itself."""
+        with self._lock:
+            # ``_retention_active`` is deliberately absent from this result:
+            # MeetingRetention calls back into this checker while it owns the
+            # controller admission slot and must not self-block.
+            if self._state in {"starting", "recording", "paused", "stopping", "postprocessing"}:
+                return True
+            if self._processing:
+                return True
+            if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
+                return True
+        return False
+
+    def _retention(self):
+        with self._store_lock:
+            if self._retention_service is None:
+                from meeting_retention import MeetingRetention
+
+                workspace_root = getattr(self.library, "home_root", None)
+                reader = getattr(self.library, "read_retention_defaults", None)
+                if callable(reader):
+                    defaults = reader()
+                else:
+                    workspace = self.library.read_workspace()
+                    defaults = workspace.get("retention_defaults", {})
+                trash_days = defaults.get("trash_days", 30.0)
+                self._retention_service = MeetingRetention(
+                    self.store,
+                    library=self.library,
+                    workspace_root=workspace_root,
+                    lease_checker=self._retention_lease_checker,
+                    trash_retention_days=trash_days,
+                )
+            return self._retention_service
+
+    def _begin_retention(self):
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("O controlador de reuniões está encerrado.")
+            if self._retention_active:
+                raise RuntimeError("Uma operação de retenção já está em andamento.")
+            if self._state != "idle":
+                raise RuntimeError("Aguarde a gravação terminar antes da retenção.")
+            if self._processing:
+                raise RuntimeError("Aguarde o processamento terminar antes da retenção.")
+            if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
+                raise RuntimeError("Aguarde a reprodução terminar antes da retenção.")
+            self._retention_active = True
+
+    def _run_retention(self, operation):
+        self._begin_retention()
+        try:
+            return operation(self._retention())
+        finally:
+            with self._lock:
+                self._retention_active = False
+
+    def retention_active(self):
+        with self._lock:
+            return self._retention_active
 
     @property
     def store(self):
@@ -229,6 +374,7 @@ class MeetingController:
                     self._playback_position = playback_position
             return {"state": self._state, "session_id": self._session_id,
                     "error": self._error, "processing": self._processing,
+                    "retention_active": self._retention_active,
                     "last_status": self._last_status, "partial": bool(self._source_errors),
                     "elapsed": max(0.0, time.monotonic() - self._started)
                     if self._state in {"starting", "recording", "paused", "stopping"} else self._elapsed,
@@ -253,10 +399,20 @@ class MeetingController:
         if isinstance(settings, dict):
             settings = resolve_meeting_settings(settings)
         with self._lock:
-            if self._closed or self._processing or self._state != "idle":
+            if self._closed or self._retention_active or self._processing or self._state != "idle":
                 return False
             if self._play_thread and self._play_thread.is_alive():
                 return False
+            defaults = self._privacy_defaults
+            notice = defaults.get("recording_notice") if isinstance(defaults, dict) else None
+            notice_enabled = notice.get("enabled", False) if isinstance(notice, dict) else (
+                defaults.get("recording_notice_enabled", False) if isinstance(defaults, dict) else False
+            )
+            if notice_enabled and not self._recording_consent_granted:
+                self._error = "Confirme o aviso de gravação antes de iniciar."
+                return False
+            # Consent is one explicit acknowledgement for one recording start.
+            self._recording_consent_granted = False
             title = initial_recording_title(title)
             self._generation += 1
             self._state, self._error = "starting", ""
@@ -399,6 +555,7 @@ class MeetingController:
                 with self._lock:
                     self._state = "postprocessing"
                     self._processing = True
+                    self._processing_session = session
                 postprocess_errors, postprocess_resource_live = self._postprocess_recording(
                     session, title, settings)
                 if postprocess_resource_live:
@@ -413,6 +570,7 @@ class MeetingController:
                 self._last_status = final_status
                 self._levels = {"microphone": 0.0, "system": 0.0}
                 self._processing = False
+                self._processing_session = None
                 # Retain the reservation and block a new capture if teardown is unproven.
                 self._state = "idle" if clean_stop else "unavailable"
             if error:
@@ -602,7 +760,96 @@ class MeetingController:
         return metadata
 
     def delete_session(self, session_id):
-        return self._file_work(lambda: self.library.delete(session_id))
+        """Move a completed meeting to recoverable app trash.
+
+        The controller is the user-facing deletion seam.  Direct canonical
+        ``MeetingLibrary.delete`` remains available only for compatibility and
+        is not used here; permanent purge has its own explicit method and
+        confirmation token.
+        """
+        return self._run_retention(lambda retention: retention.trash_meeting(
+            session_id, confirm=True,
+        ))
+
+    def retention_plan(self, session_id, policy=None, *, tracks=None, override=None):
+        return self._run_retention(lambda retention: retention.plan(
+            session_id, policy, tracks=tracks, override=override,
+        ))
+
+    plan_retention = retention_plan
+
+    def apply_retention(self, plan, *, confirm=False, permanent=False):
+        return self._run_retention(lambda retention: retention.apply(
+            plan, confirm=confirm, permanent=permanent,
+        ))
+
+    def list_trash(self):
+        return self._run_retention(lambda retention: retention.list_trash())
+
+    def restore_session(self, session_id):
+        return self._run_retention(lambda retention: retention.restore(session_id))
+
+    restore_from_trash = restore_session
+
+    def purge_session(self, session_id, *, confirm=False):
+        return self._run_retention(lambda retention: retention.purge(
+            session_id, confirm=confirm,
+        ))
+
+    permanently_delete_session = purge_session
+
+    def empty_trash(self, *, confirm=False):
+        return self._run_retention(lambda retention: retention.empty_trash(confirm=confirm))
+
+    def recover_retention_operations(self):
+        """Reconcile interrupted operations; never auto-purge expired trash."""
+        return self._run_retention(lambda retention: retention.recover_operations())
+
+    startup_recover_retention = recover_retention_operations
+
+    def _raw_retention_policy(self, tracks=None, policy=None):
+        from meeting_retention import RetentionPolicy
+
+        if policy is None:
+            defaults = self.library.read_retention_defaults()
+            policy = defaults.get(
+                "raw_audio",
+                defaults.get("raw_audio_policy", defaults.get("raw_tracks")),
+            )
+            if tracks is None and defaults.get("raw_audio_tracks") is not None:
+                tracks = defaults.get("raw_audio_tracks")
+        if policy is None:
+            policy = RetentionPolicy.raw_tracks(after_days=0, tracks=tracks or ())
+        else:
+            policy = RetentionPolicy.from_value(policy)
+            if policy.mode == "keep":
+                policy = RetentionPolicy.raw_tracks(
+                    after_days=0 if policy.after_days is None else policy.after_days,
+                    tracks=policy.tracks,
+                    purge_after_days=policy.purge_after_days,
+                )
+            elif policy.mode != "raw_tracks":
+                raise ValueError("A política selecionada não é de remoção de áudio raw.")
+        if tracks is not None:
+            policy = RetentionPolicy.raw_tracks(
+                after_days=0 if policy.after_days is None else policy.after_days,
+                tracks=tracks,
+                purge_after_days=policy.purge_after_days,
+            )
+        return policy
+
+    def plan_raw_tracks(self, session_id, tracks=None, *, policy=None):
+        resolved = self._raw_retention_policy(tracks, policy)
+        return self._run_retention(lambda retention: retention.plan(
+            session_id, resolved, tracks=resolved.tracks,
+        ))
+
+    plan_raw_audio = plan_raw_tracks
+
+    def apply_raw_tracks(self, plan, *, confirm=False):
+        return self.apply_retention(plan, confirm=confirm)
+
+    remove_raw_tracks = apply_raw_tracks
 
     def get_transcript(self, session_id, revision=None, offset=0, limit=TRANSCRIPT_LIMIT):
         """Return one bounded transcript window without retaining the full JSONL file."""
@@ -738,7 +985,7 @@ class MeetingController:
         from meeting_files import export_highlight_clip
         return self._file_work(lambda: export_highlight_clip(
             self.store, session_id, highlight, path, cancel_event=self._cancel,
-        ))
+        ), session_id=session_id)
 
     def update_notes(self, session_id, title, notes, bookmarks=None, expected_generation=_UNSET):
         fields = {"title": title, "notes": notes}
@@ -763,11 +1010,12 @@ class MeetingController:
             self._annotation_generations[session_id] = result["generation"]
         return True
 
-    def _launch_processing(self, function):
+    def _launch_processing(self, function, session_id=None):
         with self._lock:
-            if self._closed or self._processing or self._state != "idle":
+            if self._closed or self._retention_active or self._processing or self._state != "idle":
                 return False
             self._processing = True
+            self._processing_session = session_id
             self._error = ""
             self._cancel.clear()
 
@@ -781,6 +1029,7 @@ class MeetingController:
                 finally:
                     with self._lock:
                         self._processing = False
+                        self._processing_session = None
 
             self._processing_thread = threading.Thread(target=worker, daemon=True)
             self._processing_thread.start()
@@ -806,7 +1055,7 @@ class MeetingController:
             finally:
                 if release:
                     self.voice.release_meeting(token)
-        return self._launch_processing(work)
+        return self._launch_processing(work, session_id=session_id)
 
     def _refine_automatic_title(self, session_id):
         metadata = self.library.get_session(session_id)
@@ -851,20 +1100,21 @@ class MeetingController:
     def export(self, session_id, path, format="markdown"):
         return self._file_work(lambda: self.library.export(
             session_id, path, format, cancel_event=self._cancel,
-        ))
+        ), session_id=session_id)
 
     def export_mixdown(self, session_id, path, enhance_microphone=False):
         return self._file_work(lambda: export_mixdown(
             self.store, session_id, path, enhance_microphone=enhance_microphone,
             cancel_event=self._cancel,
-        ))
+        ), session_id=session_id)
 
-    def _file_work(self, operation):
+    def _file_work(self, operation, session_id=None):
         # Caller is an IO worker; reserve admission without another nested thread.
         with self._lock:
-            if self._closed or self._processing or self._state != "idle":
+            if self._closed or self._retention_active or self._processing or self._state != "idle":
                 raise RuntimeError("Aguarde a gravação ou o processamento terminar.")
             self._processing = True
+            self._processing_session = session_id
             self._cancel.clear()
             self._file_done.clear()
         try:
@@ -872,6 +1122,7 @@ class MeetingController:
         finally:
             with self._lock:
                 self._processing = False
+                self._processing_session = None
                 self._file_done.set()
 
     def summarize(self, session_id, model):
@@ -883,7 +1134,7 @@ class MeetingController:
                 self._queue_projection(session_id)
             finally:
                 self.voice.release_meeting(token)
-        return self._launch_processing(work)
+        return self._launch_processing(work, session_id=session_id)
 
     def _intelligence(self):
         """Build the installed-only intelligence seam on the IO worker."""
@@ -925,14 +1176,17 @@ class MeetingController:
 
     remove_report_profile = delete_report_profile
 
-    def list_reports(self, session_id, include_legacy=True, limit=REPORT_HISTORY_LIMIT):
+    def list_reports(self, session_id, include_legacy=True, limit=REPORT_HISTORY_LIMIT,
+                     cancel_event=None):
         limit = _bounded_report_history_limit(limit)
+        event = self._cancel if cancel_event is None else cancel_event
         reader = getattr(self.library, "list_report_metadata", None)
         if callable(reader):
             rows = reader(
                 session_id,
                 include_legacy=include_legacy,
                 limit=limit,
+                cancel_event=event,
             )
             result = []
             for row in rows or ():
@@ -947,6 +1201,8 @@ class MeetingController:
         reports = self.library.list_reports(session_id, include_legacy=include_legacy)
         result = []
         for report in reports or ():
+            if event is not None and event.is_set():
+                raise RuntimeError("A leitura do histórico de relatórios foi cancelada.")
             if len(result) >= limit:
                 break
             projection = _report_history_projection(report)
@@ -1004,7 +1260,7 @@ class MeetingController:
                 return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work)
+        return self._file_work(work, session_id=session_id)
 
     def ask_across_meetings(self, question, model, *, filters=None, **kwargs):
         """Run bounded memory-only Q&A over the filtered meeting library."""
@@ -1021,8 +1277,20 @@ class MeetingController:
     ask_cross_meeting = ask_across_meetings
     ask_cross_meetings = ask_across_meetings
 
+    def qa_mode(self):
+        defaults = self.privacy_defaults()
+        mode = defaults.get("qa_mode", "explicit_save")
+        if mode not in {"memory_only", "explicit_save"}:
+            raise ValueError("O modo de Q&A do workspace é inválido.")
+        return mode
+
     def save_answer(self, session_id, answer, model, *, question="", revision=None,
                     revision_id=None):
+        if self.qa_mode() == "memory_only":
+            raise ValueError(
+                "O modo de Q&A memory_only não permite salvar respostas; "
+                "altere explicitamente a política do workspace para explicit_save."
+            )
         normalized, selected_question, selected_revision, provenance = _normalize_saved_answer(
             answer, question=question, revision=revision, revision_id=revision_id,
         )
@@ -1031,7 +1299,7 @@ class MeetingController:
                 session_id, normalized, model, question=selected_question,
                 revision=selected_revision, provenance=provenance,
             )
-        return self._file_work(work)
+        return self._file_work(work, session_id=session_id)
 
     def export_report(self, session_id, report_id, path, format="markdown", section=None):
         from meeting_files import export_report
@@ -1046,12 +1314,12 @@ class MeetingController:
         return self._file_work(lambda: export_report(
             self.library.get_report(session_id, report_id), path, format=format, section=section,
             cancel_event=self._cancel,
-        ))
+        ), session_id=session_id)
 
     def play(self, session_id, track, start=0.0):
         from meeting_files import play_audio
         with self._lock:
-            if self._closed or self._state != "idle" or self._processing:
+            if self._closed or self._retention_active or self._state != "idle" or self._processing:
                 return False
             if self._play_thread and self._play_thread.is_alive():
                 return False

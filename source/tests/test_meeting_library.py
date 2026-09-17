@@ -623,6 +623,29 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
             saved = self.library.save_report("fixture-meeting-v1", duplicate)
         self.assertEqual(saved["id"], "report-citation-duplicates")
 
+    def test_memory_only_policy_blocks_qa_at_canonical_save_boundary(self):
+        self.library.update_workspace(
+            {"privacy_defaults": {"qa_mode": "memory_only"}},
+            expected_generation=0,
+        )
+        envelope = {
+            "schema_version": 1, "id": "qa-memory-only", "kind": "qa",
+            "profile_id": "ask_this_meeting", "profile_version": 1,
+            "session_id": "fixture-meeting-v1", "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "e" * 64, "runtime": "llama.cpp"},
+            "generated": {
+                "summary": {
+                    "answer": "Local only",
+                    "citations": ["microphone:0.000000:3.000000"],
+                    "uncertainty": "low",
+                },
+            },
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        with self.assertRaisesRegex(ValueError, "memory_only"):
+            self.library.save_report("fixture-meeting-v1", envelope)
+        self.assertFalse((self.session_dir / "reports" / "qa-memory-only.json").exists())
+
     def test_collections_series_tags_and_people_use_one_canonical_model(self):
         collection = self.library.save_collection(
             {"id": "project-1", "name": "Product", "kind": "project"},
@@ -759,6 +782,57 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         all_annotations = self.library.read_annotations("fixture-meeting-v1")
         self.assertEqual(all_annotations["highlights"][0]["revision"], "revision-1")
         self.assertEqual(self.library.list_highlights("fixture-meeting-v1", active_only=True), [])
+
+
+class MeetingWorkspaceSettingsTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(__file__).parent / "tmp"
+        root.mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=root)
+        self.home = Path(self.temp.name)
+        self.library = MeetingLibrary(self.home / "meetings", workspace_root=self.home)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_known_settings_are_validated_and_unknown_nested_keys_survive(self):
+        workspace = self.library.update_workspace(
+            {
+                "privacy_defaults": {
+                    "recording_notice": {"enabled": True, "language": "en", "future": {"keep": 1}},
+                    "qa_mode": "memory_only",
+                    "future_privacy": {"keep": True},
+                },
+                "retention_defaults": {
+                    "whole_meeting": {"after_days": 7},
+                    "raw_audio": {"after_days": 3, "tracks": ["microphone"]},
+                    "trash_days": 5,
+                    "future_retention": {"keep": True},
+                },
+            },
+            expected_generation=0,
+        )
+        self.assertEqual(workspace["retention_defaults"]["whole_meeting"]["mode"], "whole_meeting")
+        self.assertEqual(workspace["retention_defaults"]["raw_audio"]["mode"], "raw_tracks")
+        self.assertEqual(self.library.read_privacy_defaults()["future_privacy"], {"keep": True})
+        before = (self.home / "workspace.json").read_bytes()
+        with self.assertRaises(SchemaError):
+            self.library.update_workspace(
+                {"privacy_defaults": {"qa_mode": "not-a-mode"}}, expected_generation=1,
+            )
+        self.assertEqual((self.home / "workspace.json").read_bytes(), before)
+
+    def test_legacy_workspace_without_new_sections_opens_without_rewrite(self):
+        path = self.home / "workspace.json"
+        path.write_text(
+            '{"schema_version":1,"generation":4,"collections":[],"series":[],"profiles":[],'
+            '"updated_at":"2026-09-17T00:00:00Z","future":{"keep":true}}',
+            encoding="utf-8",
+        )
+        before = path.read_bytes()
+        workspace = self.library.read_workspace()
+        self.assertEqual(workspace["future"], {"keep": True})
+        self.assertEqual(path.read_bytes(), before)
 
 
 if __name__ == "__main__":

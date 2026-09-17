@@ -225,6 +225,26 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(saved["kind"], "qa")
         self.assertEqual(saved["generated"]["answer"]["citations"], ["s1"])
 
+    def test_memory_only_policy_blocks_direct_intelligence_answer_save(self):
+        library = MeetingLibrary(self.store, workspace_root=self.temp.name)
+        library.update_workspace(
+            {"privacy_defaults": {"qa_mode": "memory_only"}},
+            expected_generation=0,
+        )
+        intelligence, _runtime = self._intelligence()
+        intelligence.library = library
+        answer = {
+            "answer": "Alice will review the report by Friday.",
+            "citations": ["s1"],
+            "uncertainty": "low",
+        }
+        with self.assertRaisesRegex(ValueError, "memory_only"):
+            intelligence.save_answer(
+                self.session_id, answer, DEFAULT_SUMMARY_MODEL,
+                question="When is the review due?", revision=self.revision,
+            )
+        self.assertEqual(library.list_reports(self.session_id, include_legacy=False), [])
+
     def test_saved_answer_uses_ask_provenance_when_model_is_changed_or_uninstalled(self):
         library = MeetingLibrary(self.store, workspace_root=self.temp.name)
         intelligence, _runtime = self._intelligence(lambda _prompt, evidence: json.dumps({

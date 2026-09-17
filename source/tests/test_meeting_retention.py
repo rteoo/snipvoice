@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -357,6 +358,40 @@ class MeetingRetentionTests(unittest.TestCase):
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         with self.assertRaises(PlanConflict):
             retention.apply(citation_plan, confirm=True)
+
+    def test_whole_meeting_plan_rechecks_age_before_apply(self):
+        retention = self.retention()
+        plan = retention.plan(
+            "fixture-meeting-v1", RetentionPolicy.whole_meeting(after_days=1),
+        )
+        self.assertTrue(plan.eligible)
+        changed = self.store.get("fixture-meeting-v1", include_events=False)
+        changed["updated_at"] = "2099-09-16T12:04:00Z"
+        with mock.patch.object(retention, "_metadata", return_value=changed):
+            with self.assertRaisesRegex(PlanConflict, "elegibilidade"):
+                retention.apply(plan, confirm=True)
+        self.assertTrue((self.meetings / "fixture-meeting-v1").is_dir())
+
+    def test_legacy_time_citation_must_match_real_track_and_segment_range(self):
+        metadata_path = self.meetings / "fixture-meeting-v1" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["summary"]["citations"] = ["camera:0.000000:3.000000"]
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        invalid_track = self.retention().plan(
+            "fixture-meeting-v1",
+            RetentionPolicy.raw_tracks(after_days=1, tracks=("microphone",)),
+        )
+        self.assertFalse(invalid_track.eligible)
+        self.assertTrue(any("citação" in reason for reason in invalid_track.reasons))
+
+        metadata["summary"]["citations"] = ["microphone:300.000000:301.000000"]
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        outside_transcript = self.retention().plan(
+            "fixture-meeting-v1",
+            RetentionPolicy.raw_tracks(after_days=1, tracks=("microphone",)),
+        )
+        self.assertFalse(outside_transcript.eligible)
+        self.assertTrue(any("citação" in reason for reason in outside_transcript.reasons))
 
     def test_projection_failure_marks_index_stale_and_stays_pending(self):
         library = FailingProjectionLibrary(self.store, self.home)

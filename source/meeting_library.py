@@ -53,6 +53,9 @@ MAX_REPORT_CITATIONS = 16
 MAX_ID_CHARS = 128
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.05
+DEFAULT_TRASH_RETENTION_DAYS = 30.0
+SUPPORTED_NOTICE_LANGUAGES = frozenset(("pt-BR", "en", "en-US"))
+SUPPORTED_QA_MODES = frozenset(("memory_only", "explicit_save"))
 REPORT_SECTIONS = frozenset({
     "summary", "decisions", "action_items", "open_questions", "risks",
     "objections", "feedback", "follow_up_email", "answer",
@@ -167,6 +170,18 @@ class _LibraryStoreView:
 
     def get_transcript(self, session_id, revision=None):
         return self._library.get_transcript(session_id, revision)
+
+    def read_annotations(self, session_id, **kwargs):
+        """Expose the canonical sidecar seam to export/file helpers."""
+        return self._library.read_annotations(session_id, **kwargs)
+
+    def list_report_metadata(self, session_id, **kwargs):
+        """Expose bounded report metadata without bypassing the library."""
+        return self._library.list_report_metadata(session_id, **kwargs)
+
+    def get_report(self, session_id, report_id):
+        """Resolve report bodies only after an explicit export selection."""
+        return self._library.get_report(session_id, report_id)
 
     def iter_events(self, session_id):
         return self._library.store.iter_events(session_id)
@@ -489,8 +504,20 @@ class MeetingLibrary:
             "collections": [],
             "series": [],
             "profiles": [],
-            "privacy_defaults": {},
-            "retention_defaults": {},
+            # These defaults are returned in memory only.  A legacy workspace
+            # is never rewritten merely because it is opened.
+            "privacy_defaults": {
+                "recording_notice": {"enabled": False, "language": "pt-BR"},
+                # Existing workspaces historically allowed explicit answer
+                # saving.  Keep that compatibility behavior until an operator
+                # opts into the stricter memory-only mode.
+                "qa_mode": "explicit_save",
+            },
+            "retention_defaults": {
+                "whole_meeting": {"mode": "keep"},
+                "raw_audio": {"mode": "keep", "tracks": []},
+                "trash_days": DEFAULT_TRASH_RETENTION_DAYS,
+            },
             "updated_at": _utc_timestamp(),
         }
 
@@ -536,12 +563,122 @@ class MeetingLibrary:
                     raise SchemaError("O tipo da coleção é inválido; o arquivo foi preservado.")
                 if "archived" in item and not isinstance(item["archived"], bool):
                     raise SchemaError(f"O estado arquivado de {key} é inválido; o arquivo foi preservado.")
-        for key in ("privacy_defaults", "retention_defaults"):
-            if not isinstance(value.get(key), dict):
-                raise SchemaError(f"As configurações {key} do workspace são inválidas; o arquivo foi preservado.")
+        # These sections were added after the first workspace schema.  Their
+        # absence is a valid legacy state; malformed present sections remain
+        # read-only errors.
+        self._validate_privacy_defaults(value.get("privacy_defaults", {}))
+        self._validate_retention_defaults(value.get("retention_defaults", {}))
         _, size = _copy_json(value, "workspace.json")
         if size > MAX_WORKSPACE_BYTES:
             raise SchemaError("O workspace excede o limite permitido; o arquivo foi preservado.")
+
+    @staticmethod
+    def _validate_privacy_defaults(value):
+        """Validate known privacy keys while retaining future nested keys.
+
+        The workspace is deliberately an extensible object.  Known fields are
+        strict because a malformed consent or Q&A setting must fail closed;
+        unknown fields remain available for a newer build and are never
+        normalized or discarded.
+        """
+        if not isinstance(value, dict):
+            raise SchemaError(
+                "As configurações privacy_defaults do workspace são inválidas; o arquivo foi preservado."
+            )
+        notice = value.get("recording_notice")
+        if notice is not None:
+            if not isinstance(notice, dict):
+                raise SchemaError("A configuração de aviso de gravação é inválida; o arquivo foi preservado.")
+            if "enabled" in notice and not isinstance(notice["enabled"], bool):
+                raise SchemaError("O estado do aviso de gravação é inválido; o arquivo foi preservado.")
+            language = notice.get("language")
+            if language is not None and language not in SUPPORTED_NOTICE_LANGUAGES:
+                raise SchemaError("O idioma do aviso de gravação é inválido; o arquivo foi preservado.")
+        if "recording_notice_enabled" in value and not isinstance(value["recording_notice_enabled"], bool):
+            raise SchemaError("O estado do aviso de gravação é inválido; o arquivo foi preservado.")
+        if "recording_notice_language" in value and value["recording_notice_language"] not in SUPPORTED_NOTICE_LANGUAGES:
+            raise SchemaError("O idioma do aviso de gravação é inválido; o arquivo foi preservado.")
+        qa_mode = value.get("qa_mode")
+        if qa_mode is not None and qa_mode not in SUPPORTED_QA_MODES:
+            raise SchemaError("O modo de Q&A do workspace é inválido; o arquivo foi preservado.")
+
+    @staticmethod
+    def _retention_policy_value(value, default_mode):
+        """Validate one user-facing policy and adapt it to RetentionPolicy.
+
+        ``RetentionPolicy`` intentionally rejects unknown keys.  This adapter
+        adds the one ergonomic shorthand used by workspace settings while
+        keeping unrelated workspace keys out of the destructive seam.
+        """
+        from meeting_retention import RetentionPolicy
+
+        if isinstance(value, dict):
+            candidate = copy.deepcopy(value)
+            selectors = {"mode", "action", "kind", "policy"}
+            if not selectors.intersection(candidate):
+                candidate["mode"] = default_mode
+        else:
+            candidate = value
+        try:
+            policy = RetentionPolicy.from_value(candidate)
+        except (TypeError, ValueError) as error:
+            raise SchemaError("A política de retenção do workspace é inválida; o arquivo foi preservado.") from error
+        if default_mode == "whole_meeting" and policy.mode not in {"keep", "whole_meeting"}:
+            raise SchemaError("A política de retenção de reuniões é incompatível; o arquivo foi preservado.")
+        if default_mode == "raw_tracks" and policy.mode not in {"keep", "raw_tracks"}:
+            raise SchemaError("A política de retenção de áudio é incompatível; o arquivo foi preservado.")
+        return policy
+
+    @classmethod
+    def _validate_retention_defaults(cls, value):
+        if not isinstance(value, dict):
+            raise SchemaError(
+                "As configurações retention_defaults do workspace são inválidas; o arquivo foi preservado."
+            )
+        if "whole_meeting" in value:
+            cls._retention_policy_value(value["whole_meeting"], "whole_meeting")
+        if "whole_meeting_policy" in value:
+            cls._retention_policy_value(value["whole_meeting_policy"], "whole_meeting")
+        if "raw_audio" in value:
+            policy = cls._retention_policy_value(value["raw_audio"], "raw_tracks")
+            if policy.mode == "raw_tracks" and any(track not in {"microphone", "system"} for track in policy.tracks):
+                raise SchemaError("As fontes da política de áudio são inválidas; o arquivo foi preservado.")
+        if "raw_audio_policy" in value:
+            policy = cls._retention_policy_value(value["raw_audio_policy"], "raw_tracks")
+            if policy.mode == "raw_tracks" and any(track not in {"microphone", "system"} for track in policy.tracks):
+                raise SchemaError("As fontes da política de áudio são inválidas; o arquivo foi preservado.")
+        for key in ("raw_audio_tracks",):
+            tracks = value.get(key)
+            if tracks is not None and (
+                not isinstance(tracks, list)
+                or len(tracks) > 2
+                or any(track not in {"microphone", "system"} for track in tracks)
+                or len(set(tracks)) != len(tracks)
+            ):
+                raise SchemaError("As fontes da política de áudio são inválidas; o arquivo foi preservado.")
+        # ``raw_tracks`` was used by one pre-release build; keep it readable
+        # while the canonical user-facing key remains ``raw_audio``.
+        if "raw_tracks" in value:
+            cls._retention_policy_value(value["raw_tracks"], "raw_tracks")
+        policy_fields = {
+            "mode", "action", "kind", "policy", "after_days", "age_days",
+            "whole_meeting_after_days", "whole_after_days",
+            "raw_track_after_days", "raw_after_days", "tracks", "track",
+            "purge_after_days", "trash_after_days", "override",
+        }
+        if policy_fields.intersection(value):
+            candidate = {
+                key: copy.deepcopy(item)
+                for key, item in value.items()
+                if key not in {"trash_days"}
+            }
+            mode = candidate.get("mode", candidate.get("action", candidate.get("kind", candidate.get("policy"))))
+            default_mode = "raw_tracks" if str(mode).casefold() in {"raw", "raw_tracks", "raw_track"} else "whole_meeting"
+            cls._retention_policy_value(candidate, default_mode)
+        if "trash_days" in value:
+            days = value["trash_days"]
+            if not _finite_number(days) or float(days) < 0 or float(days) > 36500:
+                raise SchemaError("O prazo da lixeira é inválido; o arquivo foi preservado.")
 
     def update_workspace(self, patch, *, expected_generation=_UNSET):
         if not isinstance(patch, dict):
@@ -558,7 +695,32 @@ class MeetingLibrary:
             for key, value in patch.items():
                 if key in {"schema_version", "generation", "updated_at"}:
                     raise ValueError("Campos de versão do workspace são controlados pela biblioteca.")
-                merged[key] = copy.deepcopy(value)
+                if key in {"privacy_defaults", "retention_defaults"} and isinstance(value, dict):
+                    # Configuration sections are extensible.  A partial known
+                    # settings update must not erase keys introduced by a
+                    # newer build or an operator's future defaults.
+                    value = copy.deepcopy(value)
+                    if key == "retention_defaults":
+                        for policy_key, default_mode in (
+                            ("whole_meeting", "whole_meeting"),
+                            ("raw_audio", "raw_tracks"),
+                            ("raw_tracks", "raw_tracks"),
+                        ):
+                            candidate = value.get(policy_key)
+                            if isinstance(candidate, dict) and not {
+                                "mode", "action", "kind", "policy",
+                            }.intersection(candidate):
+                                # The shorthand ``{after_days: N}`` is a
+                                # policy for this named section, even when the
+                                # in-memory legacy default was ``keep``.
+                                value[policy_key] = {
+                                    **candidate, "mode": default_mode,
+                                }
+                    merged[key] = self._merge_workspace_mapping(
+                        merged.get(key) if isinstance(merged.get(key), dict) else {}, value,
+                    )
+                else:
+                    merged[key] = copy.deepcopy(value)
             merged["generation"] = actual + 1
             merged["updated_at"] = _utc_timestamp()
             self._validate_workspace(merged)
@@ -568,6 +730,38 @@ class MeetingLibrary:
             os.makedirs(self.home_root, exist_ok=True)
             write_json_atomic(path, merged)
             return copy.deepcopy(merged)
+
+    @staticmethod
+    def _merge_workspace_mapping(current, patch):
+        result = copy.deepcopy(current)
+        for key, value in patch.items():
+            if isinstance(value, dict) and isinstance(result.get(key), dict):
+                result[key] = MeetingLibrary._merge_workspace_mapping(result[key], value)
+            else:
+                result[key] = copy.deepcopy(value)
+        return result
+
+    def read_privacy_defaults(self):
+        """Return detached, validated privacy defaults for the controller."""
+        value = self.read_workspace().get("privacy_defaults", {})
+        result = copy.deepcopy(value)
+        notice = result.setdefault("recording_notice", {})
+        if isinstance(notice, dict):
+            notice.setdefault("enabled", False)
+            notice.setdefault("language", "pt-BR")
+        result.setdefault("qa_mode", "explicit_save")
+        return result
+
+    def read_retention_defaults(self):
+        """Return detached retention defaults without rewriting the workspace."""
+        value = self.read_workspace().get("retention_defaults", {})
+        result = copy.deepcopy(value)
+        if "whole_meeting" not in result and "whole_meeting_policy" not in result:
+            result["whole_meeting"] = {"mode": "keep"}
+        if "raw_audio" not in result and "raw_audio_policy" not in result and "raw_tracks" not in result:
+            result["raw_audio"] = {"mode": "keep", "tracks": []}
+        result.setdefault("trash_days", DEFAULT_TRASH_RETENTION_DAYS)
+        return result
 
     # Compatibility aliases for callers that use a save/read vocabulary.
     read_workspace_state = read_workspace
@@ -2114,10 +2308,22 @@ class MeetingLibrary:
     def save_report(self, session_id, envelope):
         normalized = self._validate_report(session_id, envelope)
         path = self._report_path(session_id, normalized["id"], create_directory=True)
-        with _writer_lock(path):
-            if os.path.lexists(path):
-                raise FileExistsError("Uma revisão de relatório com este identificador já existe.")
-            write_json_atomic(path, normalized)
+        workspace_guard = (
+            _writer_lock(self._workspace_path())
+            if normalized.get("kind") == "qa"
+            else contextlib.nullcontext()
+        )
+        with workspace_guard:
+            if normalized.get("kind") == "qa" and self.read_privacy_defaults().get(
+                "qa_mode", "explicit_save",
+            ) == "memory_only":
+                raise ValueError(
+                    "O modo de Q&A memory_only não permite salvar respostas."
+                )
+            with _writer_lock(path):
+                if os.path.lexists(path):
+                    raise FileExistsError("Uma revisão de relatório com este identificador já existe.")
+                write_json_atomic(path, normalized)
         self._project_after_canonical_write(session_id)
         return copy.deepcopy(normalized)
 
@@ -2241,7 +2447,7 @@ class MeetingLibrary:
             raise SchemaError("A data do relatório é inválida.")
 
     def list_report_metadata(self, session_id, *, include_legacy=True,
-                             limit=REPORT_HISTORY_LIMIT):
+                             limit=REPORT_HISTORY_LIMIT, cancel_event=None):
         """List a bounded history projection without retaining report bodies.
 
         Each report file is read and reduced one at a time.  Only the selected
@@ -2284,7 +2490,12 @@ class MeetingLibrary:
                 )
             if len(names) > MAX_REPORTS:
                 raise SchemaError("Há relatórios demais nesta reunião.")
+            # ceiling: exact created_at ordering currently requires reading at
+            # most MAX_REPORTS canonical envelopes; a manifest would be needed
+            # before reducing this I/O bound without changing ordering.
             for name in names:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("A leitura do histórico de relatórios foi cancelada.")
                 report_id = name[:-5]
                 path = self._report_path(session_id, report_id)
                 value = self._load_versioned(
@@ -2482,6 +2693,36 @@ class MeetingLibrary:
 
     def project_session(self, session_id):
         return self._project_after_canonical_write(session_id)
+
+    def on_session_trashed(self, session_id):
+        """Remove a moved bundle from the disposable catalog, if present.
+
+        Retention has already committed the same-root move before this hook is
+        called.  A missing catalog is therefore a successful no-op; an opened
+        catalog failure is reported to the retention journal as stale.
+        """
+        with self._catalog_lock:
+            index = self._index
+            if index is None and os.path.lexists(os.path.join(self.home_root, "library.sqlite")):
+                index = self.index
+            if index is None:
+                return True
+            try:
+                result = bool(index.remove_session(session_id))
+            except Exception:
+                self._mark_index_stale_with_reason("canonical retention move was not projected")
+                return False
+            if not result:
+                self._mark_index_stale_with_reason("canonical retention move was not projected")
+            return result
+
+    def on_session_restored(self, session_id):
+        """Reproject a bundle after a successful trash restore."""
+        return self.project_session(session_id)
+
+    def on_raw_tracks_removed(self, session_id):
+        """Reproject canonical purged-track availability markers."""
+        return self.project_session(session_id)
 
     # Named completion hooks keep processing modules independent of SQLite.
     on_session_finalized = project_session

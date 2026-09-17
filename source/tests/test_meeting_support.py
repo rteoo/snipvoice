@@ -1,4 +1,5 @@
 import struct
+import shutil
 import sys
 import tempfile
 import threading
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from meeting_settings import MeetingSettings, validate_hotkey_conflicts
 from meeting_library import AnnotationConflict, MeetingLibrary
+from meeting_retention import ConfirmationRequired, OperationRecoveryError
 from meeting_store import MeetingStore
 from meeting_support import (
     MeetingController, REPORT_HISTORY_LIMIT, WAVEFORM_POINTS, _amplitude_envelope,
@@ -450,6 +452,7 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
 
         reader.assert_called_once_with(
             "session", include_legacy=True, limit=REPORT_HISTORY_LIMIT,
+            cancel_event=self.controller._cancel,
         )
         self.assertEqual(len(result), REPORT_HISTORY_LIMIT)
         self.assertTrue(all("generated" not in item for item in result))
@@ -587,3 +590,80 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         delete_thread.join(3)
         self.assertEqual(deleted, [True])
         self.assertNotIn(session, controlled.rows)
+
+
+class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(__file__).parent / "tmp"
+        root.mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(dir=root)
+        self.home = Path(self.temp.name)
+        shutil.copytree(
+            Path(__file__).parent / "fixtures" / "meeting-v1",
+            self.home / "meetings" / "fixture-meeting-v1",
+        )
+        self.voice = Mock(cache_dir=self.temp.name)
+        self.library = MeetingLibrary(self.home / "meetings", workspace_root=self.home)
+        self.controller = MeetingController(
+            self.home / "meetings", self.voice, library=self.library,
+        )
+
+    def tearDown(self):
+        if self.controller.snapshot()["state"] != "unavailable":
+            self.controller.shutdown()
+        self.temp.cleanup()
+
+    def test_delete_is_recoverable_and_purge_needs_second_confirmation(self):
+        result = self.controller.delete_session("fixture-meeting-v1")
+        self.assertEqual(result.state, "trashed")
+        self.assertFalse((self.home / "meetings" / "fixture-meeting-v1").exists())
+        self.assertEqual(self.controller.list_trash()[0].session_id, "fixture-meeting-v1")
+        self.controller.restore_session("fixture-meeting-v1")
+        self.assertTrue((self.home / "meetings" / "fixture-meeting-v1").exists())
+        self.controller.delete_session("fixture-meeting-v1")
+        with self.assertRaises(ConfirmationRequired):
+            self.controller.purge_session("fixture-meeting-v1")
+        purged = self.controller.purge_session("fixture-meeting-v1", confirm=True)
+        self.assertEqual(purged.state, "purged")
+
+    def test_retention_admission_rejects_processing_and_memory_only_refuses_save(self):
+        self.controller._processing = True
+        try:
+            with self.assertRaisesRegex(RuntimeError, "processamento"):
+                self.controller.retention_plan("fixture-meeting-v1")
+        finally:
+            self.controller._processing = False
+        self.library.update_workspace(
+            {"privacy_defaults": {"qa_mode": "memory_only"}}, expected_generation=0,
+        )
+        self.controller.refresh_privacy_defaults()
+        with self.assertRaisesRegex(ValueError, "memory_only"):
+            self.controller.save_answer(
+                "fixture-meeting-v1", {"answer": "local"}, "model",
+            )
+
+    def test_retention_lease_checker_does_not_self_block_its_own_operation(self):
+        plan = self.controller.retention_plan("fixture-meeting-v1")
+        self.assertTrue(plan.eligible)
+        self.assertFalse(self.controller.retention_active())
+
+    def test_raw_only_legacy_workspace_defaults_whole_meeting_policy_to_keep(self):
+        workspace = {
+            "retention_defaults": {
+                "raw_audio": {"mode": "keep", "tracks": []},
+                "trash_days": 30,
+            },
+        }
+        with patch.object(self.library, "read_workspace", return_value=workspace):
+            plan = self.controller.retention_plan("fixture-meeting-v1")
+        self.assertEqual(plan.operation, "keep")
+        self.assertTrue(plan.eligible)
+
+    def test_startup_recovery_surfaces_manual_reconciliation_and_clears_admission(self):
+        with patch.object(
+            self.controller._retention(), "recover_operations",
+            side_effect=OperationRecoveryError("manual reconciliation required"),
+        ):
+            with self.assertRaises(OperationRecoveryError):
+                self.controller.recover_retention_operations()
+        self.assertFalse(self.controller.retention_active())
