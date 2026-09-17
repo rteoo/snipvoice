@@ -35,6 +35,11 @@ APPEARANCE_LABELS = {
     "light": "Claro",
     "dark": "Escuro",
 }
+APPEARANCE_STATUS = {
+    "system": "Segue o tema do sistema.",
+    "light": "Tema claro fixo.",
+    "dark": "Tema escuro fixo.",
+}
 TRANSCRIPT_PAGE_SIZE = 100
 NOTES_LIMIT = 1024 * 1024
 BOOKMARK_LIMIT = 1000
@@ -1500,7 +1505,13 @@ class MeetingWindow:
             justify="left",
             wraplength=760,
         ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
-        self.appearance_display = tk.StringVar(self.window, APPEARANCE_LABELS["system"])
+        preference = ui_theme.normalize_preference(
+            getattr(self.ui, "preference", None),
+        )
+        self.appearance_display = tk.StringVar(
+            self.window,
+            APPEARANCE_LABELS[preference],
+        )
         self.appearance_box = ttk.Combobox(
             card,
             textvariable=self.appearance_display,
@@ -1509,7 +1520,10 @@ class MeetingWindow:
             width=18,
         )
         self.appearance_box.grid(row=2, column=0, sticky="w")
-        self.appearance_status = tk.StringVar(self.window, "Segue o tema do sistema.")
+        self.appearance_status = tk.StringVar(
+            self.window,
+            APPEARANCE_STATUS[preference],
+        )
         self._label(
             card,
             "",
@@ -2343,12 +2357,7 @@ class MeetingWindow:
         if hasattr(self, "appearance_display"):
             preference = ui_theme.normalize_preference(self.raw_settings.get("appearance"))
             self.appearance_display.set(APPEARANCE_LABELS[preference])
-            status = {
-                "system": "Segue o tema do sistema.",
-                "light": "Tema claro fixo.",
-                "dark": "Tema escuro fixo.",
-            }
-            self.appearance_status.set(status[preference])
+            self.appearance_status.set(APPEARANCE_STATUS[preference])
         try:
             settings = resolve_meeting_settings(self.raw_settings)
         except ValueError as exc:
