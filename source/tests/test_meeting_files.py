@@ -21,7 +21,7 @@ from meeting_files import (
     import_wav,
     play_audio,
 )
-from meeting_store import MeetingStore
+from meeting_store import MeetingStore, TrackUnavailableError
 
 
 class MeetingFilesTests(unittest.TestCase):
@@ -212,6 +212,61 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
         self.assertNotIn(str(self.root), exported.read_text(encoding="utf-8"))
 
+    def test_whole_meeting_export_includes_annotations_report_history_and_raw_state(self):
+        sid = self.session()
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["tracks"]["microphone"].update({"available": False, "raw_removed": True})
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        class View:
+            root = self.store.root
+
+            def get(view_self, session_id, include_events=True):
+                value = self.store.get(session_id, include_events=include_events)
+                value["annotations"] = {
+                    "schema_version": 1,
+                    "generation": 3,
+                    "speaker_labels": {"s1": {"label": "Ana", "segment_id": "s1"}},
+                    "highlights": [{"id": "h1", "label": "Decision", "segment_ids": ["s1"]}],
+                    "collection_ids": ["client"], "tags": ["decision"], "people": ["Ana"],
+                    "reviewed_artifacts": {"r1": {"generation": 2, "sections": {"summary": "Reviewed"}}},
+                }
+                return value
+
+            def iter_events(view_self, session_id):
+                return self.store.iter_events(session_id)
+
+            def get_transcript(view_self, session_id, revision=None):
+                return self.store.get_transcript(session_id, revision)
+
+            def iter_audio(view_self, session_id, track=None, start=0.0):
+                return self.store.iter_audio(session_id, track=track, start=start)
+
+            def list_report_metadata(view_self, session_id, include_legacy=True, limit=64):
+                return [{
+                    "id": "r1", "kind": "report", "profile_id": "general",
+                    "created_at": "2026-09-17T00:00:00Z", "generated": {
+                        "summary": {"text": "Do not export this body", "citations": ["s1"]}
+                    },
+                }]
+
+        exported = self.root / "annotated.json"
+        export_meeting(View(), sid, exported, "json")
+        document = json.loads(exported.read_text(encoding="utf-8"))
+        self.assertFalse(document["metadata"]["tracks"]["microphone"]["available"])
+        self.assertEqual(document["annotations"]["speaker_labels"]["s1"]["label"], "Ana")
+        self.assertEqual(document["report_history"][0]["citations"], ["s1"])
+        self.assertNotIn("Do not export this body", exported.read_text(encoding="utf-8"))
+
+        for format in ("plain", "markdown"):
+            path = self.root / ("annotated." + format)
+            export_meeting(View(), sid, path, format)
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("removida pela retenção", content)
+            self.assertIn("Ana", content)
+            self.assertNotIn("Do not export this body", content)
+
     def test_report_export_is_atomic_bounded_and_path_free(self):
         destination = self.root / "report.md"
         report = {
@@ -260,6 +315,22 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b"keep")
         with self.assertRaises(ValueError):
             export_meeting(self.store, sid, Path(self.store.root) / sid / "metadata.json", "json")
+
+    def test_playback_and_wav_export_report_purged_track_capability_loss(self):
+        sid = self.session()
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["tracks"]["microphone"].update({"available": False, "raw_removed": True})
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with mock.patch.dict(sys.modules, {"sounddevice": types.SimpleNamespace(OutputStream=mock.Mock())}):
+            with self.assertRaises(TrackUnavailableError):
+                play_audio(self.store, sid, "microphone", 0, threading.Event())
+        destination = self.root / "purged.wav"
+        with self.assertRaises(TrackUnavailableError):
+            export_meeting(self.store, sid, destination, "wav-microphone")
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.glob(".purged.wav-*.tmp")), [])
 
     def test_playback_seek_and_gap_silence(self):
         sid = self.store.begin({})

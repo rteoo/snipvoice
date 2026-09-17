@@ -5,6 +5,7 @@ import copy
 import itertools
 import json
 import math
+import ntpath
 import os
 from pathlib import Path
 import struct
@@ -18,6 +19,8 @@ PLAY_FRAMES = 1024
 IMPORT_FRAMES = 8192
 RIFF_LIMIT = 0xFFFFFFFF
 SUPPORTED_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg", ".opus"})
+MAX_EXPORT_REPORTS = 64
+MAX_EXPORT_CITATIONS = 256
 
 
 def _cancel(cancel_event):
@@ -247,6 +250,149 @@ def _events(store, session, metadata):
     return iter(metadata.get("events", ()))
 
 
+def _absolute_path(value):
+    """Recognize native absolute paths even when exporting cross-platform data."""
+    return isinstance(value, str) and (
+        os.path.isabs(value) or ntpath.isabs(value) or value.startswith("/")
+    )
+
+
+def _export_value(value):
+    """Detach export data and replace absolute local paths with a marker."""
+    if isinstance(value, dict):
+        result = {}
+        for child_key, child in value.items():
+            if isinstance(child_key, str) and child_key.casefold() == "meeting_destination":
+                continue
+            result[str(child_key)] = _export_value(child)
+        return result
+    if isinstance(value, list):
+        return [_export_value(child) for child in value]
+    if _absolute_path(value):
+        return "[redacted]"
+    return copy.deepcopy(value)
+
+
+def _annotation_export_projection(store, session, metadata):
+    """Return selected canonical annotation state when the view exposes it."""
+    value = metadata.get("annotations")
+    if not isinstance(value, dict):
+        reader = getattr(store, "read_annotations", None)
+        if not callable(reader):
+            reader = getattr(getattr(store, "_library", None), "read_annotations", None)
+        if callable(reader):
+            value = reader(session)
+    if not isinstance(value, dict):
+        return None
+    selected = {
+        key: value[key]
+        for key in (
+            "schema_version", "generation", "revision_filter", "title", "notes",
+            "bookmarks", "highlights", "speaker_labels", "collection_ids", "tags",
+            "people", "series_id", "reviewed_summary", "reviewed_artifacts",
+            "active_report_id",
+        )
+        if key in value
+    }
+    return _export_value(selected)
+
+
+def _report_citations(value, output, *, budget):
+    """Collect only bounded citation identifiers, never report body text."""
+    if budget <= 0:
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str) and key.casefold() in {"question", "answer", "text", "body"}:
+                continue
+            if isinstance(key, str) and key.casefold() in {"citations", "segment_ids", "source_ids"}:
+                values = child if isinstance(child, list) else [child]
+                for item in values:
+                    if isinstance(item, str) and item not in output:
+                        output.append(item)
+                        if len(output) >= budget:
+                            return
+                continue
+            _report_citations(child, output, budget=budget - len(output))
+            if len(output) >= budget:
+                return
+    elif isinstance(value, list):
+        for child in value:
+            _report_citations(child, output, budget=budget - len(output))
+            if len(output) >= budget:
+                return
+
+
+def _report_history_projection(report):
+    """Project bounded report metadata without carrying generated bodies."""
+    if not isinstance(report, dict):
+        return None
+    report_id = report.get("id", report.get("report_id"))
+    if not isinstance(report_id, str) or not report_id:
+        return None
+    result = {"id": report_id}
+    for key in (
+        "schema_version", "kind", "profile_id", "profile_version", "session_id",
+        "transcript_revision", "status", "created_at", "completed_at", "virtual",
+    ):
+        value = report.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if key in report:
+                result[key] = value
+    reviewed = report.get("reviewed_artifact")
+    result["reviewed"] = reviewed is not None or bool(report.get("reviewed"))
+    if isinstance(reviewed, dict) and isinstance(reviewed.get("generation"), int):
+        result["review_generation"] = reviewed["generation"]
+    citations = []
+    _report_citations(report.get("generated", report.get("payload", report)), citations,
+                      budget=MAX_EXPORT_CITATIONS)
+    if citations:
+        result["citations"] = citations
+    return _export_value(result)
+
+
+def _report_history_for_export(store, session):
+    """Read an optional bounded report-history seam from a store/view."""
+    reader = getattr(store, "list_report_metadata", None)
+    if not callable(reader):
+        reader = getattr(getattr(store, "_library", None), "list_report_metadata", None)
+    if callable(reader):
+        reports = reader(session, include_legacy=True, limit=MAX_EXPORT_REPORTS)
+    else:
+        reader = getattr(store, "list_reports", None)
+        if not callable(reader):
+            reader = getattr(getattr(store, "_library", None), "list_reports", None)
+        if not callable(reader):
+            return []
+        reports = reader(session, include_legacy=True)
+    result = []
+    for report in reports or ():
+        if len(result) >= MAX_EXPORT_REPORTS:
+            break
+        projection = _report_history_projection(report)
+        if projection is not None:
+            result.append(projection)
+    return result
+
+
+def _metadata_export_projection(store, session, metadata):
+    """Build additive, path-free metadata for whole-meeting exports."""
+    public_metadata = _export_value({
+        key: value for key, value in metadata.items() if key not in {"events", "annotations"}
+    })
+    settings = public_metadata.get("settings")
+    if isinstance(settings, dict):
+        settings.pop("meeting_destination", None)
+        public_metadata["settings"] = settings
+    final_audio = public_metadata.get("final_audio")
+    if isinstance(final_audio, dict) and final_audio.get("path"):
+        final_audio["path"] = os.path.basename(os.fspath(metadata["final_audio"]["path"]))
+        public_metadata["final_audio"] = final_audio
+    annotations = _annotation_export_projection(store, session, metadata)
+    report_history = _report_history_for_export(store, session)
+    return public_metadata, annotations, report_history
+
+
 def _json(handle, value):
     for piece in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(value):
         handle.write(piece)
@@ -254,32 +400,27 @@ def _json(handle, value):
 
 def _json_export(handle, store, session, metadata, cancel_event=None):
     _cancel(cancel_event)
-    public_metadata = {key: value for key, value in metadata.items() if key != "events"}
-    settings = public_metadata.get("settings")
-    if isinstance(settings, dict) and "meeting_destination" in settings:
-        settings = dict(settings)
-        settings.pop("meeting_destination", None)
-        public_metadata["settings"] = settings
-    final_audio = public_metadata.get("final_audio")
-    if isinstance(final_audio, dict) and final_audio.get("path"):
-        final_audio = dict(final_audio)
-        final_audio["path"] = os.path.basename(os.fspath(final_audio["path"]))
-        public_metadata["final_audio"] = final_audio
+    public_metadata, annotations, report_history = _metadata_export_projection(store, session, metadata)
+    _cancel(cancel_event)
     handle.write('{"metadata":')
     _json(handle, public_metadata)
+    handle.write(',"annotations":')
+    _json(handle, annotations or {})
+    handle.write(',"report_history":')
+    _json(handle, report_history)
     handle.write(',"events":[')
     separator = ""
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         handle.write(separator)
-        _json(handle, event)
+        _json(handle, _export_value(event))
         separator = ","
     handle.write('],"transcripts":[')
     separator = ""
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
         handle.write(separator + '{"revision":')
-        _json(handle, revision)
+        _json(handle, _export_value(revision))
         handle.write(',"segments":[')
         segment_separator = ""
         for segment in store.get_transcript(session, revision["id"]):
@@ -299,20 +440,26 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     line(("# " if markdown else "") + title)
     line(f"ID: {session}; estado: {metadata.get('status')}; duração: {metadata.get('duration', 0):.3f} s")
     line("Fontes: microfone/sistema; rótulos não identificam pessoas. Tempos da transcrição representam blocos de áudio.")
+    line("\nDisponibilidade das fontes:")
+    for track, value in metadata.get("tracks", {}).items():
+        _cancel(cancel_event)
+        if isinstance(value, dict):
+            state = "disponível" if value.get("available", True) is not False else "removida pela retenção"
+            line(f"{track}: {state}")
     line("\nNotas:")
     line(metadata.get("notes", ""))
     line("\nMarcadores:")
     for bookmark in metadata.get("bookmarks", []):
         _cancel(cancel_event)
-        line(json.dumps(bookmark, ensure_ascii=False))
+        line(json.dumps(_export_value(bookmark), ensure_ascii=False))
     line("\nProveniência e lacunas:")
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         if event.get("type") != "audio":
-            line(json.dumps(event, ensure_ascii=False))
+            line(json.dumps(_export_value(event), ensure_ascii=False))
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
-        line("\nRevisão: " + json.dumps(revision, ensure_ascii=False))
+        line("\nRevisão: " + json.dumps(_export_value(revision), ensure_ascii=False))
         for segment in store.get_transcript(session, revision["id"]):
             _cancel(cancel_event)
             line(f"[{segment.get('start', 0):.3f}–{segment.get('end', 0):.3f} s | {segment.get('track', 'unknown')} | {segment.get('id', '')}] {segment.get('text', '')}")
@@ -322,6 +469,18 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     if metadata.get("reviewed_summary"):
         line("\nResumo revisado manualmente:")
         line(metadata["reviewed_summary"])
+    annotations = _annotation_export_projection(store, session, metadata)
+    _cancel(cancel_event)
+    if annotations:
+        line("\nAnotações canônicas:")
+        line(json.dumps(annotations, ensure_ascii=False))
+    report_history = _report_history_for_export(store, session)
+    _cancel(cancel_event)
+    if report_history:
+        line("\nHistórico de relatórios (metadados e citações):")
+        for report in report_history:
+            _cancel(cancel_event)
+            line(json.dumps(report, ensure_ascii=False))
 
 
 def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=None):
