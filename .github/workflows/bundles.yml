@@ -1,7 +1,31 @@
 name: Desktop bundles
 
 on:
+  # Full desktop bundles are the expensive release proof. Ordinary source and
+  # documentation PRs use CI; packaging-sensitive changes still build both.
   pull_request:
+    paths:
+      - ".github/workflows/bundles.yml"
+      - "build_release.bat"
+      - "build_release_macos.sh"
+      - "build_installer.bat"
+      - "installer/**"
+      - "packaging/**"
+      - "requirements-release.lock"
+      - "source/requirements.txt"
+      - "source/requirements-voice.txt"
+      - "source/requirements-build.txt"
+      - "source/native/**"
+      - "source/clean_ffmpeg_runtime.py"
+      - "source/voice_runtime_probe.py"
+      - "source/summary_runtime_probe.py"
+      - "source/sqlite_runtime_probe.py"
+      - "source/tests/test_voice_packaging.py"
+      - "source/snipvoice.ico"
+      - "source/snipvoice.icns"
+      - "source/snipvoice-icon.png"
+      - "THIRD_PARTY_NOTICES.md"
+      - "LICENSE"
   workflow_dispatch:
   push:
     tags:
@@ -21,7 +45,7 @@ jobs:
   windows:
     name: Windows x64 bundle and installer
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -107,9 +131,11 @@ jobs:
           }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'pull_request'
         with:
           name: snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-x64
           if-no-files-found: error
+          retention-days: 14
           path: |
             Snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-x64.zip
             Snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-x64.zip.sha256
@@ -123,7 +149,7 @@ jobs:
   macos:
     name: macOS ARM64 bundle
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -180,9 +206,11 @@ jobs:
           shasum -a 256 "Snipvoice-$SNIPVOICE_VERSION-macos-ffmpeg-build-info.zip" > "Snipvoice-$SNIPVOICE_VERSION-macos-ffmpeg-build-info.zip.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'pull_request'
         with:
           name: snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-arm64
           if-no-files-found: error
+          retention-days: 14
           path: |
             Snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-arm64.zip
             Snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-arm64.zip.sha256
