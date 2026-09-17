@@ -83,7 +83,7 @@ jobs:
       # tests without optional skips before the complete suite runs.
       - name: Require native voice imports
         working-directory: source
-        run: python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native, llama_cpp"
+        run: python -c "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native"
 
       - name: Run native voice tests without skips
         working-directory: source

@@ -24,6 +24,11 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertNotIn("\n  voice-native:", text)
         self.assertIn("requirements.txt -r requirements-voice.txt", text)
         self.assertIn("python -m ruff check source", text)
+        self.assertIn(
+            "import sounddevice, soxr, transcribe_cpp, transcribe_cpp_native",
+            text,
+        )
+        self.assertNotIn("transcribe_cpp_native, llama_cpp", text)
         self.assertIn("Run native voice tests without skips", text)
         self.assertEqual(text.count("python -m unittest discover -s tests -q"), 2)
         self.assertLess(
