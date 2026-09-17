@@ -10,6 +10,17 @@ from platform_support import current_os
 
 VISIBLE_STATES = frozenset({"recording", "transcribing", "routing"})
 
+_OVERLAY_BG = "#18191C"
+_OVERLAY_BORDER = "#34363C"
+_OVERLAY_TEXT = "#F7F7F8"
+_OVERLAY_MUTED = "#A7A9AF"
+_WAVE_HEIGHTS = (
+    (6, 12, 20, 12, 7),
+    (10, 20, 12, 18, 9),
+    (16, 9, 22, 13, 17),
+    (8, 17, 11, 21, 12),
+)
+
 _GWL_EXSTYLE = -20
 _WS_EX_TOOLWINDOW = 0x00000080
 _WS_EX_NOACTIVATE = 0x08000000
@@ -50,13 +61,26 @@ def indicator_content(state, mode=None):
     """Return the visible copy and accent token for a voice state."""
     if state == "recording":
         if mode == "command":
-            return "Ouvindo comando…", "warning"
-        return "Ouvindo…", "warning"
+            return "Ouvindo comando", "warning"
+        return "Ouvindo", "warning"
     if state == "transcribing":
-        return "Transcrevendo…", "accent"
+        return "Transcrevendo", "accent"
     if state == "routing":
-        return "Inserindo texto…", "success"
+        return "Inserindo texto", "success"
     return None
+
+
+def indicator_subtitle(state, mode=None):
+    """Return concise guidance without making the overlay interactive."""
+    if state == "recording" and mode == "command":
+        return "Solte para executar · Esc cancela"
+    if state == "recording":
+        return "Solte para transcrever · Esc cancela"
+    if state == "transcribing":
+        return "Processando localmente"
+    if state == "routing":
+        return "Enviando para o campo ativo"
+    return ""
 
 
 class VoiceStatusIndicator:
@@ -66,9 +90,14 @@ class VoiceStatusIndicator:
         self.root = root
         self.window = None
         self.title_label = None
-        self.dot_label = None
+        self.subtitle_label = None
+        self.waveform = None
+        self.waveform_bars = []
         self._native_hwnd = None
         self._mac_panel = None
+        self._animation_after_id = None
+        self._animation_frame = 0
+        self._state = "idle"
 
     def update(self, state, mode=None):
         content = indicator_content(state, mode)
@@ -86,13 +115,19 @@ class VoiceStatusIndicator:
         ui = ui_theme.theme()
         accent = getattr(ui, accent_name)
         self.title_label.configure(text=title)
-        self.dot_label.configure(fg=accent)
+        self.subtitle_label.configure(text=indicator_subtitle(state, mode))
+        for item in self.waveform_bars:
+            self.waveform.itemconfigure(item, fill=accent)
+        self._state = state
+        self._start_animation()
         self._show_without_activation()
 
     def hide(self):
         if self._mac_panel is not None:
             self._mac_panel.hide()
             return
+        self._stop_animation()
+        self._state = "idle"
         if self.window is not None and self._window_exists():
             self.window.withdraw()
 
@@ -100,6 +135,7 @@ class VoiceStatusIndicator:
         if self._mac_panel is not None:
             self._mac_panel.destroy()
             self._mac_panel = None
+        self._stop_animation()
         if self.window is not None and self._window_exists():
             self.window.destroy()
         self.window = None
@@ -112,7 +148,7 @@ class VoiceStatusIndicator:
             return False
 
     def _build(self):
-        ui = ui_theme.bind(self.root)
+        ui = ui_theme.theme()
         window = tk.Toplevel(self.root)
         self.window = window
         window.withdraw()
@@ -122,34 +158,68 @@ class VoiceStatusIndicator:
             window.attributes("-alpha", 0.96)
         except tk.TclError:
             pass
-        window.configure(bg=ui.surface_alt)
+        window.configure(bg=_OVERLAY_BG)
 
-        width = 220
-        height = 42
+        width = 286
+        height = 58
         x = max(12, (window.winfo_screenwidth() - width) // 2)
-        y = max(12, window.winfo_screenheight() - height - 72)
+        y = max(12, window.winfo_screenheight() - height - 76)
         window.geometry(f"{width}x{height}+{x}+{y}")
 
-        container = tk.Frame(window, bg=ui.surface_alt, padx=14, pady=8)
+        container = tk.Frame(
+            window,
+            bg=_OVERLAY_BG,
+            padx=14,
+            pady=8,
+            highlightbackground=_OVERLAY_BORDER,
+            highlightthickness=1,
+            bd=0,
+        )
         container.pack(fill=tk.BOTH, expand=True)
 
-        self.dot_label = tk.Label(
+        self.waveform = tk.Canvas(
             container,
-            text="●",
-            bg=ui.surface_alt,
-            fg=ui.warning,
-            font=ui.font(11, "bold"),
+            width=48,
+            height=30,
+            bg=_OVERLAY_BG,
+            highlightthickness=0,
+            bd=0,
         )
-        self.dot_label.pack(side=tk.LEFT, padx=(0, 9))
+        self.waveform.pack(side=tk.LEFT, padx=(0, 12))
+        self.waveform_bars = []
+        for index, height_value in enumerate(_WAVE_HEIGHTS[0]):
+            x_position = 6 + index * 9
+            item = self.waveform.create_line(
+                x_position,
+                15 - height_value / 2,
+                x_position,
+                15 + height_value / 2,
+                fill=ui.warning,
+                width=3,
+                capstyle=tk.ROUND,
+            )
+            self.waveform_bars.append(item)
+
+        copy = tk.Frame(container, bg=_OVERLAY_BG)
+        copy.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.title_label = tk.Label(
-            container,
+            copy,
             text="",
-            bg=ui.surface_alt,
-            fg=ui.text,
+            bg=_OVERLAY_BG,
+            fg=_OVERLAY_TEXT,
             font=ui.font(10, "bold"),
             anchor="w",
         )
-        self.title_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.title_label.pack(fill=tk.X, anchor="w")
+        self.subtitle_label = tk.Label(
+            copy,
+            text="",
+            bg=_OVERLAY_BG,
+            fg=_OVERLAY_MUTED,
+            font=ui.font(8),
+            anchor="w",
+        )
+        self.subtitle_label.pack(fill=tk.X, anchor="w", pady=(1, 0))
 
         if current_os() == "windows":
             try:
@@ -164,8 +234,45 @@ class VoiceStatusIndicator:
                     style | _WS_EX_TOOLWINDOW | _WS_EX_NOACTIVATE,
                 )
                 self._native_hwnd = hwnd
+                rounded = ctypes.c_int(2)
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, 33, ctypes.byref(rounded), ctypes.sizeof(rounded),
+                )
             except Exception:
                 self._native_hwnd = None
+
+    def _start_animation(self):
+        if self._animation_after_id is None and self.window is not None:
+            self._animation_after_id = self.window.after(110, self._animate_waveform)
+
+    def _stop_animation(self):
+        if self._animation_after_id is None or self.window is None:
+            self._animation_after_id = None
+            return
+        try:
+            self.window.after_cancel(self._animation_after_id)
+        except tk.TclError:
+            pass
+        self._animation_after_id = None
+
+    def _animate_waveform(self):
+        self._animation_after_id = None
+        if self._state not in VISIBLE_STATES or not self._window_exists():
+            return
+        self._animation_frame = (self._animation_frame + 1) % len(_WAVE_HEIGHTS)
+        heights = _WAVE_HEIGHTS[self._animation_frame]
+        if self._state != "recording":
+            heights = tuple(max(5, value // 2) for value in heights)
+        for index, (item, height_value) in enumerate(zip(self.waveform_bars, heights)):
+            x_position = 6 + index * 9
+            self.waveform.coords(
+                item,
+                x_position,
+                15 - height_value / 2,
+                x_position,
+                15 + height_value / 2,
+            )
+        self._start_animation()
 
     def _show_without_activation(self):
         """Reveal without moving keyboard focus away from the dictation target."""

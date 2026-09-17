@@ -320,7 +320,8 @@ class Snipvoice:
             self.manager_window.deiconify()
             self.manager_window.lift()
             return
-        ui = ui_theme.bind(root)
+        appearance = ui_theme.normalize_preference(self.settings.get("appearance"))
+        ui = ui_theme.bind(root, preference=appearance)
         window = tk.Toplevel(root)
         self.manager_window = window
         window.title(APP_DISPLAY_NAME)
@@ -330,8 +331,9 @@ class Snipvoice:
         window.configure(bg=ui.surface)
         self._set_window_icon(window)
         style = ttk.Style(window)
-        ui_theme.apply_ttk_theme(style)
+        ui_theme.apply_ttk_theme(style, resolved=ui)
         ui_theme.configure_manager_styles(style, ui)
+        ui_theme.apply_window_chrome(window, ui)
 
         header = tk.Frame(window, bg=ui.surface, padx=ui.space_xl, pady=ui.space_lg)
         header.pack(fill=tk.X)
@@ -357,12 +359,19 @@ class Snipvoice:
         privacy.pack(side=tk.RIGHT, padx=(ui.space_lg, 0))
         tk.Label(
             privacy,
-            text="Processamento local",
+            text="100% local",
             font=ui.font(9, "bold"),
             bg=ui.card,
             fg=ui.success,
-        ).pack()
-        tk.Frame(window, bg=ui.divider, height=1).pack(fill=tk.X)
+        ).pack(anchor="e")
+        tk.Label(
+            privacy,
+            text="sem upload automático",
+            font=ui.font(8),
+            bg=ui.card,
+            fg=ui.text_muted,
+        ).pack(anchor="e", pady=(1, 0))
+        tk.Frame(window, bg=ui.accent, height=2).pack(fill=tk.X)
 
         notebook = ttk.Notebook(window, style="Manager.TNotebook")
         self._manager_notebook = notebook
@@ -379,6 +388,9 @@ class Snipvoice:
             on_settings_changed=lambda: self.task_runner.start(
                 self._rebuild_meeting_monitor, name="meeting-hotkey"),
             on_recording_state_changed=lambda _state, _snapshot: self.refresh_tray_menu(),
+            on_appearance_changed=lambda preference: self._reopen_manager_for_appearance(
+                root, preference,
+            ),
         )
         self._manager_meeting_view = meeting_view
         self._manager_recording_tab = meeting_view.recording_tab
@@ -429,6 +441,36 @@ class Snipvoice:
         x = max(0, (screen_width - window_width) // 2)
         y = max(0, (screen_height - window_height) // 2)
         window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+    def _reopen_manager_for_appearance(self, root, preference):
+        """Rebuild the manager after a persisted appearance change.
+
+        ``MeetingWindow.close`` retains its normal unsaved-edit prompt. If the
+        user cancels that prompt, the new preference remains saved and will be
+        applied the next time the manager opens.
+        """
+        preference = ui_theme.normalize_preference(preference)
+        self.settings["appearance"] = preference
+
+        def reopen():
+            ui_theme.reset()
+            self._show_manager_window(root)
+            view = self._manager_meeting_view
+            if view is not None and self._manager_notebook is not None:
+                try:
+                    self._manager_notebook.select(view.settings_tab)
+                except tk.TclError:
+                    pass
+
+        def finish():
+            self._destroy_manager_window()
+            root.after_idle(reopen)
+
+        view = self._manager_meeting_view
+        if view is not None and not view.closed:
+            view.close(destroy=False, after_close=finish)
+        else:
+            finish()
 
     def _close_settings_window(self, force=False):
         meeting_view = self._manager_meeting_view
@@ -1401,6 +1443,55 @@ class Snipvoice:
             wraplength=640,
             justify="left",
         ).pack(anchor="w", pady=(ui.space_xs, ui.space_lg))
+
+        benefits = tk.Frame(main, bg=ui.surface)
+        benefits.pack(fill=tk.X, pady=(0, ui.space_md))
+        benefit_copy = (
+            (
+                "Fale naturalmente",
+                "Ditado contínuo com pausas, idioma automático e processamento local.",
+            ),
+            (
+                "Texto pronto",
+                "Pontuação do modelo e correções personalizadas antes da inserção.",
+            ),
+            (
+                "Em qualquer app",
+                "O texto volta ao campo ativo pelo atalho global, sem plugin.",
+            ),
+        )
+        for column, (title, description) in enumerate(benefit_copy):
+            benefits.columnconfigure(column, weight=1, uniform="voice-benefit")
+            card = tk.Frame(
+                benefits,
+                padx=ui.space_md,
+                pady=ui.space_sm,
+                **ui.card_options(),
+            )
+            card.grid(
+                row=0,
+                column=column,
+                sticky="nsew",
+                padx=(0 if column == 0 else ui.space_xs, 0),
+            )
+            tk.Label(
+                card,
+                text=title,
+                font=ui.font(9, "bold"),
+                bg=ui.card,
+                fg=ui.text_strong,
+                anchor="w",
+            ).pack(fill=tk.X)
+            tk.Label(
+                card,
+                text=description,
+                font=ui.font(8),
+                bg=ui.card,
+                fg=ui.text_muted,
+                anchor="w",
+                justify="left",
+                wraplength=220,
+            ).pack(fill=tk.X, pady=(ui.space_xs, 0))
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
         status_text = (

@@ -8,6 +8,7 @@ platform-native.
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -44,6 +45,19 @@ FLUENT_WINDOWS_COLORS = {
     "tab_unselected_fg": "#4A4A4A",
 }
 
+DARK_WINDOWS_COLORS = {
+    "surface": "#111214",
+    "surface_alt": "#191A1D",
+    "card": "#1B1C20",
+    "field": "#222329",
+    "text": "#E9EAEC",
+    "text_strong": "#FFFFFF",
+    "text_muted": "#A4A7AE",
+    "border": "#32343B",
+    "accent": "#FFB347",
+    "accent_active": "#F59E0B",
+}
+
 
 class WindowsPaletteTests(unittest.TestCase):
     """Windows must keep the intentional Fluent palette stable."""
@@ -69,6 +83,17 @@ class WindowsPaletteTests(unittest.TestCase):
 
     def test_windows_prefers_vista(self):
         self.assertEqual(ui_theme.ttk_theme_preference("windows")[0], "vista")
+
+    def test_windows_dark_palette_is_opaque_and_high_contrast(self):
+        colors = ui_theme.palette("dark", system="windows")
+        for token, expected in DARK_WINDOWS_COLORS.items():
+            self.assertEqual(colors[token], expected, token)
+        self.assertEqual(colors["text_native"], colors["text"])
+
+    def test_windows_dark_mode_uses_clam_so_colors_are_honored(self):
+        self.assertEqual(
+            ui_theme.ttk_theme_preference("windows", dark=True)[0], "clam"
+        )
 
 
 class MacPaletteTests(unittest.TestCase):
@@ -104,12 +129,12 @@ class MacPaletteTests(unittest.TestCase):
                       "link", "warning", "success"):
             self.assertNotEqual(dark[token], light[token], token)
 
-    def test_no_literal_color_leaks_from_the_windows_palette_into_dark(self):
-        windows = set(ui_theme.palette("windows").values())
-        dark = ui_theme.palette("dark")
-        # The brand accent is deliberately shared; everything else must differ.
-        shared = {token for token, value in dark.items() if value in windows}
-        self.assertEqual(shared, {"accent", "accent_active", "text_on_accent"})
+    def test_mac_dark_keeps_dynamic_surfaces_over_the_opaque_base(self):
+        dark = ui_theme.palette("dark", system="darwin")
+        self.assertEqual(dark["surface"], "systemWindowBackgroundColor")
+        self.assertEqual(dark["card"], "systemTextBackgroundColor")
+        self.assertEqual(dark["text"], "systemTextColor")
+        self.assertNotEqual(dark["surface_alt"], ui_theme.palette("light")["surface_alt"])
 
     def test_mac_fonts_use_the_system_families(self):
         theme = ui_theme.build_theme("dark", system="darwin")
@@ -172,7 +197,20 @@ class AppearanceDetectionTests(unittest.TestCase):
             def winfo_rgb(self, _name):
                 raise AssertionError("Windows must not query Aqua colors")
 
-        self.assertEqual(ui_theme._probe_kind(Exploding(), "windows"), "windows")
+        with mock.patch("ui_theme._windows_apps_use_light_theme", return_value=True):
+            self.assertEqual(ui_theme._probe_kind(Exploding(), "windows"), "windows")
+
+    def test_windows_system_dark_is_detected_without_querying_tk(self):
+        class Exploding:
+            def winfo_rgb(self, _name):
+                raise AssertionError("Windows must not query Aqua colors")
+
+        with mock.patch("ui_theme._windows_apps_use_light_theme", return_value=False):
+            self.assertEqual(ui_theme._probe_kind(Exploding(), "windows"), "dark")
+
+    def test_invalid_persisted_preference_falls_back_to_system(self):
+        for value in (None, "", "sepia", 1):
+            self.assertEqual(ui_theme.normalize_preference(value), "system")
 
 
 class ThemeCacheTests(unittest.TestCase):
@@ -196,6 +234,20 @@ class ThemeCacheTests(unittest.TestCase):
         # Guessing dark and being wrong is the unreadable case; light is the
         # historical behavior.
         self.assertEqual(ui_theme.bind(None, system="darwin").kind, "light")
+
+    def test_explicit_windows_dark_preference_wins_over_system(self):
+        with mock.patch("ui_theme._windows_apps_use_light_theme", return_value=True):
+            theme = ui_theme.bind(None, system="windows", preference="dark")
+        self.assertEqual(theme.kind, "dark")
+        self.assertEqual(theme.preference, "dark")
+
+    def test_explicit_mac_dark_uses_fixed_surfaces_instead_of_aqua_system_colors(self):
+        theme = ui_theme.bind(None, system="darwin", preference="dark")
+        self.assertEqual(theme.kind, "dark")
+        self.assertEqual(theme.preference, "dark")
+        self.assertEqual(theme.surface, DARK_WINDOWS_COLORS["surface"])
+        self.assertEqual(theme.card, DARK_WINDOWS_COLORS["card"])
+        self.assertNotEqual(theme.surface, "systemWindowBackgroundColor")
 
 
 class WidgetOptionTests(unittest.TestCase):
@@ -291,6 +343,12 @@ class WidgetOptionTests(unittest.TestCase):
             self.assertIn(option, colors)
         self.assertEqual(colors["bg"], theme.field)
         self.assertEqual(colors["fg"], theme.text)
+
+    def test_windows_dark_paints_entries_lists_and_checkbox_selection(self):
+        theme = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(theme.entry_colors()["bg"], theme.field)
+        self.assertEqual(theme.listbox_colors()["fg"], theme.text)
+        self.assertEqual(theme.checkbutton_colors(theme.card)["selectcolor"], theme.accent)
 
     def test_text_colors_drop_the_options_tk_text_rejects(self):
         colors = ui_theme.build_theme("dark", system="darwin").text_colors()
@@ -402,6 +460,13 @@ class TtkThemeSelectionTests(unittest.TestCase):
         style = self.FakeStyle(("aqua", "clam", "default"))
         self.assertEqual(ui_theme.apply_ttk_theme(style, "darwin"), "aqua")
         self.assertEqual(style.used, ["aqua"])
+
+    def test_dark_windows_picks_clam(self):
+        style = self.FakeStyle(("vista", "clam", "default"))
+        theme = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(
+            ui_theme.apply_ttk_theme(style, "windows", resolved=theme), "clam"
+        )
 
     def test_skips_a_theme_this_platform_lacks(self):
         # This is the actual bug: "vista" does not exist off Windows, and the

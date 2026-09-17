@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app_module import snipvoice as tx  # .pyw is not importable off Windows
 from gui_thread import GuiThread
 from platform_support import IS_MAC
+import ui_theme
 
 TK_AVAILABLE = False
 TK_SKIP_REASON = "Tk display not available"
@@ -428,7 +429,11 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(manager_size[1], 700)
         self.assertLessEqual(manager_size[0], 1120)
         self.assertLessEqual(manager_size[1], 820)
-        self.assertIn("Processamento local", labels)
+        self.assertIn("100% local", labels)
+        self.assertIn("sem upload automático", labels)
+        self.assertIn("Fale naturalmente", labels)
+        self.assertIn("Texto pronto", labels)
+        self.assertIn("Em qualquer app", labels)
         self.assertIn("Modelo e idioma", labels)
         self.assertIn("Atalhos", labels)
         self.assertIn("Modelos de transcrição", labels)
@@ -442,6 +447,28 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 "Configurações",
             ],
         )
+
+    def test_manager_applies_persisted_dark_appearance(self):
+        _ensure_voice(self.app)
+        self.app.settings["appearance"] = "dark"
+
+        def inspect_manager(shared_root):
+            self.app._show_manager_window(shared_root)
+            self.app.manager_window.update_idletasks()
+            view = self.app._manager_meeting_view
+            result = (
+                ui_theme.theme().kind,
+                ui_theme.theme().preference,
+                view.appearance_display.get(),
+                tuple(view.appearance_box.cget("values")),
+            )
+            ui_theme.reset()
+            return result
+
+        kind, preference, selected, choices = self._on_gui(inspect_manager)
+        self.assertEqual((kind, preference), ("dark", "dark"))
+        self.assertEqual(selected, "Escuro")
+        self.assertEqual(choices, ("Sistema", "Claro", "Escuro"))
 
     def test_manager_separates_model_settings_from_ditado_selectors(self):
         """Configurações owns downloads; Ditado keeps compact friendly selectors."""

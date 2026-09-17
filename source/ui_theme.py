@@ -1,4 +1,4 @@
-"""Per-OS palette and font resolution for the Tkinter windows.
+"""Per-OS palette, appearance preference and font resolution for Tk windows.
 
 The manager GUI was written Windows-first with a hardcoded light palette and
 ``Segoe UI`` everywhere. On macOS that produced unreadable windows: Aqua themes
@@ -10,8 +10,8 @@ This module is the seam. Call sites ask for a semantic token
 (``theme().surface``, ``theme().text``) and a size (``ui_font(9, "bold")``)
 instead of naming a color or a font family:
 
-* **Windows** resolves to the app's Fluent-inspired opaque palette. It keeps
-  the native selection behavior of controls the app does not paint itself.
+* **Windows** resolves to an opaque Fluent-inspired light or dark palette and
+  follows the user's app-theme preference by default.
 * **macOS** resolves to Aqua's dynamic system colors (``systemTextColor`` and
   friends), which follow the light/dark appearance natively, plus a small set
   of derived grays for the tokens Aqua only exposes with an alpha channel --
@@ -27,6 +27,7 @@ it was closed. A live switch with the window open is not handled -- the tokens
 mapped to system color *names* repaint themselves, the derived grays do not.
 """
 
+import ctypes
 from tkinter import font as tkfont
 
 from platform_support import current_os
@@ -65,7 +66,7 @@ class Theme:
     """A resolved palette plus the font family/size shift for this platform."""
 
     __slots__ = (
-        "kind", "system", "family", "emoji_family", "mono_family", "symbol_family",
+        "kind", "system", "preference", "family", "emoji_family", "mono_family", "symbol_family",
         "size_delta",
         "surface", "surface_alt", "surface_alt_active", "surface_hover",
         "card", "field", "field_hover",
@@ -78,10 +79,11 @@ class Theme:
         "tree_row_height",
     )
 
-    def __init__(self, kind, system, family, emoji_family, mono_family,
+    def __init__(self, kind, system, preference, family, emoji_family, mono_family,
                  symbol_family, size_delta, colors):
         self.kind = kind
         self.system = system
+        self.preference = preference
         self.family = family
         self.emoji_family = emoji_family
         self.mono_family = mono_family
@@ -117,13 +119,12 @@ class Theme:
         the system appearance while its parent frame carries an explicit color;
         that mismatch is what renders as a black box in dark mode.
 
-        Empty off macOS, and that is the point: Win32's own defaults for these
-        widgets are already right (system window background, system window
-        text, the user's highlight color). Pinning them there would swap the
-        user's selection color for the app's blue -- a Windows regression for
-        no gain.
+        Empty for the historical light Windows/Linux palette, and that is the
+        point: native defaults are already right there. Opaque dark themes
+        need explicit fields and selection colors because the OS otherwise
+        leaves these classic Tk widgets light.
         """
-        if self.system != "darwin":
+        if self.system != "darwin" and not self.is_dark:
             return {}
         return {
             "bg": self.field,
@@ -146,8 +147,8 @@ class Theme:
         return colors
 
     def listbox_colors(self):
-        """See :meth:`entry_colors` -- macOS only, for the same reason."""
-        if self.system != "darwin":
+        """See :meth:`entry_colors` for the same native-versus-painted seam."""
+        if self.system != "darwin" and not self.is_dark:
             return {}
         return {
             "bg": self.field,
@@ -169,13 +170,16 @@ class Theme:
         """Colors for a checkbox sitting on ``bg``. Native on macOS."""
         if self.system == "darwin":
             return {}
-        return {
+        colors = {
             "bg": bg,
             "fg": self.text_native,
             "activebackground": bg,
             "activeforeground": self.text_native,
             "disabledforeground": self.text_muted,
         }
+        if self.is_dark:
+            colors["selectcolor"] = self.accent
+        return colors
 
     def toolbar_frame_colors(self):
         """``bg`` for the formatting-toolbar frame (and its stacked status row).
@@ -347,6 +351,37 @@ _LIGHT = {
     "tab_unselected_fg": "#4A4A4A",
 }
 
+# Opaque near-black surfaces keep native Tk predictable on Windows and Linux.
+# The warm recording accent comes from the supplied Windows/Wispr references,
+# while the rest of the palette stays neutral and product-owned.
+_DARK = {
+    "surface": "#111214",
+    "surface_alt": "#191A1D",
+    "surface_alt_active": "#25262A",
+    "surface_hover": "#24262A",
+    "card": "#1B1C20",
+    "field": "#222329",
+    "field_hover": "#292B31",
+    "text": "#E9EAEC",
+    "text_strong": "#FFFFFF",
+    "text_muted": "#A4A7AE",
+    "text_on_accent": "#17130B",
+    "border": "#32343B",
+    "divider": "#292B31",
+    "accent": "#FFB347",
+    "accent_active": "#F59E0B",
+    "danger": "#FF6B6B",
+    "danger_active": "#E95555",
+    "focus_ring": "#FFD089",
+    "link": "#8AB4F8",
+    "warning": "#FFB347",
+    "success": "#66D18F",
+    "select_bg": "#3B3325",
+    "select_fg": "#FFFFFF",
+    "text_native": "#E9EAEC",
+    "tab_unselected_fg": "#B7BAC1",
+}
+
 # Win32's defaults for the widgets this GUI leaves uncolored (tkWinDefault.h).
 # Naming them explicitly is a no-op on Windows and keeps the seam honest.
 _WINDOWS_NATIVE = {
@@ -404,7 +439,15 @@ def palette(kind, system=None):
     resolve there. ``system`` only selects the platform's native defaults for
     the ``*_native`` tokens.
     """
-    colors = dict(_LIGHT)
+    if system is None:
+        # Preserve the public palette helper's historical contract: ``windows``
+        # is the literal Fluent map, while light/dark exercise Aqua tokens.
+        system = "darwin" if kind in {"light", "dark"} else None
+    colors = dict(_DARK if kind == "dark" else _LIGHT)
+    if system != "darwin":
+        if kind in {"windows", "light"} and system == "windows":
+            colors.update(_WINDOWS_NATIVE)
+        return colors
     if kind == "windows":
         if system == "windows":
             colors.update(_WINDOWS_NATIVE)
@@ -453,9 +496,13 @@ def size_delta(system=None, default_size=None):
     return int(default_size) - BODY_FONT_SIZE
 
 
-def ttk_theme_preference(system=None):
+def ttk_theme_preference(system=None, dark=False):
     """ttk themes to try, best first. The last is Tk's built-in fallback."""
     system = system or current_os()
+    if dark and system != "darwin":
+        # Win32's native Vista theme paints light controls regardless of the
+        # colors supplied by Tk. Clam is the portable theme that honors them.
+        return ("clam", "default")
     if system == "windows":
         return ("vista", "winnative", "default")
     if system == "darwin":
@@ -463,13 +510,14 @@ def ttk_theme_preference(system=None):
     return ("clam", "default")
 
 
-def apply_ttk_theme(style, system=None):
+def apply_ttk_theme(style, system=None, resolved=None):
     """Select the best available ttk theme. Returns the theme actually in use."""
     try:
         available = set(style.theme_names())
     except Exception:
         return None
-    for name in ttk_theme_preference(system):
+    ui = resolved or theme()
+    for name in ttk_theme_preference(system, dark=ui.is_dark):
         if name not in available:
             continue
         try:
@@ -507,6 +555,36 @@ def configure_manager_styles(style, resolved=None):
         expand=[("selected", (0, 0, 0, 0))],
     )
     style.configure("Manager.TFrame", background=ui.surface)
+    style.configure("TFrame", background=ui.surface)
+    style.configure("TLabel", background=ui.surface, foreground=ui.text)
+    style.configure(
+        "TCombobox",
+        fieldbackground=ui.field,
+        background=ui.surface_alt,
+        foreground=ui.text,
+        arrowcolor=ui.text_muted,
+        bordercolor=ui.border,
+        lightcolor=ui.border,
+        darkcolor=ui.border,
+        padding=(8, 5),
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", ui.field), ("disabled", ui.surface_alt)],
+        foreground=[("readonly", ui.text), ("disabled", ui.text_muted)],
+        selectbackground=[("readonly", ui.field)],
+        selectforeground=[("readonly", ui.text)],
+    )
+    for orientation in ("Vertical", "Horizontal"):
+        style.configure(
+            f"{orientation}.TScrollbar",
+            background=ui.surface_alt,
+            troughcolor=ui.surface,
+            bordercolor=ui.surface,
+            arrowcolor=ui.text_muted,
+            lightcolor=ui.surface_alt,
+            darkcolor=ui.surface_alt,
+        )
     style.configure(
         "Manager.Treeview",
         background=ui.card,
@@ -547,11 +625,30 @@ def _relative_luminance(rgb16):
     return sum(rgb16) / (3.0 * 65535.0)
 
 
+def normalize_preference(value):
+    """Return one of ``system``, ``light`` or ``dark`` for persisted input."""
+    return value if value in {"system", "light", "dark"} else "system"
+
+
+def _windows_apps_use_light_theme():
+    """Read the Windows app-theme preference; return ``None`` if unavailable."""
+    try:
+        import winreg
+
+        path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as key:
+            value, _kind = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return bool(value)
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
+
+
 def _probe_kind(widget, system):
+    if system == "windows":
+        light = _windows_apps_use_light_theme()
+        return "windows" if light is not False else "dark"
     if system != "darwin":
-        # Linux takes the literal palette too: Aqua's system color names do not
-        # exist on X11 and Tk raises on an unknown color.
-        return "windows"
+        return "light"
     try:
         return appearance_kind(
             _relative_luminance(widget.winfo_rgb("systemWindowBackgroundColor"))
@@ -569,25 +666,37 @@ def _probe_default_size(widget):
         return None
 
 
-def build_theme(kind, system=None, default_size=None):
-    """Assemble a :class:`Theme`. Pure given ``kind``/``system``/``default_size``."""
+def build_theme(kind, system=None, default_size=None, preference="system"):
+    """Assemble a :class:`Theme` from resolved platform and appearance state.
+
+    macOS system mode keeps Aqua's dynamic color names. A fixed light/dark
+    preference must use the opaque palette instead; otherwise Aqua resolves
+    those names from the OS appearance and silently overrides the user's
+    explicit choice.
+    """
     system = system or current_os()
+    preference = normalize_preference(preference)
+    colors = palette(kind, system)
+    if system == "darwin" and preference != "system":
+        colors = dict(_DARK if kind == "dark" else _LIGHT)
+        colors.update(_MAC_NATIVE)
     return Theme(
         kind=kind,
         system=system,
+        preference=preference,
         family=font_family(system),
         emoji_family=emoji_family(system),
         mono_family=mono_family(system),
         symbol_family=symbol_family(system),
         size_delta=size_delta(system, default_size),
-        colors=palette(kind, system),
+        colors=colors,
     )
 
 
 _current = None
 
 
-def bind(widget=None, system=None):
+def bind(widget=None, system=None, preference="system"):
     """Resolve the theme against ``widget`` and cache it. Returns the theme.
 
     Called by every top-level window builder, so a window opened after the user
@@ -595,15 +704,42 @@ def bind(widget=None, system=None):
     """
     global _current
     system = system or current_os()
-    if widget is None:
-        # No widget means no appearance probe; never guess dark, because
-        # guessing wrong is exactly the unreadable case being fixed.
-        _current = build_theme("light" if system == "darwin" else "windows", system)
-        return _current
+    preference = normalize_preference(preference)
+    if preference == "system":
+        if widget is None and system == "darwin":
+            kind = "light"
+        else:
+            kind = _probe_kind(widget, system)
+    else:
+        kind = preference
     _current = build_theme(
-        _probe_kind(widget, system), system, _probe_default_size(widget)
+        kind,
+        system,
+        _probe_default_size(widget) if widget else None,
+        preference=preference,
     )
     return _current
+
+
+def apply_window_chrome(window, resolved=None):
+    """Ask Windows 11 for matching title-bar colors and rounded corners."""
+    ui = resolved or theme()
+    if ui.system != "windows":
+        return False
+    try:
+        window.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id()) or window.winfo_id()
+        enabled = ctypes.c_int(1 if ui.is_dark else 0)
+        rounded = ctypes.c_int(2)  # DWMWCP_ROUND
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 20, ctypes.byref(enabled), ctypes.sizeof(enabled),
+        )
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 33, ctypes.byref(rounded), ctypes.sizeof(rounded),
+        )
+        return True
+    except Exception:
+        return False
 
 
 def theme():
