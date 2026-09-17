@@ -275,7 +275,9 @@ class MeetingFilesTests(unittest.TestCase):
             def iter_audio(view_self, session_id, track=None, start=0.0):
                 return self.store.iter_audio(session_id, track=track, start=start)
 
-            def list_report_metadata(view_self, session_id, include_legacy=True, limit=64):
+            def list_report_metadata(
+                view_self, session_id, include_legacy=True, limit=64, cancel_event=None,
+            ):
                 return [{
                     "id": "r1", "kind": "report", "profile_id": "general",
                     "created_at": "2026-09-17T00:00:00Z", "reviewed": True,

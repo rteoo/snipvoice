@@ -366,7 +366,12 @@ def _report_history_for_export(store, session, cancel_event=None):
     if not callable(reader):
         reader = getattr(getattr(store, "_library", None), "list_report_metadata", None)
     if callable(reader):
-        reports = reader(session, include_legacy=True, limit=MAX_EXPORT_REPORTS)
+        reports = reader(
+            session,
+            include_legacy=True,
+            limit=MAX_EXPORT_REPORTS,
+            cancel_event=cancel_event,
+        )
     else:
         reader = getattr(store, "list_reports", None)
         if not callable(reader):
