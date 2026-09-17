@@ -11,7 +11,8 @@ from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    BackgroundBridge, BOOKMARK_LIMIT, MeetingWindow, NOTES_LIMIT, TRANSCRIPT_PAGE_SIZE,
+    BackgroundBridge, BOOKMARK_LIMIT, MAX_PAGE_BACKSTACK, MeetingWindow, NOTES_LIMIT,
+    TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, open_meeting_window, validated_settings,
 )
@@ -103,6 +104,106 @@ class MeetingGuiLogicTests(unittest.TestCase):
         )
         self.assertIsNone(result)
         canvas.yview_scroll.assert_not_called()
+
+    def test_library_filters_normalize_multi_value_labels_without_file_access(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.collection_filter = Variable("project-1, project-2")
+        view.tag_filter = Variable("planning")
+        view.people_filter = Variable("Alice, Bob")
+        view.series_filter = Variable("")
+        view.date_from_filter = Variable("2026-09-01")
+        view.date_to_filter = Variable("2026-09-30")
+
+        self.assertEqual(view._library_filters(), {
+            "collection": ["project-1", "project-2"],
+            "tag": "planning", "person": ["Alice", "Bob"], "series": None,
+            "date_from": "2026-09-01", "date_to": "2026-09-30",
+        })
+
+    def test_library_cursor_backstack_is_bounded_and_stale_page_callback_is_ignored(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.library_next_cursor = "cursor"
+        view.library_cursor = None
+        view.library_back_stack = [None]
+        view.library_page_index = 0
+        view.offset = 0
+        view.refresh_library = mock.Mock()
+        for _index in range(MAX_PAGE_BACKSTACK + 8):
+            view.change_page(1)
+        self.assertLessEqual(len(view.library_back_stack), MAX_PAGE_BACKSTACK)
+        self.assertEqual(view.library_page_index, len(view.library_back_stack) - 1)
+        view.change_page(-1)
+        self.assertEqual(view.library_cursor, view.library_back_stack[-1])
+
+        stale = MeetingWindow.__new__(MeetingWindow)
+        stale.library_filter_generation = 4
+        stale.sessions = mock.Mock()
+        stale._library_loaded(({"items": [], "next_cursor": None}, [], 3), None)
+        stale.sessions.delete.assert_not_called()
+
+    def test_keyset_page_uses_zero_offset_and_preserves_page_label_index(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.library_cursor = "cursor-page-2"
+        view.library_page_index = 1
+        view.library_filter_generation = 0
+        view.query = Variable("")
+        view.status_filter = Variable("Todos")
+        view.collection_filter = Variable("")
+        view.tag_filter = Variable("")
+        view.people_filter = Variable("")
+        view.series_filter = Variable("")
+        view.date_from_filter = Variable("")
+        view.date_to_filter = Variable("")
+        view.controller = mock.Mock()
+        view.controller.list_sessions_page.return_value = {
+            "items": [{"id": "page-2", "title": "Page 2", "status": "completed"}],
+            "next_cursor": None,
+        }
+        view._submit = mock.Mock()
+
+        view.refresh_library()
+        operation = view._submit.call_args.args[1]
+        operation()
+
+        call = view.controller.list_sessions_page.call_args
+        self.assertEqual(call.kwargs["cursor"], "cursor-page-2")
+        self.assertEqual(call.kwargs["offset"], 0)
+
+    def test_cross_meeting_question_includes_visible_status_filter(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.cross_question = Variable("What was decided?")
+        view.summary_model = Variable("local-model")
+        view.status_filter = Variable("Concluídos")
+        view.cross_cancel_button = mock.Mock()
+        view.cross_status = Variable()
+        view.cross_request = 0
+        view.closed = False
+        view._library_filters = mock.Mock(return_value={"tag": "planning"})
+        view.controller = mock.Mock()
+        view._submit = mock.Mock()
+
+        view.ask_across_meetings()
+        operation = view._submit.call_args.args[1]
+        operation()
+
+        view.controller.ask_across_meetings.assert_called_once_with(
+            "What was decided?", "local-model",
+            filters={"tag": "planning", "status": "completed"},
+        )
+
+    def test_search_resolution_callback_ignores_stale_generation(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.search_request = 8
+        view.selected = "current"
+        view._jump_to_transcript_evidence = mock.Mock()
+
+        view._apply_search_resolution({
+            "source_kind": "transcript", "session_id": "current",
+            "revision_id": "revision-1", "segment_id": "segment-1",
+        }, request=7)
+
+        view._jump_to_transcript_evidence.assert_not_called()
 
     def test_missing_manual_device_stays_pinned(self):
         selection = EndpointSelection("manual", "opaque-id")
@@ -691,6 +792,28 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             self.assertTrue(view.settings_loaded)
             self.assertEqual(view.hotkey.get(), "")
             self.assertIn("input", [selection.endpoint_id for _, selection in view.options["microphone"]])
+        finally:
+            view.close()
+            self.root.update()
+
+    def test_library_detail_pane_uses_scrollable_canvas_for_appended_controls(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        controller.read_workspace.return_value = {
+            "generation": 0, "collections": [], "series": [],
+        }
+        window = open_meeting_window(self.root, controller, lambda: {}, mock.Mock())
+        view = window._meeting_view
+        try:
+            self.root.update()
+            self.assertIsInstance(view.detail_canvas, tk.Canvas)
+            self.assertIs(view.detail_content.master, view.detail_canvas)
+            self.assertTrue(view.detail_canvas.cget("yscrollcommand"))
+            self.assertIsNotNone(view.detail_canvas.bbox("all"))
         finally:
             view.close()
             self.root.update()

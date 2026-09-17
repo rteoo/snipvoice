@@ -346,6 +346,48 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         self.assertEqual(self.controller.get_session(session)["notes"], "Canonical notes")
         self.assertTrue((self.meeting_root / session / "annotations.json").is_file())
 
+    def test_library_page_and_search_seams_forward_bounded_filters(self):
+        page = {"items": [], "next_cursor": None, "cursor_reset": False}
+        with patch.object(self.library, "list_sessions_page", return_value=page) as reader, \
+                patch.object(self.library, "search", return_value=[]) as search:
+            self.assertIs(
+                self.controller.list_sessions_page(
+                    limit=10, cursor="c1", query="Friday", status="completed",
+                    collection="project-1", tag="planning", person="Alice",
+                    series="weekly", date_from="2026-09-01", date_to="2026-09-30",
+                ),
+                page,
+            )
+            self.assertEqual(self.controller.search_library("Friday", limit=5, tag="planning"), [])
+        self.assertEqual(reader.call_args.kwargs["cursor"], "c1")
+        self.assertEqual(reader.call_args.kwargs["collection"], "project-1")
+        self.assertEqual(search.call_args.kwargs, {"limit": 5, "offset": 0, "tag": "planning"})
+
+    def test_rebuild_index_reports_progress_and_surfaces_cancellation_state(self):
+        progress = []
+
+        def cancelled_rebuild(*, cancel_event, progress):
+            progress(1, 3)
+            cancel_event.set()
+            raise RuntimeError("rebuild cancelled")
+
+        cancel = threading.Event()
+        with patch.object(self.library, "reconcile", side_effect=cancelled_rebuild):
+            with self.assertRaisesRegex(RuntimeError, "rebuild cancelled"):
+                self.controller.rebuild_index(cancel_event=cancel, progress=lambda done, total: progress.append((done, total)))
+        self.assertEqual(progress, [(1, 3)])
+        self.assertEqual(self.controller.rebuild_progress()["state"], "cancelled")
+
+        with patch.object(
+            self.library, "reconcile", return_value={"state": "ready", "sessions": 2},
+        ) as rebuild:
+            result = self.controller.rebuild_index(progress=lambda *_args: None)
+        rebuild.assert_called_once()
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(self.controller.rebuild_progress(), {
+            "done": 2, "total": 2, "state": "ready",
+        })
+
     def test_capture_finalization_does_not_open_missing_sqlite_catalog(self):
         self.assertEqual(self.controller.list_sessions(), [])
         self.assertTrue(self.controller.start(MeetingSettings()))

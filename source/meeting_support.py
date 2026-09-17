@@ -193,6 +193,9 @@ class MeetingController:
         self._last_status = ""
         self._source_errors = set()
         self._annotation_generations = {}
+        self._index_rebuild_lock = threading.Lock()
+        self._index_rebuild_cancel = threading.Event()
+        self._index_rebuild_progress = {"done": 0, "total": None, "state": "idle"}
 
     @property
     def store(self):
@@ -478,8 +481,116 @@ class MeetingController:
             # locked, or unavailable index is repaired by a later reconcile.
             return None
 
-    def list_sessions(self, offset=0, limit=50, query="", status=""):
-        return self.library.list_sessions(offset, limit, query, status=status)
+    def list_sessions_page(self, *, limit=50, cursor=None, offset=0, query="", status="", **filters):
+        """Read one bounded library page on the controller's IO worker."""
+        return self.library.list_sessions_page(
+            limit=limit, cursor=cursor, offset=offset, query=query, status=status, **filters,
+        )
+
+    list_sessions_cursor = list_sessions_page
+
+    def list_sessions(self, offset=0, limit=50, query="", status="", **filters):
+        # Compatibility wrapper retained for existing manager callers.  New
+        # UI code consumes the keyset page seam above.
+        return self.library.list_sessions(offset, limit, query, status=status, **filters)
+
+    def search_library(self, query, *, limit=50, offset=0, **filters):
+        return self.library.search(query, limit=limit, offset=offset, **filters)
+
+    search = search_library
+
+    def resolve_search_result(self, result):
+        return self.library.resolve_search_result(result)
+
+    def index_state(self):
+        return self.library.index_state
+
+    def read_workspace(self):
+        return self.library.read_workspace()
+
+    def list_collections(self, *, include_archived=True):
+        return self.library.list_collections(include_archived=include_archived)
+
+    def list_series(self, *, include_archived=True):
+        return self.library.list_series(include_archived=include_archived)
+
+    def save_collection(self, value, *, expected_generation):
+        return self.library.save_collection(value, expected_generation=expected_generation)
+
+    create_collection = save_collection
+    update_collection = save_collection
+
+    def save_series(self, value, *, expected_generation):
+        return self.library.save_series(value, expected_generation=expected_generation)
+
+    create_series = save_series
+    update_series = save_series
+
+    def assign_organization(self, session_id, *, collection_ids=None, tags=None, people=None,
+                            series_id=_UNSET, expected_generation=_UNSET):
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        kwargs = {
+            "collection_ids": collection_ids, "tags": tags, "people": people,
+            "expected_generation": expected,
+        }
+        if series_id is not _UNSET:
+            kwargs["series_id"] = series_id
+        return self._annotation_result(session_id, self.library.assign_organization(session_id, **kwargs))
+
+    def preview_organization_batch(self, session_ids, **changes):
+        return self.library.preview_organization_batch(session_ids, **changes)
+
+    def assign_organization_batch(self, session_ids, *, expected_generations, cancel_event=None, **changes):
+        return self.library.assign_organization_batch(
+            session_ids, expected_generations=expected_generations,
+            cancel_event=cancel_event or self._cancel, **changes,
+        )
+
+    def rebuild_index(self, *, cancel_event=None, progress=None):
+        """Rebuild the disposable catalog without blocking canonical reads."""
+        if not self._index_rebuild_lock.acquire(blocking=False):
+            raise RuntimeError("A reconstrução do índice já está em andamento.")
+        event = cancel_event or self._index_rebuild_cancel
+        if cancel_event is None:
+            event.clear()
+        with self._lock:
+            self._index_rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
+
+        def report(done, total):
+            with self._lock:
+                self._index_rebuild_progress = {
+                    "done": done, "total": total, "state": "rebuilding",
+                }
+            if progress is not None:
+                progress(done, total)
+
+        try:
+            result = self.library.reconcile(cancel_event=event, progress=report)
+            with self._lock:
+                self._index_rebuild_progress = {
+                    "done": result.get("sessions", 0) if isinstance(result, dict) else 0,
+                    "total": result.get("sessions") if isinstance(result, dict) else None,
+                    "state": result.get("state", "ready") if isinstance(result, dict) else "ready",
+                }
+            return result
+        except Exception:
+            with self._lock:
+                self._index_rebuild_progress = {
+                    "done": self._index_rebuild_progress.get("done", 0),
+                    "total": self._index_rebuild_progress.get("total"),
+                    "state": "cancelled" if event.is_set() else "failed",
+                }
+            raise
+        finally:
+            self._index_rebuild_lock.release()
+
+    def cancel_rebuild_index(self):
+        self._index_rebuild_cancel.set()
+        return True
+
+    def rebuild_progress(self):
+        with self._lock:
+            return dict(self._index_rebuild_progress)
 
     def get_session(self, session_id):
         metadata = self.library.get_session(session_id)
@@ -894,6 +1005,21 @@ class MeetingController:
             finally:
                 self.voice.release_meeting(token)
         return self._file_work(work)
+
+    def ask_across_meetings(self, question, model, *, filters=None, **kwargs):
+        """Run bounded memory-only Q&A over the filtered meeting library."""
+        def work():
+            token = self.voice.reserve_for_meeting()
+            try:
+                return self._intelligence().ask_across_meetings(
+                    question, model, filters=filters, cancel_event=self._cancel, **kwargs,
+                )
+            finally:
+                self.voice.release_meeting(token)
+        return self._file_work(work)
+
+    ask_cross_meeting = ask_across_meetings
+    ask_cross_meetings = ask_across_meetings
 
     def save_answer(self, session_id, answer, model, *, question="", revision=None,
                     revision_id=None):

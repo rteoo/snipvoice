@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -145,6 +146,123 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.library.search("bad\x00query")
         self.assertEqual(self.library.index_state, "ready")
+
+    def test_canonical_keyset_cursor_pages_and_expired_filters_reset_explicitly(self):
+        shutil.copytree(FIXTURE, self.meetings / "second-meeting")
+        first = self.library.list_sessions_page(limit=1)
+        self.assertEqual(len(first["items"]), 1)
+        self.assertIsNotNone(first["next_cursor"])
+
+        second = self.library.list_sessions_page(limit=1, cursor=first["next_cursor"])
+        self.assertEqual(len(second["items"]), 1)
+        self.assertNotEqual(first["items"][0]["id"], second["items"][0]["id"])
+        self.assertFalse(second["cursor_reset"])
+
+        reset = self.library.list_sessions_page(
+            limit=1, cursor=first["next_cursor"], status="completed",
+        )
+        self.assertTrue(reset["cursor_reset"])
+        self.assertEqual(reset["items"][0]["id"], first["items"][0]["id"])
+
+        foreign = self.library.list_sessions_page(limit=1, cursor="index-cursor")
+        self.assertTrue(foreign["cursor_reset"])
+        self.assertEqual(foreign["items"][0]["id"], first["items"][0]["id"])
+
+    def test_combined_organization_filters_use_normalized_sidecar_labels(self):
+        self.library.save_collection(
+            {"id": "project-1", "name": "Product", "kind": "project"},
+            expected_generation=0,
+        )
+        self.library.save_series(
+            {"id": "weekly", "name": "Weekly review"}, expected_generation=1,
+        )
+        self.library.assign_organization(
+            "fixture-meeting-v1", collection_ids=["project-1"],
+            tags=[" Planejamento "], people=[" Teô "], series_id="weekly",
+            expected_generation=0,
+        )
+        page = self.library.list_sessions_page(
+            limit=10, collection="project-1", tag="Planejamento", person="Teô",
+            series="weekly", status="completed", date_from="2026-09-16",
+            date_to="2026-09-16T23:59:59Z",
+        )
+        self.assertEqual([item["id"] for item in page["items"]], ["fixture-meeting-v1"])
+
+    def test_search_result_resolution_fails_closed_for_deleted_transcript_segment(self):
+        result = self.library.search("próximo marco")[0]
+        resolved = self.library.resolve_search_result(result)
+        self.assertEqual(resolved["segment_id"], result["segment_id"])
+        self.assertEqual(resolved["timestamp"], {"start": 0.0, "end": 3.0})
+        with self.assertRaisesRegex(ValueError, "não existe mais"):
+            self.library.resolve_search_result({
+                **result, "revision_id": "missing-revision",
+            })
+        pending = self.store.begin_revision("fixture-meeting-v1", "balanced", "pt-BR")
+        self.store.add_transcript("fixture-meeting-v1", pending, {
+            "id": "pending-segment", "track": "microphone", "start": 0.0,
+            "end": 1.0, "text": "Pending evidence.",
+        })
+        with self.assertRaisesRegex(ValueError, "não está concluída"):
+            self.library.resolve_search_result({
+                **result, "revision_id": pending, "segment_id": "pending-segment",
+            })
+        with mock.patch.object(self.library.store, "get_transcript", return_value=[]):
+            with self.assertRaisesRegex(ValueError, "não existe mais"):
+                self.library.resolve_search_result(result)
+
+    def test_reviewed_search_resolution_requires_current_artifact_and_is_bounded(self):
+        envelope = {
+            "schema_version": 1, "id": "report-reviewed", "kind": "report",
+            "profile_id": "general", "profile_version": 1,
+            "session_id": "fixture-meeting-v1", "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "a" * 64, "runtime": "llama.cpp"},
+            "generated": {"summary": {"text": "Generated", "citations": [
+                "microphone:0.000000:3.000000",
+            ]}},
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        self.library.save_report("fixture-meeting-v1", envelope)
+        self.library.review_report(
+            "fixture-meeting-v1", "report-reviewed", {"summary": "Reviewed"},
+            expected_generation=0,
+        )
+        result = self.library.resolve_search_result({
+            "source_kind": "reviewed_artifact", "session_id": "fixture-meeting-v1",
+            "report_id": "report-reviewed",
+        })
+        self.assertTrue(result["reviewed"])
+        self.assertEqual(result["review_generation"], 1)
+        self.assertNotIn("report", result)
+        self.assertNotIn("generated", result)
+        self.library.update_annotations(
+            "fixture-meeting-v1", {"reviewed_artifacts": {}}, expected_generation=1,
+        )
+        with self.assertRaisesRegex(ValueError, "atual"):
+            self.library.resolve_search_result({
+                "source_kind": "reviewed_artifact", "session_id": "fixture-meeting-v1",
+                "report_id": "report-reviewed",
+            })
+
+    def test_cancelled_batch_rolls_back_completed_assignments(self):
+        shutil.copytree(FIXTURE, self.meetings / "second-meeting")
+        cancel = threading.Event()
+        original_update = self.library.update_annotations
+
+        def cancel_after_first(session_id, patch=None, **kwargs):
+            result = original_update(session_id, patch, **kwargs)
+            cancel.set()
+            return result
+
+        with mock.patch.object(self.library, "update_annotations", side_effect=cancel_after_first):
+            with self.assertRaisesRegex(RuntimeError, "cancelada"):
+                self.library.assign_organization_batch(
+                    ["fixture-meeting-v1", "second-meeting"], tags=["batch"],
+                    expected_generations={
+                        "fixture-meeting-v1": 0, "second-meeting": 0,
+                    }, cancel_event=cancel,
+                )
+        self.assertEqual(self.library.read_annotations("fixture-meeting-v1")["tags"], [])
+        self.assertEqual(self.library.read_annotations("second-meeting")["tags"], [])
 
     def test_first_mutation_writes_one_atomic_sidecar_and_mirrors_legacy_fields(self):
         result = self.library.update_annotations(
@@ -475,6 +593,35 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         with self.assertRaises(SchemaError):
             self.library.save_report("fixture-meeting-v1", envelope)
         self.assertFalse((self.session_dir / "reports").exists())
+
+    def test_report_citation_bound_counts_unique_references_without_circular_import(self):
+        identifiers = [f"segment-{index}" for index in range(17)]
+        envelope = {
+            "schema_version": 1, "id": "report-citation-bound", "kind": "report",
+            "profile_id": "general", "profile_version": 1,
+            "session_id": "fixture-meeting-v1", "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "d" * 64, "runtime": "llama.cpp"},
+            "generated": {
+                "summary": {"text": "Generated", "citations": identifiers[:8]},
+                "decisions": {"citations": identifiers[8:]},
+            },
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        with mock.patch.object(
+            self.library.store, "get_transcript",
+            return_value=[{"id": identifier} for identifier in identifiers],
+        ):
+            with self.assertRaisesRegex(SchemaError, "citações únicas"):
+                self.library.save_report("fixture-meeting-v1", envelope)
+
+            duplicate = dict(envelope)
+            duplicate["id"] = "report-citation-duplicates"
+            duplicate["generated"] = {
+                "summary": {"text": "Generated", "citations": identifiers[:8]},
+                "decisions": {"citations": identifiers[:8]},
+            }
+            saved = self.library.save_report("fixture-meeting-v1", duplicate)
+        self.assertEqual(saved["id"], "report-citation-duplicates")
 
     def test_collections_series_tags_and_people_use_one_canonical_model(self):
         collection = self.library.save_collection(

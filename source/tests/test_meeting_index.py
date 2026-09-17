@@ -271,6 +271,37 @@ class MeetingIndexTests(unittest.TestCase):
         self.assertEqual(progress_observations[-1][1], 1)
         self.assertEqual(self.index.search("streamed segment 2")[0]["session_id"], "fixture-meeting-v1")
 
+    def test_rebuild_cancels_inside_a_large_transcript_projection(self):
+        self.index.batch_size = 10_000
+        cancel = threading.Event()
+        consumed = 0
+
+        def segment_stream():
+            nonlocal consumed
+            for index in range(256):
+                consumed += 1
+                if consumed == 4:
+                    cancel.set()
+                yield {
+                    "id": f"microphone:{index}.000000:{index + 1}.000000",
+                    "track": "microphone",
+                    "start": float(index),
+                    "end": float(index + 1),
+                    "text": f"cancellable segment {index}",
+                }
+
+        with self.assertRaises(IndexCancelled):
+            self.index.rebuild([(
+                self.metadata,
+                self.annotations,
+                {"revision-1": segment_stream()},
+                [],
+            )], cancel_event=cancel)
+
+        self.assertLess(consumed, 256)
+        self.assertEqual(self.index.state, STATE_INCOMPLETE)
+        self.assertEqual(self.index.list_sessions(), [])
+
     def test_active_report_follows_canonical_creation_order_not_uuid_sorting(self):
         reports = [
             {"id": "z-older", "kind": "report", "profile_id": "general", "text": "old"},

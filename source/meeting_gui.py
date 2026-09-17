@@ -25,6 +25,8 @@ from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY
 
 
 PAGE_SIZE = 50
+MAX_PAGE_BACKSTACK = 32
+MAX_SEARCH_RESULTS = 32
 TRANSCRIPT_LIMIT = 500
 TRANSCRIPT_PAGE_SIZE = 100
 NOTES_LIMIT = 1024 * 1024
@@ -259,6 +261,12 @@ class MeetingWindow:
         self.devices = []
         self.options = {}
         self.offset = 0
+        self.library_cursor = None
+        self.library_next_cursor = None
+        self.library_back_stack = [None]
+        self.library_page_index = 0
+        self.library_cursor_reset = False
+        self.library_filter_generation = 0
         self.selected = None
         self.bookmarks = []
         self.transcript_offset = 0
@@ -291,6 +299,13 @@ class MeetingWindow:
         self.report_request = 0
         self.ask_request = 0
         self.citation_request = 0
+        self.search_request = 0
+        self.cross_request = 0
+        self.cross_citation_request = 0
+        self.rebuild_cancel = None
+        self.rebuild_progress = {"done": 0, "total": None, "state": "idle"}
+        self.organization_generation = 0
+        self.organization_definitions = {"collections": [], "series": []}
         self.report_profiles = []
         self.report_profile_by_label = {}
         self.report_history = []
@@ -306,6 +321,7 @@ class MeetingWindow:
         self._submit("settings", self.settings_getter, self._settings_loaded)
         self.refresh_devices()
         self.refresh_library()
+        self.refresh_workspace()
         self._poll()
 
     def _label(self, parent, text, **kwargs):
@@ -820,13 +836,99 @@ class MeetingWindow:
         filters.pack(side="left", padx=(0, 8))
         filters.bind("<<ComboboxSelected>>", lambda _event: self.search())
         self._button(search_row, "Importar áudio…", self.import_audio).pack(side="left")
+        self.rebuild_button = self._button(search_row, "Reconstruir índice", self.rebuild_index)
+        self.rebuild_button.pack(side="left", padx=(6, 0))
+        self.rebuild_cancel_button = self._button(search_row, "Cancelar índice", self.cancel_rebuild_index)
+        self.rebuild_cancel_button.configure(state="disabled")
+        self.rebuild_cancel_button.pack(side="left", padx=(6, 0))
+        self.index_status = tk.StringVar(self.window, "Índice de busca: estado desconhecido")
+        self._label(search_row, "", textvariable=self.index_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").pack(side="left", padx=(8, 0))
+
+        organization_row = self._card(parent, pady=self.ui.space_sm)
+        organization_row.pack(fill="x", pady=(0, self.ui.space_md))
+        self._label(organization_row, "Filtros", bg=self.ui.card,
+                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
+        self.collection_filter = tk.StringVar(self.window)
+        self.tag_filter = tk.StringVar(self.window)
+        self.people_filter = tk.StringVar(self.window)
+        self.series_filter = tk.StringVar(self.window)
+        self.date_from_filter = tk.StringVar(self.window)
+        self.date_to_filter = tk.StringVar(self.window)
+        for variable, hint in (
+            (self.collection_filter, "coleção/projeto"),
+            (self.tag_filter, "tag"),
+            (self.people_filter, "pessoa"),
+            (self.series_filter, "série"),
+            (self.date_from_filter, "data inicial"),
+            (self.date_to_filter, "data final"),
+        ):
+            entry = self._entry(organization_row, variable, 14)
+            entry.pack(side="left", padx=(0, 4))
+            # Tk has no placeholder text that works consistently across the
+            # supported platforms; the tooltip-like width keeps labels out of
+            # the search callback and values remain explicit to the user.
+            entry.configure(insertwidth=1)
+        self._button(organization_row, "Aplicar filtros", self.search, accent=True).pack(side="left", padx=(4, 0))
+        self._button(organization_row, "Limpar filtros", self.clear_library_filters).pack(side="left", padx=(4, 0))
+
+        cross_frame = self._card(parent, pady=self.ui.space_sm)
+        cross_frame.pack(fill="x", pady=(0, self.ui.space_md))
+        self._label(cross_frame, "Perguntar nas reuniões filtradas", bg=self.ui.card,
+                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
+        self.cross_question = tk.StringVar(self.window)
+        self._entry(cross_frame, self.cross_question, 54).pack(side="left", fill="x", expand=True)
+        self._button(cross_frame, "Perguntar", self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
+        self.cross_cancel_button = self._button(cross_frame, "Cancelar", self.cancel_cross_question)
+        self.cross_cancel_button.configure(state="disabled")
+        self.cross_cancel_button.pack(side="left", padx=(6, 0))
+        self.cross_status = tk.StringVar(self.window, "Resposta cruzada fica somente na memória.")
+        self._label(cross_frame, "", textvariable=self.cross_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w", wraplength=420).pack(side="left", padx=(8, 0))
+        self.cross_answer = tk.Text(cross_frame, height=2, wrap="word", font=self.ui.font(),
+                                    **self.ui.text_colors())
+        self.cross_answer.pack(fill="x", pady=(4, 0))
+        self.cross_answer.configure(state="disabled")
+        cross_citation_row = tk.Frame(cross_frame, bg=self.ui.card)
+        cross_citation_row.pack(fill="x", pady=(2, 0))
+        self._label(cross_citation_row, "Citações", bg=self.ui.card,
+                    fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
+        self.cross_citations = tk.Listbox(cross_citation_row, height=2, width=52,
+                                          font=self.ui.font(), **self.ui.listbox_colors())
+        self.cross_citations.pack(side="left", fill="x", expand=True)
+        self.cross_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_cross_citation())
+        self._button(cross_citation_row, "Ir à fonte", self.jump_to_cross_citation).pack(side="left", padx=(6, 0))
         panes = ttk.Panedwindow(parent, orient="horizontal")
         panes.pack(fill="both", expand=True)
         left = ttk.Frame(panes, style="Meeting.TFrame")
-        right = ttk.Frame(panes, style="Meeting.TFrame")
+        right_outer = ttk.Frame(panes, style="Meeting.TFrame")
         panes.add(left, weight=1)
-        panes.add(right, weight=3)
-        self.sessions = ttk.Treeview(left, columns=("title", "status"), show="headings", selectmode="browse",
+        panes.add(right_outer, weight=3)
+        right_outer.columnconfigure(0, weight=1)
+        right_outer.rowconfigure(0, weight=1)
+        self.detail_canvas = tk.Canvas(
+            right_outer, background=self.ui.surface, highlightthickness=0, borderwidth=0,
+        )
+        self.detail_scrollbar = ttk.Scrollbar(
+            right_outer, orient="vertical", command=self.detail_canvas.yview,
+        )
+        self.detail_canvas.configure(yscrollcommand=self.detail_scrollbar.set)
+        self.detail_canvas.grid(row=0, column=0, sticky="nsew")
+        self.detail_scrollbar.grid(row=0, column=1, sticky="ns", padx=(self.ui.space_sm, 0))
+        right = ttk.Frame(self.detail_canvas, style="Meeting.TFrame")
+        detail_window = self.detail_canvas.create_window((0, 0), window=right, anchor="nw")
+
+        def update_detail_scroll_region(_event=None):
+            self.detail_canvas.configure(scrollregion=self.detail_canvas.bbox("all"))
+
+        def stretch_detail_content(event):
+            self.detail_canvas.itemconfigure(detail_window, width=event.width)
+
+        right.bind("<Configure>", update_detail_scroll_region)
+        self.detail_canvas.bind("<Configure>", stretch_detail_content)
+        self.detail_content = right
+        self._bind_mousewheel_region(right, self.detail_canvas)
+        self.sessions = ttk.Treeview(left, columns=("title", "status"), show="headings", selectmode="extended",
                                      style="Meeting.Treeview", height=14)
         self.sessions.heading("title", text="Gravação")
         self.sessions.heading("status", text="Estado")
@@ -843,8 +945,26 @@ class MeetingWindow:
         self.previous_button.pack(side="left")
         self.next_button = self._button(pages, "Próxima", lambda: self.change_page(1))
         self.next_button.pack(side="left", padx=8)
+        self._button(pages, "Atribuir seleção…", self.assign_selected_organization).pack(side="left", padx=(0, 8))
+        self.batch_cancel_button = self._button(pages, "Cancelar lote", self.cancel_batch_organization)
+        self.batch_cancel_button.configure(state="disabled")
+        self.batch_cancel_button.pack(side="left")
         self.page_label = tk.StringVar(self.window, "Página 1")
         self._label(left, "", textvariable=self.page_label).pack(anchor="w")
+        self._label(left, "Resultados de busca", anchor="w", fg=self.ui.text_muted).pack(
+            fill="x", pady=(8, 2), padx=(0, 4),
+        )
+        self.search_results = ttk.Treeview(
+            left, columns=("source", "meeting", "snippet"), show="headings",
+            selectmode="browse", height=4, style="Meeting.Treeview",
+        )
+        for column, label, width in (("source", "Fonte", 90), ("meeting", "Reunião", 120),
+                                      ("snippet", "Trecho", 260)):
+            self.search_results.heading(column, text=label)
+            self.search_results.column(column, width=width, stretch=column == "snippet")
+        self.search_results.pack(fill="x", pady=(0, 4))
+        self.search_results.bind("<Double-Button-1>", lambda _event: self.open_search_result())
+        self.search_results.bind("<Return>", lambda _event: self.open_search_result())
         title_row = ttk.Frame(right, style="Meeting.TFrame")
         title_row.pack(fill="x", padx=(12, 0))
         self.title = tk.StringVar(self.window)
@@ -859,6 +979,28 @@ class MeetingWindow:
         self.notes = tk.Text(right, height=5, wrap="word", undo=True, font=self.ui.font(), **self.ui.text_colors())
         self.notes.pack(fill="both", expand=True, padx=(12, 0))
         self.notes.bind("<<Modified>>", self._notes_modified)
+        organization_detail = self._card(right, padx=12, pady=6)
+        organization_detail.pack(fill="x", padx=(12, 0), pady=(8, 0))
+        self._label(organization_detail, "Organização", bg=self.ui.card,
+                    fg=self.ui.text_strong, font=self.ui.font(10, "bold")).pack(anchor="w")
+        self._label(
+            organization_detail,
+            "Coleções/projetos, tags e pessoas usam rótulos locais; a série é manual.",
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720,
+        ).pack(fill="x", pady=(1, 4))
+        organization_inputs = tk.Frame(organization_detail, bg=self.ui.card)
+        organization_inputs.pack(fill="x")
+        self.organization_collections = tk.StringVar(self.window)
+        self.organization_tags = tk.StringVar(self.window)
+        self.organization_people = tk.StringVar(self.window)
+        self.organization_series = tk.StringVar(self.window)
+        for variable, width in ((self.organization_collections, 22), (self.organization_tags, 18),
+                                (self.organization_people, 18), (self.organization_series, 18)):
+            self._entry(organization_inputs, variable, width).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self._button(organization_inputs, "Salvar organização", self.save_organization).pack(side="left")
+        self.organization_status = tk.StringVar(self.window, "Selecione uma reunião para editar seus rótulos.")
+        self._label(organization_detail, "", textvariable=self.organization_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w", wraplength=720).pack(fill="x", pady=(2, 0))
         bookmark_row = ttk.Frame(right, style="Meeting.TFrame")
         bookmark_row.pack(fill="x", padx=(12, 0), pady=8)
         self.position = tk.StringVar(self.window, "0")
@@ -1876,18 +2018,88 @@ class MeetingWindow:
 
     def search(self):
         self.offset = 0
+        self.library_cursor = None
+        self.library_next_cursor = None
+        self.library_back_stack = [None]
+        self.library_page_index = 0
+        self.library_filter_generation += 1
         self.refresh_library()
 
     def change_page(self, delta):
-        self.offset = max(0, self.offset + delta * PAGE_SIZE)
+        if delta > 0:
+            if not self.library_next_cursor:
+                return
+            if len(self.library_back_stack) >= MAX_PAGE_BACKSTACK:
+                self.library_back_stack.pop(0)
+            self.library_back_stack.append(self.library_next_cursor)
+            self.library_page_index = len(self.library_back_stack) - 1
+            self.library_cursor = self.library_next_cursor
+        elif delta < 0:
+            if self.library_page_index <= 0:
+                return
+            self.library_page_index -= 1
+            self.library_back_stack = self.library_back_stack[:self.library_page_index + 1]
+            self.library_cursor = self.library_back_stack[-1]
+        self.offset = self.library_page_index * PAGE_SIZE
         self.refresh_library()
 
+    @staticmethod
+    def _filter_value(value):
+        parts = [item.strip() for item in str(value or "").split(",") if item.strip()]
+        if not parts:
+            return None
+        return parts if len(parts) > 1 else parts[0]
+
+    def _library_filters(self):
+        return {
+            "collection": self._filter_value(self.collection_filter.get()),
+            "tag": self._filter_value(self.tag_filter.get()),
+            "person": self._filter_value(self.people_filter.get()),
+            "series": self._filter_value(self.series_filter.get()),
+            "date_from": self.date_from_filter.get().strip() or None,
+            "date_to": self.date_to_filter.get().strip() or None,
+        }
+
+    def clear_library_filters(self):
+        for variable in (self.collection_filter, self.tag_filter, self.people_filter,
+                         self.series_filter, self.date_from_filter, self.date_to_filter):
+            variable.set("")
+        self.search()
+
     def refresh_library(self):
-        offset, query = self.offset, self.query.get()
+        cursor, query = self.library_cursor, self.query.get()
         status = STATUS_FILTERS[self.status_filter.get()]
+        filters = self._library_filters()
+        page_index = self.library_page_index
+        generation = self.library_filter_generation
         def read():
-            return [{key: item.get(key) for key in ("id", "title", "status")}
-                    for item in islice(self.controller.list_sessions(offset=offset, limit=PAGE_SIZE, query=query, status=status), PAGE_SIZE)]
+            page = None
+            reader = getattr(self.controller, "list_sessions_page", None)
+            if callable(reader):
+                candidate = reader(
+                    # Keyset cursors own the position.  Keep the legacy offset
+                    # explicitly at zero so page 2 cannot accidentally send
+                    # both cursor and its display offset to the controller.
+                    limit=PAGE_SIZE, cursor=cursor, offset=0, query=query, status=status,
+                    **filters,
+                )
+                if isinstance(candidate, dict):
+                    page = candidate
+            if page is None:
+                items = self.controller.list_sessions(
+                    offset=page_index * PAGE_SIZE, limit=PAGE_SIZE, query=query, status=status,
+                    **filters,
+                )
+                page = {"items": list(islice(items or (), PAGE_SIZE)), "next_cursor": None,
+                        "cursor_reset": False, "index_state": "compatibility"}
+            search_results = []
+            if query.strip():
+                searcher = getattr(self.controller, "search_library", None)
+                if callable(searcher):
+                    candidate = searcher(query, limit=MAX_SEARCH_RESULTS, **filters, status=status)
+                    if isinstance(candidate, (list, tuple)):
+                        search_results = list(candidate)[:MAX_SEARCH_RESULTS]
+            return page, search_results, generation
         self._submit("library", read, self._library_loaded)
 
     def _library_loaded(self, sessions, error):
@@ -1895,16 +2107,388 @@ class MeetingWindow:
             self._remember_operation_error(error)
             self.status.set("Não foi possível carregar a biblioteca. Veja os detalhes na aba Gravação.")
             return
+        search_results = []
+        generation = self.library_filter_generation
+        if isinstance(sessions, tuple) and len(sessions) == 3 and isinstance(sessions[0], dict):
+            page, search_results, generation = sessions
+            if generation != self.library_filter_generation:
+                return
+            self.library_cursor_reset = bool(page.get("cursor_reset"))
+            items = list(islice(page.get("items", []) or [], PAGE_SIZE))
+            self.library_next_cursor = page.get("next_cursor")
+            index_state = page.get("index_state")
+        else:
+            items = list(islice(sessions or [], PAGE_SIZE))
+            self.library_next_cursor = None
+            index_state = "compatibility"
         self.sessions.delete(*self.sessions.get_children())
-        items = list(islice(sessions or [], PAGE_SIZE))
         for item in items:
             self.sessions.insert("", "end", iid=item["id"], values=(item.get("title") or item["id"],
                 STATE_LABELS.get(item.get("status"), item.get("status", ""))))
-        self.previous_button.configure(state="normal" if self.offset else "disabled")
-        self.next_button.configure(state="normal" if len(items) == PAGE_SIZE else "disabled")
-        self.page_label.set(f"Página {self.offset // PAGE_SIZE + 1} · {len(items)} gravações")
+        self.previous_button.configure(state="normal" if self.library_page_index else "disabled")
+        self.next_button.configure(state="normal" if self.library_next_cursor else "disabled")
+        self.page_label.set(f"Página {self.library_page_index + 1} · {len(items)} gravações")
+        if self.library_cursor_reset:
+            self.library_cursor = None
+            self.library_back_stack = [None]
+            self.library_page_index = 0
+            self.offset = 0
+            self.previous_button.configure(state="disabled")
+            self.page_label.set(f"Página 1 · {len(items)} gravações")
+            self.index_status.set("Índice de busca mudou; listagem reiniciada.")
+        elif index_state:
+            self.index_status.set(f"Índice de busca: {index_state}")
+        self._render_search_results(search_results)
         if self.selected in self.sessions.get_children():
             self.sessions.selection_set(self.selected)
+
+    def _render_search_results(self, results):
+        self.search_result_items = [item for item in (results or ()) if isinstance(item, dict)][:MAX_SEARCH_RESULTS]
+        self.search_results.delete(*self.search_results.get_children())
+        labels = {
+            "transcript": "Transcrição",
+            "report": "Relatório",
+            "reviewed_artifact": "Revisão",
+            "session": "Reunião",
+        }
+        for index, item in enumerate(self.search_result_items):
+            source = labels.get(item.get("source_kind"), str(item.get("source_kind", "Fonte")))
+            meeting = str(item.get("title") or item.get("session_id") or "")[:120]
+            snippet = " ".join(str(item.get("snippet", "")).split())[:480]
+            self.search_results.insert("", "end", iid=str(index), values=(source, meeting, snippet))
+
+    def open_search_result(self):
+        selected = self.search_results.selection()
+        if not selected:
+            return
+        try:
+            result = self.search_result_items[int(selected[0])]
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        session_id = result.get("session_id")
+        if not isinstance(session_id, str):
+            return
+        self.search_request += 1
+        request = self.search_request
+
+        def loaded(value, error):
+            if self.closed or request != self.search_request:
+                return
+            if error or not isinstance(value, dict):
+                self._remember_operation_error(error)
+                self.status.set("A fonte da busca não está mais disponível.")
+                return
+            if value.get("session_id") != self.selected:
+                self.pending_search_resolution = value
+                self.load_session(value["session_id"])
+                return
+            self._apply_search_resolution(value, request)
+
+        self._submit("search_result", lambda: self.controller.resolve_search_result(result), loaded)
+
+    def _apply_search_resolution(self, value, request=None):
+        if request is not None and request != self.search_request:
+            return
+        if self.closed or value.get("session_id") != self.selected:
+            return
+        kind = value.get("source_kind")
+        if kind == "transcript":
+            self._jump_to_transcript_evidence(
+                value["session_id"], value.get("revision_id"), value.get("segment_id"),
+                request=request,
+            )
+        elif kind in {"report", "reviewed_artifact"}:
+            report_id = value.get("report_id")
+            if report_id:
+                self._load_report(report_id)
+                self.status.set("Fonte do relatório carregada.")
+        else:
+            self.status.set("Reunião encontrada na biblioteca.")
+
+    def _jump_to_transcript_evidence(self, session_id, revision, segment_id, *, request=None):
+        if not session_id or not revision or not segment_id:
+            return
+        self.citation_request += 1
+        citation_request = self.citation_request
+        def read():
+            for offset in range(0, TRANSCRIPT_LIMIT + TRANSCRIPT_PAGE_SIZE, TRANSCRIPT_PAGE_SIZE):
+                page = self.controller.get_transcript_page(
+                    session_id, revision=revision, offset=offset, limit=TRANSCRIPT_PAGE_SIZE,
+                )
+                values = page.get("segments", []) if isinstance(page, dict) else []
+                if any(isinstance(item, dict) and item.get("id") == segment_id for item in values):
+                    return page
+                if not isinstance(page, dict) or not page.get("has_more"):
+                    break
+            return None
+        def loaded(page, error):
+            if (self.closed or citation_request != self.citation_request
+                    or self.selected != session_id or (request is not None and request != self.search_request)):
+                return
+            if error or not page:
+                self.status.set("O trecho citado não está disponível nesta revisão.")
+                return
+            self.transcript_offset = page.get("offset", 0)
+            self.transcript_has_previous = bool(page.get("has_previous"))
+            self.transcript_has_more = bool(page.get("has_more"))
+            self._render_transcript(page.get("segments", []))
+            self._update_transcript_paging_controls()
+            for key, segment in self.segments.items():
+                if isinstance(segment, dict) and segment.get("id") == segment_id:
+                    try:
+                        self.transcript.selection_set(key)
+                        self.transcript.see(key)
+                    except (tk.TclError, AttributeError):
+                        pass
+                    break
+            self.status.set(f"Fonte carregada · {format_time(next((item.get('start', 0) for item in page.get('segments', []) if item.get('id') == segment_id), 0))}")
+        self._submit("search_citation", read, loaded)
+
+    def refresh_workspace(self):
+        def read():
+            return self.controller.read_workspace()
+        self._submit("workspace", read, self._workspace_loaded)
+
+    def _workspace_loaded(self, workspace, error):
+        if self.closed:
+            return
+        if error or not isinstance(workspace, dict):
+            if error:
+                self._remember_operation_error(error)
+            self.organization_status.set("As definições de organização não puderam ser carregadas.")
+            return
+        self.organization_generation = workspace.get("generation", 0)
+        self.organization_definitions = {
+            "collections": list(workspace.get("collections", []) or []),
+            "series": list(workspace.get("series", []) or []),
+        }
+
+    @staticmethod
+    def _split_organization(value):
+        return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+    def save_organization(self):
+        if not self.selected or not self.detail_ready:
+            self.organization_status.set("Selecione uma reunião antes de salvar a organização.")
+            return
+        session_id = self.selected
+        expected = self.annotation_generation
+        values = {
+            "collection_ids": self._split_organization(self.organization_collections.get()),
+            "tags": self._split_organization(self.organization_tags.get()),
+            "people": self._split_organization(self.organization_people.get()),
+            "series_id": self.organization_series.get().strip() or None,
+        }
+        self._submit(
+            "organization", lambda: self.controller.assign_organization(
+                session_id, expected_generation=expected, **values,
+            ),
+            lambda value, error: self._organization_saved(session_id, value, error),
+        )
+
+    def _organization_saved(self, session_id, value, error):
+        if self.closed or session_id != self.selected:
+            return
+        if error:
+            self._remember_operation_error(error)
+            self.organization_status.set("A organização não foi salva; recarregue a reunião.")
+            return
+        if isinstance(value, dict):
+            generation = value.get("generation")
+            if isinstance(generation, int):
+                self.annotation_generation = generation
+        self.organization_status.set("Organização salva.")
+        self.search()
+
+    def assign_selected_organization(self):
+        session_ids = list(self.sessions.selection())
+        if not session_ids:
+            self.status.set("Selecione uma ou mais reuniões para atribuir organização.")
+            return
+        if len(session_ids) > 500:
+            self.status.set("A seleção excede o limite de 500 reuniões por lote.")
+            return
+        tags = simpledialog.askstring("Tags", "Tags separadas por vírgula (vazio mantém a lista atual):", parent=self.window)
+        if tags is None:
+            return
+        collection_ids = simpledialog.askstring("Coleções", "IDs de coleção/projeto separados por vírgula:", parent=self.window)
+        if collection_ids is None:
+            return
+        series_id = simpledialog.askstring("Série", "ID da série (vazio remove a série):", parent=self.window)
+        if series_id is None:
+            return
+        self.batch_cancel_event = threading.Event()
+        self.batch_cancel_button.configure(state="normal")
+        changes = {
+            "tags": self._split_organization(tags),
+            "collection_ids": self._split_organization(collection_ids),
+            "series_id": series_id.strip() or None,
+        }
+        def preview_loaded(preview, error):
+            if error:
+                self.batch_cancel_button.configure(state="disabled")
+                self._remember_operation_error(error)
+                self.status.set("A prévia do lote falhou; nenhuma anotação foi alterada.")
+                return
+            if self.batch_cancel_event.is_set():
+                self.batch_cancel_button.configure(state="disabled")
+                self.status.set("A atribuição em lote foi cancelada.")
+                return
+            if not messagebox.askyesno(
+                    "Confirmar atribuição", f"Aplicar organização a {preview.get('count', 0)} reuniões?",
+                    parent=self.window):
+                self.batch_cancel_button.configure(state="disabled")
+                return
+            expected = {item["id"]: item["generation"] for item in preview.get("items", [])}
+            self._submit(
+                "organization_batch_apply",
+                lambda: self.controller.assign_organization_batch(
+                    session_ids, expected_generations=expected,
+                    cancel_event=self.batch_cancel_event, **changes,
+                ),
+                self._batch_organization_finished,
+            )
+        self._submit(
+            "organization_batch_preview",
+            lambda: self.controller.preview_organization_batch(session_ids, **changes),
+            preview_loaded,
+        )
+
+    def cancel_batch_organization(self):
+        event = getattr(self, "batch_cancel_event", None)
+        if event is not None:
+            event.set()
+        self.status.set("Cancelamento do lote solicitado…")
+
+    def _batch_organization_finished(self, value, error):
+        self.batch_cancel_button.configure(state="disabled")
+        if error:
+            self._remember_operation_error(error)
+            self.status.set("A atribuição em lote falhou; a biblioteca informou o estado do rollback.")
+            return
+        self.status.set(f"Organização atribuída a {value.get('count', 0) if isinstance(value, dict) else 0} reuniões.")
+        self.search()
+
+    def ask_across_meetings(self):
+        question = self.cross_question.get().strip()
+        if not question:
+            self.cross_status.set("Digite uma pergunta.")
+            return
+        self.cross_request += 1
+        request = self.cross_request
+        self.cross_cancel_button.configure(state="normal")
+        self.cross_status.set("Processando evidência local; a resposta não será salva automaticamente.")
+        filters = self._library_filters()
+        filters["status"] = STATUS_FILTERS[self.status_filter.get()]
+        self._submit(
+            "cross_question",
+            lambda: self.controller.ask_across_meetings(
+                question, self.summary_model.get(), filters=filters,
+            ),
+            lambda value, error: self._cross_answer_loaded(request, value, error),
+        )
+
+    def cancel_cross_question(self):
+        self.controller.cancel_processing()
+        self.cross_status.set("Cancelamento solicitado; a resposta anterior foi preservada.")
+
+    def _cross_answer_loaded(self, request, value, error):
+        if self.closed or request != self.cross_request:
+            return
+        self.cross_cancel_button.configure(state="disabled")
+        if error:
+            self._remember_operation_error(error)
+            self.cross_status.set("A pergunta cruzada não foi concluída; nada foi salvo.")
+            return
+        if not isinstance(value, dict):
+            self.cross_status.set("A resposta cruzada não tinha um formato utilizável.")
+            return
+        answer = str(value.get("answer", ""))[:MAX_ANSWER_CHARS]
+        self.cross_answer.configure(state="normal")
+        self.cross_answer.delete("1.0", "end")
+        self.cross_answer.insert("1.0", answer)
+        self.cross_answer.configure(state="disabled")
+        self.cross_citation_refs = [item for item in value.get("citations", []) if isinstance(item, dict)][:16]
+        self.cross_citations.delete(0, "end")
+        for item in self.cross_citation_refs:
+            self.cross_citations.insert(
+                "end", f"{item.get('session_id', '')} · {item.get('revision_id', '')} · "
+                        f"{item.get('segment_id', '')} · {format_time(item.get('start', 0))}",
+            )
+        self.cross_status.set(
+            f"Resposta em memória · incerteza {value.get('uncertainty', 'alta')} · "
+            f"{len(self.cross_citation_refs)} citações resolvidas."
+        )
+
+    def jump_to_cross_citation(self):
+        indexes = self.cross_citations.curselection()
+        if not indexes or indexes[0] >= len(getattr(self, "cross_citation_refs", [])):
+            return
+        citation = self.cross_citation_refs[indexes[0]]
+        session_id = citation.get("session_id")
+        if not session_id:
+            return
+        self.cross_citation_request += 1
+        request = self.cross_citation_request
+        self._submit(
+            "cross_citation",
+            lambda: self.controller.resolve_search_result({
+                "source_kind": "transcript", "session_id": session_id,
+                "revision_id": citation.get("revision_id"), "segment_id": citation.get("segment_id"),
+            }),
+            lambda value, error: self._cross_citation_loaded(request, value, error),
+        )
+
+    def _cross_citation_loaded(self, request, value, error):
+        if self.closed or request != self.cross_citation_request:
+            return
+        if error or not isinstance(value, dict):
+            self.status.set("A citação cruzada deixou de resolver para a transcrição canônica.")
+            return
+        if value.get("session_id") != self.selected:
+            self.pending_search_resolution = value
+            self.load_session(value["session_id"])
+            return
+        self._apply_search_resolution(value)
+
+    def rebuild_index(self):
+        if self.rebuild_cancel is not None:
+            return
+        self.rebuild_cancel = threading.Event()
+        self.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
+        self.rebuild_button.configure(state="disabled")
+        self.rebuild_cancel_button.configure(state="normal")
+        self.index_status.set("Índice de busca: reconstruindo…")
+        self._submit(
+            "rebuild_index",
+            lambda: self.controller.rebuild_index(
+                cancel_event=self.rebuild_cancel,
+                progress=self._rebuild_progress_from_worker,
+            ),
+            self._rebuild_finished,
+        )
+
+    def _rebuild_progress_from_worker(self, done, total):
+        self.rebuild_progress = {"done": done, "total": total, "state": "rebuilding"}
+
+    def cancel_rebuild_index(self):
+        if self.rebuild_cancel is not None:
+            self.rebuild_cancel.set()
+            self.index_status.set("Índice de busca: cancelamento solicitado…")
+
+    def _rebuild_finished(self, value, error):
+        self.rebuild_cancel = None
+        self.rebuild_button.configure(state="normal")
+        self.rebuild_cancel_button.configure(state="disabled")
+        if error:
+            self._remember_operation_error(error)
+            self.index_status.set("Índice de busca: reconstrução cancelada ou indisponível.")
+            return
+        state = value.get("state", "ready") if isinstance(value, dict) else "ready"
+        count = value.get("sessions", 0) if isinstance(value, dict) else 0
+        self.rebuild_progress = {"done": count, "total": count, "state": state}
+        self.index_status.set(f"Índice de busca: {state} · {count} reuniões")
+        self.search()
 
     def _selection_changed(self, _event=None):
         selected = self.sessions.selection()
@@ -1920,6 +2504,7 @@ class MeetingWindow:
             if answer:
                 self.save_notes(after=lambda: self.load_session(session_id))
                 return
+        self.pending_search_resolution = None
         self.load_session(session_id)
 
     def load_session(self, session_id):
@@ -1990,8 +2575,16 @@ class MeetingWindow:
                             transcript_offset=page["offset"],
                             transcript_has_previous=page["has_previous"],
                             transcript_has_more=page["has_more"],
-                            annotation_generation=raw.get("annotation_generation", annotations.get("generation", 0)),
-                            speaker_labels=speaker_labels,
+                             annotation_generation=raw.get("annotation_generation", annotations.get("generation", 0)),
+                             collection_ids=list(raw.get("annotations", {}).get("collection_ids", []))
+                             if isinstance(raw.get("annotations"), dict) else [],
+                             tags=list(raw.get("annotations", {}).get("tags", []))
+                             if isinstance(raw.get("annotations"), dict) else [],
+                             people=list(raw.get("annotations", {}).get("people", []))
+                             if isinstance(raw.get("annotations"), dict) else [],
+                             series_id=raw.get("annotations", {}).get("series_id")
+                             if isinstance(raw.get("annotations"), dict) else None,
+                             speaker_labels=speaker_labels,
                             highlights=highlights[:2000])
             return metadata, page["segments"]
         self.status.set("Carregando gravação…")
@@ -2017,6 +2610,11 @@ class MeetingWindow:
         self.transcript_has_more = bool(metadata.get("transcript_has_more"))
         generation = metadata.get("annotation_generation", 0)
         self.annotation_generation = generation if isinstance(generation, int) else 0
+        self.organization_collections.set(", ".join(metadata.get("collection_ids", [])))
+        self.organization_tags.set(", ".join(metadata.get("tags", [])))
+        self.organization_people.set(", ".join(metadata.get("people", [])))
+        self.organization_series.set(str(metadata.get("series_id") or ""))
+        self.organization_status.set("Organização carregada.")
         self.speaker_labels = metadata.get("speaker_labels", {})
         self.highlights = metadata.get("highlights", [])
         self.detail_ready = True
@@ -2033,6 +2631,10 @@ class MeetingWindow:
         self._update_transcript_paging_controls()
         self._show_summary(metadata.get("summary"))
         self.refresh_reports(session_id)
+        pending_search = getattr(self, "pending_search_resolution", None)
+        if isinstance(pending_search, dict) and pending_search.get("session_id") == session_id:
+            self.pending_search_resolution = None
+            self._apply_search_resolution(pending_search, self.search_request)
         self.status.set("Notas extensas: visualização parcial, somente leitura." if self.truncated else
                         f"Gravação carregada · página de transcrição com {len(segments)} trechos."
                         + (" · Uma etapa anterior não foi concluída." if metadata.get("error") else ""))
@@ -2816,6 +3418,15 @@ class MeetingWindow:
                 self.summary_model_status.set(
                     f"Baixando {name}: {percent}% · verificação SHA-256 antes da instalação"
                 )
+            rebuild = self.rebuild_progress
+            if getattr(self, "rebuild_cancel", None) is not None and isinstance(rebuild, dict):
+                done, total = rebuild.get("done", 0), rebuild.get("total")
+                suffix = f"{done}/{total}" if total else str(done)
+                self.index_status.set(f"Índice de busca: reconstruindo · {suffix} reuniões")
+            elif isinstance(rebuild, dict) and rebuild.get("state") not in {None, "idle"}:
+                self.index_status.set(
+                    f"Índice de busca: {rebuild.get('state')} · {rebuild.get('done', 0)} reuniões"
+                )
             self.snapshot = self.controller.snapshot()
             self._apply_playback_snapshot(self.snapshot)
             state = self.snapshot.get("state", "idle")
@@ -2895,11 +3506,22 @@ class MeetingWindow:
         self.report_request = getattr(self, "report_request", 0) + 1
         self.ask_request = getattr(self, "ask_request", 0) + 1
         self.citation_request = getattr(self, "citation_request", 0) + 1
+        self.search_request = getattr(self, "search_request", 0) + 1
+        self.cross_request = getattr(self, "cross_request", 0) + 1
+        self.cross_citation_request = getattr(self, "cross_citation_request", 0) + 1
         self.unsaved_answer = None
         self.playback_generation = getattr(self, "playback_generation", -1) + 1
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:
             self.summary_download_cancel.set()
+        for name in ("rebuild_cancel", "batch_cancel_event"):
+            event = getattr(self, name, None)
+            if event is not None:
+                event.set()
+        try:
+            self.controller.cancel_processing()
+        except (AttributeError, RuntimeError):
+            pass
         try:
             self.controller.stop_playback()
         except (AttributeError, RuntimeError):

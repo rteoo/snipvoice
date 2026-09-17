@@ -628,7 +628,23 @@ class MeetingIndex:
                 memberships.append((session_id, "series", str(annotations["series_id"])))
         return session_row, segments, report_rows, memberships
 
-    def _insert_projection(self, connection, metadata, annotations=None, transcripts=None, reports=None):
+    @staticmethod
+    def _raise_if_cancelled(cancel_event=None, cancel_check=None):
+        """Raise without swallowing cancellation from a long projection loop."""
+        if cancel_check is not None:
+            requested = cancel_check()
+        elif cancel_event is not None:
+            checker = getattr(cancel_event, "is_set", None)
+            if not callable(checker):
+                raise TypeError("cancel_event must provide is_set()")
+            requested = checker()
+        else:
+            requested = False
+        if requested:
+            raise IndexCancelled("A reconstrução do índice foi cancelada.")
+
+    def _insert_projection(self, connection, metadata, annotations=None, transcripts=None, reports=None,
+                           *, cancel_event=None, cancel_check=None):
         """Insert one projection while consuming transcript sources incrementally.
 
         Rebuild callers commonly pass JSONL-backed generators.  Keeping the
@@ -698,10 +714,12 @@ class MeetingIndex:
             return (("", value),)
 
         for revision_id, values in revision_sources(transcripts):
+            self._raise_if_cancelled(cancel_event, cancel_check)
             add("revision\0", revision_id)
             if values is None:
                 continue
             for segment in values:
+                self._raise_if_cancelled(cancel_event, cancel_check)
                 if not isinstance(segment, dict):
                     continue
                 if not revision_id:
@@ -733,6 +751,7 @@ class MeetingIndex:
         if effective_reports is None:
             effective_reports = ()
         for report in effective_reports:
+            self._raise_if_cancelled(cancel_event, cancel_check)
             if not isinstance(report, dict):
                 continue
             row = next(self._report_rows((report,)), None)
@@ -763,19 +782,32 @@ class MeetingIndex:
         if annotations:
             values = []
             for key in ("tags", "people", "collection_ids"):
-                values.extend(str(item) for item in annotations.get(key, []) or ())
-            values.extend(str(item) for item in annotations.get("_collection_labels", []) or ())
+                for item in annotations.get(key, []) or ():
+                    self._raise_if_cancelled(cancel_event, cancel_check)
+                    values.append(str(item))
+            for item in annotations.get("_collection_labels", []) or ():
+                self._raise_if_cancelled(cancel_event, cancel_check)
+                values.append(str(item))
             if annotations.get("series_id"):
+                self._raise_if_cancelled(cancel_event, cancel_check)
                 values.append(str(annotations["series_id"]))
             if values:
                 for kind, value in (("collection", annotations.get("collection_ids", ())),
                                     ("tag", annotations.get("tags", ())),
                                     ("person", annotations.get("people", ()) )):
+                    self._raise_if_cancelled(cancel_event, cancel_check)
+
+                    def membership_rows(items=value, membership_kind=kind):
+                        for item in items or ():
+                            self._raise_if_cancelled(cancel_event, cancel_check)
+                            yield (session_id, membership_kind, str(item))
+
                     connection.executemany(
                         "INSERT INTO memberships(session_id,kind,value) VALUES (?,?,?)",
-                        ((session_id, kind, str(item)) for item in value or ()),
+                        membership_rows(),
                     )
                 if annotations.get("series_id") is not None:
+                    self._raise_if_cancelled(cancel_event, cancel_check)
                     connection.execute(
                         "INSERT INTO memberships(session_id,kind,value) VALUES (?,?,?)",
                         (session_id, "series", str(annotations["series_id"])),
@@ -1195,7 +1227,10 @@ class MeetingIndex:
                         if cancel_event is not None and cancel_event.is_set():
                             raise IndexCancelled("A reconstrução do índice foi cancelada.")
                         metadata, annotations, transcripts, reports = self._normalize_rebuild_item(raw)
-                        self._insert_projection(connection, metadata, annotations, transcripts, reports)
+                        self._insert_projection(
+                            connection, metadata, annotations, transcripts, reports,
+                            cancel_event=cancel_event,
+                        )
                         processed += 1
                         if processed % self.batch_size == 0:
                             connection.commit()

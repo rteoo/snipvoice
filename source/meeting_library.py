@@ -9,7 +9,9 @@ projection supplies a value.
 
 import contextlib
 import copy
+import base64
 from datetime import datetime
+import hashlib
 import json
 import math
 import os
@@ -45,6 +47,9 @@ MAX_COLLECTIONS = 1024
 MAX_SPEAKER_LABELS = 10_000
 MAX_HIGHLIGHT_SEGMENTS = 512
 MAX_BATCH_ASSIGNMENTS = 500
+MAX_LIBRARY_CURSOR_CHARS = 2048
+MAX_LIBRARY_BACKSTACK = 32
+MAX_REPORT_CITATIONS = 16
 MAX_ID_CHARS = 128
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.05
@@ -55,6 +60,46 @@ REPORT_SECTIONS = frozenset({
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _REFERENCE_RE = re.compile(r"^[^/\\\x00]{1,128}$")
 _UNSET = object()
+
+
+def _library_cursor_encode(value):
+    """Encode one bounded canonical keyset cursor.
+
+    MeetingIndex owns its own revision-bound cursor format.  Canonical fallback
+    cursors intentionally carry only a filter digest and the last visible
+    ordering key, so a fallback page never depends on an offset into a mutable
+    directory listing.
+    """
+    try:
+        payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise ValueError("O cursor da biblioteca é inválido.") from error
+    if not encoded or len(encoded) > MAX_LIBRARY_CURSOR_CHARS:
+        raise ValueError("O cursor da biblioteca é grande demais.")
+    return "c1." + encoded
+
+
+def _library_cursor_decode(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.startswith("c1."):
+        return None
+    encoded = value[3:]
+    if not encoded or len(encoded) > MAX_LIBRARY_CURSOR_CHARS:
+        raise ValueError("O cursor da biblioteca é inválido.")
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        result = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError, base64.binascii.Error) as error:
+        raise ValueError("O cursor da biblioteca é inválido.") from error
+    if not isinstance(result, dict) or result.get("kind") != "canonical" or result.get("v") != 1:
+        raise ValueError("O cursor da biblioteca é incompatível.")
+    position = result.get("position")
+    if (not isinstance(position, list) or len(position) != 2
+            or any(not isinstance(item, str) for item in position)):
+        raise ValueError("O cursor da biblioteca é inválido.")
+    return result
 
 
 class BatchOrganizationRollbackError(RuntimeError):
@@ -579,6 +624,110 @@ class MeetingLibrary:
         return self._save_workspace_definition(
             "series", definition, expected_generation=expected_generation,
         )
+
+    # The explicit aliases keep UI/controller code independent of whether a
+    # definition is being created or replaced.  ``save_*`` remains the
+    # compare-and-swap primitive and therefore preserves the existing schema
+    # and generation semantics.
+    create_collection = save_collection
+    update_collection = save_collection
+    create_series = save_series
+    update_series = save_series
+
+    def list_collections(self, *, include_archived=True):
+        """Return detached workspace collection definitions for selectors."""
+        values = self.read_workspace().get("collections", [])
+        if not include_archived:
+            values = [item for item in values if not item.get("archived", False)]
+        return copy.deepcopy(values)
+
+    def list_series(self, *, include_archived=True):
+        """Return detached manually-defined series for selectors."""
+        values = self.read_workspace().get("series", [])
+        if not include_archived:
+            values = [item for item in values if not item.get("archived", False)]
+        return copy.deepcopy(values)
+
+    def _preview_definition_delete(self, key, identifier):
+        if not _valid_id(identifier):
+            raise ValueError("A definição de organização é inválida.")
+        workspace = self.read_workspace()
+        definitions = workspace.get(key, [])
+        if not any(item.get("id") == identifier for item in definitions):
+            raise KeyError("A definição de organização não existe.")
+        affected = []
+        for session_id in self._canonical_session_ids():
+            annotations = self.read_annotations(session_id)
+            if key == "collections":
+                matches = identifier in annotations.get("collection_ids", [])
+            else:
+                matches = annotations.get("series_id") == identifier
+            if matches:
+                affected.append(session_id)
+        return {
+            "kind": key,
+            "definition_id": identifier,
+            "workspace_generation": workspace["generation"],
+            "session_ids": affected,
+        }
+
+    def preview_series_delete(self, series_id):
+        return self._preview_definition_delete("series", series_id)
+
+    def delete_series(self, series_id, *, expected_generation, confirmed_session_ids):
+        """Delete one series definition after an exact membership preview."""
+        preview = self.preview_series_delete(series_id)
+        if preview["workspace_generation"] != expected_generation:
+            raise WorkspaceConflict(expected_generation, preview["workspace_generation"])
+        if sorted(set(confirmed_session_ids)) != preview["session_ids"]:
+            raise ValueError("A confirmação não corresponde à prévia atual da série.")
+        originals, updated = {}, []
+        try:
+            for session_id in preview["session_ids"]:
+                annotations = self.read_annotations(session_id)
+                originals[session_id] = annotations
+                self.update_annotations(
+                    session_id, {"series_id": None},
+                    expected_generation=annotations["generation"],
+                )
+                updated.append(session_id)
+            workspace = self.read_workspace()
+            self.update_workspace(
+                {"series": [item for item in workspace["series"] if item.get("id") != series_id]},
+                expected_generation=expected_generation,
+            )
+        except Exception:
+            for session_id in reversed(updated):
+                original = originals[session_id]
+                current = self.read_annotations(session_id)
+                restore = {
+                    key: copy.deepcopy(value)
+                    for key, value in original.items()
+                    if key not in {"schema_version", "generation", "updated_at"}
+                }
+                self.update_annotations(
+                    session_id, restore, expected_generation=current["generation"],
+                )
+            raise
+        return {"series_id": series_id, "removed_from": preview["session_ids"]}
+
+    def archive_collection(self, collection_id, *, archived=True, expected_generation):
+        workspace = self.read_workspace()
+        definition = next((item for item in workspace["collections"] if item.get("id") == collection_id), None)
+        if definition is None:
+            raise KeyError("A coleção não existe.")
+        updated = copy.deepcopy(definition)
+        updated["archived"] = bool(archived)
+        return self.save_collection(updated, expected_generation=expected_generation)
+
+    def archive_series(self, series_id, *, archived=True, expected_generation):
+        workspace = self.read_workspace()
+        definition = next((item for item in workspace["series"] if item.get("id") == series_id), None)
+        if definition is None:
+            raise KeyError("A série não existe.")
+        updated = copy.deepcopy(definition)
+        updated["archived"] = bool(archived)
+        return self.save_series(updated, expected_generation=expected_generation)
 
     # -- Annotations ------------------------------------------------------
 
@@ -1496,6 +1645,11 @@ class MeetingLibrary:
                     raise ValueError("O filtro da biblioteca é inválido.")
                 return tuple(value)
             raise ValueError("O filtro da biblioteca é inválido.")
+        for value, label in ((date_from, "data inicial"), (date_to, "data final")):
+            if value is not None and (not isinstance(value, str) or len(value) > 64):
+                raise ValueError(f"O filtro {label} é inválido.")
+        if date_from and date_to and date_from > date_to:
+            raise ValueError("O intervalo de datas da biblioteca é inválido.")
         return {
             "collection": values(collection), "tag": values(tag), "person": values(person),
             "series": values(series), "status": values(status),
@@ -1519,6 +1673,21 @@ class MeetingLibrary:
                     return False
         return True
 
+    @staticmethod
+    def _catalog_filter_digest(query, filters):
+        payload = {
+            "query": query,
+            "status": filters.get("status", ()),
+            "collection": filters.get("collection", ()),
+            "tag": filters.get("tag", ()),
+            "person": filters.get("person", ()),
+            "series": filters.get("series", ()),
+            "date_from": filters.get("date_from", ""),
+            "date_to": filters.get("date_to", ""),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def list_sessions_page(self, *, limit=50, cursor=None, query="", status="",
                            collection=None, tag=None, person=None, series=None,
                            date_from=None, date_to=None, collection_id=None,
@@ -1534,28 +1703,29 @@ class MeetingLibrary:
         try:
             if self.index_state == "ready" and not self._index_stale:
                 if hasattr(self.index, "list_sessions_page"):
-                    return self.index.list_sessions_page(
+                    result = self.index.list_sessions_page(
                         limit=limit, cursor=cursor, query=query, status=status,
                         collection=collection, tag=tag, person=person, series=series,
                         date_from=date_from, date_to=date_to, offset=offset,
                     )
+                    if isinstance(result, dict):
+                        result.setdefault("cursor_reset", False)
+                        result.setdefault("index_state", self.index_state)
+                    return result
                 if cursor is None and not any(
                     value not in (None, "", (), [], {})
                     for value in (collection, tag, person, series, date_from, date_to)
                 ):
                     return {"items": self.index.list_sessions(
                         offset=offset, limit=limit, query=query, status=status,
-                    ), "next_cursor": None}
+                    ), "next_cursor": None, "cursor_reset": False,
+                            "index_state": self.index_state}
         except ValueError:
             raise
         except Exception:
             self._mark_index_stale()
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
             raise ValueError("O limite da biblioteca é inválido.")
-        if cursor is not None:
-            # Canonical fallback cursors are intentionally opaque and cannot
-            # be reused after a projection becomes available.
-            raise ValueError("O cursor canônico expirou; reinicie a listagem.")
         filters = self._catalog_filters(
             collection=collection, tag=tag, person=person, series=series,
             status=status, date_from=date_from, date_to=date_to,
@@ -1563,6 +1733,18 @@ class MeetingLibrary:
         if not isinstance(query, str) or len(query) > 512:
             raise ValueError("A busca da biblioteca é inválida.")
         needle = query.casefold()
+        filter_digest = self._catalog_filter_digest(query, filters)
+        decoded = _library_cursor_decode(cursor)
+        cursor_reset = False
+        if cursor is not None and decoded is None:
+            # A cursor emitted by a disposable index cannot safely be applied
+            # to a canonical directory scan.  Reset explicitly and let the
+            # controller tell the user that the page changed underneath them.
+            cursor_reset = True
+            decoded = None
+        elif decoded is not None and decoded.get("filters") != filter_digest:
+            cursor_reset = True
+            decoded = None
         rows = []
         for session_id in self._canonical_session_ids():
             try:
@@ -1591,7 +1773,25 @@ class MeetingLibrary:
                          "status": metadata.get("status"), "created_at": metadata.get("created_at"),
                          "duration": metadata.get("duration", 0.0), "error": metadata.get("error")})
         rows.sort(key=lambda item: (str(item.get("created_at") or ""), item["id"]), reverse=True)
-        return {"items": rows[offset:offset + limit], "next_cursor": None}
+        if decoded is not None:
+            created_at, session_id = decoded["position"]
+            rows = [
+                item for item in rows
+                if (str(item.get("created_at") or ""), item["id"]) < (created_at, session_id)
+            ]
+        page = rows[offset:offset + limit]
+        next_cursor = None
+        if len(rows) > offset + limit and page:
+            last = page[-1]
+            next_cursor = _library_cursor_encode({
+                "v": 1, "kind": "canonical", "filters": filter_digest,
+                "position": [str(last.get("created_at") or ""), last["id"]],
+            })
+        return {
+            "items": page, "next_cursor": next_cursor,
+            "cursor_reset": cursor_reset,
+            "index_state": self.index_state,
+        }
 
     def list_sessions(self, offset=0, limit=50, query="", status="", **filters):
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -1612,7 +1812,8 @@ class MeetingLibrary:
             filters["series"] = filters.pop("series_id")
         try:
             if self.index_state == "ready" and not self._index_stale:
-                return self.index.search(query, limit=limit, offset=offset, **filters)
+                results = self.index.search(query, limit=limit, offset=offset, **filters)
+                return self._decorate_search_results(results)
         except ValueError:
             raise
         except Exception:
@@ -1664,17 +1865,19 @@ class MeetingLibrary:
                     if isinstance(revision_id, str):
                         for segment in self.store.get_transcript(session_id, revision_id):
                             yield ("transcript", revision_id, segment.get("id"), None,
-                                   str(segment.get("text", "")))
+                                   str(segment.get("text", "")), segment.get("start"),
+                                   segment.get("end"))
                 for report in self.list_reports(session_id):
                     generated = json.dumps(report.get("generated", ""), ensure_ascii=False)
                     yield ("report", report.get("transcript_revision"), None,
-                           report.get("id"), generated)
+                           report.get("id"), generated, None, None)
                     reviewed = report.get("reviewed_artifact")
-                    if reviewed:
+                    if isinstance(reviewed, dict):
                         yield ("reviewed_artifact", report.get("transcript_revision"), None,
-                               report.get("id"), json.dumps(reviewed, ensure_ascii=False))
+                               report.get("id"), json.dumps(reviewed, ensure_ascii=False), None, None)
 
-            for kind, revision_id, segment_id, report_id, text in source_stream():
+            for source in source_stream():
+                kind, revision_id, segment_id, report_id, text = source[:5]
                 if matches(text):
                     if matched < offset:
                         matched += 1
@@ -1683,11 +1886,107 @@ class MeetingLibrary:
                                      "revision_id": revision_id, "segment_id": segment_id,
                                      "report_id": report_id, "snippet": _bounded_text(text),
                                      "evidence_weight": _EVIDENCE_WEIGHTS.get(kind, 0.25),
-                                     "primary": kind == "transcript"})
+                                     "primary": kind == "transcript",
+                                     **({"start": source[5], "end": source[6],
+                                         "timestamp": {"start": source[5], "end": source[6]}}
+                                        if kind == "transcript" else {})})
                     matched += 1
                     if len(returned) >= limit:
                         return returned
         return returned
+
+    def _decorate_search_results(self, results):
+        """Attach bounded canonical provenance to disposable-index hits."""
+        decorated = []
+        for raw in results or ():
+            if not isinstance(raw, dict):
+                continue
+            result = copy.deepcopy(raw)
+            try:
+                resolved = self.resolve_search_result(result)
+            except (AttributeError, KeyError, OSError, RuntimeError, ValueError, SchemaError):
+                # A stale disposable row must not become a broken navigation
+                # target.  Keep the bounded hit visible; the UI will show the
+                # canonical resolution error if the user opens it.
+                resolved = None
+            if isinstance(resolved, dict):
+                for key in ("title", "start", "end", "timestamp", "revision_id", "segment_id", "report_id"):
+                    if key in resolved:
+                        result[key] = copy.deepcopy(resolved[key])
+            decorated.append(result)
+        return decorated
+
+    def resolve_search_result(self, result):
+        """Resolve one bounded search hit to canonical navigation evidence.
+
+        The returned object contains no filesystem paths.  Transcript hits are
+        looked up by session, revision, and segment; report hits are resolved
+        by report revision.  Deleted sessions, stale revisions, and missing
+        segments fail closed so callers cannot display a citation that merely
+        existed in the disposable index.
+        """
+        if not isinstance(result, dict):
+            raise ValueError("O resultado de busca é inválido.")
+        session_id = result.get("session_id")
+        kind = result.get("source_kind")
+        if not _valid_id(session_id):
+            raise ValueError("A reunião da busca é inválida.")
+        metadata = self.store.get(session_id, include_events=False)
+        title = metadata.get("title", "")
+        if kind == "transcript":
+            revision_id = result.get("revision_id")
+            segment_id = result.get("segment_id")
+            if not isinstance(revision_id, str) or not isinstance(segment_id, str):
+                raise ValueError("A fonte de transcrição é incompleta.")
+            revision = next(
+                (item for item in metadata.get("revisions", ())
+                 if isinstance(item, dict) and item.get("id") == revision_id),
+                None,
+            )
+            if revision is None:
+                raise ValueError("A revisão citada não existe mais.")
+            if revision.get("status") != "completed":
+                raise ValueError("A revisão citada não está concluída.")
+            segment = next(
+                (item for item in self.store.get_transcript(session_id, revision_id)
+                 if isinstance(item, dict) and item.get("id") == segment_id),
+                None,
+            )
+            if segment is None:
+                raise ValueError("O trecho citado não existe mais na revisão selecionada.")
+            start, end = segment.get("start"), segment.get("end")
+            return {
+                "source_kind": kind, "session_id": session_id, "title": title,
+                "revision_id": revision_id, "segment_id": segment_id,
+                "start": start, "end": end,
+                "timestamp": {"start": start, "end": end},
+                "text": str(segment.get("text", ""))[:8000],
+            }
+        if kind in {"report", "reviewed_artifact"}:
+            report_id = result.get("report_id")
+            if not isinstance(report_id, str):
+                raise ValueError("A fonte de relatório é incompleta.")
+            report = self.get_report(session_id, report_id)
+            reviewed = report.get("reviewed_artifact")
+            if kind == "reviewed_artifact" and not isinstance(reviewed, dict):
+                raise ValueError("O artefato revisado atual não está disponível.")
+            resolved = self._report_history_projection(
+                report, reviewed if kind == "reviewed_artifact" else None,
+            )
+            resolved.update({
+                "source_kind": kind, "session_id": session_id, "title": title,
+                "revision_id": report.get("transcript_revision"),
+                "report_id": report_id,
+            })
+            return resolved
+        if kind in {"session", "annotation"}:
+            return {
+                "source_kind": kind, "session_id": session_id, "title": title,
+                "revision_id": result.get("revision_id"),
+            }
+        raise ValueError("A fonte de busca não é suportada.")
+
+    resolve_search_hit = resolve_search_result
 
     def get_transcript(self, session_id, revision=None):
         return self.store.get_transcript(session_id, revision)
@@ -1730,7 +2029,8 @@ class MeetingLibrary:
 
         def visit(value, key=None):
             if key in {"citations", "segment_ids"}:
-                if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                if (not isinstance(value, list) or len(value) > MAX_REPORT_CITATIONS
+                        or any(not isinstance(item, str) for item in value)):
                     raise SchemaError("As citações do relatório são inválidas.")
                 citations.extend(value)
                 return
@@ -1742,6 +2042,8 @@ class MeetingLibrary:
                     visit(child)
 
         visit(generated)
+        if len(set(citations)) > MAX_REPORT_CITATIONS:
+            raise SchemaError("O relatório excede o limite de citações únicas.")
         return citations
 
     def _validate_report(self, session_id, envelope):

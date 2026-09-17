@@ -10,6 +10,8 @@ import hashlib
 import itertools
 import json
 import math
+import re
+import threading
 import time
 import uuid
 
@@ -32,6 +34,20 @@ MAX_ANSWER_CHARS = 4_000
 MAX_CITATIONS = 16
 MAX_SEGMENT_ID_CHARS = 128
 MAX_SEGMENT_TEXT_CHARS = 256 * 1024
+MAX_CROSS_MEETINGS = 8
+MAX_CROSS_SEGMENTS = 64
+MAX_CROSS_CANDIDATES = 128
+MAX_CROSS_EVIDENCE_BYTES = 96 * 1024
+MAX_CROSS_SEGMENTS_PER_MEETING = 16
+# Canonical transcript reads are independently bounded from the amount of
+# evidence retained.  A stale index hit must not turn a sparse/missing lookup
+# into an unbounded drain of a JSONL-backed transcript iterator.
+# ceiling: exact indexed evidence is searched through at most 4,096 canonical
+# segments per meeting.  This covers long ordinary meetings without allowing a
+# damaged or adversarial transcript to make one question drain an unbounded file.
+MAX_CROSS_CANONICAL_SCAN = 4_096
+MAX_CROSS_CONCURRENT_JOBS = 1
+_CROSS_QA_GATE = threading.BoundedSemaphore(MAX_CROSS_CONCURRENT_JOBS)
 
 SUPPORTED_SECTIONS = frozenset(
     {
@@ -811,10 +827,10 @@ class MeetingIntelligence:
                                      source_text_by_id)
 
     def _generate_answer(self, runtime, entry, question, evidence, allowed, budget, cancel_event,
-                         payload_budget=None):
+                         payload_budget=None, question_evidence=None):
         self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
         payload = self._payload(
-            evidence, self._question_evidence(question),
+            evidence, question_evidence or self._question_evidence(question),
             budget if payload_budget is None else payload_budget,
         )
         raw = runtime.generate(self._question_prompt(question), payload,
@@ -1058,6 +1074,332 @@ class MeetingIntelligence:
             return final
         finally:
             runtime.close()
+
+    @staticmethod
+    def _cross_active_revision(metadata):
+        revisions = metadata.get("revisions", []) if isinstance(metadata, dict) else []
+        for item in reversed(revisions):
+            if isinstance(item, dict) and item.get("status") == "completed" and isinstance(item.get("id"), str):
+                return item["id"]
+        return None
+
+    @staticmethod
+    def _cross_terms(question):
+        # Retrieval terms are only a candidate-discovery aid.  The answer is
+        # always generated from canonical transcript text, never from snippets
+        # or generated reports returned by the index.
+        return tuple(dict.fromkeys(
+            item.casefold() for item in re.findall(r"[\wÀ-ÿ]{3,}", question, flags=re.UNICODE)
+        ))[:32]
+
+    @staticmethod
+    def _cross_citation_id(session_id, revision_id, segment_id):
+        return f"{session_id}|{revision_id}|{segment_id}"
+
+    @staticmethod
+    def _cross_question_evidence(question):
+        return {
+            "kind": "cross_meeting_question",
+            "question": question,
+            "citation_format": "Use only the opaque evidence ids supplied with transcript segments.",
+        }
+
+    def _cross_retrieve(self, question, *, filters=None, cancel_event=None):
+        """Retrieve bounded, revision-checked transcript evidence.
+
+        ``MeetingLibrary.search`` is the only candidate source.  The search
+        projection may mention reports or notes, but those hits merely nominate
+        a meeting; canonical transcript segments are re-read before they can
+        enter model context.
+        """
+        self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        owner = self.library
+        if owner is None or not callable(getattr(owner, "search", None)):
+            raise ValueError("A biblioteca de reuniões é necessária para perguntas cruzadas.")
+        selected_filters = dict(filters or {})
+        allowed_filters = {
+            "collection", "collection_id", "tag", "person", "series", "series_id",
+            "date_from", "date_to", "status",
+        }
+        unknown = set(selected_filters) - allowed_filters
+        if unknown:
+            raise ValueError("Há filtros de reunião não reconhecidos.")
+        # A natural-language question often contains stop words that do not
+        # occur in any transcript.  Keep the canonical search as the primary
+        # route, then use a small bounded set of lexical terms for candidate
+        # discovery; all resulting evidence is still re-read from transcript
+        # storage below.
+        search_terms = (question, *self._cross_terms(question)[:8])
+        hits = []
+        seen_hit_keys = set()
+        for search_term in search_terms:
+            try:
+                candidate_hits = owner.search(
+                    search_term, limit=MAX_CROSS_CANDIDATES, **selected_filters,
+                )
+            except (ValueError, OSError, KeyError):
+                continue
+            if not isinstance(candidate_hits, (list, tuple)):
+                candidate_hits = list(candidate_hits or ())
+            for candidate in candidate_hits:
+                if not isinstance(candidate, dict):
+                    continue
+                key = tuple(candidate.get(name) for name in (
+                    "source_kind", "session_id", "revision_id", "segment_id", "report_id",
+                ))
+                if key in seen_hit_keys:
+                    continue
+                seen_hit_keys.add(key)
+                hits.append(candidate)
+                if len(hits) >= MAX_CROSS_CANDIDATES:
+                    break
+            if len(hits) >= MAX_CROSS_CANDIDATES:
+                break
+        ordered = []
+        seen_meetings = set()
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            session_id = hit.get("session_id")
+            if not isinstance(session_id, str) or not session_id or session_id in seen_meetings:
+                continue
+            seen_meetings.add(session_id)
+            ordered.append((session_id, hit))
+            if len(ordered) >= MAX_CROSS_MEETINGS:
+                break
+        terms = self._cross_terms(question)
+        evidence = []
+        seen_segments = set()
+        total_bytes = 0
+        selected_sessions = []
+        for session_id, first_hit in ordered:
+            self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+            try:
+                metadata = self._metadata(session_id)
+                revision_id = first_hit.get("revision_id")
+                revisions = {
+                    item.get("id"): item for item in metadata.get("revisions", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }
+                if not isinstance(revision_id, str) or revisions.get(revision_id, {}).get("status") != "completed":
+                    revision_id = self._cross_active_revision(metadata)
+                if revision_id is None or revisions.get(revision_id, {}).get("status") != "completed":
+                    continue
+                source = self.store.get_transcript(session_id, revision_id)
+                wanted = {
+                    hit.get("segment_id") for hit in hits
+                    if isinstance(hit, dict) and hit.get("session_id") == session_id
+                    and hit.get("source_kind") == "transcript"
+                    and hit.get("revision_id") == revision_id
+                }
+                found = []
+                found_ids = set()
+                scanned = 0
+                for segment in itertools.islice(source or (), MAX_CROSS_CANONICAL_SCAN):
+                    self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+                    scanned += 1
+                    if not isinstance(segment, dict):
+                        continue
+                    segment_id = segment.get("id")
+                    text = segment.get("text")
+                    if not isinstance(segment_id, str) or not isinstance(text, str) or not text.strip():
+                        continue
+                    if segment_id in wanted or (not wanted and terms and any(term in text.casefold() for term in terms)):
+                        found.append(segment)
+                        found_ids.add(segment_id)
+                    # Indexed IDs are resolved exactly when they occur within
+                    # the bounded canonical prefix.  Once every requested ID
+                    # has been found, no later transcript content is needed.
+                    if wanted and wanted.issubset(found_ids):
+                        break
+                    if not wanted and len(found) >= MAX_CROSS_SEGMENTS_PER_MEETING:
+                        break
+                if not found and not wanted and not terms:
+                    # A punctuation-only query cannot discover useful text
+                    # from a candidate meeting, so it remains unanswerable.
+                    continue
+                for segment in found:
+                    if len(evidence) >= MAX_CROSS_SEGMENTS:
+                        break
+                    segment_id = segment["id"]
+                    citation_id = self._cross_citation_id(session_id, revision_id, segment_id)
+                    if citation_id in seen_segments:
+                        continue
+                    text = segment["text"][:MAX_SEGMENT_TEXT_CHARS]
+                    candidate = {
+                        "id": citation_id,
+                        "session_id": session_id,
+                        "revision_id": revision_id,
+                        "segment_id": segment_id,
+                        "track": segment.get("track"),
+                        "start": segment.get("start"),
+                        "end": segment.get("end"),
+                        "timestamp": {
+                            "start": segment.get("start"), "end": segment.get("end"),
+                        },
+                        "text": text,
+                    }
+                    encoded_size = len(json.dumps(candidate, ensure_ascii=False).encode("utf-8"))
+                    if total_bytes + encoded_size > MAX_CROSS_EVIDENCE_BYTES:
+                        break
+                    total_bytes += encoded_size
+                    seen_segments.add(citation_id)
+                    evidence.append(candidate)
+                if any(item.get("session_id") == session_id for item in evidence):
+                    selected_sessions.append({"session_id": session_id, "revision_id": revision_id})
+            except (KeyError, OSError, ValueError, TypeError):
+                # A deleted session, stale revision, or damaged transcript is
+                # excluded from this answer; it is never converted into a
+                # citation-shaped placeholder.
+                continue
+            if len(evidence) >= MAX_CROSS_SEGMENTS or total_bytes >= MAX_CROSS_EVIDENCE_BYTES:
+                break
+        return evidence, selected_sessions, {
+            "candidate_hits": min(len(hits), MAX_CROSS_CANDIDATES),
+            "meetings_considered": len(ordered),
+            "segments": len(evidence),
+            "bytes": total_bytes,
+        }
+
+    def ask_across_meetings(self, question, model, *, filters=None, collection=None,
+                            collection_id=None, tag=None, person=None, series=None,
+                            series_id=None, date_from=None, date_to=None, status="",
+                            cancel_event=None, include_provenance=True):
+        """Answer from bounded transcript evidence across selected meetings.
+
+        The result is memory-only.  Its citations are structured canonical
+        references rather than bare segment IDs, so a UI can resolve exactly
+        ``session + revision + segment + timestamp`` before showing them.
+        """
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("A pergunta não pode ficar vazia.")
+        if len(question) > MAX_QUESTION_CHARS:
+            raise ValueError("A pergunta excede o limite permitido.")
+        merged_filters = dict(filters or {})
+        for key, value in {
+            "collection": collection if collection is not None else collection_id,
+            "tag": tag, "person": person,
+            "series": series if series is not None else series_id,
+            "date_from": date_from, "date_to": date_to, "status": status,
+        }.items():
+            if value not in (None, ""):
+                if key in merged_filters and merged_filters[key] != value:
+                    raise ValueError(f"O filtro {key} foi informado duas vezes.")
+                merged_filters[key] = value
+        self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        evidence, selected_sessions, retrieval = self._cross_retrieve(
+            question, filters=merged_filters, cancel_event=cancel_event,
+        )
+        if not evidence:
+            result = {
+                "answer": "Não encontrei evidência de transcrição suficiente nas reuniões selecionadas.",
+                "citations": [], "uncertainty": "high",
+            }
+            if include_provenance:
+                result["_provenance"] = {
+                    "kind": "cross_meeting", "filters": copy.deepcopy(merged_filters),
+                    "meetings": [], "retrieval": retrieval,
+                }
+            return result
+        entry, model_file, context, budget = self._model(model)
+        question_evidence = self._cross_question_evidence(question)
+        evidence_budget = min(
+            self._evidence_budget(budget, question_evidence), MAX_CROSS_EVIDENCE_BYTES,
+        )
+        # The general chunker deliberately projects only single-meeting fields.
+        # Keep cross-meeting identity/timestamp fields through bounded chunks.
+        chunks, pending = [], []
+        for item in evidence:
+            candidate = pending + [item]
+            if (len(candidate) > 16
+                    or len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > evidence_budget):
+                if not pending:
+                    raise ValueError("A evidência cruzada excede o contexto do modelo local.")
+                chunks.append(pending)
+                pending = [item]
+            else:
+                pending = candidate
+        if pending:
+            chunks.append(pending)
+        if not _CROSS_QA_GATE.acquire(blocking=False):
+            raise RuntimeError("Outra pergunta cruzada local já está em andamento.")
+        runtime = None
+        levels = []
+        try:
+            runtime = self.runtime_factory(model_file, context)
+            def reduce_pair(left, right):
+                allowed = self._ids(left) | self._ids(right)
+                return self._generate_answer(
+                    runtime, entry, question, [left, right], allowed, evidence_budget,
+                    cancel_event, budget, question_evidence=question_evidence,
+                )
+            for chunk in chunks:
+                self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+                current = self._generate_answer(
+                    runtime, entry, question, chunk,
+                    {item["id"] for item in chunk}, evidence_budget, cancel_event,
+                    budget, question_evidence=question_evidence,
+                )
+                self._reduce(levels, current, reduce_pair)
+            final = None
+            for item in reversed(levels):
+                if item is not None:
+                    final = item if final is None else reduce_pair(final, item)
+            self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        finally:
+            if runtime is not None:
+                runtime.close()
+            _CROSS_QA_GATE.release()
+        by_id = {item["id"]: item for item in evidence}
+        citations = []
+        for identifier in final.get("citations", []):
+            source = by_id.get(identifier)
+            if source is None:
+                raise ValueError("A resposta citou evidência cruzada que não pôde ser resolvida.")
+            # Re-read the cited canonical segment after inference as well.  A
+            # concurrent delete/reprocess must fail closed instead of allowing
+            # a late model result to display stale provenance.
+            try:
+                current_source = self.store.get_transcript(
+                    source["session_id"], source["revision_id"],
+                )
+            except TypeError:
+                current_source = self.store.get_transcript(
+                    source["session_id"], revision=source["revision_id"],
+                )
+            current_segment = next(
+                (item for item in (current_source or ())
+                 if isinstance(item, dict) and item.get("id") == source["segment_id"]),
+                None,
+            )
+            if current_segment is None:
+                raise ValueError("A evidência citada foi alterada ou removida antes da exibição.")
+            if any(current_segment.get(key) != source.get(key) for key in ("start", "end", "text")):
+                raise ValueError("A evidência citada mudou durante a resposta; tente novamente.")
+            citations.append({
+                "session_id": source["session_id"],
+                "revision_id": source["revision_id"],
+                "segment_id": source["segment_id"],
+                "timestamp": copy.deepcopy(source["timestamp"]),
+                "start": source["start"], "end": source["end"],
+            })
+        result = dict(final, citations=citations)
+        if include_provenance:
+            result["_provenance"] = {
+                "kind": "cross_meeting", "filters": copy.deepcopy(merged_filters),
+                "meetings": copy.deepcopy(selected_sessions), "retrieval": retrieval,
+                "model": {
+                    "id": model, "sha256": entry["sha256"], "runtime": "llama.cpp",
+                    "context_limit": context,
+                },
+            }
+        return result
+
+    # Naming aliases keep the seam discoverable for callers that use the plan's
+    # terminology versus the UI's shorter action label.
+    ask_cross_meeting = ask_across_meetings
+    ask_cross_meetings = ask_across_meetings
+    answer_across_meetings = ask_across_meetings
 
     def save_answer(self, session_id, answer, model, *, question="", revision=None,
                     revision_id=None, provenance=None):
