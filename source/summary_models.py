@@ -3,13 +3,7 @@
 import os
 
 from summary_catalog import summary_catalog_entry
-from voice_models import (
-    delete_model,
-    download_model,
-    installed_model_path,
-    model_installation,
-    model_is_installed,
-)
+from voice_models import delete_model, download_model, installed_model_path, model_is_installed
 
 
 ENV_SUMMARY_CACHE = "SNIPVOICE_SUMMARY_CACHE"
@@ -40,10 +34,6 @@ def _entry(model_id):
 
 def summary_model_is_installed(model_id, cache_dir=None):
     return model_is_installed(_entry(model_id), cache_dir or default_summary_cache_dir())
-
-
-def summary_model_installation(model_id, cache_dir=None):
-    return model_installation(_entry(model_id), cache_dir or default_summary_cache_dir())
 
 
 def summary_model_path(model_id, cache_dir=None):

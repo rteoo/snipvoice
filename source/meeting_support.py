@@ -142,12 +142,11 @@ def _final_audio_path(root, settings, session_id, title=""):
 
 class MeetingController:
     def __init__(self, root, voice, notify=None, capture_factory=NativeCapture, store=None,
-                 library=None, clock=None, summary_cache_dir=None):
+                 library=None, clock=None):
         self.root = root
         self.voice = voice
         self.notify = notify or (lambda message: None)
         self.capture_factory = capture_factory
-        self.summary_cache_dir = summary_cache_dir
         self._clock = time.monotonic if clock is None else clock
         # Store initialization/recovery is lazy and runs on an IO worker.
         self._store = store
@@ -180,7 +179,6 @@ class MeetingController:
         self._closed = False
         self._generation = 0
         self._state = "idle"
-
         self._session_id = None
         self._error = ""
         self._started = 0.0
@@ -204,25 +202,6 @@ class MeetingController:
         self._index_rebuild_lock = threading.Lock()
         self._index_rebuild_cancel = threading.Event()
         self._index_rebuild_progress = {"done": 0, "total": None, "state": "idle"}
-
-    def configure_model_library(self, root):
-        """Apply a shared model root to future ASR and LLM operations."""
-        from model_library import model_category_dir, normalize_model_library_root
-        from summary_models import default_summary_cache_dir
-        from voice_models import default_voice_cache_dir
-
-        normalized = normalize_model_library_root(root)
-        asr_dir = (
-            model_category_dir(normalized, "asr")
-            if normalized else default_voice_cache_dir()
-        )
-        llm_dir = (
-            model_category_dir(normalized, "llm")
-            if normalized else default_summary_cache_dir()
-        )
-        voice_applied = self.voice.set_cache_dir(asr_dir)
-        self.summary_cache_dir = llm_dir
-        return {"voice_applied": voice_applied, "summary_cache_dir": llm_dir}
 
     # -- Privacy and retention admission --------------------------------
 
@@ -682,10 +661,8 @@ class MeetingController:
                 with self._lock:
                     self._postprocess = "Gerando o resumo local"
                 from meeting_summary import summarize_meeting
-                summarize_meeting(
-                    self.store, session_id, settings.summary_model,
-                    cache_dir=self.summary_cache_dir, cancel_event=self._cancel,
-                )
+                summarize_meeting(self.store, session_id, settings.summary_model,
+                                  cancel_event=self._cancel)
                 self._queue_projection(session_id)
             except Exception as exc:
                 errors.append("o resumo automático falhou: " + str(exc))
@@ -1189,10 +1166,7 @@ class MeetingController:
             from meeting_summary import summarize_meeting
             token = self.voice.reserve_for_meeting()
             try:
-                summarize_meeting(
-                    self.store, session_id, model,
-                    cache_dir=self.summary_cache_dir, cancel_event=self._cancel,
-                )
+                summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
                 self._queue_projection(session_id)
             finally:
                 self.voice.release_meeting(token)
@@ -1201,14 +1175,7 @@ class MeetingController:
     def _intelligence(self):
         """Build the installed-only intelligence seam on the IO worker."""
         from meeting_intelligence import MeetingIntelligence
-        from summary_models import summary_model_path
-        return MeetingIntelligence(
-            self.store,
-            library=self.library,
-            model_path_resolver=lambda model: summary_model_path(
-                model, self.summary_cache_dir,
-            ),
-        )
+        return MeetingIntelligence(self.store, library=self.library)
 
     def list_report_profiles(self, language=None):
         return self._intelligence().read_profiles(self.library, language=language)

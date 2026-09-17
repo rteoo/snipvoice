@@ -5,7 +5,6 @@ import tempfile
 import threading
 import unittest
 import urllib.error
-from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -14,10 +13,7 @@ from voice_models import (
     VoiceModelError,
     default_voice_cache_dir,
     download_model,
-    installed_model_path,
     manifest_path,
-    model_installation,
-    model_is_installed,
     model_path,
 )
 
@@ -62,68 +58,6 @@ class VoiceDownloadPolicyTests(unittest.TestCase):
             }
             with self.assertRaises(VoiceModelError):
                 download_model(entry, tempfile.mkdtemp())
-
-
-class SharedModelDiscoveryTests(unittest.TestCase):
-    def setUp(self):
-        self.cache = tempfile.TemporaryDirectory()
-        self.addCleanup(self.cache.cleanup)
-        self.payload = b"shared verified model"
-        self.entry = {
-            "id": "shared-model",
-            "profile": "balanced",
-            "filename": "shared.gguf",
-            "url": "https://models.example.test/shared.gguf",
-            "sha256": hashlib.sha256(self.payload).hexdigest(),
-            "size_bytes": len(self.payload),
-            "license_id": "MIT",
-            "upstream_model": "example/shared",
-        }
-
-    def test_finds_verified_model_managed_by_another_app(self):
-        external = os.path.join(self.cache.name, "other-app", "models", "shared.gguf")
-        os.makedirs(os.path.dirname(external))
-        with open(external, "wb") as handle:
-            handle.write(self.payload)
-
-        installation = model_installation(self.entry, self.cache.name)
-
-        self.assertEqual(installation, {"path": external, "managed": False})
-        self.assertTrue(model_is_installed(self.entry, self.cache.name))
-        self.assertEqual(installed_model_path(self.entry, self.cache.name), external)
-
-    def test_rejects_same_name_and_size_with_wrong_hash(self):
-        external = os.path.join(self.cache.name, "other-app", "shared.gguf")
-        os.makedirs(os.path.dirname(external))
-        with open(external, "wb") as handle:
-            handle.write(b"x" * len(self.payload))
-
-        self.assertIsNone(model_installation(self.entry, self.cache.name))
-
-    def test_never_deletes_a_discovered_shared_model(self):
-        external = os.path.join(self.cache.name, "other-app", "shared.gguf")
-        os.makedirs(os.path.dirname(external))
-        with open(external, "wb") as handle:
-            handle.write(self.payload)
-
-        from voice_models import delete_model
-        with self.assertRaisesRegex(VoiceModelError, "compartilhado"):
-            delete_model(self.entry, self.cache.name)
-        self.assertTrue(os.path.isfile(external))
-
-    def test_download_reuses_and_returns_discovered_shared_model(self):
-        external = os.path.join(self.cache.name, "other-app", "shared.gguf")
-        os.makedirs(os.path.dirname(external))
-        with open(external, "wb") as handle:
-            handle.write(self.payload)
-
-        opener = mock.Mock(side_effect=AssertionError("network must not be used"))
-
-        self.assertEqual(
-            download_model(self.entry, self.cache.name, opener=opener),
-            external,
-        )
-        opener.assert_not_called()
 
 
 class _Response:

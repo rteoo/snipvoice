@@ -15,17 +15,11 @@ from clipboard_support import Clipboard
 from meeting_files import report_export_projection
 from meeting_settings import EndpointSelection, resolve_meeting_settings, validate_hotkey_conflicts
 from meeting_waveform import MeetingWaveform
-from model_library import (
-    ensure_model_library,
-    model_library_payload,
-    normalize_model_library_root,
-    resolve_model_library_root,
-)
 from summary_catalog import format_model_size, summary_catalog, summary_catalog_entry
 from summary_models import (
     delete_summary_model,
     download_summary_model,
-    summary_model_installation,
+    summary_model_is_installed,
 )
 import ui_theme
 from voice_catalog import available_languages, selectable_catalog
@@ -333,9 +327,6 @@ class MeetingWindow:
         self.after_id = None
         self.raw_settings = {}
         self.settings = resolve_meeting_settings({})
-        self.model_library_root = tk.StringVar(self.window)
-        self.model_library_status = tk.StringVar(self.window)
-        self.summary_cache_dir = getattr(controller, "summary_cache_dir", None)
         self.devices = []
         self.options = {}
         self.offset = 0
@@ -607,7 +598,6 @@ class MeetingWindow:
         self.recording_defaults_parent = self._card(settings_content)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
         self._build_privacy_card(settings_content)
-        self._build_model_library_card(settings_content)
         self.transcription_models_parent = tk.Frame(
             settings_content, bg=self.ui.surface,
         )
@@ -818,89 +808,6 @@ class MeetingWindow:
         self._build_library(library)
         self._build_summary_models(summary)
 
-    def _build_model_library_card(self, parent):
-        card = self._card(parent)
-        card.pack(fill="x", pady=(0, self.ui.space_md))
-        card.columnconfigure(0, weight=1)
-        self._label(
-            card, "Biblioteca compartilhada de modelos", bg=self.ui.card,
-            fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-        self._label(
-            card,
-            "Escolha uma pasta local comum. O Snipvoice usa llm/, tts/ e asr/, "
-            "e reconhece modelos idênticos do catálogo já usados por outros aplicativos.",
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-            wraplength=860,
-        ).grid(row=1, column=0, columnspan=3, sticky="ew",
-               pady=(self.ui.space_xs, self.ui.space_sm))
-        entry = self._entry(card, self.model_library_root)
-        entry.grid(row=2, column=0, sticky="ew", padx=(0, self.ui.space_sm))
-        self._button(card, "Escolher…", self.choose_model_library).grid(
-            row=2, column=1, padx=(0, self.ui.space_sm),
-        )
-        self._button(card, "Usar padrão", self.use_default_model_library).grid(
-            row=2, column=2,
-        )
-        actions = tk.Frame(card, bg=self.ui.card)
-        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_sm, 0))
-        self._button(
-            actions, "Salvar pasta de modelos", self.save_model_library, accent=True,
-        ).pack(side="left")
-        self._label(
-            actions, "", textvariable=self.model_library_status, bg=self.ui.card,
-            fg=self.ui.text_muted, anchor="w", justify="left", wraplength=620,
-        ).pack(side="left", fill="x", expand=True, padx=(self.ui.space_md, 0))
-
-    def choose_model_library(self):
-        initial = self.model_library_root.get().strip() or None
-        options = {"parent": self.window, "title": "Biblioteca local de modelos"}
-        if initial and os.path.isdir(initial):
-            options["initialdir"] = initial
-        path = filedialog.askdirectory(**options)
-        if path:
-            self.model_library_root.set(path)
-            self.model_library_status.set("Clique em Salvar para aplicar a nova biblioteca.")
-
-    def use_default_model_library(self):
-        self.model_library_root.set("")
-        self.model_library_status.set("Os caches próprios do Snipvoice serão usados.")
-
-    def save_model_library(self):
-        try:
-            root = normalize_model_library_root(self.model_library_root.get())
-        except ValueError as exc:
-            self.model_library_status.set(str(exc))
-            return
-
-        def save():
-            ensure_model_library(root)
-            payload = model_library_payload(root)
-            if self.persist_settings(payload) is False:
-                raise ValueError("Não foi possível salvar a pasta de modelos. Tente novamente.")
-            configure = getattr(self.controller, "configure_model_library", None)
-            result = configure(root) if callable(configure) else {"voice_applied": False}
-            return payload, result
-
-        def saved(value, error):
-            if error:
-                self.model_library_status.set(error)
-                return
-            payload, result = value
-            self.raw_settings.update(payload)
-            self.summary_cache_dir = result.get("summary_cache_dir")
-            self._refresh_summary_models()
-            if result.get("voice_applied"):
-                message = "Pasta salva; modelos compatíveis existentes serão verificados localmente."
-            else:
-                message = "Pasta salva; reinicie o Snipvoice para mover o ditado para a nova biblioteca."
-            self.model_library_status.set(message)
-            if self.on_settings_changed:
-                self.on_settings_changed()
-
-        self.model_library_status.set("Preparando llm/, tts/ e asr/…")
-        self._submit("model_library", save, saved)
-
     def _build_summary_models(self, parent):
         self.summary_model_buttons = {}
         entries = summary_catalog()
@@ -937,9 +844,7 @@ class MeetingWindow:
             button.configure(text="Verificando…", state="disabled")
         self._submit(
             "summary_inventory",
-            lambda: {entry["id"]: summary_model_installation(
-                        entry["id"], getattr(self, "summary_cache_dir", None),
-                    )
+            lambda: {entry["id"]: summary_model_is_installed(entry["id"])
                      for entry in summary_catalog()},
             self._summary_inventory_loaded,
         )
@@ -948,22 +853,10 @@ class MeetingWindow:
         if error:
             self.summary_model_status.set(error)
             return
-        installations = {
-            model_id: ({"managed": True} if value is True else value)
-            for model_id, value in installed.items()
-        }
-        self.summary_model_installations = installations
-        self.summary_model_installed = {
-            model_id: value is not None for model_id, value in installations.items()
-        }
+        self.summary_model_installed = dict(installed)
         for model_id, button in self.summary_model_buttons.items():
-            installation = installations.get(model_id)
-            if installation is None:
-                button.configure(text="Baixar", state="normal")
-            elif installation.get("managed"):
-                button.configure(text="Remover", state="normal")
-            else:
-                button.configure(text="Compartilhado", state="disabled")
+            button.configure(text="Remover" if installed.get(model_id) else "Baixar",
+                             state="normal")
 
     def toggle_summary_model(self, model_id):
         entry = summary_catalog_entry(model_id)
@@ -971,12 +864,6 @@ class MeetingWindow:
             self.status.set("O modelo de resumo selecionado não existe no catálogo.")
             return
         if self.summary_model_installed.get(model_id):
-            installation = getattr(self, "summary_model_installations", {}).get(model_id)
-            if installation is not None and not installation.get("managed"):
-                self.summary_model_status.set(
-                    "Este modelo pertence à biblioteca compartilhada e não será apagado."
-                )
-                return
             if not messagebox.askyesno("Remover modelo", f'Remover {entry["name"]} deste computador?',
                                        parent=self.window):
                 return
@@ -984,9 +871,7 @@ class MeetingWindow:
                 button.configure(state="disabled")
             self.summary_model_status.set(f'Removendo {entry["name"]}…')
             submitted = self._submit(
-                "summary_model", lambda: delete_summary_model(
-                    model_id, getattr(self, "summary_cache_dir", None),
-                ),
+                "summary_model", lambda: delete_summary_model(model_id),
                 lambda _value, error: self._summary_model_finished(entry, error, removed=True),
             )
             if not submitted:
@@ -1013,9 +898,7 @@ class MeetingWindow:
         self.summary_model_status.set(f'Baixando {entry["name"]} com verificação SHA-256…')
         submitted = self._submit(
             "summary_model",
-            lambda: download_summary_model(
-                model_id, getattr(self, "summary_cache_dir", None),
-                cancel_event=self.summary_download_cancel,
+            lambda: download_summary_model(model_id, cancel_event=self.summary_download_cancel,
                                            progress=lambda done, total: self._summary_progress(entry, done, total)),
             lambda _value, error: self._summary_model_finished(entry, error),
         )
@@ -2370,14 +2253,6 @@ class MeetingWindow:
             self.status.set("Não foi possível carregar as configurações. Veja os detalhes na aba Gravação.")
             return
         self.raw_settings = dict(raw or {})
-        model_root = resolve_model_library_root(self.raw_settings)
-        if hasattr(self, "model_library_root"):
-            self.model_library_root.set(model_root or "")
-        if hasattr(self, "model_library_status"):
-            self.model_library_status.set(
-                "Estrutura ativa: llm/, tts/ e asr/."
-                if model_root else "Usando os caches próprios do Snipvoice."
-            )
         try:
             settings = resolve_meeting_settings(self.raw_settings)
         except ValueError as exc:

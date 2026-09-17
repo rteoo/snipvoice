@@ -140,27 +140,6 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.enabled)
         self.assertEqual(self.controller.state, STATE_UNAVAILABLE)
 
-    def test_cache_dir_switch_updates_future_provider_operations(self):
-        shared = os.path.join(self.tmp, "local-models", "asr")
-        self.assertTrue(self.controller.set_cache_dir(shared))
-        self.assertEqual(self.controller.cache_dir, os.path.abspath(shared))
-        self.assertEqual(self.controller._provider.cache_dir, os.path.abspath(shared))
-
-    def test_cache_dir_switch_is_rejected_during_model_loading(self):
-        self.controller._state = "loading"
-        old = self.controller.cache_dir
-        self.assertFalse(self.controller.set_cache_dir(os.path.join(self.tmp, "asr")))
-        self.assertEqual(self.controller.cache_dir, old)
-
-    def test_cache_dir_switch_is_deferred_while_dictation_model_is_loaded(self):
-        self._ready()
-        old = self.controller.cache_dir
-
-        self.assertFalse(self.controller.set_cache_dir(os.path.join(self.tmp, "asr")))
-
-        self.assertEqual(self.controller.cache_dir, old)
-        self.assertEqual(self.controller._provider.cache_dir, old)
-
     def test_capture_runtime_unavailable_never_enters_ready(self):
         self.controller._capture_available = lambda: False
         self.controller._capture_factory = AudioCapture

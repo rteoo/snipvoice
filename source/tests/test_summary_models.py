@@ -58,23 +58,6 @@ class SummaryModelsTests(unittest.TestCase):
             summary_models.delete_summary_model("tiny", self.temp.name)
             self.assertFalse(Path(path).exists())
 
-    def test_summary_wrapper_reports_shared_installation_without_taking_ownership(self):
-        payload = b"shared local llm"
-        entry = {
-            "id": "tiny", "profile": "tiny", "filename": "tiny.gguf",
-            "url": "https://example.test/model.gguf",
-            "sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload),
-            "license_id": "MIT", "upstream_model": "example/tiny",
-        }
-        shared = Path(self.temp.name) / "lm-studio" / "tiny.gguf"
-        shared.parent.mkdir()
-        shared.write_bytes(payload)
-        with mock.patch.object(summary_models, "summary_catalog_entry", return_value=entry):
-            self.assertEqual(
-                summary_models.summary_model_installation("tiny", self.temp.name),
-                {"path": str(shared), "managed": False},
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,14 +105,14 @@ def _generate(runtime, entry, evidence, allowed, budget, cancel_event):
     return _validate(document, allowed, budget, json.dumps(evidence, ensure_ascii=False))
 
 
-def summarize_meeting(store, session_id, model, cancel_event=None, cache_dir=None):
+def summarize_meeting(store, session_id, model, cancel_event=None):
     # Keep this import surface and function shape stable for existing controller
     # callers and tests.  The deep seam owns evidence, reduction, validation,
     # lifecycle, and the canonical save boundary.
     intelligence = MeetingIntelligence(
         store,
         runtime_factory=SummaryRuntime,
-        model_path_resolver=lambda model_id: summary_model_path(model_id, cache_dir),
+        model_path_resolver=summary_model_path,
         max_context=MAX_CONTEXT,
     )
     return intelligence.generate_report(
