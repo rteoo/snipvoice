@@ -38,3 +38,18 @@ and limiter; do not describe it as spectral denoising or echo cancellation.
 Automatic transcription and summary remain opt-in and run sequentially under
 the existing local inference reservation.
 See [implementation validation and open hardware gates](offline-meeting-validation.md).
+
+Local meeting-memory development uses the canonical-bundle/disposable-index
+boundary described in
+[`local-meeting-memory-operations.md`](local-meeting-memory-operations.md).
+Run storage, index, report, annotation, clip, and retention tests only against
+copied fixtures under `source/tests/tmp`; never point them at a live
+`SNIPVOICE_HOME`. Deleting `library.sqlite*` is an index-rebuild test, not a
+data-deletion test. The SQLite/FTS runtime probe, repair/rebuild UI, report and
+Q&A controls, organization filters, consent settings, retention preview, trash,
+restore, and purge routes are implemented. On 2026-09-17,
+`python -m unittest discover -s tests -q` ran 1,191 tests successfully with 53
+environment/platform skips. Ruff is unavailable in this validation context and
+must not be described as passed until it is run with the pinned development
+tool. Physical Tk/tray interaction, native capture, packaged startup, and
+signing remain separate acceptance work.

@@ -1,16 +1,51 @@
 # Local meeting memory implementation plan
 
-Status: planning only, 2026-09-16. Inspected source baseline: `1e875d2`
-(`v3.1.0`).
+Status: implementation record, 2026-09-17. This document began as a plan
+against `1e875d2` (`v3.1.0`). The checkpoints below now describe the
+implemented local meeting-memory slice; they do not certify physical or
+packaged acceptance.
 
 This plan implements the first seven recommendations from the
 [notetaker product benchmark](notetaker-product-benchmark.md): report profiles,
 post-meeting artifacts, transcript interaction, single-meeting Q&A, local
 organization, cross-meeting search/Q&A, and privacy/retention controls.
 
-This document does not authorize source implementation, dependency changes,
-host configuration changes, pushes, pull requests, releases, or destructive
-testing against live Snipvoice data.
+No dependency or host configuration change is part of this implementation
+record. Never run its storage, rebuild, or retention checks against live
+Snipvoice data; use copied fixtures and an isolated `SNIPVOICE_HOME`.
+
+## Implementation snapshot
+
+The following status separates implemented behavior from validation that still
+requires a physical host or release environment:
+
+| Area | Status | Evidence boundary |
+| --- | --- | --- |
+| Canonical bundles, versioned workspace/annotations, disposable SQLite/FTS catalog, and library routing | Implemented | Canonical files remain authoritative; SQLite/FTS5 is rebuildable derived state. |
+| Profiles, bounded local reports, immutable report history, reviewed artifacts, and single-meeting Q&A | Implemented | Reports and answers carry validated transcript citations and model provenance. |
+| Transcript revisions, manual speaker labels, revision-scoped highlights, navigation, and bounded source clips | Implemented | Labels and clips retain revision/segment/track provenance; timings are chunk-level. |
+| Collections, tags, people, and manual series | Implemented | GUI filters and bounded organization assignment use canonical annotations. |
+| Search projection, provenance snippets, cross-meeting Q&A, and rebuild/repair UI | Implemented | Search and Q&A remain bounded and local; rebuild never deletes canonical bundles. |
+| Consent/privacy controls, retention previews, trash, restore, raw-track staging, and permanent purge | Implemented | Destructive actions are explicit, journaled, fail-closed, and subject to SSD limits. |
+| Hotkey/tray/controller integration and startup recovery | Implemented | Callback/thread routing is covered by tests; physical Tk/tray behavior is unverified. |
+| Package probes, native capture, packaged startup, signing, and physical acceptance | Open validation | These are release/environment checks, not missing local-memory features. |
+
+The implementation is therefore usable as a local development surface. On
+2026-09-17, `python -m unittest discover -s tests -q` ran 1,191 tests
+successfully with 53 environment/platform skips. Ruff is unavailable in this
+validation context. Physical Tk/tray,
+native capture, packaged startup, signing, migration/downgrade, and long-run
+scale results must be reported separately with their actual skips and limits.
+
+## Checkpoint disposition
+
+Checkpoints 1–22 are implemented in the current source and have focused unit
+coverage across the canonical bundle, index, intelligence, GUI/controller,
+organization, export, consent, and retention seams. Checkpoint 23's repair,
+export, and documentation integration is also present, including the
+`--sqlite-runtime-probe` entry point. The remaining validation boundary is
+physical Tk/tray/native capture, packaged startup, trusted signing, and the
+synthetic scale/migration checks; these are not described as passed here.
 
 ## Product outcome
 
@@ -51,12 +86,17 @@ task execution, sentiment scoring, MCP, or a local network server.
   summary on failure.
 - `meeting_gui.py` already pages the library, selects transcript chunks, seeks
   playback to a chunk start, edits notes/bookmarks, and exposes summary review.
-- Current search scans every meeting directory and may read every transcript.
-  `meeting_store.py` caps deep paging at 10,500 rows and explicitly calls for a
-  rebuildable SQLite index.
-- The selected storage, transcription, summary, file, and controller baseline
-  passed 59 targeted tests on the inspected Windows host. This is not a fresh
-  full-suite or physical-capture certification.
+- `MeetingLibrary` routes user-facing meeting reads and writes through canonical
+  bundles and the disposable catalog. `MeetingIndex` provides SQLite/FTS5
+  search, bounded snippets, filters, cursors, and rebuild/reconciliation; a
+  canonical scan remains the safe fallback when the index is unavailable.
+- `MeetingIntelligence` provides bounded local reports and single- and
+  cross-meeting answers with validated transcript citations. The GUI exposes
+  profiles, report history, Q&A, organization, search, repair, consent, and
+  retention controls through worker-backed controller seams.
+- Focused tests cover these seams. The 2026-09-17 full run completed 1,191
+  tests successfully with 53 environment/platform skips; this record is not a
+  physical-capture or packaged-acceptance certification.
 
 ## Architecture decision
 
@@ -238,7 +278,7 @@ Each checkpoint is one implementation commit unless a failing checkpoint needs
 its own corrective commit. Never merge a checkpoint whose stated validation is
 failing or unresolved.
 
-### 1. Lock data contracts and legacy fixtures
+### 1. Lock data contracts and legacy fixtures — implemented
 
 **Changes**
 
@@ -271,7 +311,7 @@ failing or unresolved.
 rollback expectation are explicit and executable as tests before storage code
 changes.
 
-### 2. Add versioned workspace and annotation storage
+### 2. Add versioned workspace and annotation storage — implemented
 
 **Changes**
 
@@ -303,7 +343,7 @@ changes.
 **Completion criterion:** human-owned state has one safe canonical write path,
 and existing meetings still open without eager migration.
 
-### 3. Add the rebuildable SQLite catalog
+### 3. Add the rebuildable SQLite catalog — implemented
 
 **Changes**
 
@@ -336,7 +376,7 @@ and existing meetings still open without eager migration.
 **Completion criterion:** the index can be destroyed at any point without
 losing user data, and rebuilding converges to canonical files.
 
-### 4. Route user-facing library operations through `MeetingLibrary`
+### 4. Route user-facing library operations through `MeetingLibrary` — implemented
 
 **Changes**
 
@@ -369,7 +409,7 @@ losing user data, and rebuilding converges to canonical files.
 **Completion criterion:** every non-capture caller uses the new deep module, and
 the legacy user-visible behavior is unchanged.
 
-### 5. Define report profiles and supported sections
+### 5. Define report profiles and supported sections — implemented
 
 **Changes**
 
@@ -403,7 +443,7 @@ the legacy user-visible behavior is unchanged.
 **Completion criterion:** every requested artifact can be expressed through one
 bounded profile model without arbitrary output schemas.
 
-### 6. Deepen local structured generation
+### 6. Deepen local structured generation — implemented
 
 **Changes**
 
@@ -438,7 +478,7 @@ bounded profile model without arbitrary output schemas.
 **Completion criterion:** reports and later Q&A share one tested inference
 module without weakening existing summary guarantees.
 
-### 7. Persist report revisions and reviewed artifacts
+### 7. Persist report revisions and reviewed artifacts — implemented
 
 **Changes**
 
@@ -470,7 +510,7 @@ module without weakening existing summary guarantees.
 **Completion criterion:** multiple report profiles and revisions coexist without
 overwriting source or human work.
 
-### 8. Add report profile and history UI
+### 8. Add report profile and history UI — implemented
 
 **Changes**
 
@@ -500,7 +540,7 @@ overwriting source or human work.
 **Completion criterion:** a user can create and review reports from built-in or
 custom profiles without blocking Tk or losing earlier output.
 
-### 9. Add reviewable post-meeting outputs
+### 9. Add reviewable post-meeting outputs — implemented
 
 **Changes**
 
@@ -532,7 +572,7 @@ custom profiles without blocking Tk or losing earlier output.
 **Completion criterion:** feature 2 produces useful artifacts without granting
 Snipvoice external mutation authority.
 
-### 10. Add transcript annotation storage
+### 10. Add transcript annotation storage — implemented
 
 **Changes**
 
@@ -560,7 +600,7 @@ Snipvoice external mutation authority.
 **Completion criterion:** human transcript corrections exist as reversible
 overlays with stable provenance.
 
-### 11. Add synchronized transcript navigation and highlight UI
+### 11. Add synchronized transcript navigation and highlight UI — implemented
 
 **Changes**
 
@@ -592,7 +632,7 @@ overlays with stable provenance.
 **Completion criterion:** transcript, playback, annotations, and search results
 share stable revision/segment/timestamp navigation.
 
-### 12. Add bounded highlight clip export
+### 12. Add bounded highlight clip export — implemented
 
 **Changes**
 
@@ -620,7 +660,7 @@ share stable revision/segment/timestamp navigation.
 **Completion criterion:** feature 3 can export a traceable source clip without
 changing or loading the full recording.
 
-### 13. Implement local `Ask this meeting`
+### 13. Implement local `Ask this meeting` — implemented
 
 **Changes**
 
@@ -650,7 +690,7 @@ changing or loading the full recording.
 **Completion criterion:** a question can be answered locally with resolvable
 evidence and no durable write.
 
-### 14. Add Q&A UI and explicit answer saving
+### 14. Add Q&A UI and explicit answer saving — implemented
 
 **Changes**
 
@@ -676,7 +716,7 @@ evidence and no durable write.
 **Completion criterion:** feature 4 is useful without silently accumulating a
 new private chat history.
 
-### 15. Add collections, tags, people, and manual series
+### 15. Add collections, tags, people, and manual series — implemented
 
 **Changes**
 
@@ -704,7 +744,7 @@ new private chat history.
 **Completion criterion:** feature 5 has one coherent organization model without
 calendar or contact ingestion.
 
-### 16. Add organization and filtered-library UI
+### 16. Add organization and filtered-library UI — implemented
 
 **Changes**
 
@@ -731,7 +771,7 @@ calendar or contact ingestion.
 **Completion criterion:** users can organize and retrieve meetings without
 learning storage or index details.
 
-### 17. Complete full-text search with provenance snippets
+### 17. Complete full-text search with provenance snippets — implemented
 
 **Changes**
 
@@ -764,7 +804,7 @@ learning storage or index details.
 **Completion criterion:** feature 6 search is fast, source-aware, rebuildable,
 and independent of generated summaries.
 
-### 18. Add cited cross-meeting Q&A
+### 18. Add cited cross-meeting Q&A — implemented
 
 **Changes**
 
@@ -797,7 +837,7 @@ and independent of generated summaries.
 **Completion criterion:** cross-meeting answers remain bounded, local, and
 auditable back to transcripts.
 
-### 19. Add explicit consent and privacy settings
+### 19. Add explicit consent and privacy settings — implemented
 
 **Changes**
 
@@ -827,7 +867,7 @@ auditable back to transcripts.
 **Completion criterion:** feature 7 begins with transparent, configurable local
 recording behavior rather than hidden automation.
 
-### 20. Implement retention planning without deletion
+### 20. Implement retention planning without deletion — implemented
 
 **Changes**
 
@@ -857,7 +897,7 @@ recording behavior rather than hidden automation.
 **Completion criterion:** every destructive feature begins from a deterministic,
 reviewable, exact-target plan.
 
-### 21. Add recoverable whole-meeting trash
+### 21. Add recoverable whole-meeting trash — implemented
 
 **Changes**
 
@@ -889,7 +929,7 @@ reviewable, exact-target plan.
 **Completion criterion:** whole-meeting deletion is recoverable by default and
 converges after interruption.
 
-### 22. Add staged raw-audio removal
+### 22. Add staged raw-audio removal — implemented
 
 **Changes**
 
@@ -923,7 +963,7 @@ converges after interruption.
 **Completion criterion:** raw audio can be removed without creating an ambiguous
 or unrecoverable meeting state.
 
-### 23. Integrate repair, export, documentation, and release gates
+### 23. Integrate repair, export, documentation, and release gates — implemented; acceptance open
 
 **Changes**
 
@@ -1062,8 +1102,9 @@ physical-host proof, and final task-owned diff review.
 
 - Run the focused test modules named by the checkpoint.
 - Run `python -m compileall -q source` for new modules and edited imports.
-- Run `python -m ruff check source` from the repository root with the pinned
-  development tool.
+- Run `python -m ruff check source` from the repository root when the pinned
+  development tool is available. Ruff is unavailable in this validation
+  context, so no lint pass is claimed here.
 - Run `git diff --check` and inspect the full task-owned diff.
 - Add failure injection for every new canonical write, transaction, migration,
   destructive state, and model lifecycle.
@@ -1108,9 +1149,10 @@ On supported physical Windows x64 and Apple Silicon macOS hosts:
 - Verify package startup, migration, FTS, Q&A, trash/restore, raw purge, repair,
   and cold offline behavior.
 
-## Definition of done
+## Release definition of done
 
-The feature set is done only when all of the following are true:
+The source implementation covers the feature set above. Release completion
+still requires all of the following evidence:
 
 - Features 1–7 are implemented through the approved hybrid architecture.
 - Capture and recovery remain independent of SQLite, GUI, and model latency.
