@@ -244,6 +244,56 @@ class MeetingFilesTests(unittest.TestCase):
         )
         self.assertNotIn(r"C:\Users\private", exported.read_text(encoding="utf-8"))
 
+    def test_text_exports_redact_paths_embedded_in_free_form_fields(self):
+        sid = self.session()
+        self.store.update(
+            sid,
+            title=r"Planning from C:\Users\Alice Smith\Meetings\plan.txt for review",
+            notes=(
+                r"Notes at C:\Users\Alice Smith\Meeting Notes\agenda.txt; "
+                "URL https://example.com/path remains and / agenda is ordinary prose. "
+                "See /Users/Alice for details. See /Users/Alice of Bob. "
+                "Saved /tmp in the archive."
+            ),
+            reviewed_summary=(
+                r"Reviewed from \\server\Shared Folder\Meeting Notes\review.txt; "
+                "also /tmp and ordinary prose remain."
+            ),
+        )
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["summary"] = {
+            "summary": r"Draft in /Users/Alice Smith/Meeting Notes/draft.txt.",
+            "notes": "Keep this ordinary summary text.",
+        }
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        revision = self.store.begin_revision(sid, "test-model", "pt")
+        self.store.add_transcript(sid, revision, {
+            "id": "s2", "track": "microphone", "start": 1, "end": 2,
+            "text": "Transcript path /var/private/meeting.txt for context remains useful.",
+        })
+        self.store.finish_revision(sid, revision)
+
+        for format in ("plain", "markdown", "json"):
+            with self.subTest(format=format):
+                exported = self.root / ("free-form." + format)
+                export_meeting(self.store, sid, exported, format)
+                content = exported.read_text(encoding="utf-8")
+                self.assertGreaterEqual(content.count("[redacted]"), 9)
+                for leaked in (
+                    "Alice Smith", "Shared Folder", "server", "/Users/Alice", "/tmp",
+                    "/var/private", "plan.txt",
+                ):
+                    self.assertNotIn(leaked, content)
+                self.assertIn("https://example.com/path", content)
+                self.assertIn("/ agenda is ordinary prose", content)
+                self.assertIn("for details", content)
+                self.assertIn("of Bob", content)
+                self.assertIn("in the archive", content)
+                self.assertIn("for review", content)
+                self.assertIn("for context remains useful", content)
+                self.assertIn("Keep this ordinary summary text.", content)
+
     def test_whole_meeting_export_includes_annotations_report_history_and_raw_state(self):
         sid = self.session()
         metadata_path = self.root / "meetings" / sid / "metadata.json"

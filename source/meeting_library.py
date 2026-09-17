@@ -2572,19 +2572,19 @@ class MeetingLibrary:
         return copy.deepcopy(artifact)
 
     def delete(self, session_id):
-        with self._catalog_lock:
-            with _writer_lock(self._session_dir(session_id)):
-                result = self.store.delete(session_id)
-                try:
-                    removed = self.index.remove_session(session_id)
-                    if not removed:
-                        self._mark_index_stale_with_reason("canonical deletion was not projected")
-                except Exception:
-                    # The canonical deletion wins.  Keep all indexed reads on
-                    # the canonical fallback until the disposable projection
-                    # is rebuilt, so removed plaintext cannot be surfaced.
-                    self._mark_index_stale_with_reason("canonical deletion was not projected")
-                return result
+        """Refuse unjournaled canonical deletion.
+
+        User-facing deletion belongs to ``MeetingRetention`` through
+        ``MeetingController.delete_session`` so the exact target inventory,
+        trash move, rollback journal, and purge confirmation remain mandatory.
+        Keeping this compatibility method fail-closed prevents older callers
+        from silently bypassing those guarantees.
+        """
+        self._session_dir(session_id)  # validate without reading or mutating
+        raise RuntimeError(
+            "A exclusão direta foi desativada. Use MeetingController.delete_session "
+            "para mover a reunião à lixeira recuperável."
+        )
 
     delete_session = delete
 

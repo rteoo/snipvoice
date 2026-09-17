@@ -791,37 +791,39 @@ class MeetingRetention:
     def _transcript_state(self, session_id, metadata):
         revisions = metadata.get("revisions")
         if not isinstance(revisions, list):
-            return False, False, set(), (), "As revisões de transcrição são inválidas."
+            return False, False, {}, {}, "As revisões de transcrição são inválidas."
         completed = [item for item in revisions if isinstance(item, dict) and item.get("status") == "completed"]
         pending = [item for item in revisions if isinstance(item, dict) and item.get("status") in {"pending", "processing"}]
         if pending:
-            return False, bool(completed), set(), (), "Há uma revisão de transcrição ainda em processamento."
+            return False, bool(completed), {}, {}, "Há uma revisão de transcrição ainda em processamento."
         if not completed:
-            return False, False, set(), (), "A reunião ainda não tem uma revisão de transcrição concluída."
-        ids = set()
-        ranges = []
+            return False, False, {}, {}, "A reunião ainda não tem uma revisão de transcrição concluída."
+        revision_ids = {}
+        revision_ranges = {}
         total_bytes = 0
         for revision in completed:
             revision_id = revision.get("id")
             if not _valid_id(revision_id):
-                return False, True, ids, tuple(ranges), "Uma revisão concluída tem um identificador inválido."
+                return False, True, {}, {}, "Uma revisão concluída tem um identificador inválido."
             reader = getattr(self.library, "get_transcript", None) if self.library is not None else None
             if reader is None:
                 reader = getattr(self.store, "get_transcript", None)
             if reader is None:
-                return False, True, ids, tuple(ranges), "O colaborador não oferece leitura de transcrições."
+                return False, True, {}, {}, "O colaborador não oferece leitura de transcrições."
             try:
                 segments = list(reader(session_id, revision_id))
             except Exception as error:
-                return False, True, ids, tuple(ranges), f"A revisão de transcrição não pôde ser lida: {error}"
+                return False, True, {}, {}, f"A revisão de transcrição não pôde ser lida: {error}"
             if len(segments) > MAX_TRANSCRIPT_SEGMENTS:
-                return False, True, ids, tuple(ranges), "A revisão de transcrição excede o limite de retenção."
+                return False, True, {}, {}, "A revisão de transcrição excede o limite de retenção."
             expected = revision.get("segments")
             if isinstance(expected, int) and not isinstance(expected, bool) and expected != len(segments):
-                return False, True, ids, tuple(ranges), "A revisão de transcrição está incompleta."
+                return False, True, {}, {}, "A revisão de transcrição está incompleta."
+            ids = set()
+            ranges = []
             for segment in segments:
                 if not isinstance(segment, dict) or not _valid_segment_id(segment.get("id")):
-                    return False, True, ids, tuple(ranges), "A revisão de transcrição contém um segmento inválido."
+                    return False, True, {}, {}, "A revisão de transcrição contém um segmento inválido."
                 ids.add(segment["id"])
                 track = segment.get("track")
                 start, end = segment.get("start"), segment.get("end")
@@ -835,8 +837,12 @@ class MeetingRetention:
                     ranges.append((track, float(start), float(end)))
                 total_bytes += _json_size(segment)
                 if total_bytes > MAX_TRANSCRIPT_BYTES:
-                    return False, True, ids, tuple(ranges), "As transcrições excedem o limite de retenção."
-        return True, True, ids, tuple(ranges), ""
+                    return False, True, {}, {}, "As transcrições excedem o limite de retenção."
+            # Keep every revision's citation scope separate.  Segment IDs and
+            # timestamps are only stable within their transcript revision.
+            revision_ids[revision_id] = ids
+            revision_ranges[revision_id] = tuple(ranges)
+        return True, True, revision_ids, revision_ranges, ""
 
     def _transcript_snapshot(self, session_id, metadata):
         """Read the completed revisions used by the raw-retention gate."""
@@ -929,18 +935,63 @@ class MeetingRetention:
             for child in value:
                 yield from MeetingRetention._iter_citations(child, key)
 
-    def _citations_resolve(self, metadata, annotations, segment_ids, segment_ranges):
-        sources = [metadata.get("summary"), annotations.get("reviewed_artifacts")]
-        sources.extend(self._report_sources(metadata.get("id")))
-        if not segment_ids:
+    def _citations_resolve(self, metadata, annotations, revision_ids, revision_ranges):
+        sources = []
+        summary = metadata.get("summary")
+        if summary is not None:
+            sources.append((summary, "legacy"))
+        report_sources = self._report_sources(metadata.get("id"))
+        report_ids = set()
+        for report in report_sources:
+            if not isinstance(report, dict) or report.get("virtual"):
+                # The virtual legacy report is represented by metadata.summary,
+                # which is handled with its legacy revision rules above.
+                continue
+            report_ids.add(report.get("id"))
+            sources.append((report, "report"))
+
+        # A detached reviewed artifact has no provenance of its own.  Only
+        # report-attached artifacts can be resolved; an orphan with citations
+        # must fail closed instead of falling back to a union of revisions.
+        reviewed_artifacts = annotations.get("reviewed_artifacts")
+        if isinstance(reviewed_artifacts, dict):
+            for report_id, artifact in reviewed_artifacts.items():
+                if report_id not in report_ids and any(self._iter_citations(artifact)):
+                    return False, "Uma citação revisada não tem uma revisão de transcrição resolvível."
+
+        if not revision_ids:
             return False, "Não há segmentos para resolver as citações preservadas."
-        for source in sources:
-            for citation in self._iter_citations(source):
+        for source, source_kind in sources:
+            citations = list(self._iter_citations(source))
+            if not citations:
+                continue
+            if source_kind == "legacy":
+                if not isinstance(source, dict):
+                    return False, "Uma citação legada não tem uma revisão de transcrição resolvível."
+                revision_id = source.get("transcript_revision", source.get("revision"))
+                if revision_id is None:
+                    # A legacy summary can be safely inferred only while the
+                    # meeting has exactly one completed transcript revision.
+                    if len(revision_ids) != 1:
+                        return False, "Uma citação legada não informa a revisão de transcrição."
+                    revision_id = next(iter(revision_ids))
+            else:
+                revision_id = source.get("transcript_revision") if isinstance(source, dict) else None
+                if revision_id not in revision_ids:
+                    return False, "Uma citação do relatório não informa uma revisão de transcrição concluída."
+            segment_ids = revision_ids.get(revision_id)
+            segment_ranges = revision_ranges.get(revision_id)
+            if segment_ids is None or segment_ranges is None:
+                return False, "Uma citação referencia uma revisão de transcrição inexistente ou não concluída."
+            for citation in citations:
                 values = citation if isinstance(citation, list) else [citation]
                 for item in values:
                     if isinstance(item, dict):
+                        cited_revision = item.get("transcript_revision", item.get("revision"))
+                        if cited_revision is not None and cited_revision != revision_id:
+                            return False, "Uma citação do relatório referencia outra revisão de transcrição."
                         candidate = item.get("segment_id", item.get("id"))
-                        if candidate is not None and candidate not in segment_ids:
+                        if candidate is None or candidate not in segment_ids:
                             return False, "Uma citação do relatório não pode mais ser resolvida."
                     elif isinstance(item, str) and item and item not in segment_ids:
                         # Existing v1 summaries used track:start:end citations.
@@ -1019,7 +1070,7 @@ class MeetingRetention:
                 reasons.append("Raw-audio removal requires a completed or partial meeting, not an interrupted/failed state.")
                 eligible = False
             annotations = self._annotations(session_id, metadata)
-            complete, _has_revision, segment_ids, segment_ranges, transcript_reason = self._transcript_state(
+            complete, _has_revision, revision_ids, revision_ranges, transcript_reason = self._transcript_state(
                 session_id, metadata,
             )
             if not complete:
@@ -1029,7 +1080,7 @@ class MeetingRetention:
                 reasons.append("Raw-audio removal waits for a reviewed transcript or report.")
                 eligible = False
             citations_ok, citation_reason = self._citations_resolve(
-                metadata, annotations, segment_ids, segment_ranges,
+                metadata, annotations, revision_ids, revision_ranges,
             )
             if not citations_ok:
                 reasons.append(citation_reason)

@@ -551,45 +551,15 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         worker.join(3)
         self.assertEqual(controlled.published[-1], "latest")
 
-    def test_delete_waits_for_projection_and_cannot_resurrect_deleted_session(self):
-        class ControlledIndex:
-            state = "ready"
-
-            def __init__(self, store):
-                self.store = store
-                self.started = threading.Event()
-                self.release = threading.Event()
-                self.rows = set()
-
-            def index_store_session(self, _store, session_id, **_kwargs):
-                self.store.get(session_id)
-                self.started.set()
-                self.release.wait(2)
-                self.rows.add(session_id)
-                return True
-
-            def remove_session(self, session_id):
-                self.rows.discard(session_id)
-                return True
-
-            def mark_stale(self, *_args, **_kwargs):
-                return True
-
+    def test_direct_library_delete_fails_closed_without_touching_canonical_or_index(self):
         session = self.controller.store.begin({}, "to delete")
         self.controller.store.finish(session)
-        controlled = ControlledIndex(self.controller.store)
+        controlled = Mock()
         self.library._index = controlled
-        worker = self.library.queue_index_session(session)
-        self.assertTrue(controlled.started.wait(2))
-        deleted = []
-        delete_thread = threading.Thread(target=lambda: deleted.append(self.library.delete(session)))
-        delete_thread.start()
-        threading.Event().wait(0.05)
-        controlled.release.set()
-        worker.join(3)
-        delete_thread.join(3)
-        self.assertEqual(deleted, [True])
-        self.assertNotIn(session, controlled.rows)
+        with self.assertRaisesRegex(RuntimeError, "lixeira recuperável"):
+            self.library.delete(session)
+        self.assertEqual(self.controller.store.get(session)["id"], session)
+        controlled.remove_session.assert_not_called()
 
 
 class MeetingControllerRetentionPrivacyTests(unittest.TestCase):

@@ -8,6 +8,7 @@ import math
 import ntpath
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -273,6 +274,48 @@ def _export_value(value):
     return copy.deepcopy(value)
 
 
+_TEXT_PATH_RE = re.compile(
+    r"""
+    (?<![\w:/])
+    (?P<path>
+        (?:[A-Za-z]:[\\/](?=[^\\/\s])|(?:\\\\|//)(?=[^\\/\s])|/(?![/\s]))
+        (?:(?![<>"|?*\r\n,;!?)]|\.(?=\s|$)).)*?
+    )
+    (?P<terminal>
+        [,;!?)]|\.(?=\s|$)|(?=\r?\n)|
+        (?=\s+[a-z][\w'-]*(?=\s|[,;!?)]|\.(?=\s|$)|$))|
+        (?=\s+(?:and|or|then|but|while|with|without|for|to|from|about|because|after|before|during|where|when|which|that|this|these|those|into|onto|through|over|under|near|beside|inside|outside|remains?|is|are|was|were|exists?|stays?|keeps?)\b)|
+        (?=$)
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def _redact_absolute_paths(value):
+    """Redact embedded native absolute paths without touching URLs or prose."""
+    if not isinstance(value, str):
+        return value
+
+    def replace(match):
+        return "[redacted]" + match.group("terminal")
+
+    return _TEXT_PATH_RE.sub(replace, value)
+
+
+def _redact_free_form_export(value):
+    """Copy an exported free-form value while redacting embedded paths."""
+    if isinstance(value, dict):
+        return {str(key): _redact_free_form_export(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_free_form_export(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_free_form_export(child) for child in value)
+    if isinstance(value, str):
+        return _redact_absolute_paths(value)
+    return copy.deepcopy(value)
+
+
 def _annotation_export_projection(store, session, metadata):
     """Return selected canonical annotation state when the view exposes it."""
     value = metadata.get("annotations")
@@ -294,7 +337,7 @@ def _annotation_export_projection(store, session, metadata):
         )
         if key in value
     }
-    return _export_value(selected)
+    return _redact_free_form_export(_export_value(selected))
 
 
 def _report_citations(value, output, *, budget):
@@ -402,9 +445,9 @@ def _report_history_for_export(store, session, cancel_event=None):
 
 def _metadata_export_projection(store, session, metadata, cancel_event=None):
     """Build additive, path-free metadata for whole-meeting exports."""
-    public_metadata = _export_value({
+    public_metadata = _redact_free_form_export(_export_value({
         key: value for key, value in metadata.items() if key not in {"events", "annotations"}
-    })
+    }))
     settings = public_metadata.get("settings")
     if isinstance(settings, dict):
         settings.pop("meeting_destination", None)
@@ -440,20 +483,20 @@ def _json_export(handle, store, session, metadata, cancel_event=None):
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         handle.write(separator)
-        _json(handle, _export_value(event))
+        _json(handle, _redact_free_form_export(_export_value(event)))
         separator = ","
     handle.write('],"transcripts":[')
     separator = ""
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
         handle.write(separator + '{"revision":')
-        _json(handle, _export_value(revision))
+        _json(handle, _redact_free_form_export(_export_value(revision)))
         handle.write(',"segments":[')
         segment_separator = ""
         for segment in store.get_transcript(session, revision["id"]):
             _cancel(cancel_event)
             handle.write(segment_separator)
-            _json(handle, _export_value(segment))
+            _json(handle, _redact_free_form_export(_export_value(segment)))
             segment_separator = ","
         handle.write("]}")
         separator = ","
@@ -463,7 +506,7 @@ def _json_export(handle, store, session, metadata, cancel_event=None):
 def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     def line(value=""):
         handle.write(str(value) + "\n")
-    title = metadata.get("title") or session
+    title = _redact_absolute_paths(metadata.get("title") or session)
     line(("# " if markdown else "") + title)
     line(f"ID: {session}; estado: {metadata.get('status')}; duração: {metadata.get('duration', 0):.3f} s")
     line("Fontes: microfone/sistema; rótulos não identificam pessoas. Tempos da transcrição representam blocos de áudio.")
@@ -491,33 +534,36 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
             state = "removida pela retenção" if unavailable else "disponível"
             line(f"{track}: {state}")
     line("\nNotas:")
-    line(metadata.get("notes", ""))
+    line(_redact_absolute_paths(metadata.get("notes", "")))
     line("\nMarcadores:")
     for bookmark in metadata.get("bookmarks", []):
         _cancel(cancel_event)
-        line(json.dumps(_export_value(bookmark), ensure_ascii=False))
+        line(json.dumps(_redact_free_form_export(_export_value(bookmark)), ensure_ascii=False))
     line("\nProveniência e lacunas:")
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         if event.get("type") != "audio":
-            line(json.dumps(_export_value(event), ensure_ascii=False))
+            line(json.dumps(_redact_free_form_export(_export_value(event)), ensure_ascii=False))
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
-        line("\nRevisão: " + json.dumps(_export_value(revision), ensure_ascii=False))
+        line("\nRevisão: " + json.dumps(
+            _redact_free_form_export(_export_value(revision)), ensure_ascii=False,
+        ))
         for segment in store.get_transcript(session, revision["id"]):
             _cancel(cancel_event)
-            line(f"[{segment.get('start', 0):.3f}–{segment.get('end', 0):.3f} s | {segment.get('track', 'unknown')} | {segment.get('id', '')}] {segment.get('text', '')}")
+            text = _redact_absolute_paths(segment.get("text", ""))
+            line(f"[{segment.get('start', 0):.3f}–{segment.get('end', 0):.3f} s | {segment.get('track', 'unknown')} | {segment.get('id', '')}] {text}")
     if metadata.get("summary"):
         line("\nResumo local editável:")
-        line(json.dumps(metadata["summary"], ensure_ascii=False))
+        line(json.dumps(_redact_free_form_export(metadata["summary"]), ensure_ascii=False))
     if metadata.get("reviewed_summary"):
         line("\nResumo revisado manualmente:")
-        line(metadata["reviewed_summary"])
+        line(_redact_absolute_paths(metadata["reviewed_summary"]))
     annotations = _annotation_export_projection(store, session, metadata)
     _cancel(cancel_event)
     if annotations:
         line("\nAnotações canônicas:")
-        line(json.dumps(annotations, ensure_ascii=False))
+        line(json.dumps(_redact_free_form_export(annotations), ensure_ascii=False))
     report_history = _report_history_for_export(store, session, cancel_event)
     _cancel(cancel_event)
     if report_history:
@@ -742,8 +788,10 @@ def _report_export_value(value, key=None):
                     "path", "file_path", "filepath", "absolute_path", "destination"})}
     if isinstance(value, list):
         return [_report_export_value(child) for child in value]
-    if isinstance(value, str) and os.path.isabs(value):
-        return "[redacted]"
+    if isinstance(value, str):
+        if _absolute_path(value):
+            return "[redacted]"
+        return _redact_absolute_paths(value)
     return copy.deepcopy(value)
 
 
@@ -770,9 +818,9 @@ def report_export_projection(report, *, section=None):
         "profile_version": report.get("profile_version"),
         "session_id": report.get("session_id"),
         "transcript_revision": report.get("transcript_revision"),
-        "model": _report_export_value(report.get("model", {})),
+        "model": _redact_free_form_export(_report_export_value(report.get("model", {}))),
         "created_at": report.get("created_at"),
-        "sections": _report_export_value(selected),
+        "sections": _redact_free_form_export(_report_export_value(selected)),
     }
 
 

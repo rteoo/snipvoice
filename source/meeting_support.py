@@ -802,10 +802,9 @@ class MeetingController:
     def delete_session(self, session_id):
         """Move a completed meeting to recoverable app trash.
 
-        The controller is the user-facing deletion seam.  Direct canonical
-        ``MeetingLibrary.delete`` remains available only for compatibility and
-        is not used here; permanent purge has its own explicit method and
-        confirmation token.
+        The controller is the user-facing deletion seam. Direct canonical
+        ``MeetingLibrary.delete`` fails closed; permanent purge has its own
+        explicit method and confirmation token.
         """
         return self._run_retention(lambda retention: retention.trash_meeting(
             session_id, confirm=True,

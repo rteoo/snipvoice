@@ -50,6 +50,29 @@ class FailingProjectionLibrary:
         self.stale = True
 
 
+class CitationReportLibrary:
+    """Small report seam for retention provenance tests."""
+
+    def __init__(self, store, home, reports, annotations=None):
+        self.store = store
+        self.home_root = home
+        self.meetings_root = store.root
+        self.reports = reports
+        self.annotations = annotations or {
+            "reviewed_summary": "",
+            "reviewed_artifacts": {},
+        }
+
+    def get_session(self, session_id, include_events=False):
+        return self.store.get(session_id, include_events=include_events)
+
+    def read_annotations(self, _session_id):
+        return self.annotations
+
+    def list_reports(self, _session_id):
+        return self.reports
+
+
 def _hold_retention_lock(path, started, release, errors):
     try:
         from meeting_retention import _cross_process_lock
@@ -89,6 +112,29 @@ class MeetingRetentionTests(unittest.TestCase):
             clock=lambda: self.now,
             **kwargs,
         )
+
+    def _add_duplicate_completed_revision(self, revision_id="revision-2"):
+        metadata_path = self.meetings / "fixture-meeting-v1" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["revisions"].append({
+            "id": revision_id,
+            "profile": "accurate",
+            "language": "pt-BR",
+            "status": "completed",
+            "segments": 1,
+            "created_at": "2026-09-16T12:03:00Z",
+            "updated_at": "2026-09-16T12:04:00Z",
+            "error": None,
+        })
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        transcript = self.meetings / "fixture-meeting-v1" / "transcripts" / f"{revision_id}.jsonl"
+        transcript.write_text(json.dumps({
+            "id": "microphone:0.000000:3.000000",
+            "track": "microphone",
+            "start": 0.0,
+            "end": 3.0,
+            "text": "Same stable-looking citation in another revision.",
+        }) + "\n", encoding="utf-8")
 
     def test_operation_id_uses_injected_clock(self):
         self.assertTrue(self.retention()._operation_id().startswith("20260920120000-"))
@@ -392,6 +438,66 @@ class MeetingRetentionTests(unittest.TestCase):
         )
         self.assertFalse(outside_transcript.eligible)
         self.assertTrue(any("citação" in reason for reason in outside_transcript.reasons))
+
+    def test_legacy_citation_without_revision_is_safe_only_with_one_completed_revision(self):
+        metadata_path = self.meetings / "fixture-meeting-v1" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["summary"].pop("revision")
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        safe = self.retention().plan(
+            "fixture-meeting-v1", RetentionPolicy.raw_tracks(after_days=1),
+        )
+        self.assertTrue(safe.eligible)
+
+        self._add_duplicate_completed_revision()
+        ambiguous = self.retention().plan(
+            "fixture-meeting-v1", RetentionPolicy.raw_tracks(after_days=1),
+        )
+        self.assertFalse(ambiguous.eligible)
+        self.assertTrue(any("não informa a revisão" in reason for reason in ambiguous.reasons))
+
+    def test_report_citations_are_scoped_to_the_report_revision(self):
+        self._add_duplicate_completed_revision()
+        citation = {
+            "segment_id": "microphone:0.000000:3.000000",
+            "transcript_revision": "revision-1",
+        }
+        report = {
+            "id": "report-revision-2",
+            "transcript_revision": "revision-2",
+            "generated": {"summary": {"citations": [citation]}},
+            "reviewed_artifact": {"summary": "Reviewed report"},
+        }
+        library = CitationReportLibrary(self.store, self.home, [report])
+        plan = MeetingRetention(
+            self.store,
+            library=library,
+            workspace_root=self.home,
+            clock=lambda: self.now,
+        ).plan("fixture-meeting-v1", RetentionPolicy.raw_tracks(after_days=1))
+        self.assertFalse(plan.eligible)
+        self.assertTrue(any("outra revisão" in reason for reason in plan.reasons))
+
+    def test_report_citations_fail_closed_for_missing_or_incomplete_revision(self):
+        self._add_duplicate_completed_revision()
+        for revision_id in (None, "revision-not-completed"):
+            with self.subTest(revision_id=revision_id):
+                report = {
+                    "id": f"report-missing-{revision_id or 'field'}",
+                    "transcript_revision": revision_id,
+                    "generated": {"summary": {"citations": ["microphone:0.000000:3.000000"]}},
+                    "reviewed_artifact": {"summary": "Reviewed report"},
+                }
+                library = CitationReportLibrary(self.store, self.home, [report])
+                plan = MeetingRetention(
+                    self.store,
+                    library=library,
+                    workspace_root=self.home,
+                    clock=lambda: self.now,
+                ).plan("fixture-meeting-v1", RetentionPolicy.raw_tracks(after_days=1))
+                self.assertFalse(plan.eligible)
+                self.assertTrue(any("concluída" in reason for reason in plan.reasons))
 
     def test_projection_failure_marks_index_stale_and_stays_pending(self):
         library = FailingProjectionLibrary(self.store, self.home)
