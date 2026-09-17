@@ -96,6 +96,87 @@ class StandaloneTests(unittest.TestCase):
         self.instance.notify_error.assert_called_once()
         self.assertIn("reinicie", self.instance.notify_error.call_args.args[0])
 
+    def test_meeting_startup_recovers_before_rebuilding_hotkey(self):
+        events = []
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.refresh_privacy_defaults.side_effect = (
+            lambda: events.append("privacy")
+        )
+        self.instance.meetings.recover_retention_operations.side_effect = (
+            lambda: events.append("recovery") or ()
+        )
+        self.instance.voice = mock.Mock()
+        self.instance.voice.is_enabled.return_value = False
+        self.instance.gui = mock.Mock()
+        self.instance.refresh_tray_menu = mock.Mock()
+        self.instance._rebuild_meeting_monitor = mock.Mock(
+            side_effect=lambda: events.append("hotkey")
+        )
+        with mock.patch.object(app.platform_support, "IS_MAC", False), \
+                mock.patch.object(app.platform_support, "autostart_state", return_value="absent"):
+            self.instance._resolve_startup()
+        self.assertEqual(events, ["privacy", "recovery", "hotkey"])
+        self.assertTrue(self.instance._meeting_startup_ready)
+
+    def test_meeting_recovery_error_blocks_hotkey_without_disclosing_path(self):
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.refresh_privacy_defaults.return_value = None
+        self.instance.meetings.recover_retention_operations.side_effect = OSError(
+            r"C:\Users\private\meetings\retention.json"
+        )
+        self.instance.voice = mock.Mock()
+        self.instance.voice.is_enabled.return_value = False
+        self.instance.gui = mock.Mock()
+        self.instance.notify_error = mock.Mock()
+        self.instance.refresh_tray_menu = mock.Mock()
+        self.instance._rebuild_meeting_monitor = mock.Mock()
+        with mock.patch.object(app.platform_support, "IS_MAC", False), \
+                mock.patch.object(app.platform_support, "autostart_state", return_value="absent"):
+            self.instance._resolve_startup()
+        self.assertFalse(self.instance._meeting_startup_ready)
+        self.assertEqual(self.instance._meeting_startup_error, "OSError")
+        self.instance._rebuild_meeting_monitor.assert_not_called()
+        messages = [call.args[0] for call in self.instance.notify_error.call_args_list]
+        self.assertTrue(messages)
+        self.assertTrue(all("C:\\Users" not in message for message in messages))
+        self.assertTrue(any("revisão manual" in message for message in messages))
+
+    def test_meeting_hotkey_callback_only_queues_gui_work(self):
+        self.instance._meeting_startup_ready = True
+        self.instance.gui = mock.Mock()
+        self.instance.gui.submit.return_value = True
+        self.instance.meetings = mock.Mock()
+        self.assertTrue(self.instance._meeting_hotkey_request())
+        self.instance.gui.submit.assert_called_once()
+        queued = self.instance.gui.submit.call_args.args[0]
+        self.assertEqual(getattr(queued, "__name__", ""), "_meeting_hotkey_on_gui")
+        self.instance.meetings.snapshot.assert_not_called()
+
+        self.instance._meeting_startup_ready = False
+        self.assertFalse(self.instance._meeting_hotkey_request())
+        self.assertEqual(self.instance.gui.submit.call_count, 1)
+
+    def test_tray_start_and_stop_callbacks_only_queue_gui_work(self):
+        self.instance._meeting_startup_ready = True
+        self.instance.gui = mock.Mock()
+        self.instance.gui.submit.return_value = True
+        self.assertTrue(self.instance.request_meeting_start())
+        self.assertTrue(self.instance.request_meeting_stop())
+        self.assertEqual(self.instance.gui.submit.call_count, 2)
+        names = [getattr(call.args[0], "__name__", "")
+                 for call in self.instance.gui.submit.call_args_list]
+        self.assertEqual(names, ["_request_meeting_start_on_gui", "_request_meeting_stop_on_gui"])
+
+    def test_tray_stop_without_open_window_runs_controller_off_tk(self):
+        self.instance._manager_meeting_view = None
+        self.instance.meetings = mock.Mock()
+        self.instance.task_runner = mock.Mock()
+        self.instance._request_meeting_stop_on_gui(mock.Mock())
+        self.instance.meetings.stop.assert_not_called()
+        self.instance.task_runner.start.assert_called_once_with(
+            self.instance.meetings.stop, name="meeting-stop",
+        )
+
     def test_probe_exits_before_mutex_or_tray(self):
         probe = mock.Mock(return_value=0)
         with mock.patch.dict(sys.modules, {"voice_runtime_probe": types.SimpleNamespace(main=probe)}), \

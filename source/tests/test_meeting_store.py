@@ -9,7 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from meeting_store import MeetingStore, SEGMENT_SECONDS
+from meeting_store import MeetingStore, SEGMENT_SECONDS, TrackUnavailableError
 
 
 class MeetingStoreTests(unittest.TestCase):
@@ -212,6 +212,38 @@ class MeetingStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             MeetingStore(self.temp.name).get(self.session)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], 999)
+
+    def test_purged_track_fails_explicitly_without_silent_empty_audio(self):
+        payload = b"\0" * 16
+        self.store.append_audio(self.session, self.event(), payload)
+        self.store.finish(self.session)
+        path = Path(self.temp.name) / self.session / "metadata.json"
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        metadata["tracks"]["microphone"].update(
+            {"available": False, "raw_removed": True, "purged_at": "2026-09-17T00:00:00Z"}
+        )
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with self.assertRaises(TrackUnavailableError) as error:
+            list(self.store.iter_audio(self.session, track="microphone"))
+        self.assertEqual(error.exception.track, "microphone")
+        self.assertIn("restaure", str(error.exception))
+
+    def test_all_tracks_read_rejects_any_canonically_unavailable_track(self):
+        self.store.finish(self.session)
+        path = Path(self.temp.name) / self.session / "metadata.json"
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+        metadata["tracks"] = {"microphone": {"available": False, "segments": []}}
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with self.assertRaises(TrackUnavailableError) as error:
+            list(self.store.iter_audio(self.session))
+        self.assertIsNone(error.exception.track)
+        self.assertEqual(error.exception.unavailable_tracks, ("microphone",))
+
+    def test_missing_track_keeps_legacy_empty_partial_behavior(self):
+        self.store.finish(self.session)
+        self.assertEqual(list(self.store.iter_audio(self.session, track="system")), [])
 
 
 if __name__ == "__main__":

@@ -41,6 +41,33 @@ _AUDIO_BYTES_PER_SAMPLE = 4
 _ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
 
 
+class TrackUnavailableError(ValueError):
+    """A canonical raw track was removed and cannot satisfy an audio read.
+
+    The error is deliberately raised before the iterator is consumed.  This
+    lets playback, transcription, clipping, and export surface capability loss
+    instead of treating a purged source as an ordinary empty partial track.
+    """
+
+    def __init__(self, session_id, track, unavailable_tracks=None):
+        self.session_id = session_id
+        self.track = track
+        self.unavailable_tracks = tuple(unavailable_tracks or ((track,) if track else ()))
+        if track:
+            selected = "a fonte " + str(track)
+        else:
+            selected = "as fontes " + ", ".join(str(item) for item in self.unavailable_tracks)
+        super().__init__(
+            f"{selected} foi removida pela retenção; restaure a reunião ou a fonte "
+            "antes de reproduzir, transcrever ou exportar áudio."
+        )
+
+
+# Compatibility names for callers that describe this loss as a purged source.
+AudioTrackUnavailableError = TrackUnavailableError
+PurgedTrackError = TrackUnavailableError
+
+
 def _utc_timestamp(value=None):
     """Return an ISO UTC timestamp suitable for sorting and display."""
     stamp = time.time() if value is None else float(value)
@@ -316,6 +343,40 @@ class MeetingStore:
         if not math.isfinite(start) or start < 0:
             raise ValueError("O início da leitura é inválido.")
         self._session_dir(session_id)
+        metadata = self.get(session_id, include_events=False)
+        tracks = metadata.get("tracks", {})
+        if isinstance(tracks, dict):
+            def unavailable(value):
+                if not isinstance(value, dict):
+                    return False
+                if (
+                    value.get("available") is False
+                    or value.get("raw_removed") is True
+                    or value.get("purged") is True
+                    or value.get("purged_at") is not None
+                    or value.get("state") == "purged"
+                ):
+                    return True
+                return any(
+                    isinstance(segment, dict)
+                    and (
+                        segment.get("available") is False
+                        or segment.get("raw_removed") is True
+                        or segment.get("purged") is True
+                        or segment.get("purged_at") is not None
+                    )
+                    for segment in value.get("segments", ())
+                )
+
+            unavailable = tuple(
+                name for name, value in tracks.items()
+                if name in _TRACKS and isinstance(value, dict)
+                and unavailable(value)
+            )
+            if track is not None and track in unavailable:
+                raise TrackUnavailableError(session_id, track)
+            if track is None and unavailable:
+                raise TrackUnavailableError(session_id, None, unavailable)
         # Validate the session path before returning so malformed IDs fail at
         # the call site rather than only when a consumer starts iteration.
         def _read():
@@ -873,4 +934,12 @@ class MeetingStore:
         return os.path.join(self._session_dir(session_id), "transcripts", revision + ".jsonl")
 
 
-__all__ = ["MeetingStore", "SCHEMA_VERSION", "SEGMENT_SECONDS", "MAX_READ_BYTES"]
+__all__ = [
+    "AudioTrackUnavailableError",
+    "MeetingStore",
+    "MAX_READ_BYTES",
+    "PurgedTrackError",
+    "SCHEMA_VERSION",
+    "SEGMENT_SECONDS",
+    "TrackUnavailableError",
+]

@@ -1,107 +1,92 @@
 # Offline meeting implementation and validation
 
-> Historical validation for v1.0.0. Snipvoice v2.0.0 replaces the Ollama
-> adapter with packaged llama.cpp and the pinned model catalog documented in
-> [summary-model-selection.md](summary-model-selection.md).
+This document records the current local meeting implementation. It describes
+source-level behavior and focused checks; it does not certify physical Tk/tray
+interaction, native capture, packaged startup, or signing on this host.
 
-Date: 2026-09-14. Branch: `codex/offline-meetings`.
+## Implemented local behavior
 
-Source implementation is integrated and published for review in
-[PR #1](https://github.com/rteoo/snipvoice/pull/1). Hosted release bundles are
-verified; native physical platform acceptance and trusted code signing remain open.
+The meeting workspace preserves Snipvoice's capture and recovery boundary:
 
-## Delivered checkpoints
+- microphone and selected speaker-output sources remain independent native PCM
+  tracks, with append-only segments, CRC journaling, atomic metadata, explicit
+  gaps, pause/resume, and interrupted-session recovery;
+- transcription is installed-model-only, opt-in, sequential, revision-preserving,
+  and bounded by transcript chunks; model acquisition remains an explicit
+  settings action;
+- final audio is a derived atomic mixdown. The optional microphone treatment is
+  a deterministic low-level gate, bounded gain, and limiter, not spectral
+  denoising or acoustic echo cancellation;
+- the shared Tk root, controller workers, meeting hotkey, and tray actions keep
+  capture, inference, disk work, and playback off keyboard/Tk callbacks;
+- startup loads privacy defaults and reconciles interrupted retention journals
+  before admitting the meeting hotkey or destructive actions.
 
-| Plan checkpoints | Implementation |
+The first seven local meeting-memory features are implemented through the
+canonical-bundle/disposable-index architecture:
+
+| Feature | Implemented behavior |
 | --- | --- |
-| 1, 3 | Validated meeting settings, stable endpoint selections, bounded versioned helper transport, process deadlines and generation guards. |
-| 2 | Separate native PCM tracks, 30-second segments, CRC journal, atomic metadata, bounded event projections and streaming recovery/readers. |
-| 4, 5 | Owned WASAPI helper: input/output enumeration, microphone and selected-endpoint loopback, simultaneous capture, shared native clocks, PCM conversion, default roles, explicit gaps. |
-| 6 | Owned macOS 14.4+ CoreAudio input and device-specific tap helper, stable UIDs, microphone permissions, bounded callback queues and cleanup. |
-| 7, 8 | Worker-owned lifecycle, temporary dictation reservation, pause/resume, pinned manual endpoints, default changes, partial/failure preservation and safe shutdown. |
-| 9, 10, 13 | PT-BR tray workspace, source/device controls, meters, paginated/status-filtered library, title/notes/bookmarks, local text search, timestamp/track playback, optional recording shortcut. |
-| 11, 12 | Installed-only model preparation, verified catalog-constrained disk import, durable pending jobs, bounded per-track ASR, chunk timestamps, preserved raw outputs/revisions and resumable valid prefixes. |
-| 14 | Standard PCM WAV import; explicit Markdown/plain/JSON and per-track PCM16 WAV export; cancellation and atomic destination preservation. |
-| 15 | Opt-in fixed-loopback Ollama adapter; cloud/remote model rejection, structured cited summaries/actions, bounded hierarchical reduction, preserved original and manually reviewed summaries. |
-| 16 | Helper compiler scripts, CI build gates, bundled helper resolution, macOS usage descriptions and non-recording staged package probes. |
+| 1. Report profiles | Built-in and custom versioned profiles; bounded local reports with model and transcript provenance; immutable report history and separate review. |
+| 2. Post-meeting artifacts | Decisions, actions, questions, risks, objections, feedback, and follow-up drafts are reviewable, cited, and exportable without sending or mutating external systems. |
+| 3. Transcript interaction | Revision-scoped manual speaker labels, highlights, navigation, source-track clips, and bounded transcript pages; timings remain chunk-level. |
+| 4. Single-meeting Q&A | Local `Ask this meeting` with bounded answers, validated transcript citations, uncertainty, and explicit save-to-QA-report behavior. |
+| 5. Organization | Canonical collections, tags, people, and manually assigned series with filtered library views and bounded batch assignment. |
+| 6. Search and cross-meeting Q&A | SQLite/FTS5 projection, provenance snippets, safe query handling, filters, rebuild/repair, and cited local answers across selected meetings. |
+| 7. Privacy and retention | Visible consent reminder/settings, memory-only or explicit-save Q&A policy, retention previews, same-root trash/restore, journaled raw-track staging, and separately confirmed permanent purge. |
 
-Recording works without an installed model. Completed recordings queue a durable
-pending transcription revision; the user starts/resumes processing from the
-workspace. Meeting processing and eligible dictation restoration never download
-models. Model downloads remain explicit actions in the existing voice settings.
+## Offline and privacy boundary
 
-The recording shortcut reuses an independent instance of the existing bounded
-hotkey observer. This keeps it available while dictation is disabled or temporarily
-reserved, without changing existing observer constructor callers. Chords with the
-same final key and overlapping modifier subsets are rejected in both settings flows.
+`SNIPVOICE_HOME` contains the authoritative meeting bundles and a disposable
+`library.sqlite`/FTS5 projection. The catalog may contain sensitive plaintext
+copied from transcripts, notes, and reports. Deleting or rebuilding the catalog
+must never be described as deleting meeting content. The canonical bundle is
+the recovery source when the index is stale, missing, corrupt, or incomplete.
 
-## Validation on this Windows host
+There is no telemetry, implicit upload, or cloud fallback by default. Reports
+and answers run through the local llama.cpp seam after an installed model has
+been selected. Transcript, profile, and question text are untrusted data;
+generated claims require resolvable transcript citations and human review.
+Source labels are not speaker identity, and chunk timestamps are not word
+timing. External exports are outside the library and are not removed by
+retention operations.
 
-- `python -m unittest discover -s tests -v`, from `source`: **927 tests run;
-  881 passed; 46 reported skips; no failures**.
-- Cached Ruff **0.16.4**: `ruff check source` passed. The configured development
-  pin remains **0.16.3**; that exact executable is unavailable on this host.
-- `python -m compileall -q source`: passed.
-- `python -m pip check`: passed.
-- `git diff --check`: passed.
-- GitHub CI: **13 test jobs passed** across Windows, macOS and Linux on Python
-  3.12 and 3.14. Two additional release jobs built the Windows x64 portable
-  bundle and installer and the macOS ARM64 app bundle. Hosted Windows and macOS
-  jobs compiled both capture helpers and ran their non-recording probes.
-- Downloaded CI artifacts matched their SHA-256 sidecars and contained the
-  executable, native helper, app license and third-party notices. The downloaded
-  Windows bundle passed both packaged runtime and capture probes locally. Its
-  installer reports product version 1.0.0. The macOS app's runtime, capture and
-  ad-hoc signature checks ran on the hosted ARM64 runner; its archive structure
-  was inspected on this Windows host.
-- Independent integration and native protocol reviews completed. Corrections
-  include device-change timestamps, matching sample-rate ceilings, required integer
-  generations, error exit handling, partial loss statuses, and reservation retention
-  after unproven native teardown.
-- Tests exercise fragmented framing, subprocess stderr flooding/reaping, stale
-  generations, durable journal prefixes, disk/write failures, import/export
-  cancellation, seek/gap playback, failed saves, resumed transcript tails,
-  installed-only preparation, structured citations and remote model rejection.
+Consent reminders are configurable but are not legal consent. Operators remain
+responsible for notifying attendees and meeting applicable law or policy.
+Permanent purge removes app-owned recovery material, but filesystem deletion on
+an SSD is not forensic erasure; use disk encryption and account/device controls
+for that threat model.
 
-Skips include unavailable Tcl initialization, the missing optional `soxr` runtime,
-OS-specific cases, and capture helper binary/platform tests. Behavioral GUI tests
-passed; the actual Tk window smoke did not run successfully.
+## Source-level validation boundary
 
-No project dependencies or host tools were installed or changed. No private live
-recordings, models, settings or command libraries were copied into the repository.
+Focused unit coverage exists for canonical sidecars, report/profile validation,
+citation handling, Q&A save semantics, annotations, clips, organization,
+SQLite/FTS5 search and rebuild, GUI/controller routing, hotkey/tray dispatch,
+privacy/consent, and retention failure/recovery paths. On 2026-09-17,
+`python -m unittest discover -s tests -q` ran 1,195 tests successfully with 53
+environment/platform skips and the SQLite runtime probe passed. Ruff is
+unavailable in this validation context and must not be called
+passed without running the pinned development tool.
 
-## Remaining acceptance gates
+The SQLite runtime probe is available as `--sqlite-runtime-probe`; it checks
+the interpreter before desktop imports. Rebuild and repair use bounded progress
+and cancellation. Tests must use copied fixtures under `source/tests/tmp`, not
+a live `SNIPVOICE_HOME`.
 
-1. Use isolated synthetic signals on physical Windows and macOS hardware to verify
-   microphone/output selection, simultaneous tracks, formats, pause, permission
-   denial, endpoint changes, and cleanup. A tap-only aggregate on macOS needs actual
-   signal verification; static API review does not establish successful capture.
-2. Record two hours on each platform and measure start/end synchronization, drift,
-   bounded memory, disk latency and recoverability. Unit queue/storage limits do
-   not certify physical long-session behavior.
-3. Exercise the real Tk workspace, cold offline startup, actual local ASR weights,
-   physical playback, and existing Ollama weights with outbound networking blocked.
-   Install the Windows package and launch the macOS app on physical machines.
-4. Apply trusted Windows signing and Apple Developer ID signing/notarization before
-   distributing a release that promises verified publisher identity or a frictionless
-   first launch. The hosted release uses an unsigned Windows installer and an ad-hoc
-   macOS signature.
+## Unverified release and physical gates
 
-## Deliberate limits
+The following remain environment checks rather than missing local-memory
+features:
 
-- Windows/macOS only for native capture; macOS system capture requires 14.4+.
-- Manual endpoints never silently fall back. Output selection does not reroute
-  another application's playback.
-- Source labels identify tracks, not people. No diarization or acoustic echo
-  cancellation is promised. Transcript timings describe audio chunks, not words.
-- WAV import accepts standard integer PCM. Format-changing recordings stay in
-  original segments; WAV export refuses a mixed-format track rather than resampling
-  silently. RIFF WAV export has the 4 GiB format ceiling.
-- GUI pages show 50 sessions and at most 500 transcript rows; export retains all
-  revisions. Deep library pagination has a documented 10,000-row offset ceiling;
-  a rebuildable SQLite index is the upgrade path.
-- Playback is blocked during recording. Inference/file jobs serialize meeting
-  admission; unproven teardown keeps the runtime unavailable.
-- Ollama is provisioned manually. Disable its cloud features with
-  `OLLAMA_NO_CLOUD=1`; loopback calls and model metadata alone cannot certify the
-  external process is offline. Summaries require review before use.
+1. Real Tk window and tray interaction on supported Windows and macOS hosts.
+2. Physical microphone/WASAPI loopback/Core Audio capture, endpoint changes,
+   permission recovery, playback, and long-session drift/memory behavior.
+3. Packaged cold startup, bundled native helpers, model runtimes, migrations,
+   offline operation, and the synthetic 10,000-meeting/250,000-segment scale
+   measurement.
+4. Windows publisher signing and Apple Developer ID signing/notarization.
+
+See [local meeting-memory operations](local-meeting-memory-operations.md) for
+backup, restore, downgrade, retention, and repair procedures, and the
+[implementation record](local-meeting-memory-implementation-plan.md) for the
+checkpoint disposition.

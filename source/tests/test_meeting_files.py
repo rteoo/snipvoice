@@ -12,8 +12,16 @@ import wave
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from meeting_files import IMPORT_FRAMES, export_meeting, import_audio, import_wav, play_audio
-from meeting_store import MeetingStore
+from meeting_files import (
+    IMPORT_FRAMES,
+    export_highlight_clip,
+    export_meeting,
+    export_report,
+    import_audio,
+    import_wav,
+    play_audio,
+)
+from meeting_store import MeetingStore, TrackUnavailableError
 
 
 class MeetingFilesTests(unittest.TestCase):
@@ -204,6 +212,177 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
         self.assertNotIn(str(self.root), exported.read_text(encoding="utf-8"))
 
+    def test_json_export_redacts_transcript_paths_and_windows_final_basename(self):
+        sid = self.session()
+
+        class View:
+            root = self.store.root
+
+            def get(view_self, session_id, include_events=True):
+                value = self.store.get(session_id, include_events=include_events)
+                value["final_audio"] = {
+                    "path": r"C:\Users\private\meetings\final.wav",
+                    "format": "wav",
+                }
+                return value
+
+            def iter_events(view_self, session_id):
+                return self.store.iter_events(session_id)
+
+            def get_transcript(view_self, session_id, revision=None):
+                rows = self.store.get_transcript(session_id, revision)
+                return [dict(item, source_path=r"C:\Users\private\source.wav") for item in rows]
+
+        exported = self.root / "portable.json"
+        export_meeting(View(), sid, exported, "json")
+
+        document = json.loads(exported.read_text(encoding="utf-8"))
+        self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
+        self.assertEqual(
+            document["transcripts"][0]["segments"][0]["source_path"],
+            "[redacted]",
+        )
+        self.assertNotIn(r"C:\Users\private", exported.read_text(encoding="utf-8"))
+
+    def test_text_exports_redact_paths_embedded_in_free_form_fields(self):
+        sid = self.session()
+        self.store.update(
+            sid,
+            title=r"Planning from C:\Users\Alice Smith\Meetings\plan.txt for review",
+            notes=(
+                r"Notes at C:\Users\Alice Smith\Meeting Notes\agenda.txt; "
+                "URL https://example.com/path remains and / agenda is ordinary prose. "
+                "See /Users/Alice for details. See /Users/Alice of Bob. "
+                "Saved /tmp in the archive."
+            ),
+            reviewed_summary=(
+                r"Reviewed from \\server\Shared Folder\Meeting Notes\review.txt; "
+                "also /tmp and ordinary prose remain."
+            ),
+        )
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["summary"] = {
+            "summary": r"Draft in /Users/Alice Smith/Meeting Notes/draft.txt.",
+            "notes": "Keep this ordinary summary text.",
+        }
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        revision = self.store.begin_revision(sid, "test-model", "pt")
+        self.store.add_transcript(sid, revision, {
+            "id": "s2", "track": "microphone", "start": 1, "end": 2,
+            "text": "Transcript path /var/private/meeting.txt for context remains useful.",
+        })
+        self.store.finish_revision(sid, revision)
+
+        for format in ("plain", "markdown", "json"):
+            with self.subTest(format=format):
+                exported = self.root / ("free-form." + format)
+                export_meeting(self.store, sid, exported, format)
+                content = exported.read_text(encoding="utf-8")
+                self.assertGreaterEqual(content.count("[redacted]"), 9)
+                for leaked in (
+                    "Alice Smith", "Shared Folder", "server", "/Users/Alice", "/tmp",
+                    "/var/private", "plan.txt",
+                ):
+                    self.assertNotIn(leaked, content)
+                self.assertIn("https://example.com/path", content)
+                self.assertIn("/ agenda is ordinary prose", content)
+                self.assertIn("for details", content)
+                self.assertIn("of Bob", content)
+                self.assertIn("in the archive", content)
+                self.assertIn("for review", content)
+                self.assertIn("for context remains useful", content)
+                self.assertIn("Keep this ordinary summary text.", content)
+
+    def test_whole_meeting_export_includes_annotations_report_history_and_raw_state(self):
+        sid = self.session()
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["tracks"]["microphone"].update({"raw_removed": True})
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        class View:
+            root = self.store.root
+
+            def get(view_self, session_id, include_events=True):
+                value = self.store.get(session_id, include_events=include_events)
+                value["annotations"] = {
+                    "schema_version": 1,
+                    "generation": 3,
+                    "speaker_labels": {"s1": {"label": "Ana", "segment_id": "s1"}},
+                    "highlights": [{"id": "h1", "label": "Decision", "segment_ids": ["s1"]}],
+                    "collection_ids": ["client"], "tags": ["decision"], "people": ["Ana"],
+                    "reviewed_artifacts": {"r1": {"generation": 2, "sections": {"summary": "Reviewed"}}},
+                }
+                return value
+
+            def iter_events(view_self, session_id):
+                return self.store.iter_events(session_id)
+
+            def get_transcript(view_self, session_id, revision=None):
+                return self.store.get_transcript(session_id, revision)
+
+            def iter_audio(view_self, session_id, track=None, start=0.0):
+                return self.store.iter_audio(session_id, track=track, start=start)
+
+            def list_report_metadata(
+                view_self, session_id, include_legacy=True, limit=64, cancel_event=None,
+            ):
+                return [{
+                    "id": "r1", "kind": "report", "profile_id": "general",
+                    "created_at": "2026-09-17T00:00:00Z", "reviewed": True,
+                    "review_generation": 2,
+                    "model": {"id": "local", "sha256": "a" * 64,
+                              "runtime": "llama.cpp", "context_limit": 4096},
+                }]
+
+            def get_report(view_self, session_id, report_id):
+                return {
+                    "id": "r1", "kind": "report", "profile_id": "general",
+                    "created_at": "2026-09-17T00:00:00Z",
+                    "reviewed_artifact": {"generation": 2, "sections": {"summary": "Reviewed"}},
+                    "model": {"id": "local", "sha256": "a" * 64,
+                              "runtime": "llama.cpp", "context_limit": 4096},
+                    "generated": {
+                        "summary": {"text": "Do not export this body", "citations": ["s1"]}
+                    },
+                }
+
+        exported = self.root / "annotated.json"
+        export_meeting(View(), sid, exported, "json")
+        document = json.loads(exported.read_text(encoding="utf-8"))
+        self.assertTrue(document["metadata"]["tracks"]["microphone"]["raw_removed"])
+        self.assertEqual(document["annotations"]["speaker_labels"]["s1"]["label"], "Ana")
+        self.assertEqual(document["report_history"][0]["citations"], ["s1"])
+        self.assertEqual(document["report_history"][0]["review_generation"], 2)
+        self.assertEqual(document["report_history"][0]["model"]["runtime"], "llama.cpp")
+        self.assertNotIn("Do not export this body", exported.read_text(encoding="utf-8"))
+
+        for format in ("plain", "markdown"):
+            path = self.root / ("annotated." + format)
+            export_meeting(View(), sid, path, format)
+            content = path.read_text(encoding="utf-8")
+            self.assertIn("removida pela retenção", content)
+            self.assertIn("Ana", content)
+            self.assertNotIn("Do not export this body", content)
+
+    def test_report_export_is_atomic_bounded_and_path_free(self):
+        destination = self.root / "report.md"
+        report = {
+            "id": "report-1", "kind": "report", "profile_id": "general",
+            "profile_version": 1, "session_id": "session-1",
+            "transcript_revision": "revision-1",
+            "model": {"id": "local", "sha256": "a" * 64, "runtime": "llama.cpp",
+                      "path": str(self.root / "secret.gguf")},
+            "generated": {"summary": {"text": "Confirmed", "citations": ["s1"]}},
+            "created_at": "2026-09-16T12:00:00Z",
+        }
+        self.assertEqual(export_report(report, destination, section="summary"), str(destination))
+        content = destination.read_text(encoding="utf-8")
+        self.assertIn("Confirmed", content)
+        self.assertNotIn(str(self.root), content)
+        self.assertEqual(list(self.root.glob(".report.md-*.tmp")), [])
+
     def test_export_failure_keeps_previous_destination(self):
         sid = self.session()
         path = self.root / "export.md"
@@ -235,6 +414,22 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), b"keep")
         with self.assertRaises(ValueError):
             export_meeting(self.store, sid, Path(self.store.root) / sid / "metadata.json", "json")
+
+    def test_playback_and_wav_export_report_purged_track_capability_loss(self):
+        sid = self.session()
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["tracks"]["microphone"].update({"available": False, "raw_removed": True})
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+        with mock.patch.dict(sys.modules, {"sounddevice": types.SimpleNamespace(OutputStream=mock.Mock())}):
+            with self.assertRaises(TrackUnavailableError):
+                play_audio(self.store, sid, "microphone", 0, threading.Event())
+        destination = self.root / "purged.wav"
+        with self.assertRaises(TrackUnavailableError):
+            export_meeting(self.store, sid, destination, "wav-microphone")
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.glob(".purged.wav-*.tmp")), [])
 
     def test_playback_seek_and_gap_silence(self):
         sid = self.store.begin({})
@@ -292,6 +487,118 @@ class MeetingFilesTests(unittest.TestCase):
                 export_meeting(self.store, sid, path, "json", cancellation)
         self.assertEqual(path.read_bytes(), b"previous")
         self.assertEqual(list(self.root.glob(".export.json-*.tmp")), [])
+
+    def test_highlight_clip_trims_exclusive_end_and_preserves_gaps(self):
+        sid = self.store.begin({}, "Clip")
+        self.audio(sid, [0.1, 0.2, 0.3, 0.4])
+        self.audio(sid, [0.5, 0.6, 0.7], timestamp=0.001, sequence=1)
+        self.store.finish(sid)
+        destination = self.root / "clip.wav"
+        highlight = {
+            "id": "highlight-1",
+            "revision": "revision-1",
+            "start": 2 / 8000,
+            "end": 10 / 8000,
+            "track": "microphone",
+            "label": "Decision",
+            "note": "Keep the source timing.",
+            "segment_ids": ["segment-1"],
+            "private_path": str(self.root / "must-not-leak"),
+        }
+
+        self.assertEqual(export_highlight_clip(self.store, sid, highlight, destination), str(destination))
+        with wave.open(str(destination), "rb") as reader:
+            self.assertEqual((reader.getframerate(), reader.getnchannels(), reader.getsampwidth()), (8000, 1, 2))
+            samples = struct.unpack("<8h", reader.readframes(20))
+        expected = tuple(round(value * 32767) for value in (0.3, 0.4, 0.0, 0.0, 0.0, 0.0, 0.5, 0.6))
+        self.assertEqual(samples, expected)
+        payload = destination.read_bytes()
+        self.assertIn(b"highlight-1", payload)
+        self.assertIn(b'"start":0.00025', payload)
+        self.assertIn(b'"end":0.00125', payload)
+        self.assertIn(b'"gap":true', payload)
+        self.assertIn(b'"gaps":[', payload)
+        self.assertNotIn(str(self.root).encode(), payload)
+
+    def test_highlight_clip_does_not_overwrite_or_leave_temp_files(self):
+        sid = self.session()
+        destination = self.root / "clip.wav"
+        destination.write_bytes(b"previous")
+
+        with self.assertRaises(FileExistsError):
+            export_highlight_clip(
+                self.store,
+                sid,
+                {"id": "h", "start": 0, "end": 1 / 8000, "track": "microphone"},
+                destination,
+            )
+        self.assertEqual(destination.read_bytes(), b"previous")
+        self.assertEqual(list(self.root.glob(".clip.wav-*.tmp")), [])
+
+    def test_cancelled_highlight_clip_preserves_destination_and_cleans_temp(self):
+        sid = self.session()
+        cancellation = threading.Event()
+        destination = self.root / "clip.wav"
+        original = self.store.iter_audio
+
+        def cancel_after_first(*arguments):
+            iterator = original(*arguments)
+            for item in iterator:
+                cancellation.set()
+                yield item
+
+        with mock.patch.object(self.store, "iter_audio", side_effect=cancel_after_first):
+            with self.assertRaisesRegex(RuntimeError, "cancelada"):
+                export_highlight_clip(
+                    self.store,
+                    sid,
+                    {"id": "h", "start": 0, "end": 1 / 8000, "track": "microphone"},
+                    destination,
+                    cancel_event=cancellation,
+                )
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.glob(".clip.wav-*.tmp")), [])
+
+    def test_highlight_clip_rejects_format_changes_and_preserves_destination(self):
+        sid = self.store.begin({})
+        self.audio(sid, [0.1] * 4)
+        self.audio(sid, [0.2] * 4, timestamp=0.0005, sequence=1, rate=16000)
+        self.store.finish(sid)
+        destination = self.root / "clip.wav"
+        with self.assertRaisesRegex(ValueError, "formato"):
+            export_highlight_clip(
+                self.store,
+                sid,
+                {"id": "h", "start": 0, "end": 0.001, "track": "microphone"},
+                destination,
+            )
+        self.assertFalse(destination.exists())
+
+    def test_highlight_clip_enforces_riff_limit_before_commit(self):
+        sid = self.session()
+        destination = self.root / "clip.wav"
+        with mock.patch("meeting_files.RIFF_LIMIT", 256):
+            with self.assertRaisesRegex(ValueError, "4 GiB"):
+                export_highlight_clip(
+                    self.store,
+                    sid,
+                    {"id": "h", "start": 0, "end": 4 / 8000, "track": "microphone"},
+                    destination,
+                )
+        self.assertFalse(destination.exists())
+        self.assertEqual(list(self.root.glob(".clip.wav-*.tmp")), [])
+
+    def test_highlight_clip_rejects_empty_or_non_finite_ranges(self):
+        sid = self.session()
+        for start, end in ((0, 0), (float("nan"), 1), (0, float("inf"))):
+            with self.subTest(start=start, end=end):
+                with self.assertRaisesRegex(ValueError, "intervalo"):
+                    export_highlight_clip(
+                        self.store,
+                        sid,
+                        {"id": "h", "start": start, "end": end, "track": "microphone"},
+                        self.root / ("clip-" + str(len(str(start))) + ".wav"),
+                    )
 
 
 if __name__ == "__main__":

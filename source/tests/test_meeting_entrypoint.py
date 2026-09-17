@@ -26,3 +26,11 @@ class MeetingEntrypointTests(unittest.TestCase):
                 exec(code, {"__name__": "__main__", "__file__": str(path)})
         self.assertEqual(stopped.exception.code, 0)
         probe.assert_called_once_with()
+
+    def test_sqlite_probe_exits_before_desktop_or_user_data_initialization(self):
+        path = Path(__file__).resolve().parents[1] / "snipvoice.pyw"
+        code = compile(path.read_text(encoding="utf-8"), str(path), "exec")
+        with mock.patch.object(sys, "argv", [str(path), "--sqlite-runtime-probe"]):
+            with self.assertRaises(SystemExit) as stopped:
+                exec(code, {"__name__": "__main__", "__file__": str(path)})
+        self.assertEqual(stopped.exception.code, 0)

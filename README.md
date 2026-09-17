@@ -136,6 +136,43 @@ The optional microphone booster applies a fixed low-level noise gate, bounded ga
 and limiter to the derived final WAV. Raw source tracks remain unchanged; it is not
 a spectral denoiser or acoustic echo canceller.
 
+### Meeting memory: local data model and status
+
+Meeting memory is built around a canonical bundle plus a disposable catalog.
+The bundle remains authoritative; SQLite/FTS5 is a rebuildable projection used
+for listing and search. Capture never depends on SQLite, the GUI, or a model.
+
+```text
+SNIPVOICE_HOME/
+├── workspace.json          # profiles, collections, series, privacy defaults
+├── library.sqlite          # disposable plaintext search/listing projection
+├── retention-ops/          # recoverable retention journals and staging
+├── trash/                  # recoverable whole-meeting trash
+└── meetings/<session-id>/
+    ├── metadata.json       # capture/recovery authority
+    ├── annotations.json    # human-owned notes and revision-scoped edits
+    ├── events.journal      # audio provenance and recovery journal
+    ├── microphone/         # native PCM segments
+    ├── system/             # native PCM segments
+    ├── transcripts/        # immutable JSONL revisions
+    └── reports/            # immutable generated report envelopes
+```
+
+The current implementation includes the complete local meeting-memory slice:
+report profiles and immutable cited reports, reviewable post-meeting artifacts,
+revision-scoped transcript labels/highlights and source clips, single- and
+cross-meeting Q&A, collections/tags/people/series, SQLite/FTS5 search and
+rebuild, exports, configurable recording consent/privacy, and recoverable
+retention with trash, restore, and explicit raw-track/permanent purge. The
+controller, GUI, meeting hotkey, and tray routes are wired to these operations.
+Physical Tk/tray interaction, native capture, packaged startup, and signing
+remain unverified on this host.
+
+The catalog contains sensitive plaintext copied from transcripts, notes, and
+reports. Treat `library.sqlite`, its `-wal`/`-shm` sidecars, backups, logs, and
+trash as private meeting data. Deleting the catalog loses only the projection;
+rebuilding it must not be treated as a deletion mechanism for canonical data.
+
 ## Local transcription and summaries
 
 Model downloads happen only after an explicit action in voice settings. Meeting
@@ -170,10 +207,22 @@ voice controller starts. Set `voice_history_retention_days` in `settings.json`
 to an integer from 1 to 3650 to change this period. Active, malformed, and
 unrecognized entries are preserved. This applies to existing dictation history;
 export anything you want to keep before upgrading. Meeting recordings remain
-until the user removes them. Files are plaintext; use OS disk encryption and
-protect your user account. There is no telemetry, transcript logging, or implicit upload. Do not
-commit or share live recordings, personal commands, settings, model files, or
-logs. Playback is blocked during recording so Snipvoice does not capture itself.
+until the user removes them. Meeting retention operations require an explicit
+preview and target resolution: whole meetings can move to recoverable trash,
+and selected raw tracks can be staged for removal. Permanent purge requires a
+separate confirmation and cannot be undone. External exports are not deleted by
+these operations. Files and the SQLite index are plaintext; use OS disk
+encryption and protect the user account. Deleting files on an SSD is not
+forensic erasure. There is no telemetry, transcript logging, implicit upload,
+or cloud fallback by default. Local inference uses installed models; model
+acquisition remains an explicit settings action.
+Do not commit or share live recordings, personal commands, settings, model
+files, logs, backups, or the SQLite catalog. Playback is blocked during
+recording so Snipvoice does not capture itself.
+
+For the storage contract, backup/restore guidance, downgrade behavior, repair,
+exports, and current validation limits, see
+[`source/docs/local-meeting-memory-operations.md`](source/docs/local-meeting-memory-operations.md).
 
 ## Platform status and limitations
 
