@@ -1,11 +1,14 @@
 """Worker-owned, bounded WAV import, provenance exports, and native playback."""
 
 import array
+import copy
 import itertools
 import json
 import math
+import ntpath
 import os
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -17,6 +20,8 @@ PLAY_FRAMES = 1024
 IMPORT_FRAMES = 8192
 RIFF_LIMIT = 0xFFFFFFFF
 SUPPORTED_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg", ".opus"})
+MAX_EXPORT_REPORTS = 64
+MAX_EXPORT_CITATIONS = 256
 
 
 def _cancel(cancel_event):
@@ -246,6 +251,216 @@ def _events(store, session, metadata):
     return iter(metadata.get("events", ()))
 
 
+def _absolute_path(value):
+    """Recognize native absolute paths even when exporting cross-platform data."""
+    return isinstance(value, str) and (
+        os.path.isabs(value) or ntpath.isabs(value) or value.startswith("/")
+    )
+
+
+def _export_value(value):
+    """Detach export data and replace absolute local paths with a marker."""
+    if isinstance(value, dict):
+        result = {}
+        for child_key, child in value.items():
+            if isinstance(child_key, str) and child_key.casefold() == "meeting_destination":
+                continue
+            result[str(child_key)] = _export_value(child)
+        return result
+    if isinstance(value, list):
+        return [_export_value(child) for child in value]
+    if _absolute_path(value):
+        return "[redacted]"
+    return copy.deepcopy(value)
+
+
+_TEXT_PATH_RE = re.compile(
+    r"""
+    (?<![\w:/])
+    (?P<path>
+        (?:[A-Za-z]:[\\/](?=[^\\/\s])|(?:\\\\|//)(?=[^\\/\s])|/(?![/\s]))
+        (?:(?![<>"|?*\r\n,;!?)]|\.(?=\s|$)).)*?
+    )
+    (?P<terminal>
+        [,;!?)]|\.(?=\s|$)|(?=\r?\n)|
+        (?=\s+[a-z][\w'-]*(?=\s|[,;!?)]|\.(?=\s|$)|$))|
+        (?=\s+(?:and|or|then|but|while|with|without|for|to|from|about|because|after|before|during|where|when|which|that|this|these|those|into|onto|through|over|under|near|beside|inside|outside|remains?|is|are|was|were|exists?|stays?|keeps?)\b)|
+        (?=$)
+    )
+    """,
+    re.VERBOSE,
+)
+
+
+def _redact_absolute_paths(value):
+    """Redact embedded native absolute paths without touching URLs or prose."""
+    if not isinstance(value, str):
+        return value
+
+    def replace(match):
+        return "[redacted]" + match.group("terminal")
+
+    return _TEXT_PATH_RE.sub(replace, value)
+
+
+def _redact_free_form_export(value):
+    """Copy an exported free-form value while redacting embedded paths."""
+    if isinstance(value, dict):
+        return {str(key): _redact_free_form_export(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_free_form_export(child) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_free_form_export(child) for child in value)
+    if isinstance(value, str):
+        return _redact_absolute_paths(value)
+    return copy.deepcopy(value)
+
+
+def _annotation_export_projection(store, session, metadata):
+    """Return selected canonical annotation state when the view exposes it."""
+    value = metadata.get("annotations")
+    if not isinstance(value, dict):
+        reader = getattr(store, "read_annotations", None)
+        if not callable(reader):
+            reader = getattr(getattr(store, "_library", None), "read_annotations", None)
+        if callable(reader):
+            value = reader(session)
+    if not isinstance(value, dict):
+        return None
+    selected = {
+        key: value[key]
+        for key in (
+            "schema_version", "generation", "revision_filter", "title", "notes",
+            "bookmarks", "highlights", "speaker_labels", "collection_ids", "tags",
+            "people", "series_id", "reviewed_summary", "reviewed_artifacts",
+            "active_report_id",
+        )
+        if key in value
+    }
+    return _redact_free_form_export(_export_value(selected))
+
+
+def _report_citations(value, output, *, budget):
+    """Collect only bounded citation identifiers, never report body text."""
+    if budget <= 0:
+        return
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str) and key.casefold() in {"question", "answer", "text", "body"}:
+                continue
+            if isinstance(key, str) and key.casefold() in {"citations", "segment_ids", "source_ids"}:
+                values = child if isinstance(child, list) else [child]
+                for item in values:
+                    if isinstance(item, str) and item not in output:
+                        output.append(item)
+                        if len(output) >= budget:
+                            return
+                continue
+            _report_citations(child, output, budget=budget - len(output))
+            if len(output) >= budget:
+                return
+    elif isinstance(value, list):
+        for child in value:
+            _report_citations(child, output, budget=budget - len(output))
+            if len(output) >= budget:
+                return
+
+
+def _report_history_projection(report):
+    """Project bounded report metadata without carrying generated bodies."""
+    if not isinstance(report, dict):
+        return None
+    report_id = report.get("id", report.get("report_id"))
+    if not isinstance(report_id, str) or not report_id:
+        return None
+    result = {"id": report_id}
+    for key in (
+        "schema_version", "kind", "profile_id", "profile_version", "session_id",
+        "transcript_revision", "status", "created_at", "completed_at", "virtual",
+    ):
+        value = report.get(key)
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            if key in report:
+                result[key] = value
+    reviewed = report.get("reviewed_artifact")
+    result["reviewed"] = reviewed is not None or bool(report.get("reviewed"))
+    if isinstance(reviewed, dict) and isinstance(reviewed.get("generation"), int):
+        result["review_generation"] = reviewed["generation"]
+    elif isinstance(report.get("review_generation"), int):
+        result["review_generation"] = report["review_generation"]
+    model = report.get("model")
+    if isinstance(model, dict):
+        result["model"] = {
+            key: _export_value(model[key])
+            for key in ("id", "sha256", "runtime", "context_limit")
+            if key in model and isinstance(model[key], (str, int, float, bool))
+        }
+    citations = []
+    _report_citations(report.get("generated", report.get("payload", report)), citations,
+                      budget=MAX_EXPORT_CITATIONS)
+    if citations:
+        result["citations"] = citations
+    return _export_value(result)
+
+
+def _report_history_for_export(store, session, cancel_event=None):
+    """Read an optional bounded report-history seam from a store/view."""
+    reader = getattr(store, "list_report_metadata", None)
+    if not callable(reader):
+        reader = getattr(getattr(store, "_library", None), "list_report_metadata", None)
+    if callable(reader):
+        reports = reader(
+            session,
+            include_legacy=True,
+            limit=MAX_EXPORT_REPORTS,
+            cancel_event=cancel_event,
+        )
+    else:
+        reader = getattr(store, "list_reports", None)
+        if not callable(reader):
+            reader = getattr(getattr(store, "_library", None), "list_reports", None)
+        if not callable(reader):
+            return []
+        reports = reader(session, include_legacy=True)
+    detail_reader = getattr(store, "get_report", None)
+    if not callable(detail_reader):
+        detail_reader = getattr(getattr(store, "_library", None), "get_report", None)
+    result = []
+    for report in reports or ():
+        _cancel(cancel_event)
+        if len(result) >= MAX_EXPORT_REPORTS:
+            break
+        source = report
+        report_id = report.get("id") if isinstance(report, dict) else None
+        # The metadata seam intentionally excludes generated bodies.  Resolve
+        # only the bounded rows selected for export so citation identifiers can
+        # be projected without ever retaining report prose in the result.
+        if callable(detail_reader) and isinstance(report_id, str) and report_id != "legacy-summary":
+            source = detail_reader(session, report_id)
+        projection = _report_history_projection(source)
+        if projection is not None:
+            result.append(projection)
+    return result
+
+
+def _metadata_export_projection(store, session, metadata, cancel_event=None):
+    """Build additive, path-free metadata for whole-meeting exports."""
+    public_metadata = _redact_free_form_export(_export_value({
+        key: value for key, value in metadata.items() if key not in {"events", "annotations"}
+    }))
+    settings = public_metadata.get("settings")
+    if isinstance(settings, dict):
+        settings.pop("meeting_destination", None)
+        public_metadata["settings"] = settings
+    final_audio = public_metadata.get("final_audio")
+    if isinstance(final_audio, dict) and final_audio.get("path"):
+        final_audio["path"] = ntpath.basename(os.fspath(metadata["final_audio"]["path"]))
+        public_metadata["final_audio"] = final_audio
+    annotations = _annotation_export_projection(store, session, metadata)
+    report_history = _report_history_for_export(store, session, cancel_event)
+    return public_metadata, annotations, report_history
+
+
 def _json(handle, value):
     for piece in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(value):
         handle.write(piece)
@@ -253,38 +468,35 @@ def _json(handle, value):
 
 def _json_export(handle, store, session, metadata, cancel_event=None):
     _cancel(cancel_event)
-    public_metadata = {key: value for key, value in metadata.items() if key != "events"}
-    settings = public_metadata.get("settings")
-    if isinstance(settings, dict) and "meeting_destination" in settings:
-        settings = dict(settings)
-        settings.pop("meeting_destination", None)
-        public_metadata["settings"] = settings
-    final_audio = public_metadata.get("final_audio")
-    if isinstance(final_audio, dict) and final_audio.get("path"):
-        final_audio = dict(final_audio)
-        final_audio["path"] = os.path.basename(os.fspath(final_audio["path"]))
-        public_metadata["final_audio"] = final_audio
+    public_metadata, annotations, report_history = _metadata_export_projection(
+        store, session, metadata, cancel_event,
+    )
+    _cancel(cancel_event)
     handle.write('{"metadata":')
     _json(handle, public_metadata)
+    handle.write(',"annotations":')
+    _json(handle, annotations or {})
+    handle.write(',"report_history":')
+    _json(handle, report_history)
     handle.write(',"events":[')
     separator = ""
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         handle.write(separator)
-        _json(handle, event)
+        _json(handle, _redact_free_form_export(_export_value(event)))
         separator = ","
     handle.write('],"transcripts":[')
     separator = ""
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
         handle.write(separator + '{"revision":')
-        _json(handle, revision)
+        _json(handle, _redact_free_form_export(_export_value(revision)))
         handle.write(',"segments":[')
         segment_separator = ""
         for segment in store.get_transcript(session, revision["id"]):
             _cancel(cancel_event)
             handle.write(segment_separator)
-            _json(handle, segment)
+            _json(handle, _redact_free_form_export(_export_value(segment)))
             segment_separator = ","
         handle.write("]}")
         separator = ","
@@ -294,33 +506,71 @@ def _json_export(handle, store, session, metadata, cancel_event=None):
 def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     def line(value=""):
         handle.write(str(value) + "\n")
-    title = metadata.get("title") or session
+    title = _redact_absolute_paths(metadata.get("title") or session)
     line(("# " if markdown else "") + title)
     line(f"ID: {session}; estado: {metadata.get('status')}; duração: {metadata.get('duration', 0):.3f} s")
     line("Fontes: microfone/sistema; rótulos não identificam pessoas. Tempos da transcrição representam blocos de áudio.")
+    line("\nDisponibilidade das fontes:")
+    for track, value in metadata.get("tracks", {}).items():
+        _cancel(cancel_event)
+        if isinstance(value, dict):
+            unavailable = (
+                value.get("available") is False
+                or value.get("raw_removed") is True
+                or value.get("purged") is True
+                or value.get("purged_at") is not None
+                or value.get("state") == "purged"
+                or any(
+                    isinstance(segment, dict)
+                    and (
+                        segment.get("available") is False
+                        or segment.get("raw_removed") is True
+                        or segment.get("purged") is True
+                        or segment.get("purged_at") is not None
+                    )
+                    for segment in value.get("segments", ())
+                )
+            )
+            state = "removida pela retenção" if unavailable else "disponível"
+            line(f"{track}: {state}")
     line("\nNotas:")
-    line(metadata.get("notes", ""))
+    line(_redact_absolute_paths(metadata.get("notes", "")))
     line("\nMarcadores:")
     for bookmark in metadata.get("bookmarks", []):
         _cancel(cancel_event)
-        line(json.dumps(bookmark, ensure_ascii=False))
+        line(json.dumps(_redact_free_form_export(_export_value(bookmark)), ensure_ascii=False))
     line("\nProveniência e lacunas:")
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         if event.get("type") != "audio":
-            line(json.dumps(event, ensure_ascii=False))
+            line(json.dumps(_redact_free_form_export(_export_value(event)), ensure_ascii=False))
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
-        line("\nRevisão: " + json.dumps(revision, ensure_ascii=False))
+        line("\nRevisão: " + json.dumps(
+            _redact_free_form_export(_export_value(revision)), ensure_ascii=False,
+        ))
         for segment in store.get_transcript(session, revision["id"]):
             _cancel(cancel_event)
-            line(f"[{segment.get('start', 0):.3f}–{segment.get('end', 0):.3f} s | {segment.get('track', 'unknown')} | {segment.get('id', '')}] {segment.get('text', '')}")
+            text = _redact_absolute_paths(segment.get("text", ""))
+            line(f"[{segment.get('start', 0):.3f}–{segment.get('end', 0):.3f} s | {segment.get('track', 'unknown')} | {segment.get('id', '')}] {text}")
     if metadata.get("summary"):
         line("\nResumo local editável:")
-        line(json.dumps(metadata["summary"], ensure_ascii=False))
+        line(json.dumps(_redact_free_form_export(metadata["summary"]), ensure_ascii=False))
     if metadata.get("reviewed_summary"):
         line("\nResumo revisado manualmente:")
-        line(metadata["reviewed_summary"])
+        line(_redact_absolute_paths(metadata["reviewed_summary"]))
+    annotations = _annotation_export_projection(store, session, metadata)
+    _cancel(cancel_event)
+    if annotations:
+        line("\nAnotações canônicas:")
+        line(json.dumps(_redact_free_form_export(annotations), ensure_ascii=False))
+    report_history = _report_history_for_export(store, session, cancel_event)
+    _cancel(cancel_event)
+    if report_history:
+        line("\nHistórico de relatórios (metadados e citações):")
+        for report in report_history:
+            _cancel(cancel_event)
+            line(json.dumps(report, ensure_ascii=False))
 
 
 def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=None):
@@ -355,6 +605,78 @@ def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=
             count = min(gap, PLAY_FRAMES)
             yield rate, channels, b"\0" * (count * channels * 4)
             gap -= count
+
+
+def _clip_audio_chunks(store, session, track, start, end, cancel_event=None, gaps=None):
+    """Yield only ``[start, end)`` from one native source track.
+
+    Audio is kept in bounded chunks, and missing intervals are represented by
+    explicit silence.  The caller supplies ``gaps`` when it needs provenance;
+    the list is deliberately metadata-only and never retains audio bytes.
+    """
+    cursor = float(start)
+    output_format = None
+    saw_audio = False
+    for event, payload in store.iter_audio(session, track, start):
+        _cancel(cancel_event)
+        rate, channels = event["rate"], event["channels"]
+        frame_bytes = channels * 4
+        frames = event["frames"]
+        if len(payload) != frames * frame_bytes:
+            raise ValueError("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la.")
+        event_start = float(event["timestamp"])
+        event_end = event_start + frames / rate
+        if event_end <= start:
+            continue
+        if event_start >= end:
+            break
+        native_format = (rate, channels)
+        if output_format is not None and native_format != output_format:
+            raise ValueError(
+                "A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente."
+            )
+        if output_format is None:
+            output_format = native_format
+
+        first_frame = max(0, math.ceil((start - event_start) * rate - 1e-9))
+        last_frame = min(frames, math.ceil((end - event_start) * rate - 1e-9))
+        if last_frame <= first_frame:
+            continue
+        overlap_start = event_start + first_frame / rate
+        if overlap_start > cursor:
+            gap_frames = max(0, math.ceil((overlap_start - cursor) * rate - 1e-9))
+            if gap_frames:
+                gap_end = cursor + gap_frames / rate
+                if gaps is not None:
+                    gaps.append({"start": cursor, "end": min(gap_end, end)})
+                while gap_frames:
+                    _cancel(cancel_event)
+                    count = min(gap_frames, PLAY_FRAMES)
+                    yield rate, channels, b"\0" * (count * frame_bytes)
+                    gap_frames -= count
+                cursor = gap_end
+
+        for frame in range(first_frame, last_frame, PLAY_FRAMES):
+            _cancel(cancel_event)
+            frame_end = min(last_frame, frame + PLAY_FRAMES)
+            yield rate, channels, payload[frame * frame_bytes:frame_end * frame_bytes]
+        cursor = event_start + last_frame / rate
+        saw_audio = True
+
+    if not saw_audio or output_format is None:
+        raise ValueError("A fonte escolhida não contém áudio no intervalo do destaque.")
+    rate, channels = output_format
+    if cursor < end:
+        gap_frames = max(0, math.ceil((end - cursor) * rate - 1e-9))
+        if gap_frames:
+            gap_end = cursor + gap_frames / rate
+            if gaps is not None:
+                gaps.append({"start": cursor, "end": min(gap_end, end)})
+            while gap_frames:
+                _cancel(cancel_event)
+                count = min(gap_frames, PLAY_FRAMES)
+                yield rate, channels, b"\0" * (count * channels * 4)
+                gap_frames -= count
 
 
 def _pcm16(raw):
@@ -450,6 +772,244 @@ def export_meeting(store, session_id, path, format="markdown", cancel_event=None
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+        raise
+    return str(destination)
+
+
+def _report_export_value(value, key=None):
+    """Detach report data and redact path-shaped fields before export."""
+    if isinstance(key, str) and key.casefold() in {
+            "path", "file_path", "filepath", "absolute_path", "destination"}:
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {str(child_key): _report_export_value(child, child_key)
+                for child_key, child in value.items()
+                if not (isinstance(child_key, str) and child_key.casefold() in {
+                    "path", "file_path", "filepath", "absolute_path", "destination"})}
+    if isinstance(value, list):
+        return [_report_export_value(child) for child in value]
+    if isinstance(value, str):
+        if _absolute_path(value):
+            return "[redacted]"
+        return _redact_absolute_paths(value)
+    return copy.deepcopy(value)
+
+
+def report_export_projection(report, *, section=None):
+    """Return a detached, path-free report projection for copy/export flows."""
+    if not isinstance(report, dict):
+        raise ValueError("O relatório deve ser um objeto.")
+    generated = report.get("generated", report.get("payload"))
+    if not isinstance(generated, dict):
+        raise ValueError("As seções geradas são inválidas.")
+    reviewed = report.get("reviewed_artifact")
+    reviewed_sections = reviewed.get("sections") if isinstance(reviewed, dict) else None
+    selected = copy.deepcopy(generated)
+    if isinstance(reviewed_sections, dict):
+        selected.update(copy.deepcopy(reviewed_sections))
+    if section is not None:
+        if not isinstance(section, str) or section not in selected:
+            raise ValueError("A seção selecionada não existe neste relatório.")
+        selected = {section: selected[section]}
+    return {
+        "report_id": report.get("id", report.get("report_id")),
+        "kind": report.get("kind"),
+        "profile_id": report.get("profile_id"),
+        "profile_version": report.get("profile_version"),
+        "session_id": report.get("session_id"),
+        "transcript_revision": report.get("transcript_revision"),
+        "model": _redact_free_form_export(_report_export_value(report.get("model", {}))),
+        "created_at": report.get("created_at"),
+        "sections": _redact_free_form_export(_report_export_value(selected)),
+    }
+
+
+def export_report(report, path, format="markdown", *, section=None, cancel_event=None):
+    """Atomically export a selected report or section without local paths."""
+    _cancel(cancel_event)
+    if format not in {"markdown", "plain", "text", "json"}:
+        raise ValueError("Escolha Markdown, texto ou JSON para exportar o relatório.")
+    destination = Path(path).absolute()
+    if not destination.parent.is_dir() or destination.is_dir():
+        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+    projection = report_export_projection(report, section=section)
+    if format == "json":
+        content = json.dumps(projection, ensure_ascii=False, indent=2) + "\n"
+    else:
+        title = projection.get("report_id") or "Relatório local"
+        lines = [("# " if format == "markdown" else "") + str(title),
+                 f"Tipo: {projection.get('kind')}; perfil: {projection.get('profile_id')}",
+                 f"Revisão de transcrição: {projection.get('transcript_revision')}", ""]
+        for name, value in projection["sections"].items():
+            lines.append(("## " if format == "markdown" else "") + str(name))
+            if isinstance(value, str):
+                lines.append(value)
+            else:
+                lines.append(json.dumps(value, ensure_ascii=False, indent=2))
+            lines.append("")
+        content = "\n".join(lines)
+        if not content.endswith("\n"):
+            content += "\n"
+    encoded_length = len(content.encode("utf-8"))
+    if encoded_length > 2 * 1024 * 1024:
+        raise ValueError("O relatório excede o limite permitido para exportação.")
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            _cancel(cancel_event)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _cancel(cancel_event)
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return str(destination)
+
+
+def _clip_annotation(highlight):
+    """Keep only stable, non-path annotation fields in clip provenance."""
+    allowed = (
+        "id", "revision", "transcript_revision", "start", "end", "track",
+        "label", "note", "segment_ids", "segments",
+    )
+    return {key: highlight[key] for key in allowed if key in highlight}
+
+
+def _commit_new_file(temporary, destination):
+    """Publish a temporary file atomically without replacing a destination."""
+    try:
+        os.link(temporary, destination)
+    except FileExistsError:
+        raise
+    finally:
+        if os.path.lexists(temporary):
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
+    track = highlight["track"]
+    start = highlight["start"]
+    end = highlight["end"]
+    gaps = []
+    chunks = iter(_clip_audio_chunks(
+        store, session, track, start, end, cancel_event=cancel_event, gaps=gaps,
+    ))
+    first = next(chunks, None)
+    if first is None:
+        raise ValueError("A fonte escolhida não contém áudio no intervalo do destaque.")
+    rate, channels, _ = first
+    handle.write(b"RIFF\0\0\0\0WAVEfmt ")
+    handle.write(struct.pack(
+        "<IHHIIHH", 16, 1, channels, rate, rate * channels * 2, channels * 2, 16,
+    ))
+    data_header = handle.tell()
+    handle.write(b"data\0\0\0\0")
+
+    data_length = 0
+
+    def write_audio(chunk):
+        nonlocal data_length
+        _cancel(cancel_event)
+        native_rate, native_channels, raw = chunk
+        if (native_rate, native_channels) != (rate, channels):
+            raise ValueError(
+                "A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente."
+            )
+        pcm = _pcm16(raw)
+        if data_length + len(pcm) > RIFF_LIMIT:
+            raise ValueError("O áudio excede o limite de 4 GiB do WAV.")
+        data_length += len(pcm)
+        handle.write(pcm)
+
+    write_audio(first)
+    for chunk in chunks:
+        write_audio(chunk)
+    provenance = {
+        "schema_version": 1,
+        "type": "highlight_clip",
+        "session": session,
+        "track": track,
+        "start": start,
+        "end": end,
+        "gap": bool(gaps),
+        "gaps": gaps,
+        "annotation": _clip_annotation(highlight),
+    }
+    try:
+        provenance_bytes = json.dumps(
+            provenance, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("A proveniência do destaque não é serializável.") from error
+    if len(provenance_bytes) > RIFF_LIMIT:
+        raise ValueError("A proveniência excede o limite de 4 GiB do formato WAV.")
+    handle.write(b"svpr" + struct.pack("<I", len(provenance_bytes)) + provenance_bytes)
+    if len(provenance_bytes) & 1:
+        handle.write(b"\0")
+    file_end = handle.tell()
+    riff_length = file_end - 8
+    if riff_length > RIFF_LIMIT:
+        raise ValueError("O áudio excede o limite de 4 GiB do WAV.")
+    for position, length in ((4, riff_length), (data_header + 4, data_length)):
+        handle.seek(position)
+        handle.write(struct.pack("<I", length))
+    handle.seek(file_end)
+
+
+def export_highlight_clip(store, session_id, highlight, path, cancel_event=None):
+    """Export one source-track highlight as an atomic, non-overwriting PCM16 WAV."""
+    if not isinstance(highlight, dict):
+        raise ValueError("O destaque deve ser um objeto.")
+    track = highlight.get("track")
+    start, end = highlight.get("start"), highlight.get("end")
+    if track not in {"microphone", "system"}:
+        raise ValueError("A fonte do destaque é inválida.")
+    if (isinstance(start, bool) or isinstance(end, bool)
+            or not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+            or not math.isfinite(start) or not math.isfinite(end)
+            or start < 0 or end <= start):
+        raise ValueError("O intervalo do destaque é inválido.")
+    destination = Path(path).absolute()
+    if not destination.parent.is_dir() or destination.is_dir() or os.path.lexists(destination):
+        if os.path.lexists(destination):
+            raise FileExistsError("O arquivo de destino já existe; escolha um novo nome para preservar o clipe anterior.")
+        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+    library = os.path.realpath(store.root)
+    try:
+        inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
+    except ValueError:
+        inside_library = False
+    if inside_library:
+        raise ValueError("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais.")
+    store.get(session_id, include_events=False)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            _highlight_wav_export(handle, store, session_id, {
+                **highlight, "start": float(start), "end": float(end),
+            }, cancel_event)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _cancel(cancel_event)
+        _commit_new_file(temporary, destination)
+    except Exception:
+        if os.path.lexists(temporary):
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
         raise
     return str(destination)
 

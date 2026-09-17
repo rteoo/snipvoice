@@ -27,6 +27,7 @@ recordings, shortcuts, process identity, and installers.
 ## Highlights
 
 - Local push-to-talk dictation with configurable shortcuts and languages.
+- System-aware light and dark appearance, with explicit Light/Dark overrides.
 - Separate microphone and selected speaker-output recording on Windows and macOS.
 - Independent microphone/system toggles, live two-track waveforms, and OS-default or manually pinned endpoints.
 - Crash-recoverable segmented audio, explicit gaps, pause/resume, and partial-session preservation.
@@ -90,10 +91,14 @@ launch. The Windows installer uses no administrator rights and installs under
 3. In **Ditado**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
-6. Open **Configurações**, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
+6. Open **Configurações** to follow the system appearance or choose a fixed light or dark theme.
+7. In the same tab, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
+The compact non-activating indicator stays dark in every theme so recording,
+local transcription, and text insertion remain easy to spot without taking
+focus from the target application.
 
 ## Dictation and commands
 
@@ -136,6 +141,43 @@ The optional microphone booster applies a fixed low-level noise gate, bounded ga
 and limiter to the derived final WAV. Raw source tracks remain unchanged; it is not
 a spectral denoiser or acoustic echo canceller.
 
+### Meeting memory: local data model and status
+
+Meeting memory is built around a canonical bundle plus a disposable catalog.
+The bundle remains authoritative; SQLite/FTS5 is a rebuildable projection used
+for listing and search. Capture never depends on SQLite, the GUI, or a model.
+
+```text
+SNIPVOICE_HOME/
+├── workspace.json          # profiles, collections, series, privacy defaults
+├── library.sqlite          # disposable plaintext search/listing projection
+├── retention-ops/          # recoverable retention journals and staging
+├── trash/                  # recoverable whole-meeting trash
+└── meetings/<session-id>/
+    ├── metadata.json       # capture/recovery authority
+    ├── annotations.json    # human-owned notes and revision-scoped edits
+    ├── events.journal      # audio provenance and recovery journal
+    ├── microphone/         # native PCM segments
+    ├── system/             # native PCM segments
+    ├── transcripts/        # immutable JSONL revisions
+    └── reports/            # immutable generated report envelopes
+```
+
+The current implementation includes the complete local meeting-memory slice:
+report profiles and immutable cited reports, reviewable post-meeting artifacts,
+revision-scoped transcript labels/highlights and source clips, single- and
+cross-meeting Q&A, collections/tags/people/series, SQLite/FTS5 search and
+rebuild, exports, configurable recording consent/privacy, and recoverable
+retention with trash, restore, and explicit raw-track/permanent purge. The
+controller, GUI, meeting hotkey, and tray routes are wired to these operations.
+Physical Tk/tray interaction, native capture, packaged startup, and signing
+remain unverified on this host.
+
+The catalog contains sensitive plaintext copied from transcripts, notes, and
+reports. Treat `library.sqlite`, its `-wal`/`-shm` sidecars, backups, logs, and
+trash as private meeting data. Deleting the catalog loses only the projection;
+rebuilding it must not be treated as a deletion mechanism for canonical data.
+
 ## Local transcription and summaries
 
 Model downloads happen only after an explicit action in voice settings. Meeting
@@ -170,10 +212,22 @@ voice controller starts. Set `voice_history_retention_days` in `settings.json`
 to an integer from 1 to 3650 to change this period. Active, malformed, and
 unrecognized entries are preserved. This applies to existing dictation history;
 export anything you want to keep before upgrading. Meeting recordings remain
-until the user removes them. Files are plaintext; use OS disk encryption and
-protect your user account. There is no telemetry, transcript logging, or implicit upload. Do not
-commit or share live recordings, personal commands, settings, model files, or
-logs. Playback is blocked during recording so Snipvoice does not capture itself.
+until the user removes them. Meeting retention operations require an explicit
+preview and target resolution: whole meetings can move to recoverable trash,
+and selected raw tracks can be staged for removal. Permanent purge requires a
+separate confirmation and cannot be undone. External exports are not deleted by
+these operations. Files and the SQLite index are plaintext; use OS disk
+encryption and protect the user account. Deleting files on an SSD is not
+forensic erasure. There is no telemetry, transcript logging, implicit upload,
+or cloud fallback by default. Local inference uses installed models; model
+acquisition remains an explicit settings action.
+Do not commit or share live recordings, personal commands, settings, model
+files, logs, backups, or the SQLite catalog. Playback is blocked during
+recording so Snipvoice does not capture itself.
+
+For the storage contract, backup/restore guidance, downgrade behavior, repair,
+exports, and current validation limits, see
+[`source/docs/local-meeting-memory-operations.md`](source/docs/local-meeting-memory-operations.md).
 
 ## Platform status and limitations
 

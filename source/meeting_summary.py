@@ -1,11 +1,9 @@
 """Structured meeting summaries using the in-process llama.cpp runtime."""
 
-import itertools
 import json
 import math
-import time
 
-from summary_catalog import summary_catalog_entry
+from meeting_intelligence import MeetingIntelligence
 from summary_models import summary_model_path
 from summary_runtime import SummaryRuntime
 
@@ -108,68 +106,15 @@ def _generate(runtime, entry, evidence, allowed, budget, cancel_event):
 
 
 def summarize_meeting(store, session_id, model, cancel_event=None):
-    _cancel(cancel_event)
-    metadata = store.get(session_id, include_events=False)
-    revisions = metadata.get("revisions", [])
-    if not revisions:
-        raise ValueError("Transcreva a reunião com um modelo local antes de gerar o resumo.")
-    revision = revisions[-1]
-    segments = iter(store.get_transcript(session_id, revision["id"]))
-    first = None
-    for candidate in segments:
-        if not isinstance(candidate, dict) or not isinstance(candidate.get("text"), str):
-            raise ValueError("A transcrição contém segmentos inválidos. Reprocesse antes de resumir.")
-        if candidate["text"].strip():
-            first = candidate
-            break
-    if first is None:
-        raise ValueError("A transcrição não contém texto para resumir.")
-    segments = itertools.chain((first,), segments)
-    entry = summary_catalog_entry(model)
-    if entry is None:
-        raise ValueError("Selecione um modelo de resumo do catálogo do Snipvoice.")
-    model_file = summary_model_path(model)
-    if model_file is None:
-        raise ValueError("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo.")
-    context = min(MAX_CONTEXT, entry["context_length"])
-    # Reserve 1536 tokens for instructions, JSON schema overhead and generated text.
-    budget = context - 1536
-    levels = []
-    chunks_processed = 0
-
-    runtime = SummaryRuntime(model_file, context)
-    try:
-        def reduce_pair(left, right):
-            return _generate(runtime, entry, [left, right], _ids(left) | _ids(right),
-                             budget, cancel_event)
-
-        for chunk in _chunks(segments, budget):
-            _cancel(cancel_event)
-            current = _generate(runtime, entry, chunk, {item["id"] for item in chunk},
-                                budget, cancel_event)
-            chunks_processed += 1
-            level = 0
-            # Online binary reduction retains one bounded result per level.
-            while level < len(levels) and levels[level] is not None:
-                current = reduce_pair(levels[level], current)
-                levels[level] = None
-                level += 1
-            if level == len(levels):
-                levels.append(current)
-            else:
-                levels[level] = current
-        if not chunks_processed:
-            raise ValueError("A transcrição não contém texto para resumir.")
-        final = None
-        for item in reversed(levels):
-            if item is not None:
-                final = item if final is None else reduce_pair(final, item)
-        _cancel(cancel_event)
-    finally:
-        runtime.close()
-    result = dict(final, model=model, model_sha256=entry["sha256"], revision=revision["id"],
-                  chunks_processed=chunks_processed, runtime="llama.cpp", offline_verified=True,
-                  timing_precision="audio_chunks", source_revision_status=revision.get("status"),
-                  created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    store.save_summary(session_id, result)
-    return result
+    # Keep this import surface and function shape stable for existing controller
+    # callers and tests.  The deep seam owns evidence, reduction, validation,
+    # lifecycle, and the canonical save boundary.
+    intelligence = MeetingIntelligence(
+        store,
+        runtime_factory=SummaryRuntime,
+        model_path_resolver=summary_model_path,
+        max_context=MAX_CONTEXT,
+    )
+    return intelligence.generate_report(
+        session_id, model, profile="general", cancel_event=cancel_event, legacy=True,
+    )

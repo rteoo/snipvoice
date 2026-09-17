@@ -10,6 +10,7 @@ from snippet_utils import load_json_file, write_json_atomic
 
 
 RUNTIME_SETTING_DEFAULTS = {
+    "appearance": "system",
     "terminator_mode": False,
     "bcb_timeout": 3,
     "bcb_cache_seconds": 300,
@@ -39,6 +40,11 @@ def normalize_runtime_settings(settings):
     """
     normalized = dict(settings) if isinstance(settings, dict) else {}
     invalid = {}
+
+    if "appearance" in normalized and normalized["appearance"] not in {
+        "system", "light", "dark",
+    }:
+        invalid["appearance"] = RUNTIME_SETTING_DEFAULTS["appearance"]
 
     if "terminator_mode" in normalized and not isinstance(
         normalized["terminator_mode"], bool
