@@ -212,11 +212,43 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
         self.assertNotIn(str(self.root), exported.read_text(encoding="utf-8"))
 
+    def test_json_export_redacts_transcript_paths_and_windows_final_basename(self):
+        sid = self.session()
+
+        class View:
+            root = self.store.root
+
+            def get(view_self, session_id, include_events=True):
+                value = self.store.get(session_id, include_events=include_events)
+                value["final_audio"] = {
+                    "path": r"C:\Users\private\meetings\final.wav",
+                    "format": "wav",
+                }
+                return value
+
+            def iter_events(view_self, session_id):
+                return self.store.iter_events(session_id)
+
+            def get_transcript(view_self, session_id, revision=None):
+                rows = self.store.get_transcript(session_id, revision)
+                return [dict(item, source_path=r"C:\Users\private\source.wav") for item in rows]
+
+        exported = self.root / "portable.json"
+        export_meeting(View(), sid, exported, "json")
+
+        document = json.loads(exported.read_text(encoding="utf-8"))
+        self.assertEqual(document["metadata"]["final_audio"]["path"], "final.wav")
+        self.assertEqual(
+            document["transcripts"][0]["segments"][0]["source_path"],
+            "[redacted]",
+        )
+        self.assertNotIn(r"C:\Users\private", exported.read_text(encoding="utf-8"))
+
     def test_whole_meeting_export_includes_annotations_report_history_and_raw_state(self):
         sid = self.session()
         metadata_path = self.root / "meetings" / sid / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        metadata["tracks"]["microphone"].update({"available": False, "raw_removed": True})
+        metadata["tracks"]["microphone"].update({"raw_removed": True})
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
         class View:
@@ -246,17 +278,32 @@ class MeetingFilesTests(unittest.TestCase):
             def list_report_metadata(view_self, session_id, include_legacy=True, limit=64):
                 return [{
                     "id": "r1", "kind": "report", "profile_id": "general",
-                    "created_at": "2026-09-17T00:00:00Z", "generated": {
+                    "created_at": "2026-09-17T00:00:00Z", "reviewed": True,
+                    "review_generation": 2,
+                    "model": {"id": "local", "sha256": "a" * 64,
+                              "runtime": "llama.cpp", "context_limit": 4096},
+                }]
+
+            def get_report(view_self, session_id, report_id):
+                return {
+                    "id": "r1", "kind": "report", "profile_id": "general",
+                    "created_at": "2026-09-17T00:00:00Z",
+                    "reviewed_artifact": {"generation": 2, "sections": {"summary": "Reviewed"}},
+                    "model": {"id": "local", "sha256": "a" * 64,
+                              "runtime": "llama.cpp", "context_limit": 4096},
+                    "generated": {
                         "summary": {"text": "Do not export this body", "citations": ["s1"]}
                     },
-                }]
+                }
 
         exported = self.root / "annotated.json"
         export_meeting(View(), sid, exported, "json")
         document = json.loads(exported.read_text(encoding="utf-8"))
-        self.assertFalse(document["metadata"]["tracks"]["microphone"]["available"])
+        self.assertTrue(document["metadata"]["tracks"]["microphone"]["raw_removed"])
         self.assertEqual(document["annotations"]["speaker_labels"]["s1"]["label"], "Ana")
         self.assertEqual(document["report_history"][0]["citations"], ["s1"])
+        self.assertEqual(document["report_history"][0]["review_generation"], 2)
+        self.assertEqual(document["report_history"][0]["model"]["runtime"], "llama.cpp")
         self.assertNotIn("Do not export this body", exported.read_text(encoding="utf-8"))
 
         for format in ("plain", "markdown"):

@@ -343,6 +343,15 @@ def _report_history_projection(report):
     result["reviewed"] = reviewed is not None or bool(report.get("reviewed"))
     if isinstance(reviewed, dict) and isinstance(reviewed.get("generation"), int):
         result["review_generation"] = reviewed["generation"]
+    elif isinstance(report.get("review_generation"), int):
+        result["review_generation"] = report["review_generation"]
+    model = report.get("model")
+    if isinstance(model, dict):
+        result["model"] = {
+            key: _export_value(model[key])
+            for key in ("id", "sha256", "runtime", "context_limit")
+            if key in model and isinstance(model[key], (str, int, float, bool))
+        }
     citations = []
     _report_citations(report.get("generated", report.get("payload", report)), citations,
                       budget=MAX_EXPORT_CITATIONS)
@@ -351,7 +360,7 @@ def _report_history_projection(report):
     return _export_value(result)
 
 
-def _report_history_for_export(store, session):
+def _report_history_for_export(store, session, cancel_event=None):
     """Read an optional bounded report-history seam from a store/view."""
     reader = getattr(store, "list_report_metadata", None)
     if not callable(reader):
@@ -365,17 +374,28 @@ def _report_history_for_export(store, session):
         if not callable(reader):
             return []
         reports = reader(session, include_legacy=True)
+    detail_reader = getattr(store, "get_report", None)
+    if not callable(detail_reader):
+        detail_reader = getattr(getattr(store, "_library", None), "get_report", None)
     result = []
     for report in reports or ():
+        _cancel(cancel_event)
         if len(result) >= MAX_EXPORT_REPORTS:
             break
-        projection = _report_history_projection(report)
+        source = report
+        report_id = report.get("id") if isinstance(report, dict) else None
+        # The metadata seam intentionally excludes generated bodies.  Resolve
+        # only the bounded rows selected for export so citation identifiers can
+        # be projected without ever retaining report prose in the result.
+        if callable(detail_reader) and isinstance(report_id, str) and report_id != "legacy-summary":
+            source = detail_reader(session, report_id)
+        projection = _report_history_projection(source)
         if projection is not None:
             result.append(projection)
     return result
 
 
-def _metadata_export_projection(store, session, metadata):
+def _metadata_export_projection(store, session, metadata, cancel_event=None):
     """Build additive, path-free metadata for whole-meeting exports."""
     public_metadata = _export_value({
         key: value for key, value in metadata.items() if key not in {"events", "annotations"}
@@ -386,10 +406,10 @@ def _metadata_export_projection(store, session, metadata):
         public_metadata["settings"] = settings
     final_audio = public_metadata.get("final_audio")
     if isinstance(final_audio, dict) and final_audio.get("path"):
-        final_audio["path"] = os.path.basename(os.fspath(metadata["final_audio"]["path"]))
+        final_audio["path"] = ntpath.basename(os.fspath(metadata["final_audio"]["path"]))
         public_metadata["final_audio"] = final_audio
     annotations = _annotation_export_projection(store, session, metadata)
-    report_history = _report_history_for_export(store, session)
+    report_history = _report_history_for_export(store, session, cancel_event)
     return public_metadata, annotations, report_history
 
 
@@ -400,7 +420,9 @@ def _json(handle, value):
 
 def _json_export(handle, store, session, metadata, cancel_event=None):
     _cancel(cancel_event)
-    public_metadata, annotations, report_history = _metadata_export_projection(store, session, metadata)
+    public_metadata, annotations, report_history = _metadata_export_projection(
+        store, session, metadata, cancel_event,
+    )
     _cancel(cancel_event)
     handle.write('{"metadata":')
     _json(handle, public_metadata)
@@ -426,7 +448,7 @@ def _json_export(handle, store, session, metadata, cancel_event=None):
         for segment in store.get_transcript(session, revision["id"]):
             _cancel(cancel_event)
             handle.write(segment_separator)
-            _json(handle, segment)
+            _json(handle, _export_value(segment))
             segment_separator = ","
         handle.write("]}")
         separator = ","
@@ -444,7 +466,24 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     for track, value in metadata.get("tracks", {}).items():
         _cancel(cancel_event)
         if isinstance(value, dict):
-            state = "disponível" if value.get("available", True) is not False else "removida pela retenção"
+            unavailable = (
+                value.get("available") is False
+                or value.get("raw_removed") is True
+                or value.get("purged") is True
+                or value.get("purged_at") is not None
+                or value.get("state") == "purged"
+                or any(
+                    isinstance(segment, dict)
+                    and (
+                        segment.get("available") is False
+                        or segment.get("raw_removed") is True
+                        or segment.get("purged") is True
+                        or segment.get("purged_at") is not None
+                    )
+                    for segment in value.get("segments", ())
+                )
+            )
+            state = "removida pela retenção" if unavailable else "disponível"
             line(f"{track}: {state}")
     line("\nNotas:")
     line(metadata.get("notes", ""))
@@ -474,7 +513,7 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
     if annotations:
         line("\nAnotações canônicas:")
         line(json.dumps(annotations, ensure_ascii=False))
-    report_history = _report_history_for_export(store, session)
+    report_history = _report_history_for_export(store, session, cancel_event)
     _cancel(cancel_event)
     if report_history:
         line("\nHistórico de relatórios (metadados e citações):")
