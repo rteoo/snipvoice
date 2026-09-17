@@ -72,8 +72,10 @@ from voice_dispatch import VoiceTarget
 from voice_indicator import VoiceStatusIndicator
 from voice_support import VoiceController
 from meeting_library import MeetingLibrary
+from model_library import model_category_dir, resolve_model_library_root
 from meeting_support import MeetingController
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
+from summary_models import default_summary_cache_dir
 
 APP_VERSION = "3.1.0"
 RELEASE_CHANNEL = "stable"
@@ -116,6 +118,12 @@ class Snipvoice:
         self.gui = GuiThread(logger=self.logger)
         self.settings_file = os.path.join(self.data_dir, "settings.json")
         self.settings = load_settings(self.settings_file)
+        model_root = resolve_model_library_root(self.settings)
+        voice_cache_dir = model_category_dir(model_root, "asr") if model_root else None
+        summary_cache_dir = (
+            model_category_dir(model_root, "llm")
+            if model_root else default_summary_cache_dir()
+        )
         self.keyboard_controller = Controller()
         timings = platform_support.insertion_timings(self.settings)
         self.text_inserter = TextInserter(
@@ -155,6 +163,7 @@ class Snipvoice:
             secure_input_blocks=macos_permissions.secure_input_enabled,
             microphone_status=macos_permissions.check_microphone,
             on_status_change=self._voice_status_changed,
+            cache_dir=voice_cache_dir,
             history_dir=os.path.join(self.data_dir, "voice-history"),
         )
         self.voice.bind_library(lambda: self.snippets, lambda: self.trigger_index)
@@ -165,6 +174,7 @@ class Snipvoice:
         self.meeting_library = MeetingLibrary(meeting_root, workspace_root=self.data_dir)
         self.meetings = MeetingController(
             meeting_root, self.voice, notify=self.notify_error, library=self.meeting_library,
+            summary_cache_dir=summary_cache_dir,
         )
 
     def open_meetings(self, icon=None, item=None):
@@ -376,8 +386,7 @@ class Snipvoice:
         meeting_view = add_meeting_tabs(
             root, window, notebook, self.meetings,
             lambda: dict(self.settings), self._persist_voice_settings,
-            on_settings_changed=lambda: self.task_runner.start(
-                self._rebuild_meeting_monitor, name="meeting-hotkey"),
+            on_settings_changed=self._manager_settings_changed,
             on_recording_state_changed=lambda _state, _snapshot: self.refresh_tray_menu(),
         )
         self._manager_meeting_view = meeting_view
@@ -429,6 +438,10 @@ class Snipvoice:
         x = max(0, (screen_width - window_width) // 2)
         y = max(0, (screen_height - window_height) // 2)
         window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+    def _manager_settings_changed(self):
+        self.task_runner.start(self._rebuild_meeting_monitor, name="meeting-hotkey")
+        self._refresh_manager_voice_tab()
 
     def _close_settings_window(self, force=False):
         meeting_view = self._manager_meeting_view
@@ -1003,6 +1016,8 @@ class Snipvoice:
         ]
         profile_labels = []
         download_buttons = []
+        profile_installations = {}
+        inventory_scanning = [False]
 
         # The Configurações page owns the long download inventory. The fallback keeps direct
         # callers and older embedded views functional while the manager view is
@@ -1033,8 +1048,16 @@ class Snipvoice:
         ).pack(anchor="w", pady=(ui.space_xs, ui.space_sm))
 
         def profile_label(entry):
-            installed = voice_models.model_is_installed(entry, self.voice.cache_dir)
-            status = "instalado" if installed else "não baixado"
+            if entry["id"] not in profile_installations:
+                status = "verificando…"
+            else:
+                installation = profile_installations[entry["id"]]
+                if installation is None:
+                    status = "não baixado"
+                elif installation["managed"]:
+                    status = "instalado"
+                else:
+                    status = "disponível na biblioteca compartilhada"
             return (
                 f"{entry['purpose']}\n"
                 f"Download {format_size(entry['size_bytes'])} · "
@@ -1055,18 +1078,46 @@ class Snipvoice:
                         continue
                 except tk.TclError:
                     continue
-                installed = voice_models.model_is_installed(
-                    entry, self.voice.cache_dir
-                )
+                installation = profile_installations.get(entry["id"])
                 downloading = self.voice.model_download_in_progress(
                     entry["profile"]
                 )
-                if installed:
-                    button.configure(text="Baixado", state=tk.DISABLED)
+                if entry["id"] not in profile_installations:
+                    button.configure(text="Verificando…", state=tk.DISABLED)
+                elif installation is not None:
+                    label = "Baixado" if installation["managed"] else "Compartilhado"
+                    button.configure(text=label, state=tk.DISABLED)
                 elif downloading:
                     button.configure(text="Baixando…", state=tk.DISABLED)
                 else:
                     button.configure(text="Baixar", state=tk.NORMAL)
+
+        def inventory_loaded(result):
+            inventory_scanning[0] = False
+            profile_installations.clear()
+            profile_installations.update(result)
+            refresh_profile_labels()
+
+        def scan_profile_installations():
+            if inventory_scanning[0]:
+                return
+            inventory_scanning[0] = True
+            profile_installations.clear()
+            refresh_profile_labels()
+            cache_dir = self.voice.cache_dir
+
+            def scan():
+                try:
+                    result = {
+                        entry["id"]: voice_models.model_installation(entry, cache_dir)
+                        for entry in visible
+                    }
+                except Exception as exc:
+                    self.logger.debug("Falha ao verificar biblioteca de modelos: %s", exc)
+                    result = {entry["id"]: None for entry in visible}
+                self.gui.submit(lambda _root: inventory_loaded(result))
+
+            self.task_runner.start(scan, name="voice-model-inventory")
 
         for entry in visible:
             row = tk.Frame(models_card, bg=ui.card)
@@ -1237,7 +1288,7 @@ class Snipvoice:
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         def refresh_form():
-            refresh_profile_labels()
+            scan_profile_installations()
             voice = self.voice
             if voice is None:
                 return
@@ -1286,9 +1337,8 @@ class Snipvoice:
                 (item for item in visible if item["profile"] == profile),
                 None,
             )
-            if entry is not None and not voice_models.model_is_installed(
-                entry, self.voice.cache_dir
-            ):
+            if (entry is not None
+                    and profile_installations.get(entry["id"]) is None):
                 warning = (
                     f"Isso vai baixar {format_size(entry['size_bytes'])} "
                     f"({entry['license_id']}).\n\n{entry['attribution']}"
@@ -1317,7 +1367,7 @@ class Snipvoice:
             self._refresh_manager_voice_tab()
 
         def download_model(entry):
-            if voice_models.model_is_installed(entry, self.voice.cache_dir):
+            if profile_installations.get(entry["id"]) is not None:
                 refresh_profile_labels()
                 return
             warning = (
@@ -1334,9 +1384,22 @@ class Snipvoice:
             if not self.voice.download_profile(entry["profile"]):
                 refresh_profile_labels()
                 return
-            refresh_profile_labels()
+            scan_profile_installations()
 
         def remove_model():
+            entry = next(
+                (item for item in visible if item["profile"] == selected.get()),
+                None,
+            )
+            installation = profile_installations.get(entry["id"]) if entry is not None else None
+            if installation is not None and not installation["managed"]:
+                messagebox.showinfo(
+                    "Modelo compartilhado",
+                    "Este arquivo pertence à biblioteca compartilhada e pode estar em uso "
+                    "por outro aplicativo. O Snipvoice não irá apagá-lo.",
+                    parent=owner,
+                )
+                return
             if not messagebox.askokcancel(
                 "Remover modelo",
                 "A entrada por voz será desligada e só o modelo deste perfil será apagado.",

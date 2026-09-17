@@ -87,10 +87,13 @@ launch. The Windows installer uses no administrator rights and installs under
 
 1. Start Snipvoice and find its icon in the Windows tray or macOS menu bar.
 2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
-3. In **Ditado**, choose a profile and language, then download or import its local model.
-4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
-5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
-6. Open **Configurações**, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
+3. Optionally choose a shared model root in **Configurações**. Snipvoice creates
+   `llm/`, `tts/`, and `asr/` below it and can reuse exact catalog models already
+   stored there by another local application.
+4. In **Ditado**, choose a profile and language, then download or import its local model.
+5. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
+6. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
+7. Open **Configurações**, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -191,6 +194,10 @@ download shows the license terms and the US$10 million annual-revenue commercial
 use threshold for explicit acceptance.
 Downloads use a fixed catalog, stream to a resumable partial
 file, and become usable only after their exact size and SHA-256 match.
+When a shared model root is configured, downloads are organized under its
+`asr/` and `llm/` folders (with `tts/` reserved for speech models). Snipvoice
+also searches those category folders for compatible catalog files. A discovered
+file remains externally managed and cannot be removed from Snipvoice.
 After a model is installed, summary inference makes no network request. Review
 cited decisions and action items before using them.
 
@@ -199,7 +206,8 @@ cited decisions and action items before using them.
 Settings, optional commands, logs, voice history, raw meetings, and the default
 final-recording folder live under
 `~/.snipvoice` by default; `SNIPVOICE_HOME` overrides the location. Models use
-separate non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
+the shared root selected in **Configurações**, when present, or separate
+non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
 `SNIPVOICE_SUMMARY_CACHE`.
 
 Inactive dictation audio and transcripts expire after 30 days, checked when the

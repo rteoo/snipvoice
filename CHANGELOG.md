@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a configurable shared `llm/`, `tts/`, and `asr/` model library with
+  SHA-256-verified discovery and non-destructive reuse of models owned by other apps.
+
 ## 3.1.0 - 2026-09-15
 
 - Refine the recording workspace with a responsive layout, full-width automation controls, and recording defaults in Configurações.

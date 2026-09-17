@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -68,6 +69,36 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_shared_model_root_is_persisted_and_applied_in_background(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "local-models")
+            view = MeetingWindow.__new__(MeetingWindow)
+            view.model_library_root = Variable(root)
+            view.model_library_status = Variable()
+            view.persist_settings = mock.Mock(return_value=True)
+            view.controller = mock.Mock()
+            view.controller.configure_model_library.return_value = {
+                "voice_applied": True,
+                "summary_cache_dir": os.path.join(root, "llm"),
+            }
+            view.raw_settings = {}
+            view._refresh_summary_models = mock.Mock()
+            view.on_settings_changed = mock.Mock()
+
+            def submit(_key, operation, callback):
+                callback(operation(), None)
+                return True
+
+            view._submit = submit
+            view.save_model_library()
+
+            self.assertEqual(view.raw_settings["local_models_root"], root)
+            self.assertEqual(sorted(os.listdir(root)), ["asr", "llm", "tts"])
+            view.controller.configure_model_library.assert_called_once_with(root)
+            view._refresh_summary_models.assert_called_once_with()
+            view.on_settings_changed.assert_called_once_with()
+            self.assertIn("verificados", view.model_library_status.get())
+
     def test_operation_error_redacts_drive_unc_and_spaced_paths(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.record_details_button = mock.Mock()

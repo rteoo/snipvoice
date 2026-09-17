@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 
@@ -28,6 +29,7 @@ MANIFEST_NAME = "manifest.json"
 PARTIAL_SUFFIX = ".partial"
 MAX_REDIRECTS = 5
 CHUNK_SIZE = 1024 * 1024
+MAX_DISCOVERY_FILES = 20_000
 # ceiling: single-file GGUF downloads only. A catalog entry that points at an
 # archive needs a path-safe extractor before it can be added.
 _MANIFEST_IDENTITY_FIELDS = (
@@ -39,6 +41,8 @@ _MANIFEST_IDENTITY_FIELDS = (
     "license_id",
     "upstream_model",
 )
+_DISCOVERY_CACHE = {}
+_DISCOVERY_CACHE_LOCK = threading.Lock()
 
 
 class VoiceModelError(Exception):
@@ -94,8 +98,8 @@ def _read_manifest(path):
     return data if isinstance(data, dict) else None
 
 
-def model_is_installed(entry, cache_dir):
-    """True when the pinned file exists and its verified manifest is current.
+def _managed_model_is_installed(entry, cache_dir):
+    """True when the catalog-owned file and manifest are current.
 
     A matching manifest and file stat avoid re-reading multi-gigabyte models on
     every tray/menu check. Older manifests, or files whose stat changed, are
@@ -132,10 +136,73 @@ def model_is_installed(entry, cache_dir):
     return True
 
 
-def installed_model_path(entry, cache_dir):
-    if model_is_installed(entry, cache_dir):
-        return model_path(cache_dir, entry)
+def _cached_file_digest(path, stat):
+    identity = (stat.st_size, stat.st_mtime_ns)
+    with _DISCOVERY_CACHE_LOCK:
+        cached = _DISCOVERY_CACHE.get(path)
+    if cached is not None and cached[:2] == identity:
+        return cached[2]
+    digest = _hash_file(path)
+    with _DISCOVERY_CACHE_LOCK:
+        _DISCOVERY_CACHE[path] = identity + (digest,)
+    return digest
+
+
+def _discover_verified_model(entry, cache_dir):
+    """Find exact catalog bytes already present in a shared category folder.
+
+    Discovery is filename- and size-filtered before hashing. The bounded walk
+    never follows directory symlinks, and the verified file remains owned by
+    whichever application placed it there.
+    """
+    root = os.path.abspath(cache_dir)
+    if not os.path.isdir(root):
+        return None
+    expected_name = entry["filename"]
+    scanned = 0
+    try:
+        for directory, _subdirs, files in os.walk(root, followlinks=False):
+            scanned += len(files)
+            if scanned > MAX_DISCOVERY_FILES:
+                return None
+            if expected_name not in files:
+                continue
+            candidate = os.path.join(directory, expected_name)
+            try:
+                stat = os.stat(candidate)
+            except OSError:
+                continue
+            if stat.st_size != entry["size_bytes"]:
+                continue
+            try:
+                digest = _cached_file_digest(candidate, stat)
+            except VoiceModelError:
+                continue
+            if digest == entry["sha256"]:
+                return candidate
+    except OSError:
+        return None
     return None
+
+
+def model_installation(entry, cache_dir):
+    """Return a verified installation and whether Snipvoice manages it."""
+    if _managed_model_is_installed(entry, cache_dir):
+        return {"path": model_path(cache_dir, entry), "managed": True}
+    discovered = _discover_verified_model(entry, cache_dir)
+    if discovered is None:
+        return None
+    return {"path": discovered, "managed": False}
+
+
+def model_is_installed(entry, cache_dir):
+    """True for a managed install or exact verified bytes in the shared root."""
+    return model_installation(entry, cache_dir) is not None
+
+
+def installed_model_path(entry, cache_dir):
+    installation = model_installation(entry, cache_dir)
+    return installation["path"] if installation is not None else None
 
 
 def _ensure_parent(path):
@@ -276,8 +343,9 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
     a ``threading.Event``. ``opener`` is a test hook matching
     ``urllib.request.OpenerDirector.open``. Returns the installed model path.
     """
-    if model_is_installed(entry, cache_dir):
-        return model_path(cache_dir, entry)
+    installed = installed_model_path(entry, cache_dir)
+    if installed is not None:
+        return installed
 
     dest_dir = model_dir(cache_dir, entry)
     dest_file = model_path(cache_dir, entry)
@@ -430,7 +498,7 @@ def _write_manifest(entry, cache_dir, digest, verified_stat=None):
 
 
 def import_local_model(profile_or_id, source, cache_dir, cancel_event=None, progress=None):
-    """Import only exact catalog bytes without network access or another app's cache."""
+    """Copy exact catalog bytes into Snipvoice's managed model directory."""
     entry = resolve_entry(profile_or_id)
     if entry is None:
         raise VoiceModelError("Modelo não pertence ao catálogo do Snipvoice.")
@@ -486,7 +554,15 @@ def delete_model(entry, cache_dir):
     if os.path.basename(target) != entry["id"]:
         raise VoiceModelError("Recusa em apagar um diretório que não é do catálogo.")
     if not os.path.exists(target):
+        if model_installation(entry, cache_dir) is not None:
+            raise VoiceModelError(
+                "O modelo é compartilhado com outro aplicativo e não será apagado."
+            )
         return True
+    if not _managed_model_is_installed(entry, cache_dir):
+        raise VoiceModelError(
+            "O modelo encontrado não é gerenciado pelo Snipvoice e não será apagado."
+        )
     shutil.rmtree(target)
     return True
 

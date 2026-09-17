@@ -411,6 +411,23 @@ class VoiceController:
     def is_enabled(self):
         return bool(self.settings.enabled)
 
+    def set_cache_dir(self, cache_dir):
+        """Switch future model operations while no capture/download owns the path."""
+        resolved = os.path.abspath(os.path.expanduser(cache_dir))
+        with self._lock:
+            if (self._shutdown.is_set() or self._meeting_token is not None
+                    or self._model_download_active or self._capture_starting
+                    or (self.settings.enabled and self._state == STATE_IDLE)
+                    or self._state in (
+                        STATE_LOADING, STATE_RECORDING, STATE_TRANSCRIBING, STATE_ROUTING,
+                    )):
+                return False
+            self.cache_dir = resolved
+            self.settings.cache_dir = resolved
+            if hasattr(self._provider, "cache_dir"):
+                self._provider.cache_dir = resolved
+        return True
+
     @property
     def enabled(self):
         return self.is_enabled()
