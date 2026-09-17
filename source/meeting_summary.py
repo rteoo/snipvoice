@@ -1,12 +1,9 @@
 """Structured meeting summaries using the in-process llama.cpp runtime."""
 
-import itertools
 import json
 import math
-import time
 
 from meeting_intelligence import MeetingIntelligence
-from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
 from summary_runtime import SummaryRuntime
 

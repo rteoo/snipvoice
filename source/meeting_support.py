@@ -703,9 +703,6 @@ class MeetingController:
     def index_state(self):
         return self.library.index_state
 
-    def read_workspace(self):
-        return self.library.read_workspace()
-
     def list_collections(self, *, include_archived=True):
         return self.library.list_collections(include_archived=include_archived)
 
