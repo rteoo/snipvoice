@@ -1444,55 +1444,6 @@ class Snipvoice:
             justify="left",
         ).pack(anchor="w", pady=(ui.space_xs, ui.space_lg))
 
-        benefits = tk.Frame(main, bg=ui.surface)
-        benefits.pack(fill=tk.X, pady=(0, ui.space_md))
-        benefit_copy = (
-            (
-                "Fale naturalmente",
-                "Ditado contínuo com pausas, idioma automático e processamento local.",
-            ),
-            (
-                "Texto pronto",
-                "Pontuação do modelo e correções personalizadas antes da inserção.",
-            ),
-            (
-                "Em qualquer app",
-                "O texto volta ao campo ativo pelo atalho global, sem plugin.",
-            ),
-        )
-        for column, (title, description) in enumerate(benefit_copy):
-            benefits.columnconfigure(column, weight=1, uniform="voice-benefit")
-            card = tk.Frame(
-                benefits,
-                padx=ui.space_md,
-                pady=ui.space_sm,
-                **ui.card_options(),
-            )
-            card.grid(
-                row=0,
-                column=column,
-                sticky="nsew",
-                padx=(0 if column == 0 else ui.space_xs, 0),
-            )
-            tk.Label(
-                card,
-                text=title,
-                font=ui.font(9, "bold"),
-                bg=ui.card,
-                fg=ui.text_strong,
-                anchor="w",
-            ).pack(fill=tk.X)
-            tk.Label(
-                card,
-                text=description,
-                font=ui.font(8),
-                bg=ui.card,
-                fg=ui.text_muted,
-                anchor="w",
-                justify="left",
-                wraplength=220,
-            ).pack(fill=tk.X, pady=(ui.space_xs, 0))
-
         enabled = bool(self.voice is not None and self.voice.is_enabled())
         status_text = (
             self.voice.status_label() if self.voice is not None else "Entrada por voz"
