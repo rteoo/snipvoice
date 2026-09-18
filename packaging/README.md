@@ -35,3 +35,24 @@ python -m pip install --no-index build/clean-audio-wheel/av-*.whl
 Then install `source/requirements-voice.txt`. Do not replace this with
 `pip install av`; that resolves the upstream binary wheel and bypasses the
 release license gate.
+
+## Windows PowerShell
+
+The Windows recipe can be launched from PowerShell. It discovers the default
+MSYS2 installation at `C:\msys64` and adds its MINGW64 and MSYS binaries to
+the child-process environment. Git Bash alone is insufficient because it does
+not provide `gcc`.
+
+Install MSYS2 with `base-devel`, `mingw-w64-x86_64-gcc`,
+`mingw-w64-x86_64-nasm`, and `mingw-w64-x86_64-pkgconf`. If it is installed
+elsewhere, set `SNIPVOICE_MSYS2_ROOT` before running the same PowerShell
+commands:
+
+```powershell
+$env:SNIPVOICE_MSYS2_ROOT = 'D:\tools\msys64'
+python -m pip install --require-hashes -r packaging\requirements-build.lock
+python packaging\clean_audio_runtime.py `
+  --work-dir build\clean-audio `
+  --wheel-dir build\clean-audio-wheel `
+  --compliance-dir build\clean-audio-compliance
+```

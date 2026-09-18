@@ -97,9 +97,14 @@ CONFIGURE_FLAGS = (
 )
 
 
-def run(command: list[str], *, cwd: Path | None = None) -> None:
+def run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
     print("+", subprocess.list2cmdline(command), flush=True)
-    subprocess.run(command, cwd=cwd, check=True)
+    subprocess.run(command, cwd=cwd, env=env, check=True)
 
 
 def download(url: str, destination: Path, sha256: str) -> None:
@@ -121,16 +126,73 @@ def extract(archive: Path, destination: Path) -> Path:
     return destination / roots.pop()
 
 
-def shell_path(path: Path) -> str:
+def shell_path(path: Path, env: dict[str, str]) -> str:
     if platform.system() != "Windows":
         return str(path)
     result = subprocess.run(
-        ["cygpath", "-u", str(path)], check=True, capture_output=True, text=True
+        ["cygpath", "-u", str(path)],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
     )
     return result.stdout.strip()
 
 
-def copy_windows_runtime(prefix: Path) -> None:
+def build_runtime_environment() -> dict[str, str]:
+    """Return an environment that can run the native audio build.
+
+    Git Bash provides the POSIX shell but not the MINGW64 compiler toolchain.
+    When launched from PowerShell, locate a normal MSYS2 installation and
+    expose its MINGW64 and MSYS binaries to every child process. CI already
+    supplies the same tools in its MSYS2 shell, so this remains compatible
+    with the existing release workflow.
+    """
+
+    environment = os.environ.copy()
+    if platform.system() != "Windows":
+        return environment
+
+    required_tools = ("sh", "make", "gcc", "cygpath", "nasm", "pkg-config")
+    inherited_path = environment.get("PATH", "")
+    if all(shutil.which(tool, path=inherited_path) for tool in required_tools):
+        return environment
+
+    roots: list[Path] = []
+    configured_root = environment.get("SNIPVOICE_MSYS2_ROOT")
+    if configured_root:
+        roots.append(Path(configured_root))
+    roots.append(Path(r"C:\msys64"))
+
+    for root in roots:
+        msys_bin = root / "usr" / "bin"
+        mingw_bin = root / "mingw64" / "bin"
+        required_files = (
+            msys_bin / "sh.exe",
+            msys_bin / "make.exe",
+            msys_bin / "cygpath.exe",
+            mingw_bin / "gcc.exe",
+            mingw_bin / "nasm.exe",
+            mingw_bin / "pkg-config.exe",
+        )
+        if not all(path.is_file() for path in required_files):
+            continue
+
+        environment["MSYSTEM"] = "MINGW64"
+        environment["PATH"] = os.pathsep.join(
+            (str(mingw_bin), str(msys_bin), inherited_path)
+        )
+        return environment
+
+    raise RuntimeError(
+        "Windows clean audio builds require an MSYS2 MINGW64 toolchain. "
+        "Install MSYS2 with sh, make, cygpath, gcc, nasm, and pkgconf, or "
+        "set SNIPVOICE_MSYS2_ROOT to its installation directory. "
+        "Git Bash alone does not provide gcc."
+    )
+
+
+def copy_windows_runtime(prefix: Path, env: dict[str, str]) -> None:
     libraries = (
         "avcodec",
         "avdevice",
@@ -147,7 +209,7 @@ def copy_windows_runtime(prefix: Path) -> None:
     missing = [name for name in libraries if not (prefix / "lib" / f"{name}.lib").is_file()]
     if missing:
         raise RuntimeError(f"FFmpeg did not produce MSVC import libraries: {missing}")
-    gcc = shutil.which("gcc")
+    gcc = shutil.which("gcc", path=env.get("PATH"))
     if not gcc:
         raise RuntimeError("gcc not found after the FFmpeg build")
     compiler_bin = Path(gcc).parent
@@ -163,6 +225,7 @@ def write_compliance(
     ffmpeg_build: Path,
     pyav_source: Path,
     prefix: Path,
+    env: dict[str, str],
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ffmpeg_source / "COPYING.LGPLv2.1", output / "FFmpeg-COPYING.LGPLv2.1.txt")
@@ -197,6 +260,7 @@ def write_compliance(
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         ).stdout.splitlines()[0],
     }
     (output / "runtime-manifest.json").write_text(
@@ -235,6 +299,8 @@ def main() -> int:
     if platform.system() not in {"Windows", "Darwin"}:
         raise RuntimeError("Release builds support Windows and macOS only")
 
+    runtime_environment = build_runtime_environment()
+
     work = args.work_dir.resolve()
     prefix = work / "ffmpeg-prefix"
     downloads = work / "downloads"
@@ -252,19 +318,19 @@ def main() -> int:
 
     configure = [
         "sh",
-        shell_path(ffmpeg_source / "configure"),
-        f"--prefix={shell_path(prefix)}",
-        f"--libdir={shell_path(prefix / 'lib')}",
-        f"--shlibdir={shell_path(prefix / ('bin' if platform.system() == 'Windows' else 'lib'))}",
+        shell_path(ffmpeg_source / "configure", runtime_environment),
+        f"--prefix={shell_path(prefix, runtime_environment)}",
+        f"--libdir={shell_path(prefix / 'lib', runtime_environment)}",
+        f"--shlibdir={shell_path(prefix / ('bin' if platform.system() == 'Windows' else 'lib'), runtime_environment)}",
         *CONFIGURE_FLAGS,
     ]
     build_dir = work / "ffmpeg-build"
     build_dir.mkdir(exist_ok=True)
-    run(configure, cwd=build_dir)
-    run(["make", "-j", str(os.cpu_count() or 2)], cwd=build_dir)
-    run(["make", "install"], cwd=build_dir)
+    run(configure, cwd=build_dir, env=runtime_environment)
+    run(["make", "-j", str(os.cpu_count() or 2)], cwd=build_dir, env=runtime_environment)
+    run(["make", "install"], cwd=build_dir, env=runtime_environment)
     if platform.system() == "Windows":
-        copy_windows_runtime(prefix)
+        copy_windows_runtime(prefix, runtime_environment)
 
     run(
         [
@@ -275,6 +341,7 @@ def main() -> int:
             f"--ffmpeg-dir={prefix}",
         ],
         cwd=pyav_source,
+        env=runtime_environment,
     )
     wheels = list(raw_wheels.glob("av-*.whl"))
     if len(wheels) != 1:
@@ -291,7 +358,8 @@ def main() -> int:
                 "--wheel-dir",
                 str(args.wheel_dir),
                 str(wheels[0]),
-            ]
+            ],
+            env=runtime_environment,
         )
     elif platform.system() == "Darwin":
         run(
@@ -300,7 +368,8 @@ def main() -> int:
                 "--wheel-dir",
                 str(args.wheel_dir),
                 str(wheels[0]),
-            ]
+            ],
+            env=runtime_environment,
         )
     else:  # pragma: no cover - guarded before any build work
         raise AssertionError("unsupported platform passed the early guard")
@@ -310,7 +379,12 @@ def main() -> int:
         raise RuntimeError(f"Expected one repaired wheel, found {len(repaired_wheels)}")
     verify_wheel(repaired_wheels[0])
     write_compliance(
-        args.compliance_dir.resolve(), ffmpeg_source, build_dir, pyav_source, prefix
+        args.compliance_dir.resolve(),
+        ffmpeg_source,
+        build_dir,
+        pyav_source,
+        prefix,
+        runtime_environment,
     )
     shutil.copy2(ffmpeg_archive, args.compliance_dir / ffmpeg_archive.name)
     (args.compliance_dir / "PyAV-wheel-sha256.txt").write_text(

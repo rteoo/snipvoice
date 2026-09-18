@@ -1,6 +1,10 @@
+import importlib.util
 import os
+from pathlib import Path
 import re
+import tempfile
 import unittest
+from unittest import mock
 
 from PIL import Image
 
@@ -9,6 +13,42 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class PackagingExcludeTests(unittest.TestCase):
+    def test_windows_clean_audio_recipe_bootstraps_msys2_from_powershell(self):
+        path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
+        spec = importlib.util.spec_from_file_location("clean_audio_runtime", path)
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            msys_root = Path(temporary_directory)
+            for relative_path in (
+                "usr/bin/sh.exe",
+                "usr/bin/make.exe",
+                "usr/bin/cygpath.exe",
+                "mingw64/bin/gcc.exe",
+                "mingw64/bin/nasm.exe",
+                "mingw64/bin/pkg-config.exe",
+            ):
+                executable = msys_root / relative_path
+                executable.parent.mkdir(parents=True, exist_ok=True)
+                executable.touch()
+
+            with mock.patch.object(recipe.platform, "system", return_value="Windows"):
+                with mock.patch.dict(
+                    recipe.os.environ,
+                    {
+                        "PATH": r"C:\Program Files\Git\usr\bin",
+                        "SNIPVOICE_MSYS2_ROOT": str(msys_root),
+                    },
+                    clear=False,
+                ):
+                    environment = recipe.build_runtime_environment()
+
+        self.assertEqual(environment["MSYSTEM"], "MINGW64")
+        path_entries = environment["PATH"].split(os.pathsep)
+        self.assertEqual(path_entries[0], str(msys_root / "mingw64" / "bin"))
+        self.assertEqual(path_entries[1], str(msys_root / "usr" / "bin"))
+
     def test_ci_consolidates_platform_native_and_lint_coverage(self):
         path = os.path.join(ROOT, ".github", "workflows", "ci.yml")
         with open(path, encoding="utf-8") as handle:
