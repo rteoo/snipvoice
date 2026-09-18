@@ -552,6 +552,9 @@ def configure_manager_styles(style, resolved=None):
         "Manager.TNotebook.Tab",
         foreground=[("selected", ui.accent), ("active", ui.text_strong)],
         background=[("selected", ui.card), ("active", ui.surface_hover)],
+        # Built-in themes may map selected tabs to narrower horizontal padding.
+        # Keep the selected tab's geometry stable while changing its colors.
+        padding=[("selected", (18, 10))],
         expand=[("selected", (0, 0, 0, 0))],
     )
     style.configure("Manager.TFrame", background=ui.surface)

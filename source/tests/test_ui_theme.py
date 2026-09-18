@@ -500,6 +500,10 @@ class TtkThemeSelectionTests(unittest.TestCase):
         self.assertEqual(
             style.configured["Manager.TNotebook.Tab"]["padding"], (18, 10)
         )
+        self.assertEqual(
+            style.mapped["Manager.TNotebook.Tab"]["padding"],
+            [("selected", (18, 10))],
+        )
         self.assertIn(
             ("selected", theme.accent),
             style.mapped["Manager.TNotebook.Tab"]["foreground"],
