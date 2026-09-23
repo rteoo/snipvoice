@@ -237,6 +237,18 @@ class Theme:
             "activeforeground": self.text_native,
         }
 
+    def nav_button_colors(self, bg, selected=False):
+        """Colors for a section-navigation button sitting on ``bg``. Native on macOS."""
+        if self.system == "darwin":
+            return {}
+        fg = self.accent if selected else self.text_native
+        return {
+            "bg": bg,
+            "fg": fg,
+            "activebackground": self.surface_hover,
+            "activeforeground": fg,
+        }
+
     def glyph_button_colors(self, bg):
         """Colors for a small icon button sitting on ``bg`` (the ✎ rename)."""
         if self.system == "darwin":
