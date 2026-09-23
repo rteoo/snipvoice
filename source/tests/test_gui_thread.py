@@ -128,6 +128,34 @@ class GuiThreadCallTests(unittest.TestCase):
     def test_call_receives_the_shared_root(self):
         self.assertIs(self.gui.call(lambda root: root, timeout=10), self.gui.root)
 
+    @unittest.skipUnless(sys.platform == "win32", "guards a Windows Tcl notifier defect")
+    def test_queued_calls_complete_while_the_gui_thread_waits_only_for_messages(self):
+        # Deterministic stand-in for the deaf-timer stall seen on CI: the GUI
+        # thread parks in a wait that timer messages cannot end, as Tcl's event
+        # wait behaves once its WM_TIMER wake-ups stop arriving. Only a posted
+        # message (QS_POSTMESSAGE) releases it.
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        wait = user32.MsgWaitForMultipleObjects
+        wait.argtypes = [wintypes.DWORD, ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD, wintypes.DWORD]
+        wait.restype = wintypes.DWORD
+        qs_postmessage, infinite = 0x0008, 0xFFFFFFFF
+        parked = threading.Event()
+        gui_thread_id = []
+
+        def park(_root):
+            gui_thread_id.append(threading.get_native_id())
+            parked.set()
+            wait(0, None, False, infinite, qs_postmessage)
+
+        self.gui.submit(park)
+        self.assertTrue(parked.wait(10))
+        # Never leave the thread parked if the assertion fails.
+        self.addCleanup(user32.PostThreadMessageW, gui_thread_id[0], 0, 0, 0)
+        self.assertEqual(self.gui.call(lambda _root: 42, timeout=5), 42)
+
     def test_call_propagates_the_exception_with_a_usable_traceback(self):
         def boom(_root):
             raise ValueError("kaboom-from-gui")
