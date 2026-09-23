@@ -70,6 +70,7 @@ class Theme:
         "size_delta",
         "surface", "surface_alt", "surface_alt_active", "surface_hover",
         "card", "field", "field_hover",
+        "control", "control_active", "control_border",
         "text", "text_strong", "text_muted", "text_on_accent",
         "border", "divider",
         "accent", "accent_active", "danger", "danger_active", "focus_ring",
@@ -302,8 +303,9 @@ class Theme:
             "bd": 0,
             "padx": 8 if compact else 12,
             "pady": 4 if compact else 6,
+            # The idle ring color belongs to button_colors: a neutral button
+            # needs a visible edge, a filled one must not wear a grey ring.
             "highlightthickness": 1,
-            "highlightbackground": self.border,
             "highlightcolor": self.focus_ring,
             "cursor": "hand2",
         }
@@ -332,6 +334,7 @@ class Theme:
                 "fg": self.text_on_accent,
                 "activebackground": self.danger_active,
                 "activeforeground": self.text_on_accent,
+                "highlightbackground": self.danger,
             }
         if accent:
             return {
@@ -339,12 +342,16 @@ class Theme:
                 "fg": self.text_on_accent,
                 "activebackground": self.accent_active,
                 "activeforeground": self.text_on_accent,
+                "highlightbackground": self.accent,
             }
+        # A neutral button sits on cards as often as on the page surface, so
+        # its fill and edge must stand out from both.
         return {
-            "bg": self.surface_alt,
+            "bg": self.control,
             "fg": self.text_native,
-            "activebackground": self.surface_alt_active,
+            "activebackground": self.control_active,
             "activeforeground": self.text_native,
+            "highlightbackground": self.control_border,
         }
 
 
@@ -367,6 +374,9 @@ _LIGHT = {
     "card": "#FFFFFF",
     "field": "#FFFFFF",
     "field_hover": "#F5F9FD",
+    "control": "#F5F5F5",
+    "control_active": "#E6E6E6",
+    "control_border": "#C4C4C4",
     "text": "#1B1B1B",
     "text_strong": "#242424",
     "text_muted": "#616161",
@@ -401,6 +411,9 @@ _DARK = {
     "card": "#1B1C20",
     "field": "#222329",
     "field_hover": "#292B31",
+    "control": "#2C2E35",
+    "control_active": "#383B43",
+    "control_border": "#4B4E58",
     "text": "#E9EAEC",
     "text_strong": "#FFFFFF",
     "text_muted": "#A4A7AE",

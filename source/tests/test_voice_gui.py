@@ -535,7 +535,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual((move_state, default_state), ("disabled", "disabled"))
         self.assertTrue(any("SNIPVOICE_HOME" in label for label in labels))
 
-    def test_general_settings_move_models_to_a_shared_folder(self):
+    def test_models_settings_move_models_to_a_shared_folder(self):
         import meeting_gui
 
         voice = _ensure_voice(self.app)
@@ -551,19 +551,21 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             view, labels = self._general_data_card(shared_root)
             card = view.location_cards["models"]
             states = (str(card["move"]["state"]), str(card["default"]["state"]))
+            placed = (str(card["move"]).rsplit(".", 2)[0], str(view.settings_sections.frames["models"]))
             with mock.patch.object(meeting_gui.messagebox, "askokcancel", return_value=True) as ask:
                 view._confirm_location_move("models", shared)
                 view.summary_download_cancel = threading.Event()
                 with mock.patch.object(meeting_gui.messagebox, "showerror") as error:
                     view._confirm_location_move("models", shared)
                 view.summary_download_cancel = None
-            return labels, card["display"].get(), states, ask.call_args, error.call_args
+            return labels, card["display"].get(), states, ask.call_args, error.call_args, placed
 
         with mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": "", "SNIPVOICE_SUMMARY_CACHE": ""}), \
                 mock.patch.object(tx.app_paths, "config_dir", return_value=os.path.join(base, "config")), \
                 mock.patch.object(tx.app_paths, "default_models_dir", return_value=current):
-            labels, shown, states, asked, error = self._on_gui(inspect_card)
+            labels, shown, states, asked, error, placed = self._on_gui(inspect_card)
         self.assertIn("Pasta dos modelos", labels)
+        self.assertEqual(placed[0], placed[1])
         self.assertEqual(shown, current)
         self.assertEqual(states, ("normal", "disabled"))
         self.assertIn(shared, asked.args[1])
