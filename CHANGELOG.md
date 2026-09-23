@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.3.1 - 2026-09-23
+
+- Remove the transparent margin from the Windows icon so it fills tray, Start and taskbar slots like neighbouring icons.
+- Keep the Windows GUI pump running when Tcl timer wake-ups stop arriving, which intermittently left queued GUI work unprocessed.
+
 ## 3.3.0 - 2026-09-23
 
 - Reorganize the library into a single toolbar with on-demand filters and cross-meeting questions, empty-state guidance, and a recording view split into Notas, Transcrição, Resumo, Perguntar and Arquivos.
