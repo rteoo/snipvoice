@@ -94,8 +94,8 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         try:
             return self.app.gui.call(func, timeout=30)
         except TimeoutError:
-            # Intermittent on hosted Windows runners and never reproduced
-            # locally: report where the GUI thread is blocked.
+            # Name where the GUI thread is blocked; the deaf-timer stall this
+            # caught is guarded by GuiThread's Windows waker.
             thread = self.app.gui._thread
             frame = sys._current_frames().get(getattr(thread, "ident", None))
             stack = "".join(traceback.format_stack(frame)) if frame else "GUI thread is not running"

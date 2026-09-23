@@ -30,7 +30,9 @@ marshaling belongs to the expansion worker path only.
 """
 
 import queue
+import sys
 import threading
+import time
 
 import tkinter as tk
 
@@ -42,6 +44,10 @@ from platform_support import tk_runs_on_main_thread
 PUMP_INTERVAL_MS = 40
 
 _START_TIMEOUT_SECONDS = 10.0
+
+# Posted to the GUI thread's message queue to wake Tcl's event wait. The
+# message itself is ignored; waking is the point.
+_WM_NULL = 0x0000
 
 
 class GuiThread:
@@ -57,6 +63,9 @@ class GuiThread:
         self._stopping = False
         # Set by the teardown so the pump stops draining into a destroyed root.
         self._destroyed = False
+        # Windows only: the GUI thread's native id and the waker signal.
+        self._native_thread_id = None
+        self._work_queued = threading.Event()
         self._main_thread = (
             tk_runs_on_main_thread() if main_thread is None else bool(main_thread)
         )
@@ -163,8 +172,42 @@ class GuiThread:
             self._ready.set()
             return
 
+        if sys.platform == "win32":
+            self._native_thread_id = threading.get_native_id()
+            threading.Thread(
+                target=self._wake_while_queued, args=(threading.current_thread(),),
+                name="tk-gui-waker", daemon=True,
+            ).start()
         self._ready.set()
         self._loop()
+
+    def _wake_while_queued(self, gui_thread):
+        """Keep the pump running on Windows even when Tcl's timer goes deaf.
+
+        After a process has created enough Tk interpreters on different
+        threads, a new interpreter's event wait can stop honouring timer
+        deadlines: the pump's ``after`` timer stays armed and overdue while
+        ``mainloop`` sleeps until a window message arrives (reproduced in
+        roughly 1 of 15 fresh interpreters past the 24th; never with one
+        interpreter per process). While work is queued, post a no-op message
+        each pump interval; by then the pump timer is due and Tcl runs it. A
+        healthy loop drains first, so this usually posts nothing.
+        """
+        import ctypes
+
+        post = ctypes.windll.user32.PostThreadMessageW
+        interval = PUMP_INTERVAL_MS / 1000
+        while gui_thread.is_alive():
+            # Idle: only wake to notice the GUI thread exiting.
+            if not self._work_queued.wait(1.0):
+                continue
+            self._work_queued.clear()
+            # Work queued after this clear sets the event again and is picked
+            # up by the next outer iteration.
+            time.sleep(interval)
+            while gui_thread.is_alive() and not self._queue.empty():
+                post(self._native_thread_id, _WM_NULL, 0, 0)
+                time.sleep(interval)
 
     def _loop(self):
         try:
@@ -208,6 +251,7 @@ class GuiThread:
 
         # Cannot use call(): ensure_started() refuses once _stopping is set.
         self._queue.put((self._teardown, None, None))
+        self._work_queued.set()
         thread.join(timeout)
         self._fail_pending()
 
@@ -274,6 +318,7 @@ class GuiThread:
         box = {}
         done = threading.Event()
         self._queue.put((func, box, done))
+        self._work_queued.set()
         if not done.wait(timeout):
             raise TimeoutError("GUI call did not complete in time")
         if "error" in box:
@@ -296,6 +341,7 @@ class GuiThread:
             func(self.root)
             return
         self._queue.put((func, None, None))
+        self._work_queued.set()
 
     def _pump(self):
         if self.root is None:
