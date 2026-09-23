@@ -11,13 +11,15 @@ from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, MAX_PAGE_BACKSTACK,
+    APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, INDEX_STATE_LABELS, MAX_PAGE_BACKSTACK,
     MeetingWindow, NOTES_LIMIT,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, open_meeting_window, retention_plan_projection, validated_settings,
 )
+from meeting_index import INDEX_STATES
 from meeting_settings import EndpointSelection, resolve_meeting_settings
+import ui_theme
 
 
 def wait_for(predicate, timeout=2):
@@ -1099,6 +1101,153 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view.close()
             self.root.update()
 
+    def test_manager_controls_are_left_aligned_labelled_and_stacked(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        controller.read_workspace.return_value = {
+            "generation": 0, "collections": [], "series": [],
+        }
+        window = open_meeting_window(self.root, controller, lambda: {}, mock.Mock())
+        view = window._meeting_view
+        try:
+            self.root.update()
+            for check in (view.auto_transcribe_check, view.auto_summary_check, view.voice_boost_check):
+                self.assertEqual(check.cget("anchor"), "w")
+            # Side-packed siblings squeeze the full-width answer into a corner.
+            answer_siblings = view.cross_answer.master.pack_slaves()
+            self.assertEqual([w for w in answer_siblings if w.pack_info()["side"] == "left"], [])
+
+            labels = {w.cget("text") for w in descendants(view.window) if isinstance(w, tk.Label)}
+            for caption in ("Coleção/projeto", "Tag", "Pessoa", "Série",
+                            "Coleções/projetos", "Tags", "Pessoas"):
+                self.assertIn(caption, labels)
+        finally:
+            view.close()
+            self.root.update()
+
+    # Pixel fit depends on the platform's fonts and native control metrics;
+    # the minimum-width layout is verified against Windows' Segoe UI metrics.
+    # macOS uses its own wider minimum, and the Linux GUI is not supported.
+    @unittest.skipUnless(sys.platform == "win32", "layout fit is verified on Windows metrics")
+    def test_library_controls_fit_at_the_minimum_manager_width(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        controller.read_workspace.return_value = {
+            "generation": 0, "collections": [], "series": [],
+        }
+        # Mirror the manager: its minimum size, notebook inset by 24px.
+        _geometry, min_width, min_height = ui_theme.build_theme(
+            "windows", system="windows").manager_window_size
+        manager = tk.Toplevel(self.root)
+        manager.geometry(f"{min_width}x{min_height}")
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True, padx=24)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        try:
+            notebook.select(view.library_tab)
+            self.root.update()
+            # Pack clips an overflowing row by shrinking its last widgets below
+            # their requested width rather than pushing them off the edge.
+            clipped = [
+                widget.cget("text") or str(widget)
+                for widget in descendants(view.library_tab)
+                if isinstance(widget, (tk.Button, tk.Label)) and widget.winfo_ismapped()
+                and widget.cget("width") == 0
+                and widget.winfo_width() < widget.winfo_reqwidth()
+            ]
+            self.assertEqual(clipped, [])
+        finally:
+            view.close_without_prompt(destroy=False)
+            manager.destroy()
+            self.root.update()
+
+    def _embedded_view(self, geometry="1120x820"):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        controller.list_sessions_page.return_value = {
+            "items": [], "next_cursor": None, "cursor_reset": False, "index_state": "ready",
+        }
+        controller.search_library.return_value = []
+        controller.read_workspace.return_value = {
+            "generation": 0, "collections": [], "series": [],
+        }
+        manager = tk.Toplevel(self.root)
+        manager.geometry(geometry)
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True, padx=24)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        self.addCleanup(self.root.update)
+        self.addCleanup(manager.destroy)
+        self.addCleanup(view.close_without_prompt, destroy=False)
+        return view, notebook
+
+    def test_settings_show_one_section_at_a_time(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.settings_tab)
+        self.root.update()
+        sections = view.settings_sections
+        self.assertEqual(sections.current, "general")
+        self.assertEqual([key for key, frame in sections.frames.items() if frame.winfo_ismapped()],
+                         ["general"])
+        self.assertTrue(view.recording_defaults_parent.winfo_ismapped())
+        sections.select("privacy")
+        self.root.update()
+        self.assertFalse(view.recording_defaults_parent.winfo_ismapped())
+        self.assertTrue(sections.frames["privacy"].winfo_ismapped())
+
+    def test_library_panels_open_on_demand_and_count_active_filters(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        self.root.update()
+        self.assertFalse(view.library_panels["filters"].winfo_ismapped())
+        self.assertFalse(view.library_panels["cross"].winfo_ismapped())
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros ▾")
+        view.filters_toggle.invoke()
+        self.root.update()
+        self.assertTrue(view.library_panels["filters"].winfo_ismapped())
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros ▴")
+        view.tag_filter.set("cliente")
+        view.date_from_filter.set("2026-01-01")
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros (2) ▴")
+        view.filters_toggle.invoke()
+        self.root.update()
+        self.assertFalse(view.library_panels["filters"].winfo_ismapped())
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros (2) ▾")
+
+    def test_library_explains_empty_list_and_unselected_detail(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.library_empty.get())[1])
+        self.root.update()
+        self.assertTrue(view.library_empty_label.winfo_ismapped())
+        self.assertIn("Nenhuma gravação ainda", view.library_empty.get())
+        self.assertTrue(view.detail_placeholder.winfo_ismapped())
+        self.assertFalse(view.detail_frame.winfo_ismapped())
+        view._show_library_detail(True)
+        self.root.update()
+        self.assertTrue(view.detail_frame.winfo_ismapped())
+        self.assertFalse(view.detail_placeholder.winfo_ismapped())
+        self.assertEqual(view.detail_sections.current, "notes")
+
+    def test_every_index_state_has_a_portuguese_label(self):
+        self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))
+
     def test_library_detail_pane_uses_scrollable_canvas_for_appended_controls(self):
         controller = mock.Mock()
         controller.snapshot.return_value = {
@@ -1184,7 +1333,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         controller.devices.return_value = []
         controller.list_sessions.return_value = []
         manager = tk.Toplevel(self.root)
-        manager.geometry("1120x820")
+        # Short enough that the summary-model section overflows its viewport.
+        manager.geometry("1120x560")
         notebook = ttk.Notebook(manager)
         notebook.pack(fill="both", expand=True)
         view = add_meeting_tabs(
@@ -1192,6 +1342,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         )
         try:
             notebook.select(view.settings_tab)
+            view.settings_sections.select("summary")
             self.root.update()
             view.settings_canvas.yview_moveto(0)
             self.root.update()

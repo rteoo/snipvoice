@@ -59,6 +59,10 @@ STATE_LABELS = {"idle": "Pronto", "starting": "Iniciando", "recording": "Gravand
                 "stopped": "Parado", "interrupted": "Interrompido", "failed": "Falha",
                 "partial": "Parcial", "teardown_blocked": "Recursos ainda em uso",
                 "unavailable": "Recursos ainda em uso"}
+INDEX_STATE_LABELS = {"ready": "pronto", "stale": "desatualizado", "rebuilding": "reconstruindo",
+                      "unavailable": "indisponível", "incomplete": "incompleto",
+                      "compatibility": "modo de compatibilidade", "cancelled": "cancelado",
+                      "failed": "falhou"}
 STATUS_FILTERS = {"Todos": "", "Concluídos": "completed", "Parciais": "partial",
                   "Falhas": "failed", "Interrompidos": "interrupted", "Gravando": "recording"}
 PROFILE_LABELS = {"balanced": "Equilibrado · Parakeet TDT", "compact": "Compacto · Qwen 0.6B",
@@ -313,6 +317,72 @@ class BackgroundBridge:
         self.tokens.clear()
 
 
+class SectionSwitcher:
+    """Show one of several section frames at a time, chosen from a nav bar.
+
+    Replaces pages that stacked every section in one long scroll. Hidden
+    sections keep their widgets alive, so callers keep addressing them
+    directly; only the chosen frame is packed into ``container``.
+    """
+
+    def __init__(self, ui, nav, container, *, vertical=False, on_select=None):
+        self.ui = ui
+        self.nav = nav
+        self.container = container
+        self.vertical = vertical
+        self.on_select = on_select
+        self.frames = {}
+        self.buttons = {}
+        self.markers = {}
+        self.current = None
+
+    def add(self, key, title):
+        bg = self.nav.cget("background")
+        item = tk.Frame(self.nav, bg=bg)
+        marker = tk.Frame(item, bg=bg, width=3, height=2)
+        chrome = self.ui.button_chrome(compact=True)
+        if chrome:
+            # Keep the keyboard focus ring, but no idle border around each item.
+            chrome["highlightbackground"] = bg
+        button = tk.Button(
+            item, text=title, font=self.ui.font(9), command=lambda: self.select(key),
+            anchor="w" if self.vertical else "center",
+            **self.ui.nav_button_colors(bg), **chrome,
+        )
+        if self.vertical:
+            item.pack(side="top", fill="x", pady=1)
+            marker.pack(side="left", fill="y")
+            button.pack(side="left", fill="x", expand=True)
+        else:
+            item.pack(side="left")
+            marker.pack(side="bottom", fill="x")
+            button.pack(side="top")
+        frame = tk.Frame(self.container, bg=self.ui.surface)
+        self.frames[key] = frame
+        self.buttons[key] = button
+        self.markers[key] = marker
+        if self.current is None:
+            self.select(key)
+        return frame
+
+    def select(self, key):
+        if key == self.current:
+            return
+        bg = self.nav.cget("background")
+        if self.current is not None:
+            self.frames[self.current].pack_forget()
+            self.buttons[self.current].configure(
+                font=self.ui.font(9), **self.ui.nav_button_colors(bg))
+            self.markers[self.current].configure(bg=bg)
+        self.current = key
+        self.frames[key].pack(fill="both", expand=True)
+        self.buttons[key].configure(
+            font=self.ui.font(9, "bold"), **self.ui.nav_button_colors(bg, selected=True))
+        self.markers[key].configure(bg=self.ui.accent)
+        if self.on_select is not None:
+            self.on_select(key)
+
+
 class MeetingWindow:
     def __init__(self, root, controller, settings_getter, persist_settings,
                  on_settings_changed=None, on_recording_state_changed=None,
@@ -449,6 +519,83 @@ class MeetingWindow:
         kwargs.setdefault("fg", self.ui.text)
         return tk.Label(parent, text=text, **kwargs)
 
+    def _wrap_label(self, parent, text, **kwargs):
+        """A label that wraps at its allocated width, not a fixed length.
+
+        ``width=1`` stops the wrapped text from requesting width back from
+        its parent, which would otherwise widen the pane it sits in.
+        """
+        label = self._label(parent, text, width=1, wraplength=360, **kwargs)
+        label.bind("<Configure>", lambda event: label.configure(wraplength=max(event.width, 120)))
+        return label
+
+    def _placeholder(self, entry, variable, text):
+        """Grey hint over an empty entry. The variable itself stays empty."""
+        hint = self._label(entry, text, bg=self.ui.field, fg=self.ui.text_muted, anchor="w",
+                           cursor="xterm")
+        hint.bind("<Button-1>", lambda _event: entry.focus_set())
+
+        def refresh(*_args):
+            if variable.get():
+                hint.place_forget()
+            else:
+                hint.place(x=4, rely=0.5, anchor="w")
+
+        variable.trace_add("write", refresh)
+        refresh()
+        return hint
+
+    def _toggle_library_panel(self, key):
+        panel = self.library_panels[key]
+        if panel.winfo_manager():
+            panel.pack_forget()
+        else:
+            panel.pack(fill="x", pady=(0, self.ui.space_sm), before=self.library_panes)
+        self._refresh_library_toggles()
+
+    def _refresh_library_toggles(self):
+        """Label the panel toggles with open state and the active filter count."""
+        toggles = getattr(self, "library_panel_toggles", None)
+        if not toggles:
+            return
+        active = sum(bool(variable.get().strip()) for variable in (
+            self.collection_filter, self.tag_filter, self.people_filter,
+            self.series_filter, self.date_from_filter, self.date_to_filter,
+        ))
+        labels = {"filters": f"Filtros ({active})" if active else "Filtros",
+                  "cross": "Perguntar à biblioteca"}
+        for key, label in labels.items():
+            arrow = "▴" if self.library_panels[key].winfo_manager() else "▾"
+            toggles[key].configure(text=f"{label} {arrow}")
+
+    def _show_library_detail(self, visible):
+        placeholder = getattr(self, "detail_placeholder", None)
+        if placeholder is None:
+            return
+        if visible:
+            placeholder.grid_remove()
+            self.detail_frame.grid()
+        else:
+            self.detail_frame.grid_remove()
+            placeholder.grid()
+
+    def _render_library_empty_state(self, items):
+        label = getattr(self, "library_empty_label", None)
+        if label is None:
+            return
+        if items:
+            label.place_forget()
+            return
+        narrowed = (
+            bool(self.query.get().strip()) or bool(STATUS_FILTERS.get(self.status_filter.get()))
+            or any(self._library_filters().values())
+        )
+        self.library_empty.set(
+            "Nenhuma gravação encontrada.\nAjuste a busca ou os filtros." if narrowed
+            else "Nenhuma gravação ainda.\nGrave na aba Gravação ou use Importar áudio…"
+        )
+        label.place(relx=0.5, rely=0.5, anchor="center")
+
     def _button(self, parent, text, command, accent=False, danger=False):
         return tk.Button(parent, text=text, command=command, font=self.ui.font(),
                          **self.ui.button_colors(accent=accent, danger=danger),
@@ -456,7 +603,7 @@ class MeetingWindow:
 
     def _entry(self, parent, variable, width=30):
         return tk.Entry(parent, textvariable=variable, width=width, font=self.ui.font(),
-                        **self.ui.entry_colors())
+                        **self.ui.entry_colors(), **self.ui.entry_chrome())
 
     def _page_header(self, parent, title, description):
         header = tk.Frame(parent, bg=self.ui.surface)
@@ -521,6 +668,9 @@ class MeetingWindow:
             rowheight=self.ui.tree_row_height,
             font=self.ui.font(),
             borderwidth=0,
+            bordercolor=self.ui.border,
+            lightcolor=self.ui.card,
+            darkcolor=self.ui.card,
         )
         style.map(
             "Meeting.Treeview",
@@ -579,8 +729,10 @@ class MeetingWindow:
         library.pack(fill="both", expand=True)
         settings_view = ttk.Frame(self.settings_tab, style="Meeting.TFrame")
         settings_view.pack(fill="both", expand=True, padx=16, pady=(0, 16))
-        settings_view.columnconfigure(0, weight=1)
+        settings_view.columnconfigure(1, weight=1)
         settings_view.rowconfigure(0, weight=1)
+        settings_nav = tk.Frame(settings_view, bg=self.ui.surface)
+        settings_nav.grid(row=0, column=0, sticky="nsw", padx=(0, self.ui.space_lg))
         settings_canvas = tk.Canvas(
             settings_view, background=self.ui.surface, highlightthickness=0,
             borderwidth=0,
@@ -589,8 +741,8 @@ class MeetingWindow:
             settings_view, orient="vertical", command=settings_canvas.yview,
         )
         settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
-        settings_canvas.grid(row=0, column=0, sticky="nsew")
-        settings_scrollbar.grid(row=0, column=1, sticky="ns", padx=(self.ui.space_sm, 0))
+        settings_canvas.grid(row=0, column=1, sticky="nsew")
+        settings_scrollbar.grid(row=0, column=2, sticky="ns", padx=(self.ui.space_sm, 0))
         settings_content = ttk.Frame(settings_canvas, style="Meeting.TFrame")
         settings_window = settings_canvas.create_window(
             (0, 0), window=settings_content, anchor="nw",
@@ -607,15 +759,24 @@ class MeetingWindow:
         self._bind_mousewheel_region(settings_view, settings_canvas)
         self.settings_canvas = settings_canvas
         self.settings_content = settings_content
-        self._build_appearance_card(settings_content)
-        self.recording_defaults_parent = self._card(settings_content)
+        # One section at a time instead of a single page several screens long.
+        self.settings_sections = SectionSwitcher(
+            self.ui, settings_nav, settings_content, vertical=True,
+            on_select=lambda _key: settings_canvas.yview_moveto(0),
+        )
+        general = self.settings_sections.add("general", "Geral")
+        privacy = self.settings_sections.add("privacy", "Privacidade")
+        transcription = self.settings_sections.add("transcription", "Transcrição")
+        summary_section = self.settings_sections.add("summary", "Resumos")
+        self._build_appearance_card(general)
+        self.recording_defaults_parent = self._card(general)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
-        self._build_privacy_card(settings_content)
+        self._build_privacy_card(privacy)
         self.transcription_models_parent = tk.Frame(
-            settings_content, bg=self.ui.surface,
+            transcription, bg=self.ui.surface,
         )
         self.transcription_models_parent.pack(fill="x", pady=(0, self.ui.space_md))
-        summary = ttk.Frame(settings_content, style="Meeting.TFrame")
+        summary = ttk.Frame(summary_section, style="Meeting.TFrame")
         summary.pack(fill="x", expand=False)
         self._label(
             summary, "Modelos de resumo de texto",
@@ -717,19 +878,19 @@ class MeetingWindow:
         automation = tk.Frame(settings_card, bg=self.ui.card)
         self.auto_transcribe_check = tk.Checkbutton(
             automation, text="Transcrever automaticamente", variable=self.auto_transcribe,
-            command=self._automation_toggled, font=self.ui.font(),
+            command=self._automation_toggled, font=self.ui.font(), anchor="w",
             **self.ui.checkbutton_colors(self.ui.card),
         )
         self.auto_transcribe_check.pack(anchor="w", fill="x")
         self.auto_summary_check = tk.Checkbutton(
             automation, text="Resumir após transcrever", variable=self.auto_summary,
-            command=self._automation_toggled, font=self.ui.font(),
+            command=self._automation_toggled, font=self.ui.font(), anchor="w",
             **self.ui.checkbutton_colors(self.ui.card),
         )
         self.auto_summary_check.pack(anchor="w", fill="x", padx=(self.ui.space_xl, 0))
         self.voice_boost_check = tk.Checkbutton(
             automation, text="Melhorar a voz do microfone", variable=self.voice_boost,
-            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+            font=self.ui.font(), anchor="w", **self.ui.checkbutton_colors(self.ui.card),
         )
         self.voice_boost_check.pack(anchor="w", fill="x", pady=(self.ui.space_xs, 0))
         automation_row = next_row
@@ -737,14 +898,15 @@ class MeetingWindow:
             row=automation_row, column=0, sticky="w", pady=(row_pady, 0))
         automation.grid(row=automation_row + 1, column=0, sticky="ew", pady=(0, row_pady))
         note_row = automation_row + 2
-        self._label(
+        note = self._wrap_label(
             settings_card,
             "Configurações valem para a próxima gravação. A pasta local padrão "
             "fica ao lado da biblioteca.\nO sistema inclui todos os sons do "
             "dispositivo escolhido. Use fones para reduzir duplicação acústica.",
-            justify="left", anchor="w", wraplength=360, bg=self.ui.card,
+            justify="left", anchor="w", bg=self.ui.card,
             fg=self.ui.text_muted, font=self.ui.font(9),
-        ).grid(row=note_row, column=0, sticky="ew", pady=note_pady)
+        )
+        note.grid(row=note_row, column=0, sticky="ew", pady=note_pady)
         commands = tk.Frame(settings_card, bg=self.ui.card)
         commands.grid(row=note_row + 1, column=0, sticky="w")
         self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
@@ -942,72 +1104,86 @@ class MeetingWindow:
         self.summary_model_status.set(f'{entry["name"]} {action}.')
 
     def _build_library(self, parent):
-        search_row = self._card(parent, pady=self.ui.space_sm)
-        search_row.pack(fill="x", pady=(0, self.ui.space_md))
+        # One toolbar row; filters and the cross-meeting question open on
+        # demand so the list and the selected recording get the height.
+        toolbar = self._card(parent, pady=self.ui.space_sm)
+        toolbar.pack(fill="x", pady=(0, self.ui.space_sm))
         self.query = tk.StringVar(self.window)
-        self._label(search_row, "Buscar", bg=self.ui.card,
-                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 8))
-        search = self._entry(search_row, self.query)
+        search = self._entry(toolbar, self.query, 12)
         search.pack(side="left", fill="x", expand=True)
         search.bind("<Return>", lambda _event: self.search())
-        self._button(search_row, "Buscar", self.search).pack(side="left", padx=8)
+        self._placeholder(search, self.query, "Buscar gravações e transcrições")
+        self._button(toolbar, "Buscar", self.search, accent=True).pack(side="left", padx=(6, 0))
         self.status_filter = tk.StringVar(self.window, "Todos")
-        filters = ttk.Combobox(search_row, textvariable=self.status_filter, state="readonly",
-                               values=list(STATUS_FILTERS), width=14)
-        filters.pack(side="left", padx=(0, 8))
+        filters = ttk.Combobox(toolbar, textvariable=self.status_filter, state="readonly",
+                               values=list(STATUS_FILTERS), width=12)
+        filters.pack(side="left", padx=(6, 0))
         filters.bind("<<ComboboxSelected>>", lambda _event: self.search())
-        self._button(search_row, "Importar áudio…", self.import_audio).pack(side="left")
-        self.rebuild_button = self._button(search_row, "Reconstruir índice", self.rebuild_index)
-        self.rebuild_button.pack(side="left", padx=(6, 0))
-        self.rebuild_cancel_button = self._button(search_row, "Cancelar índice", self.cancel_rebuild_index)
-        self.rebuild_cancel_button.configure(state="disabled")
-        self.rebuild_cancel_button.pack(side="left", padx=(6, 0))
-        self._button(search_row, "Lixeira…", self.show_trash).pack(side="left", padx=(6, 0))
-        self.index_status = tk.StringVar(self.window, "Índice de busca: estado desconhecido")
-        self._label(search_row, "", textvariable=self.index_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w").pack(side="left", padx=(8, 0))
+        self.filters_toggle = self._button(toolbar, "Filtros", lambda: self._toggle_library_panel("filters"))
+        self.filters_toggle.pack(side="left", padx=(6, 0))
+        self.cross_toggle = self._button(
+            toolbar, "Perguntar à biblioteca", lambda: self._toggle_library_panel("cross"),
+        )
+        self.cross_toggle.pack(side="left", padx=(6, 0))
+        self._button(toolbar, "Lixeira…", self.show_trash).pack(side="right", padx=(6, 0))
+        self._button(toolbar, "Importar áudio…", self.import_audio).pack(side="right", padx=(6, 0))
 
-        organization_row = self._card(parent, pady=self.ui.space_sm)
-        organization_row.pack(fill="x", pady=(0, self.ui.space_md))
-        self._label(organization_row, "Filtros", bg=self.ui.card,
-                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
+        filter_panel = self._card(parent, pady=self.ui.space_sm)
         self.collection_filter = tk.StringVar(self.window)
         self.tag_filter = tk.StringVar(self.window)
         self.people_filter = tk.StringVar(self.window)
         self.series_filter = tk.StringVar(self.window)
         self.date_from_filter = tk.StringVar(self.window)
         self.date_to_filter = tk.StringVar(self.window)
-        for variable, hint in (
-            (self.collection_filter, "coleção/projeto"),
-            (self.tag_filter, "tag"),
-            (self.people_filter, "pessoa"),
-            (self.series_filter, "série"),
-            (self.date_from_filter, "data inicial"),
-            (self.date_to_filter, "data final"),
-        ):
-            entry = self._entry(organization_row, variable, 14)
-            entry.pack(side="left", padx=(0, 4))
-            # Tk has no placeholder text that works consistently across the
-            # supported platforms; the tooltip-like width keeps labels out of
-            # the search callback and values remain explicit to the user.
+        filter_fields = tk.Frame(filter_panel, bg=self.ui.card)
+        filter_fields.pack(fill="x")
+        # Tk has no portable placeholder text, so each field carries a small
+        # caption above it instead.
+        for column, (variable, caption) in enumerate((
+            (self.collection_filter, "Coleção/projeto"),
+            (self.tag_filter, "Tag"),
+            (self.people_filter, "Pessoa"),
+            (self.series_filter, "Série"),
+            (self.date_from_filter, "Data inicial (AAAA-MM-DD)"),
+            (self.date_to_filter, "Data final (AAAA-MM-DD)"),
+        )):
+            self._label(filter_fields, caption, bg=self.ui.card, fg=self.ui.text_muted,
+                        font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
+            entry = self._entry(filter_fields, variable, 6)
             entry.configure(insertwidth=1)
-        self._button(organization_row, "Aplicar filtros", self.search, accent=True).pack(side="left", padx=(4, 0))
-        self._button(organization_row, "Limpar filtros", self.clear_library_filters).pack(side="left", padx=(4, 0))
+            entry.grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            filter_fields.columnconfigure(column, weight=1)
+            variable.trace_add("write", lambda *_args: self._refresh_library_toggles())
+        self._button(filter_fields, "Aplicar filtros", self.search, accent=True).grid(
+            row=1, column=6, padx=(4, 0))
+        self._button(filter_fields, "Limpar filtros", self.clear_library_filters).grid(
+            row=1, column=7, padx=(4, 0))
+        index_row = tk.Frame(filter_panel, bg=self.ui.card)
+        index_row.pack(fill="x", pady=(self.ui.space_sm, 0))
+        self.index_status = tk.StringVar(self.window, "Índice de busca: estado desconhecido")
+        self._label(index_row, "", textvariable=self.index_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").pack(side="left")
+        self.rebuild_cancel_button = self._button(index_row, "Cancelar", self.cancel_rebuild_index)
+        self.rebuild_cancel_button.configure(state="disabled")
+        self.rebuild_cancel_button.pack(side="right", padx=(6, 0))
+        self.rebuild_button = self._button(index_row, "Reconstruir índice", self.rebuild_index)
+        self.rebuild_button.pack(side="right")
 
         cross_frame = self._card(parent, pady=self.ui.space_sm)
-        cross_frame.pack(fill="x", pady=(0, self.ui.space_md))
-        self._label(cross_frame, "Perguntar nas reuniões filtradas", bg=self.ui.card,
+        question_row = tk.Frame(cross_frame, bg=self.ui.card)
+        question_row.pack(fill="x")
+        self._label(question_row, "Perguntar nas reuniões filtradas", bg=self.ui.card,
                     font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
         self.cross_question = tk.StringVar(self.window)
-        self._entry(cross_frame, self.cross_question, 54).pack(side="left", fill="x", expand=True)
-        self._button(cross_frame, "Perguntar", self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
-        self.cross_cancel_button = self._button(cross_frame, "Cancelar", self.cancel_cross_question)
+        self._entry(question_row, self.cross_question, 12).pack(side="left", fill="x", expand=True)
+        self._button(question_row, "Perguntar", self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
+        self.cross_cancel_button = self._button(question_row, "Cancelar", self.cancel_cross_question)
         self.cross_cancel_button.configure(state="disabled")
         self.cross_cancel_button.pack(side="left", padx=(6, 0))
         self.cross_status = tk.StringVar(self.window, "Resposta cruzada fica somente na memória.")
         self._label(cross_frame, "", textvariable=self.cross_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", wraplength=420).pack(side="left", padx=(8, 0))
-        self.cross_answer = tk.Text(cross_frame, height=2, wrap="word", font=self.ui.font(),
+                    fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
+        self.cross_answer = tk.Text(cross_frame, height=3, wrap="word", font=self.ui.font(),
                                     **self.ui.text_colors())
         self.cross_answer.pack(fill="x", pady=(4, 0))
         self.cross_answer.configure(state="disabled")
@@ -1015,24 +1191,125 @@ class MeetingWindow:
         cross_citation_row.pack(fill="x", pady=(2, 0))
         self._label(cross_citation_row, "Citações", bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
-        self.cross_citations = tk.Listbox(cross_citation_row, height=2, width=52,
+        self.cross_citations = tk.Listbox(cross_citation_row, height=2, width=10,
                                           font=self.ui.font(), **self.ui.listbox_colors())
         self.cross_citations.pack(side="left", fill="x", expand=True)
         self.cross_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_cross_citation())
         self._button(cross_citation_row, "Ir à fonte", self.jump_to_cross_citation).pack(side="left", padx=(6, 0))
+
         panes = ttk.Panedwindow(parent, orient="horizontal")
         panes.pack(fill="both", expand=True)
+        self.library_panes = panes
+        self.library_panels = {"filters": filter_panel, "cross": cross_frame}
+        self.library_panel_toggles = {"filters": self.filters_toggle, "cross": self.cross_toggle}
+        self._refresh_library_toggles()
         left = ttk.Frame(panes, style="Meeting.TFrame")
         right_outer = ttk.Frame(panes, style="Meeting.TFrame")
         panes.add(left, weight=1)
         panes.add(right_outer, weight=3)
+
+        def place_sash(event):
+            # The first layout splits by requested widths, which left the
+            # list wider than the recording it opens; start at about a third.
+            if event.width > 100:
+                panes.unbind("<Configure>")
+                panes.sashpos(0, max(260, int(event.width * 0.36)))
+
+        panes.bind("<Configure>", place_sash)
+
+        # Recording list with an empty state drawn over the tree.
+        list_frame = tk.Frame(left, bg=self.ui.surface)
+        list_frame.pack(fill="both", expand=True)
+        self.sessions = ttk.Treeview(list_frame, columns=("title", "status"), show="headings",
+                                     selectmode="extended", style="Meeting.Treeview", height=6)
+        self.sessions.heading("title", text="Gravação")
+        self.sessions.heading("status", text="Estado")
+        self.sessions.column("title", width=170)
+        self.sessions.column("status", width=85)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.sessions.yview)
+        self.sessions.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.sessions.pack(fill="both", expand=True)
+        self.sessions.bind("<<TreeviewSelect>>", self._selection_changed)
+        self.library_empty = tk.StringVar(self.window)
+        self.library_empty_label = self._label(
+            list_frame, "", textvariable=self.library_empty, bg=self.ui.card,
+            fg=self.ui.text_muted, justify="center", wraplength=220,
+        )
+        pages = ttk.Frame(left, style="Meeting.TFrame")
+        pages.pack(fill="x", pady=(8, 0))
+        self.previous_button = self._button(pages, "‹ Anterior", lambda: self.change_page(-1))
+        self.previous_button.pack(side="left")
+        self.next_button = self._button(pages, "Próxima ›", lambda: self.change_page(1))
+        self.next_button.pack(side="left", padx=(6, 0))
+        self.page_label = tk.StringVar(self.window, "Página 1")
+        self._label(pages, "", textvariable=self.page_label, fg=self.ui.text_muted).pack(
+            side="left", padx=(8, 0))
+        batch = ttk.Frame(left, style="Meeting.TFrame")
+        batch.pack(fill="x", pady=(6, 0))
+        self._button(batch, "Organizar seleção…", self.assign_selected_organization).pack(side="left")
+        self.batch_cancel_button = self._button(batch, "Cancelar lote", self.cancel_batch_organization)
+        self.batch_cancel_button.configure(state="disabled")
+        self.batch_cancel_button.pack(side="left", padx=(6, 0))
+        # Full-text hits appear only after a search that found something.
+        self.search_results_frame = ttk.Frame(left, style="Meeting.TFrame")
+        self._label(self.search_results_frame, "Encontrado em transcrições e relatórios",
+                    anchor="w", fg=self.ui.text_muted).pack(fill="x", pady=(8, 2))
+        self.search_results = ttk.Treeview(
+            self.search_results_frame, columns=("source", "meeting", "snippet"), show="headings",
+            selectmode="browse", height=4, style="Meeting.Treeview",
+        )
+        # Modest starting widths: this tree's request sets the list pane's
+        # width, and 470px starved the detail pane's controls. The snippet
+        # column stretches into whatever the pane receives.
+        for column, label, width in (("source", "Fonte", 70), ("meeting", "Reunião", 90),
+                                      ("snippet", "Trecho", 120)):
+            self.search_results.heading(column, text=label)
+            self.search_results.column(column, width=width, stretch=column == "snippet")
+        self.search_results.pack(fill="x")
+        self.search_results.bind("<Double-Button-1>", lambda _event: self.open_search_result())
+        self.search_results.bind("<Return>", lambda _event: self.open_search_result())
+
+        # Selected recording: a placeholder until one is chosen, then a fixed
+        # header over one section at a time.
         right_outer.columnconfigure(0, weight=1)
         right_outer.rowconfigure(0, weight=1)
+        self.detail_placeholder = tk.Frame(right_outer, bg=self.ui.surface)
+        self.detail_placeholder.grid(row=0, column=0, sticky="nsew", padx=(12, 0))
+        self._label(
+            self.detail_placeholder,
+            "Selecione uma gravação na lista para ver notas, transcrição e resumo.",
+            fg=self.ui.text_muted, justify="center", wraplength=320,
+        ).place(relx=0.5, rely=0.4, anchor="center")
+        self.detail_frame = tk.Frame(right_outer, bg=self.ui.surface)
+        self.detail_frame.grid(row=0, column=0, sticky="nsew")
+        self.detail_frame.grid_remove()
+        title_row = ttk.Frame(self.detail_frame, style="Meeting.TFrame")
+        title_row.pack(fill="x", padx=(12, 0))
+        self.title = tk.StringVar(self.window)
+        self.title.trace_add("write", self._mark_dirty)
+        # Small minimum width: the entry expands, and a wide request clipped
+        # the delete button off the pane at the minimum window size.
+        title_entry = self._entry(title_row, self.title, 12)
+        title_entry.configure(font=self.ui.font(12, "bold"))
+        title_entry.pack(side="left", fill="x", expand=True)
+        self._placeholder(title_entry, self.title, "Título da gravação")
+        self._button(title_row, "Salvar notas", self.save_notes, accent=True).pack(side="left", padx=(8, 0))
+        self.delete_button = self._button(title_row, "Excluir gravação", self.delete_selected, danger=True)
+        self.delete_button.configure(state="disabled")
+        self.delete_button.pack(side="left", padx=(8, 0))
+        detail_nav = tk.Frame(self.detail_frame, bg=self.ui.surface)
+        detail_nav.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0))
+        tk.Frame(self.detail_frame, bg=self.ui.border, height=1).pack(fill="x", padx=(12, 0))
+        detail_body = ttk.Frame(self.detail_frame, style="Meeting.TFrame")
+        detail_body.pack(fill="both", expand=True, pady=(self.ui.space_sm, 0))
+        detail_body.columnconfigure(0, weight=1)
+        detail_body.rowconfigure(0, weight=1)
         self.detail_canvas = tk.Canvas(
-            right_outer, background=self.ui.surface, highlightthickness=0, borderwidth=0,
+            detail_body, background=self.ui.surface, highlightthickness=0, borderwidth=0,
         )
         self.detail_scrollbar = ttk.Scrollbar(
-            right_outer, orient="vertical", command=self.detail_canvas.yview,
+            detail_body, orient="vertical", command=self.detail_canvas.yview,
         )
         self.detail_canvas.configure(yscrollcommand=self.detail_scrollbar.set)
         self.detail_canvas.grid(row=0, column=0, sticky="nsew")
@@ -1050,68 +1327,30 @@ class MeetingWindow:
         self.detail_canvas.bind("<Configure>", stretch_detail_content)
         self.detail_content = right
         self._bind_mousewheel_region(right, self.detail_canvas)
-        self.sessions = ttk.Treeview(left, columns=("title", "status"), show="headings", selectmode="extended",
-                                     style="Meeting.Treeview", height=14)
-        self.sessions.heading("title", text="Gravação")
-        self.sessions.heading("status", text="Estado")
-        self.sessions.column("title", width=170)
-        self.sessions.column("status", width=85)
-        scrollbar = ttk.Scrollbar(left, orient="vertical", command=self.sessions.yview)
-        self.sessions.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        self.sessions.pack(fill="both", expand=True)
-        self.sessions.bind("<<TreeviewSelect>>", self._selection_changed)
-        pages = ttk.Frame(left, style="Meeting.TFrame")
-        pages.pack(fill="x", pady=8)
-        self.previous_button = self._button(pages, "Anterior", lambda: self.change_page(-1))
-        self.previous_button.pack(side="left")
-        self.next_button = self._button(pages, "Próxima", lambda: self.change_page(1))
-        self.next_button.pack(side="left", padx=8)
-        self._button(pages, "Atribuir seleção…", self.assign_selected_organization).pack(side="left", padx=(0, 8))
-        self.batch_cancel_button = self._button(pages, "Cancelar lote", self.cancel_batch_organization)
-        self.batch_cancel_button.configure(state="disabled")
-        self.batch_cancel_button.pack(side="left")
-        self.page_label = tk.StringVar(self.window, "Página 1")
-        self._label(left, "", textvariable=self.page_label).pack(anchor="w")
-        self._label(left, "Resultados de busca", anchor="w", fg=self.ui.text_muted).pack(
-            fill="x", pady=(8, 2), padx=(0, 4),
+        self.detail_sections = SectionSwitcher(
+            self.ui, detail_nav, right,
+            on_select=lambda _key: self.detail_canvas.yview_moveto(0),
         )
-        self.search_results = ttk.Treeview(
-            left, columns=("source", "meeting", "snippet"), show="headings",
-            selectmode="browse", height=4, style="Meeting.Treeview",
-        )
-        for column, label, width in (("source", "Fonte", 90), ("meeting", "Reunião", 120),
-                                      ("snippet", "Trecho", 260)):
-            self.search_results.heading(column, text=label)
-            self.search_results.column(column, width=width, stretch=column == "snippet")
-        self.search_results.pack(fill="x", pady=(0, 4))
-        self.search_results.bind("<Double-Button-1>", lambda _event: self.open_search_result())
-        self.search_results.bind("<Return>", lambda _event: self.open_search_result())
-        title_row = ttk.Frame(right, style="Meeting.TFrame")
-        title_row.pack(fill="x", padx=(12, 0))
-        self.title = tk.StringVar(self.window)
-        self.title.trace_add("write", self._mark_dirty)
-        self._label(title_row, "Título").pack(side="left", padx=(0, 8))
-        self._entry(title_row, self.title).pack(side="left", fill="x", expand=True)
-        self._button(title_row, "Salvar notas", self.save_notes).pack(side="left", padx=(8, 0))
-        self.delete_button = self._button(title_row, "Excluir gravação", self.delete_selected, danger=True)
-        self.delete_button.configure(state="disabled")
-        self.delete_button.pack(side="left", padx=(8, 0))
-        self.audio_capability_status = tk.StringVar(self.window, "Áudio raw disponível.")
-        self._label(right, "", textvariable=self.audio_capability_status, anchor="w",
-                    fg=self.ui.text_muted, wraplength=720).pack(fill="x", padx=12, pady=(4, 0))
-        self._label(right, "Notas manuais", anchor="w").pack(fill="x", padx=12, pady=(12, 4))
-        self.notes = tk.Text(right, height=5, wrap="word", undo=True, font=self.ui.font(), **self.ui.text_colors())
+        notes_page = self.detail_sections.add("notes", "Notas")
+        transcript_page = self.detail_sections.add("transcript", "Transcrição")
+        summary_page = self.detail_sections.add("summary", "Resumo")
+        ask_page = self.detail_sections.add("ask", "Perguntar")
+        files_page = self.detail_sections.add("files", "Arquivos")
+
+        # Notas: manual notes, organization labels and bookmarks.
+        self._label(notes_page, "Notas manuais", anchor="w").pack(fill="x", padx=12, pady=(0, 4))
+        self.notes = tk.Text(notes_page, height=8, wrap="word", undo=True, font=self.ui.font(),
+                             **self.ui.text_colors())
         self.notes.pack(fill="both", expand=True, padx=(12, 0))
         self.notes.bind("<<Modified>>", self._notes_modified)
-        organization_detail = self._card(right, padx=12, pady=6)
+        organization_detail = self._card(notes_page, padx=12, pady=6)
         organization_detail.pack(fill="x", padx=(12, 0), pady=(8, 0))
         self._label(organization_detail, "Organização", bg=self.ui.card,
                     fg=self.ui.text_strong, font=self.ui.font(10, "bold")).pack(anchor="w")
-        self._label(
+        self._wrap_label(
             organization_detail,
             "Coleções/projetos, tags e pessoas usam rótulos locais; a série é manual.",
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720,
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x", pady=(1, 4))
         organization_inputs = tk.Frame(organization_detail, bg=self.ui.card)
         organization_inputs.pack(fill="x")
@@ -1119,48 +1358,69 @@ class MeetingWindow:
         self.organization_tags = tk.StringVar(self.window)
         self.organization_people = tk.StringVar(self.window)
         self.organization_series = tk.StringVar(self.window)
-        for variable, width in ((self.organization_collections, 22), (self.organization_tags, 18),
-                                (self.organization_people, 18), (self.organization_series, 18)):
-            self._entry(organization_inputs, variable, width).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self._button(organization_inputs, "Salvar organização", self.save_organization).pack(side="left")
+        for column, (variable, caption) in enumerate((
+            (self.organization_collections, "Coleções/projetos"),
+            (self.organization_tags, "Tags"),
+            (self.organization_people, "Pessoas"),
+            (self.organization_series, "Série"),
+        )):
+            self._label(organization_inputs, caption, bg=self.ui.card, fg=self.ui.text_muted,
+                        font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
+            self._entry(organization_inputs, variable, 5).grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            organization_inputs.columnconfigure(column, weight=1)
+        self._button(organization_inputs, "Salvar organização", self.save_organization).grid(row=1, column=4)
         self.organization_status = tk.StringVar(self.window, "Selecione uma reunião para editar seus rótulos.")
-        self._label(organization_detail, "", textvariable=self.organization_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", wraplength=720).pack(fill="x", pady=(2, 0))
-        bookmark_row = ttk.Frame(right, style="Meeting.TFrame")
-        bookmark_row.pack(fill="x", padx=(12, 0), pady=8)
+        self._wrap_label(organization_detail, "", textvariable=self.organization_status, bg=self.ui.card,
+                         fg=self.ui.text_muted, anchor="w").pack(fill="x", pady=(2, 0))
+        self._label(notes_page, "Marcadores", anchor="w", fg=self.ui.text_strong,
+                    font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(12, 2))
+        bookmark_row = ttk.Frame(notes_page, style="Meeting.TFrame")
+        bookmark_row.pack(fill="x", padx=(12, 0), pady=(0, 4))
         self.position = tk.StringVar(self.window, "0")
         self.bookmark_label = tk.StringVar(self.window)
         self._label(bookmark_row, "Segundos").pack(side="left")
-        self._entry(bookmark_row, self.position, 9).pack(side="left", padx=6)
-        self._entry(bookmark_row, self.bookmark_label, 18).pack(side="left", fill="x", expand=True)
+        self._entry(bookmark_row, self.position, 6).pack(side="left", padx=6)
+        self._entry(bookmark_row, self.bookmark_label, 10).pack(side="left", fill="x", expand=True)
         self._button(bookmark_row, "Adicionar marcador", self.add_bookmark).pack(side="left", padx=(6, 0))
         self.bookmark_status = tk.StringVar(self.window)
-        self._label(right, "", textvariable=self.bookmark_status, anchor="w",
-                    wraplength=600).pack(fill="x", padx=12)
+        self._wrap_label(notes_page, "", textvariable=self.bookmark_status, anchor="w").pack(fill="x", padx=12)
         self.bookmark_choice = tk.StringVar(self.window)
-        self.bookmark_picker = ttk.Combobox(right, textvariable=self.bookmark_choice, state="readonly")
+        self.bookmark_picker = ttk.Combobox(notes_page, textvariable=self.bookmark_choice, state="readonly")
         self.bookmark_picker.pack(fill="x", padx=(12, 0), pady=4)
         self.bookmark_picker.bind("<<ComboboxSelected>>", self._bookmark_selected)
-        transcript_header = ttk.Frame(right, style="Meeting.TFrame")
-        transcript_header.pack(fill="x", padx=12, pady=(10, 4))
-        self._label(
-            transcript_header, "Transcrição · horários por trecho de áudio", anchor="w",
-        ).pack(side="left")
+
+        # Transcrição: processing, playback, segments, speaker labels, highlights.
+        actions = ttk.Frame(transcript_page, style="Meeting.TFrame")
+        actions.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        self.transcribe_button = self._button(actions, "Transcrever novamente", self.transcribe)
+        self.transcribe_button.pack(side="left", padx=(0, 6))
+        self._button(actions, "Cancelar processamento", lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
         self.transcript_timing = tk.StringVar(self.window, "Os horários indicam trechos de áudio, não palavras.")
-        self._label(
-            transcript_header, "", textvariable=self.transcript_timing, anchor="e",
+        self._wrap_label(
+            transcript_page, "", textvariable=self.transcript_timing, anchor="w",
             fg=self.ui.text_muted,
-        ).pack(side="right")
+        ).pack(fill="x", padx=12)
+        self.track = tk.StringVar(self.window, "Microfone")
+        playback = ttk.Frame(transcript_page, style="Meeting.TFrame")
+        playback.pack(fill="x", padx=(12, 0), pady=(6, 0))
+        ttk.Combobox(playback, textvariable=self.track, values=list(TRACK_LABELS),
+                     width=12, state="readonly").pack(side="left")
+        self.play_button = self._button(playback, "Ouvir neste horário", self.play)
+        self.play_button.pack(side="left", padx=8)
+        self._button(playback, "Parar reprodução", lambda: self._action("stop_playback", urgent=True)).pack(side="left")
+        self.playback_status = tk.StringVar(self.window, "Reprodução parada.")
+        self._label(transcript_page, "", textvariable=self.playback_status, anchor="w",
+                    fg=self.ui.text_muted).pack(fill="x", padx=12, pady=(2, 4))
         self.transcript = ttk.Treeview(
-            right, columns=("time", "track", "speaker", "text"), show="headings", height=4,
+            transcript_page, columns=("time", "track", "speaker", "text"), show="headings", height=8,
             selectmode="browse", style="Meeting.Treeview")
-        for column, label, width in (("time", "Início", 75), ("track", "Fonte", 80),
-                                     ("speaker", "Rótulo manual", 120), ("text", "Texto", 360)):
+        for column, label, width in (("time", "Início", 60), ("track", "Fonte", 70),
+                                     ("speaker", "Rótulo manual", 115), ("text", "Texto", 200)):
             self.transcript.heading(column, text=label)
             self.transcript.column(column, width=width, stretch=column == "text")
         self.transcript.pack(fill="both", expand=True, padx=(12, 0))
         self.transcript.bind("<<TreeviewSelect>>", self._transcript_selected)
-        transcript_pages = ttk.Frame(right, style="Meeting.TFrame")
+        transcript_pages = ttk.Frame(transcript_page, style="Meeting.TFrame")
         transcript_pages.pack(fill="x", padx=(12, 0), pady=(4, 0))
         self.transcript_previous_button = self._button(
             transcript_pages, "Trechos anteriores", lambda: self.change_transcript_page(-1),
@@ -1175,42 +1435,51 @@ class MeetingWindow:
             transcript_pages, "", textvariable=self.transcript_page_label, anchor="w",
             fg=self.ui.text_muted,
         ).pack(side="left")
-        self.segment_text = tk.Text(right, height=3, wrap="word", font=self.ui.font(), **self.ui.text_colors())
+        self.segment_text = tk.Text(transcript_page, height=3, wrap="word", font=self.ui.font(),
+                                    **self.ui.text_colors())
         self.segment_text.pack(fill="x", padx=(12, 0), pady=4)
         self.segment_text.configure(state="disabled")
         self.segments = {}
-        self._label(
-            right, "Rótulo manual do locutor (não é identificação biométrica)", anchor="w",
+        self._wrap_label(
+            transcript_page, "Rótulo manual do locutor (não é identificação biométrica)", anchor="w",
             fg=self.ui.text_muted,
         ).pack(fill="x", padx=12, pady=(4, 2))
-        speaker_row = ttk.Frame(right, style="Meeting.TFrame")
+        speaker_row = ttk.Frame(transcript_page, style="Meeting.TFrame")
         speaker_row.pack(fill="x", padx=(12, 0), pady=(0, 4))
         self.speaker_name = tk.StringVar(self.window)
-        self._entry(speaker_row, self.speaker_name, 24).pack(side="left", fill="x", expand=True)
+        self._entry(speaker_row, self.speaker_name, 10).pack(side="left", fill="x", expand=True)
         self.speaker_save_button = self._button(speaker_row, "Salvar rótulo", self.save_speaker_label)
         self.speaker_save_button.pack(side="left", padx=(6, 0))
         self.speaker_delete_button = self._button(speaker_row, "Excluir rótulo", self.delete_speaker_label, danger=True)
         self.speaker_delete_button.configure(state="disabled")
         self.speaker_delete_button.pack(side="left", padx=(6, 0))
-        highlight_row = ttk.Frame(right, style="Meeting.TFrame")
-        highlight_row.pack(fill="x", padx=(12, 0), pady=(2, 4))
-        self._label(highlight_row, "Destaque", fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
+        self._label(transcript_page, "Destaques e clipes", anchor="w", fg=self.ui.text_strong,
+                    font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(12, 2))
+        highlight_captions = ttk.Frame(transcript_page, style="Meeting.TFrame")
+        highlight_captions.pack(fill="x", padx=(12, 0))
+        highlight_row = ttk.Frame(transcript_page, style="Meeting.TFrame")
+        highlight_row.pack(fill="x", padx=(12, 0), pady=(0, 4))
         self.highlight_start = tk.StringVar(self.window)
         self.highlight_end = tk.StringVar(self.window)
         self.highlight_label = tk.StringVar(self.window)
         self.highlight_note = tk.StringVar(self.window)
-        self._entry(highlight_row, self.highlight_start, 8).pack(side="left")
-        self._label(highlight_row, "até", fg=self.ui.text_muted).pack(side="left", padx=4)
-        self._entry(highlight_row, self.highlight_end, 8).pack(side="left")
-        self._entry(highlight_row, self.highlight_label, 20).pack(side="left", fill="x", expand=True, padx=6)
-        self._entry(highlight_row, self.highlight_note, 24).pack(side="left", fill="x", expand=True)
+        for column, (variable, caption, width) in enumerate((
+            (self.highlight_start, "Início (s)", 6),
+            (self.highlight_end, "Fim (s)", 6),
+            (self.highlight_label, "Rótulo", 8),
+            (self.highlight_note, "Nota", 8),
+        )):
+            self._label(highlight_row, caption, fg=self.ui.text_muted,
+                        font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
+            self._entry(highlight_row, variable, width).grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            highlight_row.columnconfigure(column, weight=2 if column > 1 else 1)
         self.highlight_choice = tk.StringVar(self.window)
         self.highlight_picker = ttk.Combobox(
-            right, textvariable=self.highlight_choice, state="readonly", width=42,
+            transcript_page, textvariable=self.highlight_choice, state="readonly", width=10,
         )
         self.highlight_picker.pack(fill="x", padx=(12, 0), pady=(0, 4))
         self.highlight_picker.bind("<<ComboboxSelected>>", self._highlight_selected)
-        highlight_actions = ttk.Frame(right, style="Meeting.TFrame")
+        highlight_actions = ttk.Frame(transcript_page, style="Meeting.TFrame")
         highlight_actions.pack(fill="x", padx=(12, 0), pady=(0, 4))
         self.highlight_save_button = self._button(highlight_actions, "Salvar destaque", self.save_highlight)
         self.highlight_save_button.pack(side="left")
@@ -1224,72 +1493,45 @@ class MeetingWindow:
         )
         self.highlight_export_button.configure(state="disabled")
         self.highlight_export_button.pack(side="left")
-        self.track = tk.StringVar(self.window, "Microfone")
-        playback = ttk.Frame(right, style="Meeting.TFrame")
-        playback.pack(fill="x", padx=(12, 0), pady=8)
-        ttk.Combobox(playback, textvariable=self.track, values=list(TRACK_LABELS),
-                     width=12, state="readonly").pack(side="left")
-        self.play_button = self._button(playback, "Ouvir neste horário", self.play)
-        self.play_button.pack(side="left", padx=8)
-        self._button(playback, "Parar reprodução", lambda: self._action("stop_playback", urgent=True)).pack(side="left")
-        self.playback_status = tk.StringVar(self.window, "Reprodução parada.")
-        self._label(playback, "", textvariable=self.playback_status, anchor="w",
-                    fg=self.ui.text_muted).pack(side="left", padx=(8, 0))
-        actions = ttk.Frame(right, style="Meeting.TFrame")
-        actions.pack(fill="x", padx=(12, 0), pady=4)
-        self.transcribe_button = self._button(actions, "Transcrever novamente", self.transcribe)
-        self.transcribe_button.pack(side="left", padx=(0, 6))
-        self._button(actions, "Cancelar processamento", lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
-        exports = ttk.Frame(right, style="Meeting.TFrame")
-        exports.pack(fill="x", padx=(12, 0), pady=4)
-        self._button(exports, "Exportar Markdown…", lambda: self.export("markdown")).pack(side="left", padx=(0, 6))
-        self._button(exports, "Exportar texto…", lambda: self.export("text")).pack(side="left", padx=(0, 6))
-        self.export_audio_button = self._button(exports, "Exportar áudio final…", self.export_audio)
-        self.export_audio_button.pack(side="left", padx=(0, 6))
-        self.raw_remove_microphone = tk.BooleanVar(self.window, False)
-        self.raw_remove_system = tk.BooleanVar(self.window, False)
-        self.raw_remove_microphone_check = tk.Checkbutton(
-            exports, text="Remover mic", variable=self.raw_remove_microphone,
-            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
-        )
-        self.raw_remove_microphone_check.pack(side="left", padx=(0, 2))
-        self.raw_remove_system_check = tk.Checkbutton(
-            exports, text="Remover sistema", variable=self.raw_remove_system,
-            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
-        )
-        self.raw_remove_system_check.pack(side="left", padx=(0, 6))
-        self.raw_remove_button = self._button(exports, "Remover áudio raw…", self.preview_raw_tracks, danger=True)
-        self.raw_remove_button.pack(side="left", padx=(0, 6))
-        self._button(exports, "Gerar relatório local", self.generate_report).pack(side="left")
-        self._label(right, "Resumo editável · copie a revisão para notas antes de salvar", anchor="w").pack(
-            fill="x", padx=12, pady=(8, 0))
-        self.summary = tk.Text(right, height=3, wrap="word", font=self.ui.font(), **self.ui.text_colors())
-        self.summary.pack(fill="x", padx=(12, 0), pady=(8, 0))
+
+        # Resumo: the editable summary and structured local reports.
+        self._wrap_label(summary_page, "Resumo editável · copie a revisão para notas antes de salvar",
+                         anchor="w").pack(fill="x", padx=12)
+        self.summary = tk.Text(summary_page, height=6, wrap="word", font=self.ui.font(),
+                               **self.ui.text_colors())
+        self.summary.pack(fill="x", padx=(12, 0), pady=(6, 0))
         self.summary.insert("1.0", "Resumo local opcional. Revise os resultados e copie o texto para suas notas.")
         self.summary.configure(state="disabled")
-        self._button(right, "Copiar resumo revisado para notas", self.summary_to_notes).pack(anchor="w", padx=12, pady=4)
-        self._button(right, "Salvar resumo revisado", self.save_summary).pack(anchor="w", padx=12, pady=4)
+        summary_actions = ttk.Frame(summary_page, style="Meeting.TFrame")
+        summary_actions.pack(fill="x", padx=(12, 0), pady=4)
+        self._button(summary_actions, "Copiar para notas", self.summary_to_notes).pack(side="left")
+        self._button(summary_actions, "Salvar resumo revisado", self.save_summary).pack(side="left", padx=(6, 0))
 
         # Structured local reports.  The generated envelope remains immutable;
         # the editor below writes only a reviewed artifact through the library.
-        report_frame = self._card(right, padx=12, pady=8)
+        report_frame = self._card(summary_page, padx=12, pady=8)
         report_frame.pack(fill="x", padx=(12, 0), pady=(8, 0))
-        self._label(report_frame, "Relatórios locais", bg=self.ui.card,
-                    fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(anchor="w")
-        self._label(
+        report_header = tk.Frame(report_frame, bg=self.ui.card)
+        report_header.pack(fill="x")
+        self._label(report_header, "Relatórios locais", bg=self.ui.card,
+                    fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(side="left")
+        self._button(report_header, "Gerar relatório local", self.generate_report, accent=True).pack(side="right")
+        self._wrap_label(
             report_frame,
             "Perfis são receitas locais versionadas; o modelo nunca recebe dados fora do computador.",
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720,
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x", pady=(2, 6))
+        self.report_profile_choice = tk.StringVar(self.window, "Geral")
+        # The profile picker gets its own line; beside six buttons it left no
+        # room for the last ones in a narrow detail pane.
+        self.report_profile_box = ttk.Combobox(
+            report_frame, textvariable=self.report_profile_choice, state="readonly", width=10,
+        )
+        self.report_profile_box.pack(fill="x", pady=2)
         profile_row = tk.Frame(report_frame, bg=self.ui.card)
         profile_row.pack(fill="x", pady=2)
-        self.report_profile_choice = tk.StringVar(self.window, "Geral")
-        self.report_profile_box = ttk.Combobox(
-            profile_row, textvariable=self.report_profile_choice, state="readonly", width=28,
-        )
-        self.report_profile_box.pack(side="left", fill="x", expand=True)
         self.report_profile_box.bind("<<ComboboxSelected>>", self._report_profile_changed)
-        self._button(profile_row, "Criar", self.create_report_profile).pack(side="left", padx=(6, 0))
+        self._button(profile_row, "Criar", self.create_report_profile).pack(side="left")
         self._button(profile_row, "Duplicar", self.duplicate_report_profile).pack(side="left", padx=(6, 0))
         self._button(profile_row, "Editar", self.edit_report_profile).pack(side="left", padx=(6, 0))
         self.report_disable_button = self._button(profile_row, "Desativar", self.disable_report_profile)
@@ -1302,7 +1544,7 @@ class MeetingWindow:
         self._label(history_row, "Histórico", bg=self.ui.card).pack(side="left", padx=(0, 6))
         self.report_history_choice = tk.StringVar(self.window)
         self.report_history_box = ttk.Combobox(
-            history_row, textvariable=self.report_history_choice, state="readonly", width=48,
+            history_row, textvariable=self.report_history_choice, state="readonly", width=12,
         )
         self.report_history_box.pack(side="left", fill="x", expand=True)
         self.report_history_box.bind("<<ComboboxSelected>>", self._report_history_changed)
@@ -1312,45 +1554,48 @@ class MeetingWindow:
         self._label(section_row, "Seção", bg=self.ui.card).pack(side="left", padx=(0, 6))
         self.report_section_choice = tk.StringVar(self.window)
         self.report_section_box = ttk.Combobox(
-            section_row, textvariable=self.report_section_choice, state="readonly", width=24,
+            section_row, textvariable=self.report_section_choice, state="readonly", width=10,
         )
         self.report_section_box.pack(side="left", fill="x", expand=True)
         self.report_section_box.bind("<<ComboboxSelected>>", self._report_section_changed)
         self._button(section_row, "Copiar seção", self.copy_report_section).pack(side="left", padx=(6, 0))
         self._button(section_row, "Exportar…", self.export_report).pack(side="left", padx=(6, 0))
         self.report_provenance = tk.StringVar(self.window, "Nenhum relatório selecionado.")
-        self._label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720).pack(fill="x", pady=2)
-        self.report_editor = tk.Text(report_frame, height=5, wrap="word", font=self.ui.font(),
-                                    **self.ui.text_colors())
+        self._wrap_label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
+                         fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=2)
+        self.report_editor = tk.Text(report_frame, height=6, wrap="word", font=self.ui.font(),
+                                     **self.ui.text_colors())
         self.report_editor.pack(fill="x", pady=(4, 2))
         report_actions = tk.Frame(report_frame, bg=self.ui.card)
         report_actions.pack(fill="x", pady=2)
         self._button(report_actions, "Salvar revisão", self.save_report_review, accent=True).pack(side="left")
         self._label(report_actions, "Citações", bg=self.ui.card, fg=self.ui.text_muted).pack(side="left", padx=(12, 4))
-        self.report_citations = tk.Listbox(report_actions, height=2, width=42,
+        self.report_citations = tk.Listbox(report_actions, height=2, width=10,
                                            font=self.ui.font(), **self.ui.listbox_colors())
         self.report_citations.pack(side="left", fill="x", expand=True)
         self.report_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_report_citation())
         self._button(report_actions, "Ir à fonte", self.jump_to_report_citation).pack(side="left", padx=(6, 0))
 
-        ask_frame = self._card(right, padx=12, pady=8)
-        ask_frame.pack(fill="x", padx=(12, 0), pady=(8, 0))
+        # Perguntar: questions about this recording only.
+        ask_frame = self._card(ask_page, padx=12, pady=8)
+        ask_frame.pack(fill="x", padx=(12, 0))
         self._label(ask_frame, "Perguntar sobre esta reunião", bg=self.ui.card,
                     fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(anchor="w")
         self.ask_question = tk.StringVar(self.window)
         ask_row = tk.Frame(ask_frame, bg=self.ui.card)
         ask_row.pack(fill="x", pady=3)
-        self._entry(ask_row, self.ask_question, 60).pack(side="left", fill="x", expand=True)
+        ask_entry = self._entry(ask_row, self.ask_question, 12)
+        ask_entry.pack(side="left", fill="x", expand=True)
+        ask_entry.bind("<Return>", lambda _event: self.ask_this_meeting())
         self._button(ask_row, "Perguntar", self.ask_this_meeting, accent=True).pack(side="left", padx=(6, 0))
-        self.ask_answer = tk.Text(ask_frame, height=3, wrap="word", font=self.ui.font(),
+        self.ask_answer = tk.Text(ask_frame, height=8, wrap="word", font=self.ui.font(),
                                   **self.ui.text_colors())
         self.ask_answer.pack(fill="x", pady=(2, 2))
         ask_citation_row = tk.Frame(ask_frame, bg=self.ui.card)
         ask_citation_row.pack(fill="x", pady=(0, 2))
         self._label(ask_citation_row, "Citações", bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
-        self.ask_citations = tk.Listbox(ask_citation_row, height=2, width=42,
+        self.ask_citations = tk.Listbox(ask_citation_row, height=3, width=10,
                                         font=self.ui.font(), **self.ui.listbox_colors())
         self.ask_citations.pack(side="left", fill="x", expand=True)
         self.ask_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_ask_citation())
@@ -1360,8 +1605,39 @@ class MeetingWindow:
         self.ask_save_button = self._button(ask_actions, "Salvar resposta", self.save_answer)
         self.ask_save_button.pack(side="left")
         self.ask_status = tk.StringVar(self.window, "Respostas ficam somente na memória até você salvar.")
-        self._label(ask_actions, "", textvariable=self.ask_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", wraplength=580).pack(side="left", padx=(8, 0))
+        self._wrap_label(ask_actions, "", textvariable=self.ask_status, bg=self.ui.card,
+                         fg=self.ui.text_muted, anchor="w").pack(side="left", fill="x", expand=True, padx=(8, 0))
+
+        # Arquivos: exports and raw-audio storage.
+        self._label(files_page, "Exportar", anchor="w", fg=self.ui.text_strong,
+                    font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(0, 4))
+        exports = ttk.Frame(files_page, style="Meeting.TFrame")
+        exports.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        self._button(exports, "Markdown…", lambda: self.export("markdown")).pack(side="left", padx=(0, 6))
+        self._button(exports, "Texto…", lambda: self.export("text")).pack(side="left", padx=(0, 6))
+        self.export_audio_button = self._button(exports, "Áudio final…", self.export_audio)
+        self.export_audio_button.pack(side="left")
+        self._label(files_page, "Áudio raw", anchor="w", fg=self.ui.text_strong,
+                    font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(12, 2))
+        self.audio_capability_status = tk.StringVar(self.window, "Áudio raw disponível.")
+        self._wrap_label(files_page, "", textvariable=self.audio_capability_status, anchor="w",
+                         fg=self.ui.text_muted).pack(fill="x", padx=12, pady=(0, 4))
+        raw_row = ttk.Frame(files_page, style="Meeting.TFrame")
+        raw_row.pack(fill="x", padx=(12, 0))
+        self.raw_remove_microphone = tk.BooleanVar(self.window, False)
+        self.raw_remove_system = tk.BooleanVar(self.window, False)
+        self.raw_remove_microphone_check = tk.Checkbutton(
+            raw_row, text="Microfone", variable=self.raw_remove_microphone,
+            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
+        )
+        self.raw_remove_microphone_check.pack(side="left", padx=(0, 2))
+        self.raw_remove_system_check = tk.Checkbutton(
+            raw_row, text="Sistema", variable=self.raw_remove_system,
+            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
+        )
+        self.raw_remove_system_check.pack(side="left", padx=(0, 6))
+        self.raw_remove_button = self._button(raw_row, "Remover áudio raw…", self.preview_raw_tracks, danger=True)
+        self.raw_remove_button.pack(side="left")
 
     def _build_privacy_card(self, parent):
         """Build privacy/retention controls inside the existing scrollable page."""
@@ -2873,7 +3149,8 @@ class MeetingWindow:
             self.page_label.set(f"Página 1 · {len(items)} gravações")
             self.index_status.set("Índice de busca mudou; listagem reiniciada.")
         elif index_state:
-            self.index_status.set(f"Índice de busca: {index_state}")
+            self.index_status.set(f"Índice de busca: {INDEX_STATE_LABELS.get(index_state, index_state)}")
+        self._render_library_empty_state(items)
         self._render_search_results(search_results)
         if self.selected in self.sessions.get_children():
             self.sessions.selection_set(self.selected)
@@ -2892,6 +3169,12 @@ class MeetingWindow:
             meeting = str(item.get("title") or item.get("session_id") or "")[:120]
             snippet = " ".join(str(item.get("snippet", "")).split())[:480]
             self.search_results.insert("", "end", iid=str(index), values=(source, meeting, snippet))
+        frame = getattr(self, "search_results_frame", None)
+        if frame is not None:
+            if self.search_result_items:
+                frame.pack(fill="x")
+            else:
+                frame.pack_forget()
 
     def open_search_result(self):
         selected = self.search_results.selection()
@@ -3412,7 +3695,7 @@ class MeetingWindow:
         state = value.get("state", "ready") if isinstance(value, dict) else "ready"
         count = value.get("sessions", 0) if isinstance(value, dict) else 0
         self.rebuild_progress = {"done": count, "total": count, "state": state}
-        self.index_status.set(f"Índice de busca: {state} · {count} reuniões")
+        self.index_status.set(f"Índice de busca: {INDEX_STATE_LABELS.get(state, state)} · {count} reuniões")
         self.search()
 
     def _selection_changed(self, _event=None):
@@ -3434,6 +3717,7 @@ class MeetingWindow:
 
     def load_session(self, session_id):
         self.selected = session_id
+        self._show_library_detail(True)
         self.report_request = getattr(self, "report_request", 0) + 1
         self.ask_request = getattr(self, "ask_request", 0) + 1
         self.citation_request = getattr(self, "citation_request", 0) + 1
@@ -4062,6 +4346,7 @@ class MeetingWindow:
         self.bridge.invalidate("transcript_page")
         self.transcript_request += 1
         self.selected = None
+        self._show_library_detail(False)
         self.detail_ready = False
         self.dirty = False
         self.truncated = False
