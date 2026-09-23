@@ -348,7 +348,25 @@ class WidgetOptionTests(unittest.TestCase):
         theme = ui_theme.build_theme("dark", system="windows")
         self.assertEqual(theme.entry_colors()["bg"], theme.field)
         self.assertEqual(theme.listbox_colors()["fg"], theme.text)
-        self.assertEqual(theme.checkbutton_colors(theme.card)["selectcolor"], theme.accent)
+        # Win32 paints selectcolor behind the indicator in both states; an
+        # accent fill made unchecked boxes look checked.
+        self.assertEqual(theme.checkbutton_colors(theme.card)["selectcolor"], theme.field)
+
+    def test_dark_readonly_entries_and_lists_avoid_light_native_faces(self):
+        theme = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(theme.entry_colors()["readonlybackground"], theme.surface_alt)
+        self.assertNotIn("readonlybackground", theme.text_colors())
+        self.assertEqual(theme.listbox_colors()["highlightbackground"], theme.border)
+
+    def test_entry_chrome_draws_a_flat_bordered_field_off_macos(self):
+        for kind in ("windows", "dark"):
+            theme = ui_theme.build_theme(kind, system="windows")
+            chrome = theme.entry_chrome()
+            self.assertEqual(chrome["relief"], "flat")
+            self.assertEqual(chrome["highlightthickness"], 1)
+            self.assertEqual(chrome["highlightbackground"], theme.border)
+            self.assertEqual(chrome["highlightcolor"], theme.focus_ring)
+        self.assertEqual(ui_theme.build_theme("dark", system="darwin").entry_chrome(), {})
 
     def test_text_colors_drop_the_options_tk_text_rejects(self):
         colors = ui_theme.build_theme("dark", system="darwin").text_colors()
@@ -512,6 +530,29 @@ class TtkThemeSelectionTests(unittest.TestCase):
             style.mapped["Manager.Treeview"]["background"],
             [("selected", theme.select_bg)],
         )
+
+    def test_dark_manager_styles_replace_clam_light_defaults(self):
+        class Recorder:
+            def __init__(self):
+                self.configured = {}
+                self.mapped = {}
+
+            def configure(self, name, **options):
+                self.configured[name] = options
+
+            def map(self, name, **options):
+                self.mapped[name] = options
+
+        style = Recorder()
+        theme = ui_theme.build_theme("dark", system="windows")
+        ui_theme.configure_manager_styles(style, theme)
+        self.assertEqual(style.configured["Horizontal.TProgressbar"]["troughcolor"], theme.field)
+        self.assertEqual(style.configured["Manager.Treeview"]["bordercolor"], theme.border)
+        self.assertEqual(style.configured["Sash"]["background"], theme.surface)
+        self.assertIn(("!active", theme.surface_alt),
+                      style.mapped["Vertical.TScrollbar"]["background"])
+        self.assertEqual(style.mapped["Manager.TNotebook.Tab"]["lightcolor"],
+                         [("selected", theme.card)])
 
 
 class GuiSourceTests(unittest.TestCase):

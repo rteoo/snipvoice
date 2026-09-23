@@ -1255,6 +1255,7 @@ class Snipvoice:
             font=ui.font(9),
             width=28,
             **ui.entry_colors(),
+            **ui.entry_chrome(),
         ).grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
@@ -1269,6 +1270,7 @@ class Snipvoice:
             font=ui.font(9),
             width=28,
             **ui.entry_colors(),
+            **ui.entry_chrome(),
         ).grid(row=2, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
