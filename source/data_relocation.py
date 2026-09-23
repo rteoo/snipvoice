@@ -252,3 +252,135 @@ def complete_pending_relocation():
             "ser apagados; remova essa pasta manualmente."
         )
     return f"Dados movidos para {dst}."
+
+
+MODEL_FOLDERS = ("voice-models", "summary-models")
+_MODEL_ENV_OVERRIDES = ("SNIPVOICE_VOICE_CACHE", "SNIPVOICE_SUMMARY_CACHE")
+
+
+def models_env_locked():
+    return any(os.environ.get(name) for name in _MODEL_ENV_OVERRIDES)
+
+
+def validate_models_target(current, target):
+    """Return the normalized model root, or raise RelocationError.
+
+    Unlike the data folder, the model root may be a shared folder that already
+    holds other files: only the ``voice-models`` and ``summary-models``
+    subfolders are ever written there.
+    """
+    if models_env_locked():
+        raise RelocationError(
+            "A pasta dos modelos está definida por SNIPVOICE_VOICE_CACHE ou "
+            "SNIPVOICE_SUMMARY_CACHE."
+        )
+    if not isinstance(target, str) or not target.strip() or not os.path.isabs(target):
+        raise RelocationError("Escolha uma pasta com caminho completo.")
+    target = os.path.abspath(target.strip())
+    if _same(current, target):
+        raise RelocationError("Essa já é a pasta dos modelos atual.")
+    for folder in MODEL_FOLDERS:
+        if _inside(target, os.path.join(current, folder)):
+            raise RelocationError("A nova pasta não pode ficar dentro da pasta atual dos modelos.")
+    if os.path.lexists(target) and not os.path.isdir(target):
+        raise RelocationError("Já existe um arquivo com esse nome no destino.")
+    if not os.path.isdir(target) and not os.path.isdir(os.path.dirname(target)):
+        raise RelocationError("A pasta onde a nova pasta seria criada não existe.")
+    return target
+
+
+def models_size(root):
+    return sum(directory_size(os.path.join(root, folder)) for folder in MODEL_FOLDERS)
+
+
+def request_models_relocation(current, target):
+    """Validate and record a model-folder move to perform at the next start."""
+    target = validate_models_target(current, target)
+    location = app_paths.read_location()
+    location["models_dir"] = current
+    location["pending_models_move"] = {"from": current, "to": target}
+    app_paths.write_location(location)
+    return target
+
+
+def _model_items(root):
+    for folder in MODEL_FOLDERS:
+        parent = os.path.join(root, folder)
+        if not os.path.isdir(parent):
+            continue
+        for entry in sorted(os.scandir(parent), key=lambda item: item.name):
+            if entry.is_dir():
+                yield folder, entry.name
+
+
+def complete_pending_models_relocation():
+    """Move each downloaded model into the new root. Return a message or "".
+
+    Every model is renamed or copied and verified before the pointer switches;
+    a failure puts renamed models back and discards copies, so the old root
+    stays complete. A model already present at the destination is kept there
+    and the old copy is left untouched.
+    """
+    location = app_paths.read_location()
+    pending = location.get("pending_models_move")
+    if not isinstance(pending, dict):
+        return ""
+    src, dst = pending.get("from"), pending.get("to")
+    if not (isinstance(src, str) and isinstance(dst, str)) or models_env_locked():
+        location.pop("pending_models_move", None)
+        app_paths.write_location(location)
+        return ""
+    renamed, copied, kept = [], [], []
+    try:
+        for folder, name in _model_items(src):
+            source = os.path.join(src, folder, name)
+            target = os.path.join(dst, folder, name)
+            _discard_incomplete(target)
+            if os.path.exists(target):
+                kept.append(name)
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            try:
+                os.rename(source, target)
+                renamed.append((source, target))
+                continue
+            except OSError:
+                pass
+            try:
+                copied.append((source, target, _copy_verified(source, target)))
+            except (OSError, RelocationError):
+                _discard_incomplete(target)
+                raise
+            os.remove(os.path.join(target, _INCOMPLETE_MARKER))
+    except (OSError, RelocationError) as exc:
+        for source, target in reversed(renamed):
+            try:
+                os.rename(target, source)
+            except OSError:
+                pass
+        for _source, target, _manifest_files in copied:
+            shutil.rmtree(target, ignore_errors=True)
+        location.pop("pending_models_move", None)
+        location["models_dir"] = src
+        app_paths.write_location(location)
+        return f"Não foi possível mover os modelos para {dst}: {exc}. Nada foi alterado."
+    location.pop("pending_models_move", None)
+    location["models_dir"] = dst
+    app_paths.write_location(location)
+    leftovers = False
+    for source, _target, manifest in copied:
+        leftovers = not _remove_copied(source, manifest) or leftovers
+    for folder in MODEL_FOLDERS:
+        try:
+            os.rmdir(os.path.join(src, folder))
+        except OSError:
+            pass
+    message = f"Modelos movidos para {dst}."
+    if kept:
+        message += (
+            f" Estes modelos já estavam no destino e foram mantidos lá: {', '.join(kept)}. "
+            f"As cópias antigas continuam em {src}."
+        )
+    if leftovers:
+        message += f" Alguns arquivos antigos em {src} não puderam ser apagados."
+    return message

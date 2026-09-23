@@ -505,12 +505,13 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         def inspect_card(shared_root):
             view, labels = self._general_data_card(shared_root)
-            states = (str(view.data_move_button["state"]), str(view.data_default_button["state"]))
+            card = view.location_cards["data"]
+            states = (str(card["move"]["state"]), str(card["default"]["state"]))
             with mock.patch.object(meeting_gui.messagebox, "askokcancel", return_value=True) as ask, \
                     mock.patch.object(meeting_gui.messagebox, "showerror") as error:
-                view._confirm_data_relocation(target)
-                view._confirm_data_relocation(os.path.join(self.app.data_dir, "inside"))
-            return labels, view.data_dir_display.get(), states, ask.call_args, error.call_args
+                view._confirm_location_move("data", target)
+                view._confirm_location_move("data", os.path.join(self.app.data_dir, "inside"))
+            return labels, card["display"].get(), states, ask.call_args, error.call_args
 
         labels, shown, states, asked, error = self._on_gui(inspect_card)
         self.assertIn("Pasta de dados", labels)
@@ -527,11 +528,47 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         def inspect_card(shared_root):
             with mock.patch.dict(os.environ, {"SNIPVOICE_HOME": self.app.data_dir}):
                 view, labels = self._general_data_card(shared_root)
-            return labels, str(view.data_move_button["state"]), str(view.data_default_button["state"])
+            card = view.location_cards["data"]
+            return labels, str(card["move"]["state"]), str(card["default"]["state"])
 
         labels, move_state, default_state = self._on_gui(inspect_card)
         self.assertEqual((move_state, default_state), ("disabled", "disabled"))
         self.assertTrue(any("SNIPVOICE_HOME" in label for label in labels))
+
+    def test_general_settings_move_models_to_a_shared_folder(self):
+        import meeting_gui
+
+        voice = _ensure_voice(self.app)
+        voice.settings.cache_dir = None
+        base = tempfile.mkdtemp()
+        current = os.path.join(base, "local", "Snipvoice")
+        os.makedirs(os.path.join(current, "voice-models", "m"))
+        shared = os.path.join(base, "shared")
+        os.makedirs(os.path.join(shared, "other-app"))
+        self.app.request_models_relocation = mock.Mock(return_value="")
+
+        def inspect_card(shared_root):
+            view, labels = self._general_data_card(shared_root)
+            card = view.location_cards["models"]
+            states = (str(card["move"]["state"]), str(card["default"]["state"]))
+            with mock.patch.object(meeting_gui.messagebox, "askokcancel", return_value=True) as ask:
+                view._confirm_location_move("models", shared)
+                view.summary_download_cancel = threading.Event()
+                with mock.patch.object(meeting_gui.messagebox, "showerror") as error:
+                    view._confirm_location_move("models", shared)
+                view.summary_download_cancel = None
+            return labels, card["display"].get(), states, ask.call_args, error.call_args
+
+        with mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": "", "SNIPVOICE_SUMMARY_CACHE": ""}), \
+                mock.patch.object(tx.app_paths, "config_dir", return_value=os.path.join(base, "config")), \
+                mock.patch.object(tx.app_paths, "default_models_dir", return_value=current):
+            labels, shown, states, asked, error = self._on_gui(inspect_card)
+        self.assertIn("Pasta dos modelos", labels)
+        self.assertEqual(shown, current)
+        self.assertEqual(states, ("normal", "disabled"))
+        self.assertIn(shared, asked.args[1])
+        self.app.request_models_relocation.assert_called_once_with(shared)
+        self.assertIn("download", error.args[1])
 
     def test_manager_separates_model_settings_from_ditado_selectors(self):
         """Configurações owns downloads; Ditado keeps compact friendly selectors."""

@@ -19,6 +19,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
+import app_paths
 from voice_catalog import catalog_entry, catalog_entry_by_id
 
 
@@ -55,17 +56,15 @@ def default_voice_cache_dir(system=None):
     override = os.environ.get(ENV_VOICE_CACHE)
     if override:
         return os.path.abspath(os.path.expanduser(override))
+    return os.path.join(app_paths.default_models_dir(system), CACHE_DIR_NAME)
 
-    from platform_support import current_os
 
-    os_name = system or current_os()
-    home = os.path.expanduser("~")
-    if os_name == "windows":
-        root = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
-        return os.path.join(root, "Snipvoice", CACHE_DIR_NAME)
-    if os_name == "darwin":
-        return os.path.join(home, "Library", "Caches", "Snipvoice", CACHE_DIR_NAME)
-    return os.path.join(home, ".cache", "snipvoice", CACHE_DIR_NAME)
+def voice_cache_dir():
+    """Active voice cache: env override, then the user-chosen model folder."""
+    override = os.environ.get(ENV_VOICE_CACHE)
+    if override:
+        return os.path.abspath(os.path.expanduser(override))
+    return os.path.join(app_paths.configured_models_dir(), CACHE_DIR_NAME)
 
 
 def model_dir(cache_dir, entry):

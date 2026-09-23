@@ -207,9 +207,19 @@ restarts, copies and verifies every file when the new folder is on another
 drive, and only then deletes the old copy. The chosen location is recorded in
 `location.json` under `%LOCALAPPDATA%\Snipvoice` (macOS:
 `~/Library/Application Support/Snipvoice`; Linux: `~/.config/snipvoice`).
-`SNIPVOICE_HOME` overrides both and disables the move controls. Models use
-separate non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
-`SNIPVOICE_SUMMARY_CACHE`; they are not moved with the data folder.
+`SNIPVOICE_HOME` overrides both and disables the move controls.
+
+Downloaded models live apart from the data folder, under
+`%LOCALAPPDATA%\Snipvoice` by default (macOS: `~/Library/Caches/Snipvoice`;
+Linux: `~/.cache/snipvoice`), as plain GGUF files in `voice-models\<model>\`
+and `summary-models\<model>\`, each beside a `manifest.json`. Other
+compatible apps can open those files directly. **Configurações > Geral >
+Pasta dos modelos** moves them to another folder with the same restart and
+verified copy; that folder may be shared with other apps, and only the two
+Snipvoice subfolders are written there. A model already present at the
+destination is kept and the old copy is left in place. `SNIPVOICE_VOICE_CACHE`
+and `SNIPVOICE_SUMMARY_CACHE` override the location per model type and disable
+the move controls.
 
 Inactive dictation audio and transcripts expire after 30 days, checked when the
 voice controller starts. Set `voice_history_retention_days` in `settings.json`

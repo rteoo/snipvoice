@@ -113,11 +113,11 @@ def get_runtime_resource_dir():
 class Snipvoice:
     """Standalone voice tray app; the only global listener observes voice chords."""
 
-    def __init__(self, relocation_message=""):
+    def __init__(self, startup_notices=()):
         self.data_dir, data_dir_warning = app_paths.resolve_data_dir()
         configure_logging(os.path.join(self.data_dir, "logs"))
         self.logger = AppLogger()
-        self._startup_notices = [notice for notice in (relocation_message, data_dir_warning) if notice]
+        self._startup_notices = [notice for notice in (*startup_notices, data_dir_warning) if notice]
         for notice in self._startup_notices:
             self.logger.warning(notice)
         self.relaunch_requested = False
@@ -402,6 +402,8 @@ class Snipvoice:
             ),
             data_location=self.data_location,
             relocate_data=self.request_data_relocation,
+            models_location=self.models_location,
+            relocate_models=self.request_models_relocation,
         )
         self._manager_meeting_view = meeting_view
         self._manager_recording_tab = meeting_view.recording_tab
@@ -593,6 +595,28 @@ class Snipvoice:
             "default": app_paths.default_data_dir(),
             "env_locked": bool(app_paths.env_data_dir()),
         }
+
+    def models_location(self):
+        """Describe the model root for the Configurações > Geral card."""
+        return {
+            "path": app_paths.configured_models_dir(),
+            "default": app_paths.default_models_dir(),
+            "env_locked": data_relocation.models_env_locked()
+            or bool(self.voice is not None and self.voice.settings.cache_dir),
+        }
+
+    def request_models_relocation(self, target):
+        """Record a model-folder move and restart. Return "" or a user-facing reason."""
+        downloading = self.voice is not None and self.voice.model_download_in_progress()
+        if self.meetings.is_busy() or downloading:
+            return "Aguarde downloads, gravações e processamentos terminarem antes de mover os modelos."
+        try:
+            data_relocation.request_models_relocation(app_paths.configured_models_dir(), target)
+        except (OSError, data_relocation.RelocationError) as exc:
+            return str(exc)
+        self.relaunch_requested = True
+        self.quit_app(None, None)
+        return ""
 
     def request_data_relocation(self, target):
         """Record a move and restart. Return "" on success or a user-facing reason."""
@@ -1739,8 +1763,11 @@ def main():
         return
     app = None
     try:
-        relocation_message = data_relocation.complete_pending_relocation()
-        app = Snipvoice(relocation_message=relocation_message)
+        notices = (
+            data_relocation.complete_pending_relocation(),
+            data_relocation.complete_pending_models_relocation(),
+        )
+        app = Snipvoice(startup_notices=notices)
         app.run(show_settings="--show-settings" in arguments)
     finally:
         if lock_path is not None:
