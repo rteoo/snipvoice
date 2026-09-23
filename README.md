@@ -43,7 +43,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v3.3.1 release](https://github.com/rteoo/snipvoice/releases/tag/v3.3.1).
+[stable v3.3.2 release](https://github.com/rteoo/snipvoice/releases/tag/v3.3.2).
 To run from source with Python installed:
 
 ```powershell
@@ -65,7 +65,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v3.3.1`](https://github.com/rteoo/snipvoice/releases/tag/v3.3.1):
+[`v3.3.2`](https://github.com/rteoo/snipvoice/releases/tag/v3.3.2):
 
 | Platform | Package |
 | --- | --- |
@@ -77,10 +77,11 @@ macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
 
-### What's new in v3.3.1
+### What's new in v3.3.2
 
-- The Windows icon now fills tray, Start and taskbar slots instead of looking smaller than neighbouring icons.
-- The Windows window pump keeps processing queued work even when Tk timer wake-ups stop arriving.
+- Whisper Small, Whisper Large v3 Turbo and Whisper Large v3 are available as optional local transcription models.
+- The Snipvoice data folder and the downloaded-models folder can each be moved to another location, including a models folder shared with other apps.
+- Configurações groups transcription and summary model downloads under Modelos, and download buttons stand out clearly on their cards.
 
 ## First use
 
@@ -213,7 +214,7 @@ Downloaded models live apart from the data folder, under
 `%LOCALAPPDATA%\Snipvoice` by default (macOS: `~/Library/Caches/Snipvoice`;
 Linux: `~/.cache/snipvoice`), as plain GGUF files in `voice-models\<model>\`
 and `summary-models\<model>\`, each beside a `manifest.json`. Other
-compatible apps can open those files directly. **Configurações > Geral >
+compatible apps can open those files directly. **Configurações > Modelos >
 Pasta dos modelos** moves them to another folder with the same restart and
 verified copy; that folder may be shared with other apps, and only the two
 Snipvoice subfolders are written there. A model already present at the
