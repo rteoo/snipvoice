@@ -43,7 +43,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v3.2.0 release](https://github.com/rteoo/snipvoice/releases/tag/v3.2.0).
+[stable v3.3.0 release](https://github.com/rteoo/snipvoice/releases/tag/v3.3.0).
 To run from source with Python installed:
 
 ```powershell
@@ -65,7 +65,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v3.2.0`](https://github.com/rteoo/snipvoice/releases/tag/v3.2.0):
+[`v3.3.0`](https://github.com/rteoo/snipvoice/releases/tag/v3.3.0):
 
 | Platform | Package |
 | --- | --- |
@@ -77,12 +77,12 @@ macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
 
-### What's new in v3.2.0
+### What's new in v3.3.0
 
-- Meeting memory now supports transcript navigation, revision-scoped annotations, searchable collections, cited reports, and questions across meetings.
-- Consent, retention, restore, purge, and export workflows keep local meeting data recoverable and privacy-aware.
-- The application follows the system appearance more reliably, with a refreshed dark theme and stable persisted theme settings.
-- CI now exercises the supported Windows, macOS, and Linux boundaries with native runtime and capture-helper validation.
+- The library is easier to navigate: one toolbar, filters and cross-meeting questions on demand, and each recording split into Notas, Transcrição, Resumo, Perguntar and Arquivos.
+- Configurações is organized into Geral, Privacidade, Transcrição and Resumos sections instead of one long page.
+- Dark and light themes render checkboxes, fields, meters, scrollbars and borders correctly, and controls stay whole at the minimum window size.
+- The clean Windows audio runtime can be built from PowerShell with an MSYS2 toolchain.
 
 ## First use
 
