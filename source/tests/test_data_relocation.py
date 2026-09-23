@@ -215,5 +215,108 @@ class ResolveTests(RelocationTestCase):
         self.assertEqual(app_paths.configured_data_dir(), self.src)
 
 
+
+class ModelsRelocationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(dir=TMP)
+        self.addCleanup(temp.cleanup)
+        self.root = temp.name
+        self.config = os.path.join(self.root, "config")
+        self.src = os.path.join(self.root, "local", "Snipvoice")
+        self.dst = os.path.join(self.root, "D", "models")
+        _write(os.path.join(self.src, "voice-models", "parakeet", "parakeet.gguf"), "voice")
+        _write(os.path.join(self.src, "voice-models", "parakeet", "manifest.json"), "{}")
+        _write(os.path.join(self.src, "summary-models", "qwen", "qwen.gguf"), "summary")
+        _write(os.path.join(self.src, app_paths.LOCATION_NAME), "{}")
+        _write(os.path.join(self.dst, "lmstudio", "other.gguf"), "foreign")
+        patches = [
+            mock.patch.object(app_paths, "config_dir", return_value=self.config),
+            mock.patch.object(app_paths, "default_models_dir", return_value=self.src),
+            mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": "", "SNIPVOICE_SUMMARY_CACHE": ""}),
+        ]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def _assert_moved(self):
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "voice-models", "parakeet", "parakeet.gguf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "summary-models", "qwen", "qwen.gguf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "lmstudio", "other.gguf")))
+        self.assertFalse(os.path.exists(os.path.join(self.src, "voice-models")))
+        self.assertFalse(os.path.exists(os.path.join(self.src, "summary-models")))
+        self.assertTrue(os.path.isfile(os.path.join(self.src, app_paths.LOCATION_NAME)))
+        self.assertEqual(app_paths.configured_models_dir(), self.dst)
+
+    def test_shared_folder_with_other_files_is_accepted(self):
+        self.assertEqual(data_relocation.validate_models_target(self.src, self.dst), self.dst)
+
+    def test_rejects_same_nested_and_env_locked_targets(self):
+        with self.assertRaisesRegex(RelocationError, "atual"):
+            data_relocation.validate_models_target(self.src, self.src)
+        with self.assertRaisesRegex(RelocationError, "dentro"):
+            data_relocation.validate_models_target(
+                self.src, os.path.join(self.src, "voice-models", "x"))
+        with mock.patch.dict(os.environ, {"SNIPVOICE_SUMMARY_CACHE": self.src}):
+            with self.assertRaisesRegex(RelocationError, "SNIPVOICE"):
+                data_relocation.validate_models_target(self.src, self.dst)
+
+    def test_request_then_start_moves_models_by_rename(self):
+        data_relocation.request_models_relocation(self.src, self.dst)
+        self.assertEqual(app_paths.configured_models_dir(), self.src)
+        self.assertEqual(
+            data_relocation.complete_pending_models_relocation(),
+            f"Modelos movidos para {self.dst}.",
+        )
+        self._assert_moved()
+
+    def test_cross_volume_models_are_copied_verified_and_deleted(self):
+        data_relocation.request_models_relocation(self.src, self.dst)
+        with mock.patch.object(data_relocation.os, "rename", side_effect=OSError(18, "EXDEV")):
+            message = data_relocation.complete_pending_models_relocation()
+        self.assertEqual(message, f"Modelos movidos para {self.dst}.")
+        self._assert_moved()
+
+    def test_model_already_at_destination_is_kept_and_old_copy_left(self):
+        _write(os.path.join(self.dst, "voice-models", "parakeet", "parakeet.gguf"), "theirs")
+        data_relocation.request_models_relocation(self.src, self.dst)
+        message = data_relocation.complete_pending_models_relocation()
+        self.assertIn("parakeet", message)
+        with open(os.path.join(self.dst, "voice-models", "parakeet", "parakeet.gguf"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "theirs")
+        self.assertTrue(os.path.isfile(os.path.join(self.src, "voice-models", "parakeet", "parakeet.gguf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "summary-models", "qwen", "qwen.gguf")))
+        self.assertEqual(app_paths.configured_models_dir(), self.dst)
+
+    def test_failure_puts_renamed_models_back_and_keeps_the_old_root(self):
+        data_relocation.request_models_relocation(self.src, self.dst)
+        real_rename = os.rename
+
+        def rename(source, target):
+            if "qwen" in source and source.startswith(self.src):
+                raise OSError(18, "EXDEV")
+            return real_rename(source, target)
+
+        with mock.patch.object(data_relocation.os, "rename", side_effect=rename), \
+                mock.patch.object(data_relocation.shutil, "copytree", side_effect=OSError("disk")):
+            message = data_relocation.complete_pending_models_relocation()
+        self.assertIn("Nada foi alterado", message)
+        self.assertTrue(os.path.isfile(os.path.join(self.src, "voice-models", "parakeet", "parakeet.gguf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.src, "summary-models", "qwen", "qwen.gguf")))
+        self.assertFalse(os.path.exists(os.path.join(self.dst, "voice-models", "parakeet")))
+        self.assertFalse(os.path.exists(os.path.join(self.dst, "summary-models", "qwen")))
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "lmstudio", "other.gguf")))
+        self.assertEqual(app_paths.configured_models_dir(), self.src)
+
+    def test_active_caches_follow_the_chosen_root(self):
+        import summary_models
+        import voice_models
+
+        app_paths.write_location({"models_dir": self.dst})
+        self.assertEqual(voice_models.voice_cache_dir(), os.path.join(self.dst, "voice-models"))
+        self.assertEqual(summary_models.summary_cache_dir(), os.path.join(self.dst, "summary-models"))
+        with mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": self.root}):
+            self.assertEqual(voice_models.voice_cache_dir(), self.root)
+
+
 if __name__ == "__main__":
     unittest.main()

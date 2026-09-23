@@ -75,6 +75,35 @@ class StandaloneTests(unittest.TestCase):
         self.assertIn("SNIPVOICE_HOME", message)
         self.instance.quit_app.assert_not_called()
 
+    def test_models_relocation_waits_for_downloads(self):
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.is_busy.return_value = False
+        self.instance.voice = mock.Mock()
+        self.instance.voice.model_download_in_progress.return_value = True
+        self.instance.quit_app = mock.Mock()
+        message = self.instance.request_models_relocation(os.path.join(self.temp.name, "models"))
+        self.assertIn("downloads", message)
+        self.instance.quit_app.assert_not_called()
+
+    def test_models_relocation_records_the_move_then_quits_to_relaunch(self):
+        config = os.path.join(self.temp.name, "config")
+        current = os.path.join(self.temp.name, "local", "Snipvoice")
+        target = os.path.join(self.temp.name, "shared-models")
+        os.makedirs(current)
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.is_busy.return_value = False
+        self.instance.voice = mock.Mock()
+        self.instance.voice.model_download_in_progress.return_value = False
+        self.instance.quit_app = mock.Mock()
+        with mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": "", "SNIPVOICE_SUMMARY_CACHE": ""}), \
+                mock.patch.object(app.app_paths, "config_dir", return_value=config), \
+                mock.patch.object(app.app_paths, "default_models_dir", return_value=current):
+            self.assertEqual(self.instance.request_models_relocation(target), "")
+            location = app.app_paths.read_location()
+        self.assertEqual(location["pending_models_move"], {"from": current, "to": target})
+        self.assertTrue(self.instance.relaunch_requested)
+        self.instance.quit_app.assert_called_once_with(None, None)
+
     def test_startup_notices_are_shown_when_the_tray_is_ready(self):
         self.instance._startup_notices = ["Dados movidos para D."]
         self.instance.notify_error = mock.Mock()
@@ -87,8 +116,8 @@ class StandaloneTests(unittest.TestCase):
         attempts = iter([False, False, True])
         instance = mock.Mock(relaunch_requested=True)
 
-        def construct(relocation_message=""):
-            events.append(("app", relocation_message))
+        def construct(startup_notices=()):
+            events.append(("app", startup_notices))
             return instance
 
         with mock.patch.object(app.sys, "argv", ["snipvoice.pyw", app.RELAUNCH_FLAG]), \
@@ -97,10 +126,12 @@ class StandaloneTests(unittest.TestCase):
                 mock.patch.object(app.time, "sleep"), \
                 mock.patch.object(app.data_relocation, "complete_pending_relocation",
                                   side_effect=lambda: events.append("move") or "moved"), \
+                mock.patch.object(app.data_relocation, "complete_pending_models_relocation",
+                                  side_effect=lambda: events.append("models") or ""), \
                 mock.patch.object(app, "Snipvoice", side_effect=construct), \
                 mock.patch.object(app, "relaunch", side_effect=lambda: events.append("relaunch")):
             app.main()
-        self.assertEqual(events, ["move", ("app", "moved"), "relaunch"])
+        self.assertEqual(events, ["move", "models", ("app", ("moved", "")), "relaunch"])
         instance.run.assert_called_once_with(show_settings=False)
 
     def test_main_without_relaunch_flag_does_not_wait_for_the_lock(self):

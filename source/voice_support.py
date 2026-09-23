@@ -38,11 +38,11 @@ from voice_history import (
 )
 from voice_models import (
     VoiceModelError,
-    default_voice_cache_dir,
     delete_model,
     download_model,
     installed_model_path,
     model_is_installed,
+    voice_cache_dir,
 )
 from voice_provider import create_provider
 from voice_runtime import VoiceRuntimeError
@@ -160,7 +160,7 @@ class VoiceController:
         self._model_download_cancel = threading.Event()
         self._capture_factory = capture_factory or AudioCapture
         self._download = download or download_model
-        self.cache_dir = cache_dir or self.settings.cache_dir or default_voice_cache_dir()
+        self.cache_dir = cache_dir or self.settings.cache_dir or voice_cache_dir()
         self._provider = provider or create_provider(
             self.cache_dir,
             backend=backend,

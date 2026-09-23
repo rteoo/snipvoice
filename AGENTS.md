@@ -16,8 +16,10 @@ Read the active runtime's global operator contract and SOUL.md before work.
   atomic JSON, hash-verified model downloads, and safe manual history retry.
 - User data is `~/.snipvoice`, a user-moved folder recorded in the config-dir
   `location.json` (`app_paths`), or `SNIPVOICE_HOME`; moves run at startup in
-  `data_relocation` before any data file opens. Cache is independent and
-  non-roaming / `SNIPVOICE_VOICE_CACHE`. Never migrate Sniptype data implicitly.
+  `data_relocation` before any data file opens. Model caches are independent
+  and non-roaming: a user-movable root (`models_dir` in `location.json`) holding
+  `voice-models`/`summary-models`, or `SNIPVOICE_VOICE_CACHE` /
+  `SNIPVOICE_SUMMARY_CACHE`. Never migrate Sniptype data implicitly.
 - `commands.json` contains private literal commands. Never copy live libraries,
   recordings, models, settings, logs, or predecessor Git backups into the repo.
 - Use `ui_theme` for GUI colors/fonts; native overlays never steal focus.

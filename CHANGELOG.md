@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Configurações > Geral > Pasta dos modelos to move downloaded transcription and summary models to another folder, including one shared with other apps; the GGUF files stay usable by compatible apps and unrelated files in that folder are never touched.
+
 - Add Configurações > Geral > Pasta de dados to move all Snipvoice data (settings, dictation history, recordings and the meeting library) to another folder, such as another drive; the app restarts and verifies the copy before removing the old folder.
 
 - Add Whisper Small, Whisper Large v3 Turbo and Whisper Large v3 as optional, hash-pinned transcription models for dictation and meetings.

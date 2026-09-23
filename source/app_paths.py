@@ -39,6 +39,28 @@ def location_file():
     return os.path.join(config_dir(), LOCATION_NAME)
 
 
+def default_models_dir(system=None):
+    """Default root holding the ``voice-models`` and ``summary-models`` caches."""
+    from platform_support import current_os
+
+    os_name = system or current_os()
+    home = os.path.expanduser("~")
+    if os_name == "windows":
+        root = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        return os.path.join(root, "Snipvoice")
+    if os_name == "darwin":
+        return os.path.join(home, "Library", "Caches", "Snipvoice")
+    return os.path.join(home, ".cache", "snipvoice")
+
+
+def configured_models_dir():
+    """The model root the user chose, or the per-OS default."""
+    chosen = read_location().get("models_dir")
+    if isinstance(chosen, str) and os.path.isabs(chosen):
+        return os.path.abspath(chosen)
+    return default_models_dir()
+
+
 def default_data_dir():
     return os.path.abspath(os.path.expanduser(DEFAULT_HOME))
 
