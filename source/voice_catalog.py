@@ -13,6 +13,7 @@ PROFILE_ACCURACY = "accuracy"
 PROFILE_STREAMING = "streaming"
 PROFILE_WHISPER_SMALL = "whisper-small"
 PROFILE_WHISPER_TURBO = "whisper-turbo"
+PROFILE_WHISPER_LARGE = "whisper-large-v3"
 
 PROFILES = (
     PROFILE_BALANCED,
@@ -21,6 +22,7 @@ PROFILES = (
     PROFILE_STREAMING,
     PROFILE_WHISPER_SMALL,
     PROFILE_WHISPER_TURBO,
+    PROFILE_WHISPER_LARGE,
 )
 
 LANGUAGE_AUTO = "auto"
@@ -236,6 +238,42 @@ _WHISPER_TURBO_Q8 = {
     "user_selectable": True,
 }
 
+_WHISPER_LARGE_Q8 = {
+    "id": "whisper-large-v3-q8",
+    "profile": PROFILE_WHISPER_LARGE,
+    "filename": "whisper-large-v3-Q8_0.gguf",
+    "url": (
+        "https://huggingface.co/handy-computer/whisper-large-v3-gguf/"
+        "resolve/b33a05f1459f33b0c876f014a57d51618b77d754/"
+        "whisper-large-v3-Q8_0.gguf"
+    ),
+    "sha256": "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
+    "size_bytes": 1668741440,
+    "upstream_model": "openai/whisper-large-v3",
+    "upstream_commit": "06f233fe06e710322aca913c1bc4249a0d71fce1",
+    "quant_source": "handy-computer/whisper-large-v3-gguf",
+    "runtime": RUNTIME_TRANSCRIBE_CPP,
+    "quantization": "Q8_0",
+    "format": "gguf",
+    "streaming": False,
+    "language_hint": "optional",
+    "min_memory_bytes": 3 * 1024 * 1024 * 1024,
+    "recommended_memory_bytes": 4 * 1024 * 1024 * 1024,
+    "license_id": "Apache-2.0",
+    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "attribution": (
+        "Whisper large-v3 by OpenAI, quantized to Q8_0 by handy-computer "
+        "for transcribe.cpp."
+    ),
+    "source_url": "https://huggingface.co/openai/whisper-large-v3",
+    "purpose": (
+        "Whisper Large v3 (opcional): o mais preciso em português, porém "
+        "mais lento que o tempo real na CPU e com maior uso de memória; nunca "
+        "é selecionado automaticamente."
+    ),
+    "user_selectable": True,
+}
+
 MODEL_CATALOG = (
     _PARAKEET_Q8,
     _QWEN_06_Q8,
@@ -243,6 +281,7 @@ MODEL_CATALOG = (
     _NEMOTRON_Q8,
     _WHISPER_SMALL_Q8,
     _WHISPER_TURBO_Q8,
+    _WHISPER_LARGE_Q8,
 )
 
 DEFAULT_PROFILE = PROFILE_BALANCED

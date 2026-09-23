@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add Whisper Small and Whisper Large v3 Turbo as optional, hash-pinned transcription models for dictation and meetings.
+- Add Whisper Small, Whisper Large v3 Turbo and Whisper Large v3 as optional, hash-pinned transcription models for dictation and meetings.
 
 ## 3.3.1 - 2026-09-23
 

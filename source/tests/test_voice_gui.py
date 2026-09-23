@@ -548,6 +548,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertIn("Precisão · Qwen 1.7B", profile_values)
         self.assertIn("Whisper Small", profile_values)
         self.assertIn("Whisper Large v3 Turbo", profile_values)
+        self.assertIn("Whisper Large v3", profile_values)
         self.assertNotIn("Transcrição contínua", profile_values)
         self.assertEqual(whisper_selected, "whisper-turbo")
         self.assertEqual(whisper_language_values, language_values)
