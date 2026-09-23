@@ -453,6 +453,16 @@ class MeetingWindow:
         kwargs.setdefault("fg", self.ui.text)
         return tk.Label(parent, text=text, **kwargs)
 
+    def _wrap_label(self, parent, text, **kwargs):
+        """A label that wraps at its allocated width, not a fixed length.
+
+        ``width=1`` stops the wrapped text from requesting width back from
+        its parent, which would otherwise widen the pane it sits in.
+        """
+        label = self._label(parent, text, width=1, wraplength=360, **kwargs)
+        label.bind("<Configure>", lambda event: label.configure(wraplength=max(event.width, 120)))
+        return label
+
     def _button(self, parent, text, command, accent=False, danger=False):
         return tk.Button(parent, text=text, command=command, font=self.ui.font(),
                          **self.ui.button_colors(accent=accent, danger=danger),
@@ -744,14 +754,15 @@ class MeetingWindow:
             row=automation_row, column=0, sticky="w", pady=(row_pady, 0))
         automation.grid(row=automation_row + 1, column=0, sticky="ew", pady=(0, row_pady))
         note_row = automation_row + 2
-        self._label(
+        note = self._wrap_label(
             settings_card,
             "Configurações valem para a próxima gravação. A pasta local padrão "
             "fica ao lado da biblioteca.\nO sistema inclui todos os sons do "
             "dispositivo escolhido. Use fones para reduzir duplicação acústica.",
-            justify="left", anchor="w", wraplength=360, bg=self.ui.card,
+            justify="left", anchor="w", bg=self.ui.card,
             fg=self.ui.text_muted, font=self.ui.font(9),
-        ).grid(row=note_row, column=0, sticky="ew", pady=note_pady)
+        )
+        note.grid(row=note_row, column=0, sticky="ew", pady=note_pady)
         commands = tk.Frame(settings_card, bg=self.ui.card)
         commands.grid(row=note_row + 1, column=0, sticky="w")
         self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
@@ -949,32 +960,36 @@ class MeetingWindow:
         self.summary_model_status.set(f'{entry["name"]} {action}.')
 
     def _build_library(self, parent):
-        search_row = self._card(parent, pady=self.ui.space_sm)
-        search_row.pack(fill="x", pady=(0, self.ui.space_md))
+        search_card = self._card(parent, pady=self.ui.space_sm)
+        search_card.pack(fill="x", pady=(0, self.ui.space_md))
+        # Two rows: search and library actions together overflowed the pane
+        # at the minimum window width and clipped the index status.
+        search_row = tk.Frame(search_card, bg=self.ui.card)
+        search_row.pack(fill="x")
+        actions_row = tk.Frame(search_card, bg=self.ui.card)
+        actions_row.pack(fill="x", pady=(self.ui.space_sm, 0))
         self.query = tk.StringVar(self.window)
         self._label(search_row, "Buscar", bg=self.ui.card,
                     font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 8))
-        # The entry expands into spare width; a small minimum keeps the index
-        # status at the end of this row from being clipped.
-        search = self._entry(search_row, self.query, 12)
+        search = self._entry(search_row, self.query)
         search.pack(side="left", fill="x", expand=True)
         search.bind("<Return>", lambda _event: self.search())
         self._button(search_row, "Buscar", self.search).pack(side="left", padx=8)
         self.status_filter = tk.StringVar(self.window, "Todos")
         filters = ttk.Combobox(search_row, textvariable=self.status_filter, state="readonly",
                                values=list(STATUS_FILTERS), width=14)
-        filters.pack(side="left", padx=(0, 8))
+        filters.pack(side="left")
         filters.bind("<<ComboboxSelected>>", lambda _event: self.search())
-        self._button(search_row, "Importar áudio…", self.import_audio).pack(side="left")
-        self.rebuild_button = self._button(search_row, "Reconstruir índice", self.rebuild_index)
+        self._button(actions_row, "Importar áudio…", self.import_audio).pack(side="left")
+        self.rebuild_button = self._button(actions_row, "Reconstruir índice", self.rebuild_index)
         self.rebuild_button.pack(side="left", padx=(6, 0))
-        self.rebuild_cancel_button = self._button(search_row, "Cancelar índice", self.cancel_rebuild_index)
+        self.rebuild_cancel_button = self._button(actions_row, "Cancelar índice", self.cancel_rebuild_index)
         self.rebuild_cancel_button.configure(state="disabled")
         self.rebuild_cancel_button.pack(side="left", padx=(6, 0))
-        self._button(search_row, "Lixeira…", self.show_trash).pack(side="left", padx=(6, 0))
+        self._button(actions_row, "Lixeira…", self.show_trash).pack(side="left", padx=(6, 0))
         self.index_status = tk.StringVar(self.window, "Índice de busca: estado desconhecido")
-        self._label(search_row, "", textvariable=self.index_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w").pack(side="left", padx=(8, 0))
+        self._label(actions_row, "", textvariable=self.index_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").pack(side="left", padx=(12, 0))
 
         organization_row = self._card(parent, pady=self.ui.space_sm)
         organization_row.pack(fill="x", pady=(0, self.ui.space_md))
@@ -998,7 +1013,7 @@ class MeetingWindow:
         ), 1):
             self._label(organization_row, caption, bg=self.ui.card, fg=self.ui.text_muted,
                         font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
-            entry = self._entry(organization_row, variable, 10)
+            entry = self._entry(organization_row, variable, 6)
             entry.configure(insertwidth=1)
             entry.grid(row=1, column=column, sticky="ew", padx=(0, 4))
             organization_row.columnconfigure(column, weight=1)
@@ -1097,8 +1112,11 @@ class MeetingWindow:
             left, columns=("source", "meeting", "snippet"), show="headings",
             selectmode="browse", height=4, style="Meeting.Treeview",
         )
-        for column, label, width in (("source", "Fonte", 90), ("meeting", "Reunião", 120),
-                                      ("snippet", "Trecho", 260)):
+        # Modest starting widths: this tree's request sets the list pane's
+        # width, and 470px starved the detail pane's controls. The snippet
+        # column stretches into whatever the pane receives.
+        for column, label, width in (("source", "Fonte", 70), ("meeting", "Reunião", 90),
+                                      ("snippet", "Trecho", 120)):
             self.search_results.heading(column, text=label)
             self.search_results.column(column, width=width, stretch=column == "snippet")
         self.search_results.pack(fill="x", pady=(0, 4))
@@ -1109,14 +1127,16 @@ class MeetingWindow:
         self.title = tk.StringVar(self.window)
         self.title.trace_add("write", self._mark_dirty)
         self._label(title_row, "Título").pack(side="left", padx=(0, 8))
-        self._entry(title_row, self.title).pack(side="left", fill="x", expand=True)
+        # Small minimum width: the entry expands, and a wide request clipped
+        # the delete button off the pane at the minimum window size.
+        self._entry(title_row, self.title, 12).pack(side="left", fill="x", expand=True)
         self._button(title_row, "Salvar notas", self.save_notes).pack(side="left", padx=(8, 0))
         self.delete_button = self._button(title_row, "Excluir gravação", self.delete_selected, danger=True)
         self.delete_button.configure(state="disabled")
         self.delete_button.pack(side="left", padx=(8, 0))
         self.audio_capability_status = tk.StringVar(self.window, "Áudio raw disponível.")
-        self._label(right, "", textvariable=self.audio_capability_status, anchor="w",
-                    fg=self.ui.text_muted, wraplength=720).pack(fill="x", padx=12, pady=(4, 0))
+        self._wrap_label(right, "", textvariable=self.audio_capability_status, anchor="w",
+                    fg=self.ui.text_muted).pack(fill="x", padx=12, pady=(4, 0))
         self._label(right, "Notas manuais", anchor="w").pack(fill="x", padx=12, pady=(12, 4))
         self.notes = tk.Text(right, height=5, wrap="word", undo=True, font=self.ui.font(), **self.ui.text_colors())
         self.notes.pack(fill="both", expand=True, padx=(12, 0))
@@ -1125,10 +1145,10 @@ class MeetingWindow:
         organization_detail.pack(fill="x", padx=(12, 0), pady=(8, 0))
         self._label(organization_detail, "Organização", bg=self.ui.card,
                     fg=self.ui.text_strong, font=self.ui.font(10, "bold")).pack(anchor="w")
-        self._label(
+        self._wrap_label(
             organization_detail,
             "Coleções/projetos, tags e pessoas usam rótulos locais; a série é manual.",
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720,
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x", pady=(1, 4))
         organization_inputs = tk.Frame(organization_detail, bg=self.ui.card)
         organization_inputs.pack(fill="x")
@@ -1144,12 +1164,12 @@ class MeetingWindow:
         )):
             self._label(organization_inputs, caption, bg=self.ui.card, fg=self.ui.text_muted,
                         font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
-            self._entry(organization_inputs, variable, 8).grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            self._entry(organization_inputs, variable, 5).grid(row=1, column=column, sticky="ew", padx=(0, 4))
             organization_inputs.columnconfigure(column, weight=1)
         self._button(organization_inputs, "Salvar organização", self.save_organization).grid(row=1, column=4)
         self.organization_status = tk.StringVar(self.window, "Selecione uma reunião para editar seus rótulos.")
-        self._label(organization_detail, "", textvariable=self.organization_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", wraplength=720).pack(fill="x", pady=(2, 0))
+        self._wrap_label(organization_detail, "", textvariable=self.organization_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").pack(fill="x", pady=(2, 0))
         bookmark_row = ttk.Frame(right, style="Meeting.TFrame")
         bookmark_row.pack(fill="x", padx=(12, 0), pady=8)
         self.position = tk.StringVar(self.window, "0")
@@ -1172,9 +1192,9 @@ class MeetingWindow:
         ).pack(side="left")
         self.transcript_timing = tk.StringVar(self.window, "Os horários indicam trechos de áudio, não palavras.")
         self._label(
-            transcript_header, "", textvariable=self.transcript_timing, anchor="e",
+            right, "", textvariable=self.transcript_timing, anchor="w",
             fg=self.ui.text_muted,
-        ).pack(side="right")
+        ).pack(fill="x", padx=12)
         self.transcript = ttk.Treeview(
             right, columns=("time", "track", "speaker", "text"), show="headings", height=4,
             selectmode="browse", style="Meeting.Treeview")
@@ -1257,8 +1277,8 @@ class MeetingWindow:
         self.play_button.pack(side="left", padx=8)
         self._button(playback, "Parar reprodução", lambda: self._action("stop_playback", urgent=True)).pack(side="left")
         self.playback_status = tk.StringVar(self.window, "Reprodução parada.")
-        self._label(playback, "", textvariable=self.playback_status, anchor="w",
-                    fg=self.ui.text_muted).pack(side="left", padx=(8, 0))
+        self._label(right, "", textvariable=self.playback_status, anchor="w",
+                    fg=self.ui.text_muted).pack(fill="x", padx=12)
         actions = ttk.Frame(right, style="Meeting.TFrame")
         actions.pack(fill="x", padx=(12, 0), pady=4)
         self.transcribe_button = self._button(actions, "Transcrever novamente", self.transcribe)
@@ -1300,20 +1320,22 @@ class MeetingWindow:
         report_frame.pack(fill="x", padx=(12, 0), pady=(8, 0))
         self._label(report_frame, "Relatórios locais", bg=self.ui.card,
                     fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(anchor="w")
-        self._label(
+        self._wrap_label(
             report_frame,
             "Perfis são receitas locais versionadas; o modelo nunca recebe dados fora do computador.",
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720,
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x", pady=(2, 6))
+        self.report_profile_choice = tk.StringVar(self.window, "Geral")
+        # The profile picker gets its own line; beside six buttons it left no
+        # room for the last ones in a narrow detail pane.
+        self.report_profile_box = ttk.Combobox(
+            report_frame, textvariable=self.report_profile_choice, state="readonly", width=10,
+        )
+        self.report_profile_box.pack(fill="x", pady=2)
         profile_row = tk.Frame(report_frame, bg=self.ui.card)
         profile_row.pack(fill="x", pady=2)
-        self.report_profile_choice = tk.StringVar(self.window, "Geral")
-        self.report_profile_box = ttk.Combobox(
-            profile_row, textvariable=self.report_profile_choice, state="readonly", width=28,
-        )
-        self.report_profile_box.pack(side="left", fill="x", expand=True)
         self.report_profile_box.bind("<<ComboboxSelected>>", self._report_profile_changed)
-        self._button(profile_row, "Criar", self.create_report_profile).pack(side="left", padx=(6, 0))
+        self._button(profile_row, "Criar", self.create_report_profile).pack(side="left")
         self._button(profile_row, "Duplicar", self.duplicate_report_profile).pack(side="left", padx=(6, 0))
         self._button(profile_row, "Editar", self.edit_report_profile).pack(side="left", padx=(6, 0))
         self.report_disable_button = self._button(profile_row, "Desativar", self.disable_report_profile)
@@ -1326,7 +1348,7 @@ class MeetingWindow:
         self._label(history_row, "Histórico", bg=self.ui.card).pack(side="left", padx=(0, 6))
         self.report_history_choice = tk.StringVar(self.window)
         self.report_history_box = ttk.Combobox(
-            history_row, textvariable=self.report_history_choice, state="readonly", width=48,
+            history_row, textvariable=self.report_history_choice, state="readonly", width=12,
         )
         self.report_history_box.pack(side="left", fill="x", expand=True)
         self.report_history_box.bind("<<ComboboxSelected>>", self._report_history_changed)
@@ -1336,15 +1358,15 @@ class MeetingWindow:
         self._label(section_row, "Seção", bg=self.ui.card).pack(side="left", padx=(0, 6))
         self.report_section_choice = tk.StringVar(self.window)
         self.report_section_box = ttk.Combobox(
-            section_row, textvariable=self.report_section_choice, state="readonly", width=24,
+            section_row, textvariable=self.report_section_choice, state="readonly", width=10,
         )
         self.report_section_box.pack(side="left", fill="x", expand=True)
         self.report_section_box.bind("<<ComboboxSelected>>", self._report_section_changed)
         self._button(section_row, "Copiar seção", self.copy_report_section).pack(side="left", padx=(6, 0))
         self._button(section_row, "Exportar…", self.export_report).pack(side="left", padx=(6, 0))
         self.report_provenance = tk.StringVar(self.window, "Nenhum relatório selecionado.")
-        self._label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", justify="left", wraplength=720).pack(fill="x", pady=2)
+        self._wrap_label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=2)
         self.report_editor = tk.Text(report_frame, height=5, wrap="word", font=self.ui.font(),
                                     **self.ui.text_colors())
         self.report_editor.pack(fill="x", pady=(4, 2))
@@ -1352,7 +1374,7 @@ class MeetingWindow:
         report_actions.pack(fill="x", pady=2)
         self._button(report_actions, "Salvar revisão", self.save_report_review, accent=True).pack(side="left")
         self._label(report_actions, "Citações", bg=self.ui.card, fg=self.ui.text_muted).pack(side="left", padx=(12, 4))
-        self.report_citations = tk.Listbox(report_actions, height=2, width=42,
+        self.report_citations = tk.Listbox(report_actions, height=2, width=10,
                                            font=self.ui.font(), **self.ui.listbox_colors())
         self.report_citations.pack(side="left", fill="x", expand=True)
         self.report_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_report_citation())
@@ -1365,7 +1387,7 @@ class MeetingWindow:
         self.ask_question = tk.StringVar(self.window)
         ask_row = tk.Frame(ask_frame, bg=self.ui.card)
         ask_row.pack(fill="x", pady=3)
-        self._entry(ask_row, self.ask_question, 60).pack(side="left", fill="x", expand=True)
+        self._entry(ask_row, self.ask_question, 12).pack(side="left", fill="x", expand=True)
         self._button(ask_row, "Perguntar", self.ask_this_meeting, accent=True).pack(side="left", padx=(6, 0))
         self.ask_answer = tk.Text(ask_frame, height=3, wrap="word", font=self.ui.font(),
                                   **self.ui.text_colors())
@@ -1374,7 +1396,7 @@ class MeetingWindow:
         ask_citation_row.pack(fill="x", pady=(0, 2))
         self._label(ask_citation_row, "Citações", bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
-        self.ask_citations = tk.Listbox(ask_citation_row, height=2, width=42,
+        self.ask_citations = tk.Listbox(ask_citation_row, height=2, width=10,
                                         font=self.ui.font(), **self.ui.listbox_colors())
         self.ask_citations.pack(side="left", fill="x", expand=True)
         self.ask_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_ask_citation())
@@ -1384,8 +1406,8 @@ class MeetingWindow:
         self.ask_save_button = self._button(ask_actions, "Salvar resposta", self.save_answer)
         self.ask_save_button.pack(side="left")
         self.ask_status = tk.StringVar(self.window, "Respostas ficam somente na memória até você salvar.")
-        self._label(ask_actions, "", textvariable=self.ask_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", wraplength=580).pack(side="left", padx=(8, 0))
+        self._wrap_label(ask_actions, "", textvariable=self.ask_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").pack(side="left", fill="x", expand=True, padx=(8, 0))
 
     def _build_privacy_card(self, parent):
         """Build privacy/retention controls inside the existing scrollable page."""
