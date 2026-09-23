@@ -772,12 +772,22 @@ class MeetingWindow:
         )
         general = self.settings_sections.add("general", "Geral")
         privacy = self.settings_sections.add("privacy", "Privacidade")
-        transcription = self.settings_sections.add("transcription", "Transcrição")
-        summary_section = self.settings_sections.add("summary", "Resumos")
+        models = self.settings_sections.add("models", "Modelos")
+        model_nav = tk.Frame(models, bg=self.ui.surface)
+        model_nav.pack(fill="x", pady=(0, self.ui.space_md))
+        model_pages = tk.Frame(models, bg=self.ui.surface)
+        model_pages.pack(fill="x")
+        self.model_sections = SectionSwitcher(
+            self.ui, model_nav, model_pages,
+            on_select=lambda _key: settings_canvas.yview_moveto(0),
+        )
+        transcription = self.model_sections.add("transcription", "Transcrição")
+        summary_section = self.model_sections.add("summary", "Resumos")
         self._build_appearance_card(general)
         self.location_cards = {}
         for spec in self._location_specs():
-            self._build_location_card(general, spec)
+            # The model folder serves both model kinds, so it sits under their tabs.
+            self._build_location_card(models if spec["key"] == "models" else general, spec)
         self.recording_defaults_parent = self._card(general)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
         self._build_privacy_card(privacy)
@@ -1769,7 +1779,7 @@ class MeetingWindow:
         self._sync_raw_policy_controls()
 
     def _location_specs(self):
-        """Folder cards shown in Geral: app data, and downloaded models."""
+        """Folder cards: app data (Geral) and downloaded models (Modelos)."""
         specs = []
         if self.data_location is not None and self.relocate_data is not None:
             specs.append({
@@ -1779,7 +1789,7 @@ class MeetingWindow:
                 "description": (
                     "Configurações, histórico de ditado, gravações e a biblioteca de reuniões "
                     "ficam nesta pasta. Ao escolher outra, o Snipvoice move tudo para lá e "
-                    "reinicia. Os modelos baixados têm uma pasta própria, abaixo."
+                    "reinicia. Os modelos baixados têm uma pasta própria, na seção Modelos."
                 ),
                 "lock_note": "Definida pela variável SNIPVOICE_HOME; altere-a fora do aplicativo.",
                 "confirm": "Mover os dados do Snipvoice",

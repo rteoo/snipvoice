@@ -25,6 +25,9 @@ FLUENT_WINDOWS_COLORS = {
     "card": "#FFFFFF",
     "field": "#FFFFFF",
     "field_hover": "#F5F9FD",
+    "control": "#F5F5F5",
+    "control_active": "#E6E6E6",
+    "control_border": "#C4C4C4",
     "text": "#1B1B1B",
     "text_strong": "#242424",
     "text_muted": "#616161",
@@ -50,6 +53,8 @@ DARK_WINDOWS_COLORS = {
     "surface_alt": "#191A1D",
     "card": "#1B1C20",
     "field": "#222329",
+    "control": "#2C2E35",
+    "control_border": "#4B4E58",
     "text": "#E9EAEC",
     "text_strong": "#FFFFFF",
     "text_muted": "#A4A7AE",
@@ -261,7 +266,7 @@ class WidgetOptionTests(unittest.TestCase):
             self.assertEqual(theme.text_colors(), {})
             self.assertEqual(theme.listbox_colors(), {})
             self.assertEqual(theme.checkbutton_colors("#FFFFFF")["bg"], "#FFFFFF")
-            self.assertEqual(theme.button_colors()["bg"], "#FAFAFA")
+            self.assertEqual(theme.button_colors()["bg"], "#F5F5F5")
 
     def test_disabled_checkboxes_keep_readable_secondary_text(self):
         theme = ui_theme.build_theme("light", system="windows")
@@ -388,7 +393,8 @@ class WidgetOptionTests(unittest.TestCase):
                 colors = theme.button_colors(accent=accent)
                 self.assertEqual(
                     set(colors),
-                    {"bg", "fg", "activebackground", "activeforeground"},
+                    {"bg", "fg", "activebackground", "activeforeground",
+                     "highlightbackground"},
                 )
 
     def test_fluent_button_chrome_has_consistent_geometry_and_focus(self):
@@ -397,13 +403,39 @@ class WidgetOptionTests(unittest.TestCase):
             theme.button_chrome(),
             {
                 "relief": "flat", "bd": 0, "padx": 12, "pady": 6,
-                "highlightthickness": 1, "highlightbackground": theme.border,
-                "highlightcolor": theme.focus_ring, "cursor": "hand2",
+                "highlightthickness": 1, "highlightcolor": theme.focus_ring,
+                "cursor": "hand2",
             },
         )
         compact = theme.button_chrome(compact=True)
         self.assertEqual(compact["padx"], 8)
         self.assertEqual(compact["pady"], 4)
+
+    def test_neutral_buttons_stand_out_on_cards_and_the_page(self):
+        # Neutral buttons once shared the card's near-identical grey and its
+        # quiet border, so Baixar/Remover read as bare text on model cards.
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+                      for c in channels]
+            return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+        def contrast(a, b):
+            high, low = sorted((luminance(a), luminance(b)), reverse=True)
+            return (high + 0.05) / (low + 0.05)
+
+        for kind in ("windows", "dark"):
+            theme = ui_theme.build_theme(kind, system="windows")
+            colors = theme.button_colors()
+            for backdrop in (theme.card, theme.surface):
+                self.assertGreaterEqual(
+                    contrast(colors["highlightbackground"], backdrop), 1.5, (kind, backdrop))
+                self.assertNotEqual(colors["bg"], backdrop)
+
+    def test_filled_buttons_wear_no_grey_ring(self):
+        theme = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(theme.button_colors(accent=True)["highlightbackground"], theme.accent)
+        self.assertEqual(theme.button_colors(danger=True)["highlightbackground"], theme.danger)
 
     def test_danger_button_uses_distinct_semantic_tokens(self):
         theme = ui_theme.build_theme("windows", system="windows")

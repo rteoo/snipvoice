@@ -1187,7 +1187,9 @@ class Snipvoice:
                 text="Baixar",
                 width=ui.button_width(10),
                 command=lambda item=entry: download_model(item),
+                font=ui.font(),
                 **ui.button_colors(),
+                **ui.button_chrome(compact=True),
             )
             download_button.pack(side=tk.RIGHT, padx=(8, 0))
             download_buttons.append((download_button, entry))

@@ -1216,6 +1216,25 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertFalse(view.recording_defaults_parent.winfo_ismapped())
         self.assertTrue(sections.frames["privacy"].winfo_ismapped())
 
+    def test_settings_group_transcription_and_summary_models_under_modelos(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.settings_tab)
+        sections = view.settings_sections
+        self.assertEqual(list(sections.frames), ["general", "privacy", "models"])
+        self.assertEqual(sections.buttons["models"].cget("text"), "Modelos")
+        sections.select("models")
+        self.root.update()
+        models = view.model_sections
+        self.assertEqual(list(models.frames), ["transcription", "summary"])
+        self.assertEqual([models.buttons[key].cget("text") for key in models.frames],
+                         ["Transcrição", "Resumos"])
+        self.assertTrue(view.transcription_models_parent.winfo_ismapped())
+        self.assertFalse(models.frames["summary"].winfo_ismapped())
+        models.select("summary")
+        self.root.update()
+        self.assertTrue(models.frames["summary"].winfo_ismapped())
+        self.assertFalse(view.transcription_models_parent.winfo_ismapped())
+
     def test_library_panels_open_on_demand_and_count_active_filters(self):
         view, notebook = self._embedded_view()
         notebook.select(view.library_tab)
@@ -1347,7 +1366,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         )
         try:
             notebook.select(view.settings_tab)
-            view.settings_sections.select("summary")
+            view.settings_sections.select("models")
+            view.model_sections.select("summary")
             self.root.update()
             view.settings_canvas.yview_moveto(0)
             self.root.update()
