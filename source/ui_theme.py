@@ -134,6 +134,26 @@ class Theme:
             "selectforeground": self.select_fg,
             "disabledbackground": self.surface_alt,
             "disabledforeground": self.text_muted,
+            # Read-only entries otherwise keep Win32's light button face under
+            # the light dark-mode text, which makes their value invisible.
+            "readonlybackground": self.surface_alt,
+        }
+
+    def entry_chrome(self):
+        """Flat one-pixel field border for ``tk.Entry``. Native on macOS.
+
+        Win32's sunken relief draws its light bevel edges in white, so on a
+        white card only the top shadow line survives and the field reads as a
+        stray rule. The border width doubles as inner padding in ``bg``.
+        """
+        if self.system == "darwin":
+            return {}
+        return {
+            "relief": "flat",
+            "bd": 3,
+            "highlightthickness": 1,
+            "highlightbackground": self.border,
+            "highlightcolor": self.focus_ring,
         }
 
     def text_colors(self):
@@ -143,6 +163,7 @@ class Theme:
             return colors
         colors.pop("disabledbackground", None)
         colors.pop("disabledforeground", None)
+        colors.pop("readonlybackground", None)
         colors["inactiveselectbackground"] = self.select_bg
         return colors
 
@@ -155,6 +176,9 @@ class Theme:
             "fg": self.text,
             "selectbackground": self.select_bg,
             "selectforeground": self.select_fg,
+            # Tk's default highlight ring is near-white on the dark surfaces.
+            "highlightbackground": self.border,
+            "highlightcolor": self.focus_ring,
         }
 
     # Buttons and checkboxes are the widgets Aqua draws *itself*, and it draws
@@ -178,7 +202,10 @@ class Theme:
             "disabledforeground": self.text_muted,
         }
         if self.is_dark:
-            colors["selectcolor"] = self.accent
+            # Win32 paints ``selectcolor`` behind the indicator in *both*
+            # states and draws the check mark in ``fg``; an accent fill made
+            # every box look checked and hid the light mark.
+            colors["selectcolor"] = self.field
         return colors
 
     def toolbar_frame_colors(self):
@@ -534,11 +561,16 @@ def apply_ttk_theme(style, system=None, resolved=None):
 def configure_manager_styles(style, resolved=None):
     """Apply the shared Fluent shell styles to a live ttk style object."""
     ui = resolved or theme()
+    # The border/light/dark colors only matter under clam (dark mode); vista
+    # ignores them. Clam's defaults are near-white bevels around every tab.
     style.configure(
         "Manager.TNotebook",
         background=ui.surface,
         borderwidth=0,
         tabmargins=(0, 0, 0, 0),
+        bordercolor=ui.border,
+        lightcolor=ui.surface,
+        darkcolor=ui.surface,
     )
     style.configure(
         "Manager.TNotebook.Tab",
@@ -547,15 +579,36 @@ def configure_manager_styles(style, resolved=None):
         foreground=ui.tab_unselected_fg,
         background=ui.surface,
         borderwidth=0,
+        bordercolor=ui.border,
+        lightcolor=ui.surface,
+        darkcolor=ui.surface,
     )
     style.map(
         "Manager.TNotebook.Tab",
         foreground=[("selected", ui.accent), ("active", ui.text_strong)],
         background=[("selected", ui.card), ("active", ui.surface_hover)],
+        lightcolor=[("selected", ui.card)],
         # Built-in themes may map selected tabs to narrower horizontal padding.
         # Keep the selected tab's geometry stable while changing its colors.
         padding=[("selected", (18, 10))],
         expand=[("selected", (0, 0, 0, 0))],
+    )
+    style.configure(
+        "Horizontal.TProgressbar",
+        troughcolor=ui.field,
+        background=ui.accent,
+        bordercolor=ui.border,
+        lightcolor=ui.accent,
+        darkcolor=ui.accent,
+    )
+    style.configure("TPanedwindow", background=ui.surface)
+    style.configure(
+        "Sash",
+        background=ui.surface,
+        bordercolor=ui.surface,
+        lightcolor=ui.surface,
+        darkcolor=ui.surface,
+        gripcount=0,
     )
     style.configure("Manager.TFrame", background=ui.surface)
     style.configure("TFrame", background=ui.surface)
@@ -588,6 +641,13 @@ def configure_manager_styles(style, resolved=None):
             lightcolor=ui.surface_alt,
             darkcolor=ui.surface_alt,
         )
+        # Clam maps a near-white face onto idle states (e.g. an empty list's
+        # full-length thumb), overriding the configured background.
+        style.map(
+            f"{orientation}.TScrollbar",
+            background=[("pressed", ui.surface_alt_active), ("active", ui.surface_alt_active),
+                        ("!active", ui.surface_alt)],
+        )
     style.configure(
         "Manager.Treeview",
         background=ui.card,
@@ -596,6 +656,9 @@ def configure_manager_styles(style, resolved=None):
         rowheight=ui.tree_row_height,
         font=ui.font(9),
         borderwidth=0,
+        bordercolor=ui.border,
+        lightcolor=ui.card,
+        darkcolor=ui.card,
     )
     style.map(
         "Manager.Treeview",

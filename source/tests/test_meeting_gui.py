@@ -11,12 +11,13 @@ from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, MAX_PAGE_BACKSTACK,
+    APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, INDEX_STATE_LABELS, MAX_PAGE_BACKSTACK,
     MeetingWindow, NOTES_LIMIT,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, open_meeting_window, retention_plan_projection, validated_settings,
 )
+from meeting_index import INDEX_STATES
 from meeting_settings import EndpointSelection, resolve_meeting_settings
 
 
@@ -1098,6 +1099,37 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         finally:
             view.close()
             self.root.update()
+
+    def test_manager_controls_are_left_aligned_labelled_and_stacked(self):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        controller.read_workspace.return_value = {
+            "generation": 0, "collections": [], "series": [],
+        }
+        window = open_meeting_window(self.root, controller, lambda: {}, mock.Mock())
+        view = window._meeting_view
+        try:
+            self.root.update()
+            for check in (view.auto_transcribe_check, view.auto_summary_check, view.voice_boost_check):
+                self.assertEqual(check.cget("anchor"), "w")
+            # Side-packed siblings squeeze the full-width answer into a corner.
+            answer_siblings = view.cross_answer.master.pack_slaves()
+            self.assertEqual([w for w in answer_siblings if w.pack_info()["side"] == "left"], [])
+
+            labels = {w.cget("text") for w in descendants(view.window) if isinstance(w, tk.Label)}
+            for caption in ("Coleção/projeto", "Tag", "Pessoa", "Série",
+                            "Coleções/projetos", "Tags", "Pessoas"):
+                self.assertIn(caption, labels)
+        finally:
+            view.close()
+            self.root.update()
+
+    def test_every_index_state_has_a_portuguese_label(self):
+        self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))
 
     def test_library_detail_pane_uses_scrollable_canvas_for_appended_controls(self):
         controller = mock.Mock()

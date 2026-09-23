@@ -59,6 +59,10 @@ STATE_LABELS = {"idle": "Pronto", "starting": "Iniciando", "recording": "Gravand
                 "stopped": "Parado", "interrupted": "Interrompido", "failed": "Falha",
                 "partial": "Parcial", "teardown_blocked": "Recursos ainda em uso",
                 "unavailable": "Recursos ainda em uso"}
+INDEX_STATE_LABELS = {"ready": "pronto", "stale": "desatualizado", "rebuilding": "reconstruindo",
+                      "unavailable": "indisponível", "incomplete": "incompleto",
+                      "compatibility": "modo de compatibilidade", "cancelled": "cancelado",
+                      "failed": "falhou"}
 STATUS_FILTERS = {"Todos": "", "Concluídos": "completed", "Parciais": "partial",
                   "Falhas": "failed", "Interrompidos": "interrupted", "Gravando": "recording"}
 PROFILE_LABELS = {"balanced": "Equilibrado · Parakeet TDT", "compact": "Compacto · Qwen 0.6B",
@@ -456,7 +460,7 @@ class MeetingWindow:
 
     def _entry(self, parent, variable, width=30):
         return tk.Entry(parent, textvariable=variable, width=width, font=self.ui.font(),
-                        **self.ui.entry_colors())
+                        **self.ui.entry_colors(), **self.ui.entry_chrome())
 
     def _page_header(self, parent, title, description):
         header = tk.Frame(parent, bg=self.ui.surface)
@@ -521,6 +525,9 @@ class MeetingWindow:
             rowheight=self.ui.tree_row_height,
             font=self.ui.font(),
             borderwidth=0,
+            bordercolor=self.ui.border,
+            lightcolor=self.ui.card,
+            darkcolor=self.ui.card,
         )
         style.map(
             "Meeting.Treeview",
@@ -717,19 +724,19 @@ class MeetingWindow:
         automation = tk.Frame(settings_card, bg=self.ui.card)
         self.auto_transcribe_check = tk.Checkbutton(
             automation, text="Transcrever automaticamente", variable=self.auto_transcribe,
-            command=self._automation_toggled, font=self.ui.font(),
+            command=self._automation_toggled, font=self.ui.font(), anchor="w",
             **self.ui.checkbutton_colors(self.ui.card),
         )
         self.auto_transcribe_check.pack(anchor="w", fill="x")
         self.auto_summary_check = tk.Checkbutton(
             automation, text="Resumir após transcrever", variable=self.auto_summary,
-            command=self._automation_toggled, font=self.ui.font(),
+            command=self._automation_toggled, font=self.ui.font(), anchor="w",
             **self.ui.checkbutton_colors(self.ui.card),
         )
         self.auto_summary_check.pack(anchor="w", fill="x", padx=(self.ui.space_xl, 0))
         self.voice_boost_check = tk.Checkbutton(
             automation, text="Melhorar a voz do microfone", variable=self.voice_boost,
-            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+            font=self.ui.font(), anchor="w", **self.ui.checkbutton_colors(self.ui.card),
         )
         self.voice_boost_check.pack(anchor="w", fill="x", pady=(self.ui.space_xs, 0))
         automation_row = next_row
@@ -947,7 +954,9 @@ class MeetingWindow:
         self.query = tk.StringVar(self.window)
         self._label(search_row, "Buscar", bg=self.ui.card,
                     font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 8))
-        search = self._entry(search_row, self.query)
+        # The entry expands into spare width; a small minimum keeps the index
+        # status at the end of this row from being clipped.
+        search = self._entry(search_row, self.query, 12)
         search.pack(side="left", fill="x", expand=True)
         search.bind("<Return>", lambda _event: self.search())
         self._button(search_row, "Buscar", self.search).pack(side="left", padx=8)
@@ -970,43 +979,51 @@ class MeetingWindow:
         organization_row = self._card(parent, pady=self.ui.space_sm)
         organization_row.pack(fill="x", pady=(0, self.ui.space_md))
         self._label(organization_row, "Filtros", bg=self.ui.card,
-                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
+                    font=self.ui.font(9, "bold")).grid(row=1, column=0, sticky="w", padx=(0, 6))
         self.collection_filter = tk.StringVar(self.window)
         self.tag_filter = tk.StringVar(self.window)
         self.people_filter = tk.StringVar(self.window)
         self.series_filter = tk.StringVar(self.window)
         self.date_from_filter = tk.StringVar(self.window)
         self.date_to_filter = tk.StringVar(self.window)
-        for variable, hint in (
-            (self.collection_filter, "coleção/projeto"),
-            (self.tag_filter, "tag"),
-            (self.people_filter, "pessoa"),
-            (self.series_filter, "série"),
-            (self.date_from_filter, "data inicial"),
-            (self.date_to_filter, "data final"),
-        ):
-            entry = self._entry(organization_row, variable, 14)
-            entry.pack(side="left", padx=(0, 4))
-            # Tk has no placeholder text that works consistently across the
-            # supported platforms; the tooltip-like width keeps labels out of
-            # the search callback and values remain explicit to the user.
+        # Tk has no portable placeholder text, so each field carries a small
+        # caption above it instead.
+        for column, (variable, caption) in enumerate((
+            (self.collection_filter, "Coleção/projeto"),
+            (self.tag_filter, "Tag"),
+            (self.people_filter, "Pessoa"),
+            (self.series_filter, "Série"),
+            (self.date_from_filter, "Data inicial (AAAA-MM-DD)"),
+            (self.date_to_filter, "Data final (AAAA-MM-DD)"),
+        ), 1):
+            self._label(organization_row, caption, bg=self.ui.card, fg=self.ui.text_muted,
+                        font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
+            entry = self._entry(organization_row, variable, 10)
             entry.configure(insertwidth=1)
-        self._button(organization_row, "Aplicar filtros", self.search, accent=True).pack(side="left", padx=(4, 0))
-        self._button(organization_row, "Limpar filtros", self.clear_library_filters).pack(side="left", padx=(4, 0))
+            entry.grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            organization_row.columnconfigure(column, weight=1)
+        self._button(organization_row, "Aplicar filtros", self.search, accent=True).grid(
+            row=1, column=7, padx=(4, 0))
+        self._button(organization_row, "Limpar filtros", self.clear_library_filters).grid(
+            row=1, column=8, padx=(4, 0))
 
         cross_frame = self._card(parent, pady=self.ui.space_sm)
         cross_frame.pack(fill="x", pady=(0, self.ui.space_md))
-        self._label(cross_frame, "Perguntar nas reuniões filtradas", bg=self.ui.card,
+        # The question controls get their own row: packing them beside the
+        # full-width answer and citation rows squeezed those into a corner.
+        question_row = tk.Frame(cross_frame, bg=self.ui.card)
+        question_row.pack(fill="x")
+        self._label(question_row, "Perguntar nas reuniões filtradas", bg=self.ui.card,
                     font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
         self.cross_question = tk.StringVar(self.window)
-        self._entry(cross_frame, self.cross_question, 54).pack(side="left", fill="x", expand=True)
-        self._button(cross_frame, "Perguntar", self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
-        self.cross_cancel_button = self._button(cross_frame, "Cancelar", self.cancel_cross_question)
+        self._entry(question_row, self.cross_question, 54).pack(side="left", fill="x", expand=True)
+        self._button(question_row, "Perguntar", self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
+        self.cross_cancel_button = self._button(question_row, "Cancelar", self.cancel_cross_question)
         self.cross_cancel_button.configure(state="disabled")
         self.cross_cancel_button.pack(side="left", padx=(6, 0))
         self.cross_status = tk.StringVar(self.window, "Resposta cruzada fica somente na memória.")
         self._label(cross_frame, "", textvariable=self.cross_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w", wraplength=420).pack(side="left", padx=(8, 0))
+                    fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
         self.cross_answer = tk.Text(cross_frame, height=2, wrap="word", font=self.ui.font(),
                                     **self.ui.text_colors())
         self.cross_answer.pack(fill="x", pady=(4, 0))
@@ -1119,10 +1136,17 @@ class MeetingWindow:
         self.organization_tags = tk.StringVar(self.window)
         self.organization_people = tk.StringVar(self.window)
         self.organization_series = tk.StringVar(self.window)
-        for variable, width in ((self.organization_collections, 22), (self.organization_tags, 18),
-                                (self.organization_people, 18), (self.organization_series, 18)):
-            self._entry(organization_inputs, variable, width).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self._button(organization_inputs, "Salvar organização", self.save_organization).pack(side="left")
+        for column, (variable, caption) in enumerate((
+            (self.organization_collections, "Coleções/projetos"),
+            (self.organization_tags, "Tags"),
+            (self.organization_people, "Pessoas"),
+            (self.organization_series, "Série"),
+        )):
+            self._label(organization_inputs, caption, bg=self.ui.card, fg=self.ui.text_muted,
+                        font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
+            self._entry(organization_inputs, variable, 8).grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            organization_inputs.columnconfigure(column, weight=1)
+        self._button(organization_inputs, "Salvar organização", self.save_organization).grid(row=1, column=4)
         self.organization_status = tk.StringVar(self.window, "Selecione uma reunião para editar seus rótulos.")
         self._label(organization_detail, "", textvariable=self.organization_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w", wraplength=720).pack(fill="x", pady=(2, 0))
@@ -2873,7 +2897,7 @@ class MeetingWindow:
             self.page_label.set(f"Página 1 · {len(items)} gravações")
             self.index_status.set("Índice de busca mudou; listagem reiniciada.")
         elif index_state:
-            self.index_status.set(f"Índice de busca: {index_state}")
+            self.index_status.set(f"Índice de busca: {INDEX_STATE_LABELS.get(index_state, index_state)}")
         self._render_search_results(search_results)
         if self.selected in self.sessions.get_children():
             self.sessions.selection_set(self.selected)
@@ -3412,7 +3436,7 @@ class MeetingWindow:
         state = value.get("state", "ready") if isinstance(value, dict) else "ready"
         count = value.get("sessions", 0) if isinstance(value, dict) else 0
         self.rebuild_progress = {"done": count, "total": count, "state": state}
-        self.index_status.set(f"Índice de busca: {state} · {count} reuniões")
+        self.index_status.set(f"Índice de busca: {INDEX_STATE_LABELS.get(state, state)} · {count} reuniões")
         self.search()
 
     def _selection_changed(self, _event=None):
