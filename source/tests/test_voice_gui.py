@@ -517,6 +517,10 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             profile_box.set("Compacto · Qwen 0.6B")
             profile_box.event_generate("<<ComboboxSelected>>")
             compact_language_values = tuple(language_box["values"])
+            profile_box.set("Whisper Large v3 Turbo")
+            profile_box.event_generate("<<ComboboxSelected>>")
+            whisper_language_values = tuple(language_box["values"])
+            whisper_selected = self.app._manager_voice_tk_vars[0].get()
             profile_box.set("Equilibrado · Parakeet TDT")
             profile_box.event_generate("<<ComboboxSelected>>")
             language_box.set("Português (Brasil)")
@@ -528,17 +532,25 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 profile_values,
                 language_values,
                 compact_language_values,
+                whisper_language_values,
+                whisper_selected,
                 selected.get(),
                 language.get(),
             )
 
         (settings_text, profile_values, language_values, compact_language_values,
+         whisper_language_values, whisper_selected,
          selected, language) = self._on_gui(inspect_manager)
         self.assertIn("Modelos de transcrição", settings_text)
         self.assertIn("Modelos de resumo de texto", settings_text)
         self.assertIn("Equilibrado · Parakeet TDT", profile_values)
         self.assertIn("Compacto · Qwen 0.6B", profile_values)
         self.assertIn("Precisão · Qwen 1.7B", profile_values)
+        self.assertIn("Whisper Small", profile_values)
+        self.assertIn("Whisper Large v3 Turbo", profile_values)
+        self.assertNotIn("Transcrição contínua", profile_values)
+        self.assertEqual(whisper_selected, "whisper-turbo")
+        self.assertEqual(whisper_language_values, language_values)
         self.assertIn("Automático", language_values)
         self.assertIn("Português (Brasil)", language_values)
         self.assertEqual(compact_language_values, ("Automático",))
