@@ -14,6 +14,7 @@ import inspect
 import tempfile
 import threading
 import time
+import traceback
 import unittest
 from unittest import mock
 
@@ -90,7 +91,17 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
     def _on_gui(self, func):
         """Run func(root) on the GUI thread, propagating assertion failures."""
-        return self.app.gui.call(func, timeout=30)
+        try:
+            return self.app.gui.call(func, timeout=30)
+        except TimeoutError:
+            # Intermittent on hosted Windows runners and never reproduced
+            # locally: report where the GUI thread is blocked.
+            thread = self.app.gui._thread
+            frame = sys._current_frames().get(getattr(thread, "ident", None))
+            stack = "".join(traceback.format_stack(frame)) if frame else "GUI thread is not running"
+            raise TimeoutError(
+                "GUI call did not complete in time; GUI thread stack:\n" + stack
+            ) from None
 
 
 
