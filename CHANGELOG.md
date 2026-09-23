@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.3.0 - 2026-09-23
+
+- Reorganize the library into a single toolbar with on-demand filters and cross-meeting questions, empty-state guidance, and a recording view split into Notas, Transcrição, Resumo, Perguntar and Arquivos.
+- Split Configurações into Geral, Privacidade, Transcrição and Resumos sections instead of one long page.
+- Fix dark-mode widgets (checkboxes, read-only fields, level meters, scrollbars and borders), light-mode entry borders, and controls clipped at the minimum window width.
+- Translate search-index states to Portuguese and label the library filter and organization fields.
+- Support building the clean Windows audio runtime from PowerShell with an MSYS2 toolchain.
+
 ## 3.2.0 - 2026-09-17
 
 - Add a private local meeting-memory workspace with recoverable recordings, searchable metadata, transcript navigation, annotations, and rebuildable local indexing.
