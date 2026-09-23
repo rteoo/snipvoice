@@ -307,6 +307,19 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertIn('RELEASE_CHANNEL = "stable"', texts["source"])
         self.assertIn('#define MyAppChannel "stable"', texts["installer"])
 
+    def test_windows_icon_badge_fills_every_frame(self):
+        # Tray, Start and taskbar slots are 16-32 px. A transparent margin
+        # there (it was ~9% per side) makes the dark badge read visibly
+        # smaller than neighbouring icons.
+        ico_path = os.path.join(ROOT, "source", "snipvoice.ico")
+        with Image.open(ico_path) as ico:
+            for size in sorted(ico.info["sizes"]):
+                ico.size = size
+                alpha = ico.convert("RGBA").getchannel("A")
+                left, top, right, bottom = alpha.point(lambda a: 255 if a > 24 else 0).getbbox()
+                self.assertGreaterEqual((right - left) / size[0], 0.95, size)
+                self.assertGreaterEqual((bottom - top) / size[1], 0.95, size)
+
     def test_release_icons_cover_desktop_sizes(self):
         png_path = os.path.join(ROOT, "source", "snipvoice-icon.png")
         ico_path = os.path.join(ROOT, "source", "snipvoice.ico")
