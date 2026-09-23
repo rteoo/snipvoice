@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add Whisper Small, Whisper Large v3 Turbo and Whisper Large v3 as optional, hash-pinned transcription models for dictation and meetings.
+
 ## 3.3.1 - 2026-09-23
 
 - Remove the transparent margin from the Windows icon so it fills tray, Start and taskbar slots like neighbouring icons.

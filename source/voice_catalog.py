@@ -11,12 +11,18 @@ PROFILE_BALANCED = "balanced"
 PROFILE_COMPACT = "compact"
 PROFILE_ACCURACY = "accuracy"
 PROFILE_STREAMING = "streaming"
+PROFILE_WHISPER_SMALL = "whisper-small"
+PROFILE_WHISPER_TURBO = "whisper-turbo"
+PROFILE_WHISPER_LARGE = "whisper-large-v3"
 
 PROFILES = (
     PROFILE_BALANCED,
     PROFILE_COMPACT,
     PROFILE_ACCURACY,
     PROFILE_STREAMING,
+    PROFILE_WHISPER_SMALL,
+    PROFILE_WHISPER_TURBO,
+    PROFILE_WHISPER_LARGE,
 )
 
 LANGUAGE_AUTO = "auto"
@@ -161,7 +167,122 @@ _NEMOTRON_Q8 = {
     "user_selectable": False,
 }
 
-MODEL_CATALOG = (_PARAKEET_Q8, _QWEN_06_Q8, _QWEN_Q8, _NEMOTRON_Q8)
+# Whisper pins use immutable repository revisions (verified 2026-09-23).
+_WHISPER_SMALL_Q8 = {
+    "id": "whisper-small-q8",
+    "profile": PROFILE_WHISPER_SMALL,
+    "filename": "whisper-small-Q8_0.gguf",
+    "url": (
+        "https://huggingface.co/handy-computer/whisper-small-gguf/resolve/"
+        "a2073177cb69bd74b9ca9460b852d17fbfd5d68c/"
+        "whisper-small-Q8_0.gguf"
+    ),
+    "sha256": "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
+    "size_bytes": 269751136,
+    "upstream_model": "openai/whisper-small",
+    "upstream_commit": "973afd24965f72e36ca33b3055d56a652f456b4d",
+    "quant_source": "handy-computer/whisper-small-gguf",
+    "runtime": RUNTIME_TRANSCRIBE_CPP,
+    "quantization": "Q8_0",
+    "format": "gguf",
+    "streaming": False,
+    "language_hint": "optional",
+    "min_memory_bytes": 1024 * 1024 * 1024,
+    "recommended_memory_bytes": 1500 * 1024 * 1024,
+    "license_id": "Apache-2.0",
+    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "attribution": (
+        "Whisper small by OpenAI, quantized to Q8_0 by handy-computer "
+        "for transcribe.cpp."
+    ),
+    "source_url": "https://huggingface.co/openai/whisper-small",
+    "purpose": (
+        "Whisper Small: download menor e pouca memória; menos preciso que o "
+        "Parakeet em português."
+    ),
+    "user_selectable": True,
+}
+
+_WHISPER_TURBO_Q8 = {
+    "id": "whisper-large-v3-turbo-q8",
+    "profile": PROFILE_WHISPER_TURBO,
+    "filename": "whisper-large-v3-turbo-Q8_0.gguf",
+    "url": (
+        "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/"
+        "resolve/ceea6c8a94a21ab85be244d311e874a39344dbf5/"
+        "whisper-large-v3-turbo-Q8_0.gguf"
+    ),
+    "sha256": "b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183",
+    "size_bytes": 886381760,
+    "upstream_model": "openai/whisper-large-v3-turbo",
+    "upstream_commit": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+    "quant_source": "handy-computer/whisper-large-v3-turbo-gguf",
+    "runtime": RUNTIME_TRANSCRIBE_CPP,
+    "quantization": "Q8_0",
+    "format": "gguf",
+    "streaming": False,
+    "language_hint": "optional",
+    "min_memory_bytes": 2 * 1024 * 1024 * 1024,
+    "recommended_memory_bytes": 3 * 1024 * 1024 * 1024,
+    "license_id": "MIT",
+    "license_url": "https://huggingface.co/openai/whisper-large-v3-turbo",
+    "attribution": (
+        "Whisper large-v3-turbo by OpenAI, quantized to Q8_0 by "
+        "handy-computer for transcribe.cpp."
+    ),
+    "source_url": "https://huggingface.co/openai/whisper-large-v3-turbo",
+    "purpose": (
+        "Whisper Large v3 Turbo (opcional): multilíngue e preciso, porém bem "
+        "mais lento na CPU; nunca é selecionado automaticamente."
+    ),
+    "user_selectable": True,
+}
+
+_WHISPER_LARGE_Q8 = {
+    "id": "whisper-large-v3-q8",
+    "profile": PROFILE_WHISPER_LARGE,
+    "filename": "whisper-large-v3-Q8_0.gguf",
+    "url": (
+        "https://huggingface.co/handy-computer/whisper-large-v3-gguf/"
+        "resolve/b33a05f1459f33b0c876f014a57d51618b77d754/"
+        "whisper-large-v3-Q8_0.gguf"
+    ),
+    "sha256": "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
+    "size_bytes": 1668741440,
+    "upstream_model": "openai/whisper-large-v3",
+    "upstream_commit": "06f233fe06e710322aca913c1bc4249a0d71fce1",
+    "quant_source": "handy-computer/whisper-large-v3-gguf",
+    "runtime": RUNTIME_TRANSCRIBE_CPP,
+    "quantization": "Q8_0",
+    "format": "gguf",
+    "streaming": False,
+    "language_hint": "optional",
+    "min_memory_bytes": 3 * 1024 * 1024 * 1024,
+    "recommended_memory_bytes": 4 * 1024 * 1024 * 1024,
+    "license_id": "Apache-2.0",
+    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "attribution": (
+        "Whisper large-v3 by OpenAI, quantized to Q8_0 by handy-computer "
+        "for transcribe.cpp."
+    ),
+    "source_url": "https://huggingface.co/openai/whisper-large-v3",
+    "purpose": (
+        "Whisper Large v3 (opcional): o mais preciso em português, porém "
+        "mais lento que o tempo real na CPU e com maior uso de memória; nunca "
+        "é selecionado automaticamente."
+    ),
+    "user_selectable": True,
+}
+
+MODEL_CATALOG = (
+    _PARAKEET_Q8,
+    _QWEN_06_Q8,
+    _QWEN_Q8,
+    _NEMOTRON_Q8,
+    _WHISPER_SMALL_Q8,
+    _WHISPER_TURBO_Q8,
+    _WHISPER_LARGE_Q8,
+)
 
 DEFAULT_PROFILE = PROFILE_BALANCED
 

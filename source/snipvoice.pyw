@@ -1150,10 +1150,10 @@ class Snipvoice:
         # The compact controls are deliberately kept in Ditado. Internal
         # values remain profile/language IDs so persistence and runtime code do
         # not depend on the localized labels shown to users.
+        from meeting_gui import PROFILE_LABELS
+
         profile_display_labels = {
-            "balanced": "Equilibrado · Parakeet TDT",
-            "compact": "Compacto · Qwen 0.6B",
-            "accuracy": "Precisão · Qwen 1.7B",
+            entry["profile"]: PROFILE_LABELS[entry["profile"]] for entry in visible
         }
         profile_display_to_id = {
             label: profile for profile, label in profile_display_labels.items()

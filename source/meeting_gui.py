@@ -66,7 +66,9 @@ INDEX_STATE_LABELS = {"ready": "pronto", "stale": "desatualizado", "rebuilding":
 STATUS_FILTERS = {"Todos": "", "Concluídos": "completed", "Parciais": "partial",
                   "Falhas": "failed", "Interrompidos": "interrupted", "Gravando": "recording"}
 PROFILE_LABELS = {"balanced": "Equilibrado · Parakeet TDT", "compact": "Compacto · Qwen 0.6B",
-                  "accuracy": "Precisão · Qwen 1.7B", "streaming": "Transcrição contínua"}
+                  "accuracy": "Precisão · Qwen 1.7B", "streaming": "Transcrição contínua",
+                  "whisper-small": "Whisper Small", "whisper-turbo": "Whisper Large v3 Turbo",
+                  "whisper-large-v3": "Whisper Large v3"}
 LANGUAGE_LABELS = {"auto": "Automático", "pt-BR": "Português (Brasil)", "en-US": "Inglês (Estados Unidos)"}
 TRACK_LABELS = {"Microfone": "microphone", "Sistema": "system"}
 SUMMARY_LABELS = {entry["id"]: f'{entry["name"]} · {entry["parameters"]}'

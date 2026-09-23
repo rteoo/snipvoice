@@ -12,7 +12,7 @@ from unittest import mock
 
 from meeting_gui import (
     APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, INDEX_STATE_LABELS, MAX_PAGE_BACKSTACK,
-    MeetingWindow, NOTES_LIMIT,
+    MeetingWindow, NOTES_LIMIT, PROFILE_LABELS,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, open_meeting_window, retention_plan_projection, validated_settings,
@@ -71,6 +71,11 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_every_selectable_profile_has_a_distinct_label(self):
+        from voice_catalog import selectable_catalog
+        labels = [PROFILE_LABELS[entry["profile"]] for entry in selectable_catalog()]
+        self.assertEqual(len(labels), len(set(labels)))
+
     def test_appearance_save_persists_then_requests_a_safe_rebuild(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.appearance_display = Variable(APPEARANCE_LABELS["dark"])

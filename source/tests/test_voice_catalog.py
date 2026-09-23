@@ -20,6 +20,9 @@ from voice_catalog import (
     PROFILE_BALANCED,
     PROFILE_COMPACT,
     PROFILE_STREAMING,
+    PROFILE_WHISPER_LARGE,
+    PROFILE_WHISPER_SMALL,
+    PROFILE_WHISPER_TURBO,
     catalog_entry,
     available_languages,
     default_language_for_profile,
@@ -72,11 +75,19 @@ class _FakeResponse:
 
 
 class CatalogTests(unittest.TestCase):
-    def test_four_profiles_and_no_f32(self):
+    def test_catalog_profiles_and_no_f32(self):
         profiles = {entry["profile"] for entry in MODEL_CATALOG}
         self.assertEqual(
             profiles,
-            {PROFILE_BALANCED, PROFILE_COMPACT, PROFILE_ACCURACY, PROFILE_STREAMING},
+            {
+                PROFILE_BALANCED,
+                PROFILE_COMPACT,
+                PROFILE_ACCURACY,
+                PROFILE_STREAMING,
+                PROFILE_WHISPER_SMALL,
+                PROFILE_WHISPER_TURBO,
+                PROFILE_WHISPER_LARGE,
+            },
         )
         self.assertEqual(DEFAULT_PROFILE, PROFILE_BALANCED)
         for entry in MODEL_CATALOG:
@@ -113,6 +124,48 @@ class CatalogTests(unittest.TestCase):
         )
         self.assertTrue(entry["user_selectable"])
 
+    def test_whisper_profiles_pin_q8_at_immutable_revisions(self):
+        small = catalog_entry(PROFILE_WHISPER_SMALL)
+        self.assertEqual(small["id"], "whisper-small-q8")
+        self.assertEqual(small["size_bytes"], 269751136)
+        self.assertEqual(
+            small["sha256"],
+            "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
+        )
+        turbo = catalog_entry(PROFILE_WHISPER_TURBO)
+        self.assertEqual(turbo["id"], "whisper-large-v3-turbo-q8")
+        self.assertEqual(turbo["size_bytes"], 886381760)
+        self.assertEqual(
+            turbo["sha256"],
+            "b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183",
+        )
+        large = catalog_entry(PROFILE_WHISPER_LARGE)
+        self.assertEqual(large["id"], "whisper-large-v3-q8")
+        self.assertEqual(large["size_bytes"], 1668741440)
+        self.assertEqual(
+            large["sha256"],
+            "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
+        )
+        for entry in (small, turbo, large):
+            self.assertIn("/resolve/", entry["url"])
+            self.assertNotIn("/resolve/main/", entry["url"])
+            self.assertTrue(entry["url"].endswith("/" + entry["filename"]))
+            self.assertTrue(entry["user_selectable"])
+            self.assertFalse(entry["streaming"])
+
+    def test_whisper_honors_language_hints(self):
+        for profile in (
+            PROFILE_WHISPER_SMALL, PROFILE_WHISPER_TURBO, PROFILE_WHISPER_LARGE
+        ):
+            self.assertEqual(
+                available_languages(profile),
+                (LANGUAGE_AUTO, LANGUAGE_PT_BR, LANGUAGE_EN_US),
+            )
+            self.assertEqual(default_language_for_profile(profile, "pt-BR"), "pt-BR")
+            self.assertEqual(
+                default_language_for_profile(profile, LANGUAGE_AUTO), LANGUAGE_AUTO
+            )
+
     def test_streaming_defaults_auto_to_pt_br(self):
         self.assertEqual(
             default_language_for_profile(PROFILE_STREAMING, LANGUAGE_AUTO),
@@ -140,7 +193,14 @@ class CatalogTests(unittest.TestCase):
         visible = selectable_catalog()
         self.assertEqual(
             [entry["profile"] for entry in visible],
-            ["balanced", "compact", "accuracy"],
+            [
+                "balanced",
+                "compact",
+                "accuracy",
+                "whisper-small",
+                "whisper-turbo",
+                "whisper-large-v3",
+            ],
         )
 
     def test_selectable_copy_leads_with_model_names_and_marks_default(self):
@@ -159,6 +219,19 @@ class CatalogTests(unittest.TestCase):
                 "Qwen3-ASR 1.7B (opcional):"
             )
         )
+
+    def test_whisper_copy_leads_with_model_names(self):
+        self.assertTrue(
+            catalog_entry(PROFILE_WHISPER_SMALL)["purpose"].startswith("Whisper Small:")
+        )
+        self.assertTrue(
+            catalog_entry(PROFILE_WHISPER_TURBO)["purpose"].startswith(
+                "Whisper Large v3 Turbo (opcional):"
+            )
+        )
+        large_purpose = catalog_entry(PROFILE_WHISPER_LARGE)["purpose"]
+        self.assertTrue(large_purpose.startswith("Whisper Large v3 (opcional):"))
+        self.assertIn("automaticamente", large_purpose)
 
     def test_accuracy_copy_identifies_optional_resource_cost(self):
         purpose = catalog_entry(PROFILE_ACCURACY)["purpose"].lower()
