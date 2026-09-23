@@ -19,6 +19,7 @@ from meeting_gui import (
 )
 from meeting_index import INDEX_STATES
 from meeting_settings import EndpointSelection, resolve_meeting_settings
+import ui_theme
 
 
 def wait_for(predicate, timeout=2):
@@ -1128,6 +1129,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view.close()
             self.root.update()
 
+    # Pixel fit depends on the platform's fonts and native control metrics;
+    # the minimum-width layout is verified against Windows' Segoe UI metrics.
+    # macOS uses its own wider minimum, and the Linux GUI is not supported.
+    @unittest.skipUnless(sys.platform == "win32", "layout fit is verified on Windows metrics")
     def test_library_controls_fit_at_the_minimum_manager_width(self):
         controller = mock.Mock()
         controller.snapshot.return_value = {
@@ -1138,9 +1143,11 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         controller.read_workspace.return_value = {
             "generation": 0, "collections": [], "series": [],
         }
-        # Mirror the manager: 920px minimum width, notebook inset by 24px.
+        # Mirror the manager: its minimum size, notebook inset by 24px.
+        _geometry, min_width, min_height = ui_theme.build_theme(
+            "windows", system="windows").manager_window_size
         manager = tk.Toplevel(self.root)
-        manager.geometry("920x700")
+        manager.geometry(f"{min_width}x{min_height}")
         notebook = ttk.Notebook(manager)
         notebook.pack(fill="both", expand=True, padx=24)
         view = add_meeting_tabs(
