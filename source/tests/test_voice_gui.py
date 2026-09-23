@@ -482,6 +482,57 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(selected, "Escuro")
         self.assertEqual(choices, ("Sistema", "Claro", "Escuro"))
 
+    def _general_data_card(self, shared_root):
+        self.app._show_manager_window(shared_root)
+        view = self.app._manager_meeting_view
+        notebook = self.app._manager_notebook
+        settings = next(
+            notebook.nametowidget(tab_id) for tab_id in notebook.tabs()
+            if notebook.tab(tab_id, "text") == "Configurações"
+        )
+        labels = [
+            str(widget.cget("text")) for widget in _descendants(settings)
+            if isinstance(widget, (tk.Label, ttk.Label))
+        ]
+        return view, labels
+
+    def test_general_settings_show_the_data_folder_and_request_a_move(self):
+        import meeting_gui
+
+        _ensure_voice(self.app)
+        target = os.path.join(tempfile.mkdtemp(), "snipvoice")
+        self.app.request_data_relocation = mock.Mock(return_value="")
+
+        def inspect_card(shared_root):
+            view, labels = self._general_data_card(shared_root)
+            states = (str(view.data_move_button["state"]), str(view.data_default_button["state"]))
+            with mock.patch.object(meeting_gui.messagebox, "askokcancel", return_value=True) as ask, \
+                    mock.patch.object(meeting_gui.messagebox, "showerror") as error:
+                view._confirm_data_relocation(target)
+                view._confirm_data_relocation(os.path.join(self.app.data_dir, "inside"))
+            return labels, view.data_dir_display.get(), states, ask.call_args, error.call_args
+
+        labels, shown, states, asked, error = self._on_gui(inspect_card)
+        self.assertIn("Pasta de dados", labels)
+        self.assertEqual(shown, self.app.data_dir)
+        self.assertEqual(states, ("normal", "normal"))
+        self.assertIn(target, asked.args[1])
+        self.assertIn(self.app.data_dir, asked.args[1])
+        self.app.request_data_relocation.assert_called_once_with(target)
+        self.assertIn("dentro", error.args[1])
+
+    def test_env_override_locks_the_data_folder_card(self):
+        _ensure_voice(self.app)
+
+        def inspect_card(shared_root):
+            with mock.patch.dict(os.environ, {"SNIPVOICE_HOME": self.app.data_dir}):
+                view, labels = self._general_data_card(shared_root)
+            return labels, str(view.data_move_button["state"]), str(view.data_default_button["state"])
+
+        labels, move_state, default_state = self._on_gui(inspect_card)
+        self.assertEqual((move_state, default_state), ("disabled", "disabled"))
+        self.assertTrue(any("SNIPVOICE_HOME" in label for label in labels))
+
     def test_manager_separates_model_settings_from_ditado_selectors(self):
         """Configurações owns downloads; Ditado keeps compact friendly selectors."""
         _ensure_voice(self.app)

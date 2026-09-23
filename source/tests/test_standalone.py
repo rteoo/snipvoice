@@ -36,9 +36,83 @@ class StandaloneTests(unittest.TestCase):
 
     def test_legacy_home_override_is_ignored(self):
         with mock.patch.dict(os.environ, {"SNIPTYPE_HOME": "legacy", "SNIPVOICE_HOME": ""}), \
+                mock.patch.object(app.app_paths, "config_dir", return_value=self.temp.name), \
                 mock.patch.object(app.os.path, "expanduser", return_value=self.temp.name), \
                 mock.patch.object(app.os, "makedirs"):
-            self.assertEqual(app.ensure_data_dir(), self.temp.name)
+            self.assertEqual(app.app_paths.ensure_data_dir(), self.temp.name)
+
+    def test_data_relocation_waits_for_idle_meetings(self):
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.is_busy.return_value = True
+        self.instance.quit_app = mock.Mock()
+        message = self.instance.request_data_relocation(os.path.join(self.temp.name, "x"))
+        self.assertIn("Aguarde", message)
+        self.instance.quit_app.assert_not_called()
+        self.assertFalse(self.instance.relaunch_requested)
+
+    def test_data_relocation_records_the_move_then_quits_to_relaunch(self):
+        config = os.path.join(self.temp.name, "config")
+        target = os.path.join(self.temp.name, "moved")
+        self.instance.data_dir = os.path.join(self.temp.name, "home")
+        os.makedirs(self.instance.data_dir)
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.is_busy.return_value = False
+        self.instance.quit_app = mock.Mock()
+        with mock.patch.dict(os.environ, {"SNIPVOICE_HOME": ""}), \
+                mock.patch.object(app.app_paths, "config_dir", return_value=config):
+            self.assertEqual(self.instance.request_data_relocation(target), "")
+            location = app.app_paths.read_location()
+        self.assertEqual(location["pending_move"], {"from": self.instance.data_dir, "to": target})
+        self.assertTrue(self.instance.relaunch_requested)
+        self.instance.quit_app.assert_called_once_with(None, None)
+
+    def test_data_relocation_error_is_returned_without_quitting(self):
+        self.instance.meetings = mock.Mock()
+        self.instance.meetings.is_busy.return_value = False
+        self.instance.quit_app = mock.Mock()
+        with mock.patch.dict(os.environ, {"SNIPVOICE_HOME": self.temp.name}):
+            message = self.instance.request_data_relocation(os.path.join(self.temp.name, "x"))
+        self.assertIn("SNIPVOICE_HOME", message)
+        self.instance.quit_app.assert_not_called()
+
+    def test_startup_notices_are_shown_when_the_tray_is_ready(self):
+        self.instance._startup_notices = ["Dados movidos para D."]
+        self.instance.notify_error = mock.Mock()
+        self.instance.task_runner = mock.Mock()
+        self.instance.on_tray_ready(mock.Mock())
+        self.instance.notify_error.assert_called_once_with("Dados movidos para D.", key="data-dir-0")
+
+    def test_main_completes_a_pending_move_before_opening_the_app_then_relaunches(self):
+        events = []
+        attempts = iter([False, False, True])
+        instance = mock.Mock(relaunch_requested=True)
+
+        def construct(relocation_message=""):
+            events.append(("app", relocation_message))
+            return instance
+
+        with mock.patch.object(app.sys, "argv", ["snipvoice.pyw", app.RELAUNCH_FLAG]), \
+                mock.patch.object(app.platform_support, "IS_WINDOWS", True), \
+                mock.patch.object(app, "acquire_single_instance_mutex", side_effect=lambda: next(attempts)), \
+                mock.patch.object(app.time, "sleep"), \
+                mock.patch.object(app.data_relocation, "complete_pending_relocation",
+                                  side_effect=lambda: events.append("move") or "moved"), \
+                mock.patch.object(app, "Snipvoice", side_effect=construct), \
+                mock.patch.object(app, "relaunch", side_effect=lambda: events.append("relaunch")):
+            app.main()
+        self.assertEqual(events, ["move", ("app", "moved"), "relaunch"])
+        instance.run.assert_called_once_with(show_settings=False)
+
+    def test_main_without_relaunch_flag_does_not_wait_for_the_lock(self):
+        with mock.patch.object(app.sys, "argv", ["snipvoice.pyw"]), \
+                mock.patch.object(app.platform_support, "IS_WINDOWS", True), \
+                mock.patch.object(app, "acquire_single_instance_mutex", return_value=False) as mutex, \
+                mock.patch.object(app.time, "sleep") as sleep, \
+                mock.patch.object(app.data_relocation, "complete_pending_relocation") as move:
+            app.main()
+        mutex.assert_called_once_with()
+        sleep.assert_not_called()
+        move.assert_not_called()
 
     def test_legacy_cache_overrides_are_ignored(self):
         with mock.patch.dict(os.environ, {"SNIPTYPE_VOICE_CACHE": "legacy",

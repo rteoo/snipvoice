@@ -7,6 +7,7 @@ history; model downloads are the only transcription-related network operation.
 """
 
 import ctypes
+import functools
 import gc
 import json
 import os
@@ -60,7 +61,8 @@ from PIL import Image
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-from app_paths import ensure_data_dir
+import app_paths
+import data_relocation
 from gui_support import center_dialog, center_on_screen
 from gui_thread import GuiThread
 import macos_permissions
@@ -82,6 +84,9 @@ if RELEASE_CHANNEL != "stable":
     APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} {RELEASE_CHANNEL}"
 APP_MUTEX_NAME = r"Local\SnipvoiceSingleton"
 APP_MUTEX_HANDLES = []
+RELAUNCH_FLAG = "--relaunch"
+# A relaunched copy waits for the exiting instance to release the lock.
+RELAUNCH_LOCK_WAIT_SECONDS = 60
 
 
 def acquire_single_instance_mutex():
@@ -108,10 +113,14 @@ def get_runtime_resource_dir():
 class Snipvoice:
     """Standalone voice tray app; the only global listener observes voice chords."""
 
-    def __init__(self):
-        self.data_dir = ensure_data_dir()
+    def __init__(self, relocation_message=""):
+        self.data_dir, data_dir_warning = app_paths.resolve_data_dir()
         configure_logging(os.path.join(self.data_dir, "logs"))
         self.logger = AppLogger()
+        self._startup_notices = [notice for notice in (relocation_message, data_dir_warning) if notice]
+        for notice in self._startup_notices:
+            self.logger.warning(notice)
+        self.relaunch_requested = False
         self.task_runner = BackgroundTaskRunner()
         self.gui = GuiThread(logger=self.logger)
         self.settings_file = os.path.join(self.data_dir, "settings.json")
@@ -391,6 +400,8 @@ class Snipvoice:
             on_appearance_changed=lambda preference: self._reopen_manager_for_appearance(
                 root, preference,
             ),
+            data_location=self.data_location,
+            relocate_data=self.request_data_relocation,
         )
         self._manager_meeting_view = meeting_view
         self._manager_recording_tab = meeting_view.recording_tab
@@ -505,6 +516,8 @@ class Snipvoice:
 
     def on_tray_ready(self, icon):
         icon.visible = True
+        for index, notice in enumerate(self._startup_notices):
+            self.notify_error(notice, key=f"data-dir-{index}")
         self.task_runner.start(self._resolve_startup, name="startup-checks")
 
     def _resolve_startup(self):
@@ -572,6 +585,26 @@ class Snipvoice:
             self.notify_error("Não foi possível alterar a inicialização automática do Snipvoice.")
         self._autostart_state = platform_support.autostart_state()
         self.refresh_tray_menu()
+
+    def data_location(self):
+        """Describe the data folder for the Configurações > Geral card."""
+        return {
+            "path": self.data_dir,
+            "default": app_paths.default_data_dir(),
+            "env_locked": bool(app_paths.env_data_dir()),
+        }
+
+    def request_data_relocation(self, target):
+        """Record a move and restart. Return "" on success or a user-facing reason."""
+        if self.meetings.is_busy():
+            return "Aguarde a gravação, o processamento ou a reprodução terminar antes de mover os dados."
+        try:
+            data_relocation.request_relocation(self.data_dir, target)
+        except (OSError, data_relocation.RelocationError) as exc:
+            return str(exc)
+        self.relaunch_requested = True
+        self.quit_app(None, None)
+        return ""
 
     def quit_app(self, icon, item):
         if self._quitting.is_set():
@@ -1671,20 +1704,49 @@ class Snipvoice:
             self.logger.warning(f"Falha ao atualizar o menu da bandeja: {e}")
 
 
+def _acquire_instance_lock(acquire, wait_seconds):
+    deadline = time.monotonic() + wait_seconds
+    while not acquire():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.25)
+    return True
+
+
+def relaunch():
+    """Start a fresh instance that waits for this one to exit."""
+    import subprocess
+
+    command = platform_support.default_autostart_command() + [RELAUNCH_FLAG]
+    if platform_support.IS_WINDOWS:
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(command, creationflags=flags, close_fds=True)
+    else:
+        subprocess.Popen(command, start_new_session=True, close_fds=True)
+
+
 def main():
+    arguments = sys.argv[1:]
+    wait_seconds = RELAUNCH_LOCK_WAIT_SECONDS if RELAUNCH_FLAG in arguments else 0
     lock_path = None
     if platform_support.IS_WINDOWS:
-        acquired = acquire_single_instance_mutex()
+        acquire = acquire_single_instance_mutex
     else:
-        lock_path = os.path.join(ensure_data_dir(), "snipvoice.lock")
-        acquired = platform_support.acquire_lockfile(lock_path)
-    if not acquired:
+        # The lock lives beside the location pointer so it never moves with the data.
+        lock_path = os.path.join(app_paths.config_dir(), "snipvoice.lock")
+        acquire = functools.partial(platform_support.acquire_lockfile, lock_path)
+    if not _acquire_instance_lock(acquire, wait_seconds):
         return
+    app = None
     try:
-        Snipvoice().run(show_settings="--show-settings" in sys.argv[1:])
+        relocation_message = data_relocation.complete_pending_relocation()
+        app = Snipvoice(relocation_message=relocation_message)
+        app.run(show_settings="--show-settings" in arguments)
     finally:
         if lock_path is not None:
             platform_support.release_lockfile(lock_path)
+    if app is not None and app.relaunch_requested:
+        relaunch()
 
 
 if __name__ == "__main__":

@@ -382,6 +382,10 @@ class MeetingController:
         with self._lock:
             return self._retention_active
 
+    def is_busy(self):
+        """True while capture, processing, playback, or retention work is running."""
+        return self._retention_lease_checker() or self.retention_active()
+
     @property
     def store(self):
         with self._store_lock:
