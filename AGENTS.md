@@ -14,7 +14,9 @@ Read the active runtime's global operator contract and SOUL.md before work.
   Cocoa callbacks to the Tk pump and hide the Dock icon after root creation.
 - Preserve target/cancellation guards, append-only recoverable recordings,
   atomic JSON, hash-verified model downloads, and safe manual history retry.
-- User data is `~/.snipvoice` / `SNIPVOICE_HOME`; cache is independent and
+- User data is `~/.snipvoice`, a user-moved folder recorded in the config-dir
+  `location.json` (`app_paths`), or `SNIPVOICE_HOME`; moves run at startup in
+  `data_relocation` before any data file opens. Cache is independent and
   non-roaming / `SNIPVOICE_VOICE_CACHE`. Never migrate Sniptype data implicitly.
 - `commands.json` contains private literal commands. Never copy live libraries,
   recordings, models, settings, logs, or predecessor Git backups into the repo.

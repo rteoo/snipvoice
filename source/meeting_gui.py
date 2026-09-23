@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from clipboard_support import Clipboard
+import data_relocation
 from meeting_files import report_export_projection
 from meeting_settings import EndpointSelection, resolve_meeting_settings, validate_hotkey_conflicts
 from meeting_waveform import MeetingWaveform
@@ -22,7 +23,7 @@ from summary_models import (
     summary_model_is_installed,
 )
 import ui_theme
-from voice_catalog import available_languages, selectable_catalog
+from voice_catalog import available_languages, format_size, selectable_catalog
 from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY
 
 
@@ -389,8 +390,9 @@ class MeetingWindow:
     def __init__(self, root, controller, settings_getter, persist_settings,
                  on_settings_changed=None, on_recording_state_changed=None,
                  on_appearance_changed=None, *,
-                 window=None, notebook=None):
+                 window=None, notebook=None, data_location=None, relocate_data=None):
         self.root, self.controller = root, controller
+        self.data_location, self.relocate_data = data_location, relocate_data
         self.settings_getter, self.persist_settings = settings_getter, persist_settings
         self.on_settings_changed = on_settings_changed
         self.on_recording_state_changed = on_recording_state_changed
@@ -771,6 +773,8 @@ class MeetingWindow:
         transcription = self.settings_sections.add("transcription", "Transcrição")
         summary_section = self.settings_sections.add("summary", "Resumos")
         self._build_appearance_card(general)
+        if self.data_location is not None and self.relocate_data is not None:
+            self._build_data_location_card(general)
         self.recording_defaults_parent = self._card(general)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
         self._build_privacy_card(privacy)
@@ -1760,6 +1764,78 @@ class MeetingWindow:
         )
         card.columnconfigure(2, weight=1)
         self._sync_raw_policy_controls()
+
+    def _build_data_location_card(self, parent):
+        """Show where app data lives and offer a move-and-restart to another folder."""
+        info = self.data_location()
+        card = self._card(parent)
+        card.pack(fill="x", pady=(0, self.ui.space_md))
+        self._label(
+            card, "Pasta de dados", bg=self.ui.card, fg=self.ui.text_strong,
+            font=self.ui.font(11, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        self._label(
+            card,
+            "Configurações, histórico de ditado, gravações e a biblioteca de reuniões "
+            "ficam nesta pasta. Ao escolher outra, o Snipvoice move tudo para lá e "
+            "reinicia. Os modelos baixados continuam no cache local.",
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
+            wraplength=760,
+        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
+        self.data_dir_display = tk.StringVar(self.window, info["path"])
+        entry = self._entry(card, self.data_dir_display)
+        entry.configure(state="readonly")
+        entry.grid(row=2, column=0, sticky="ew")
+        state = "disabled" if info["env_locked"] else "normal"
+        self.data_move_button = self._button(card, "Mover para…", self.choose_data_location)
+        self.data_move_button.configure(state=state)
+        self.data_move_button.grid(row=2, column=1, padx=(self.ui.space_sm, 0))
+        at_default = os.path.normcase(info["path"]) == os.path.normcase(info["default"])
+        self.data_default_button = self._button(
+            card, "Restaurar padrão", self.restore_default_data_location,
+        )
+        self.data_default_button.configure(
+            state="disabled" if info["env_locked"] or at_default else "normal",
+        )
+        self.data_default_button.grid(row=2, column=2, padx=(self.ui.space_sm, 0))
+        if info["env_locked"]:
+            self._label(
+                card, "Definida pela variável SNIPVOICE_HOME; altere-a fora do aplicativo.",
+                bg=self.ui.card, fg=self.ui.text_muted, anchor="w",
+            ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(self.ui.space_xs, 0))
+        card.columnconfigure(0, weight=1)
+
+    def choose_data_location(self):
+        chosen = filedialog.askdirectory(
+            parent=self.window, title="Nova pasta de dados do Snipvoice", mustexist=True,
+        )
+        if chosen:
+            self._confirm_data_relocation(data_relocation.target_for_choice(chosen))
+
+    def restore_default_data_location(self):
+        self._confirm_data_relocation(self.data_location()["default"])
+
+    def _confirm_data_relocation(self, target):
+        current = self.data_location()["path"]
+        try:
+            target = data_relocation.validate_target(current, target)
+        except data_relocation.RelocationError as exc:
+            messagebox.showerror("Pasta de dados", str(exc), parent=self.window)
+            return
+        # ceiling: sizes the library on the Tk thread; move to a worker if
+        # libraries reach hundreds of thousands of files.
+        size = format_size(data_relocation.directory_size(current))
+        if not messagebox.askokcancel(
+            "Mover dados",
+            f"Mover os dados do Snipvoice ({size}) de\n{current}\npara\n{target}?\n\n"
+            "O Snipvoice será fechado e aberto de novo. Entre discos diferentes, a cópia "
+            "pode levar alguns minutos antes de o ícone voltar à bandeja.",
+            parent=self.window,
+        ):
+            return
+        error = self.relocate_data(target)
+        if error:
+            messagebox.showerror("Pasta de dados", error, parent=self.window)
 
     def _build_appearance_card(self, parent):
         """Build a local appearance preference with a safe manager rebuild."""
@@ -5052,12 +5128,14 @@ def open_meeting_window(root, controller, settings_getter, persist_settings, on_
 
 def add_meeting_tabs(root, window, notebook, controller, settings_getter,
                      persist_settings, on_settings_changed=None,
-                     on_recording_state_changed=None, on_appearance_changed=None):
+                     on_recording_state_changed=None, on_appearance_changed=None,
+                     data_location=None, relocate_data=None):
     """Attach recording and library tabs to the shared application window."""
     view = MeetingWindow(
         root, controller, settings_getter, persist_settings, on_settings_changed,
         on_recording_state_changed, on_appearance_changed,
         window=window, notebook=notebook,
+        data_location=data_location, relocate_data=relocate_data,
     )
     window._meeting_view = view
     return view

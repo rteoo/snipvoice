@@ -11,7 +11,8 @@ and platform helpers are copied so the project runs independently of Sniptype.
 The shared trigger/variable helpers support exact spoken-command matching only;
 Snipvoice has no text-expansion keyboard listener, market providers, or snippet manager.
 
-User data: `~/.snipvoice` / `SNIPVOICE_HOME`. Model cache: non-roaming Snipvoice
+User data: `~/.snipvoice`, a user-moved folder recorded in `location.json`, or
+`SNIPVOICE_HOME`. Model cache: non-roaming Snipvoice
 directory / `SNIPVOICE_VOICE_CACHE`. Legacy Sniptype cache overrides are ignored.
 Existing `~/.sniptype` data, recordings, and models are preserved without migration.
 Any reuse or copying of an existing model cache is an explicit later operation;

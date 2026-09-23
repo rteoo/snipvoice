@@ -201,9 +201,15 @@ cited decisions and action items before using them.
 
 Settings, optional commands, logs, voice history, raw meetings, and the default
 final-recording folder live under
-`~/.snipvoice` by default; `SNIPVOICE_HOME` overrides the location. Models use
+`~/.snipvoice` by default. **Configurações > Geral > Pasta de dados** moves
+that whole folder to another location (for example `D:\snipvoice`): Snipvoice
+restarts, copies and verifies every file when the new folder is on another
+drive, and only then deletes the old copy. The chosen location is recorded in
+`location.json` under `%LOCALAPPDATA%\Snipvoice` (macOS:
+`~/Library/Application Support/Snipvoice`; Linux: `~/.config/snipvoice`).
+`SNIPVOICE_HOME` overrides both and disables the move controls. Models use
 separate non-roaming caches selected by `SNIPVOICE_VOICE_CACHE` and
-`SNIPVOICE_SUMMARY_CACHE`.
+`SNIPVOICE_SUMMARY_CACHE`; they are not moved with the data folder.
 
 Inactive dictation audio and transcripts expire after 30 days, checked when the
 voice controller starts. Set `voice_history_retention_days` in `settings.json`
