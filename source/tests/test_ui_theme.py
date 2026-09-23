@@ -352,6 +352,13 @@ class WidgetOptionTests(unittest.TestCase):
         # accent fill made unchecked boxes look checked.
         self.assertEqual(theme.checkbutton_colors(theme.card)["selectcolor"], theme.field)
 
+    def test_nav_buttons_mark_the_selected_section_off_macos(self):
+        theme = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(theme.nav_button_colors(theme.surface, selected=True)["fg"], theme.accent)
+        self.assertEqual(theme.nav_button_colors(theme.surface)["fg"], theme.text_native)
+        self.assertEqual(theme.nav_button_colors(theme.surface)["bg"], theme.surface)
+        self.assertEqual(ui_theme.build_theme("dark", system="darwin").nav_button_colors("#222"), {})
+
     def test_dark_readonly_entries_and_lists_avoid_light_native_faces(self):
         theme = ui_theme.build_theme("dark", system="windows")
         self.assertEqual(theme.entry_colors()["readonlybackground"], theme.surface_alt)

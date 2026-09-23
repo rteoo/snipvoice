@@ -1164,6 +1164,80 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             manager.destroy()
             self.root.update()
 
+    def _embedded_view(self, geometry="1120x820"):
+        controller = mock.Mock()
+        controller.snapshot.return_value = {
+            "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+        }
+        controller.devices.return_value = []
+        controller.list_sessions.return_value = []
+        controller.list_sessions_page.return_value = {
+            "items": [], "next_cursor": None, "cursor_reset": False, "index_state": "ready",
+        }
+        controller.search_library.return_value = []
+        controller.read_workspace.return_value = {
+            "generation": 0, "collections": [], "series": [],
+        }
+        manager = tk.Toplevel(self.root)
+        manager.geometry(geometry)
+        notebook = ttk.Notebook(manager)
+        notebook.pack(fill="both", expand=True, padx=24)
+        view = add_meeting_tabs(
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+        )
+        self.addCleanup(self.root.update)
+        self.addCleanup(manager.destroy)
+        self.addCleanup(view.close_without_prompt, destroy=False)
+        return view, notebook
+
+    def test_settings_show_one_section_at_a_time(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.settings_tab)
+        self.root.update()
+        sections = view.settings_sections
+        self.assertEqual(sections.current, "general")
+        self.assertEqual([key for key, frame in sections.frames.items() if frame.winfo_ismapped()],
+                         ["general"])
+        self.assertTrue(view.recording_defaults_parent.winfo_ismapped())
+        sections.select("privacy")
+        self.root.update()
+        self.assertFalse(view.recording_defaults_parent.winfo_ismapped())
+        self.assertTrue(sections.frames["privacy"].winfo_ismapped())
+
+    def test_library_panels_open_on_demand_and_count_active_filters(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        self.root.update()
+        self.assertFalse(view.library_panels["filters"].winfo_ismapped())
+        self.assertFalse(view.library_panels["cross"].winfo_ismapped())
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros ▾")
+        view.filters_toggle.invoke()
+        self.root.update()
+        self.assertTrue(view.library_panels["filters"].winfo_ismapped())
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros ▴")
+        view.tag_filter.set("cliente")
+        view.date_from_filter.set("2026-01-01")
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros (2) ▴")
+        view.filters_toggle.invoke()
+        self.root.update()
+        self.assertFalse(view.library_panels["filters"].winfo_ismapped())
+        self.assertEqual(view.filters_toggle.cget("text"), "Filtros (2) ▾")
+
+    def test_library_explains_empty_list_and_unselected_detail(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.library_empty.get())[1])
+        self.root.update()
+        self.assertTrue(view.library_empty_label.winfo_ismapped())
+        self.assertIn("Nenhuma gravação ainda", view.library_empty.get())
+        self.assertTrue(view.detail_placeholder.winfo_ismapped())
+        self.assertFalse(view.detail_frame.winfo_ismapped())
+        view._show_library_detail(True)
+        self.root.update()
+        self.assertTrue(view.detail_frame.winfo_ismapped())
+        self.assertFalse(view.detail_placeholder.winfo_ismapped())
+        self.assertEqual(view.detail_sections.current, "notes")
+
     def test_every_index_state_has_a_portuguese_label(self):
         self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))
 
@@ -1252,7 +1326,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         controller.devices.return_value = []
         controller.list_sessions.return_value = []
         manager = tk.Toplevel(self.root)
-        manager.geometry("1120x820")
+        # Short enough that the summary-model section overflows its viewport.
+        manager.geometry("1120x560")
         notebook = ttk.Notebook(manager)
         notebook.pack(fill="both", expand=True)
         view = add_meeting_tabs(
@@ -1260,6 +1335,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         )
         try:
             notebook.select(view.settings_tab)
+            view.settings_sections.select("summary")
             self.root.update()
             view.settings_canvas.yview_moveto(0)
             self.root.update()
