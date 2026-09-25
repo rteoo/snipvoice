@@ -14,8 +14,9 @@ The meeting workspace preserves Snipvoice's capture and recovery boundary:
 - transcription is installed-model-only, opt-in, sequential, revision-preserving,
   and bounded by transcript chunks; model acquisition remains an explicit
   settings action;
-- final audio is a derived atomic mixdown. The optional microphone treatment is
-  a deterministic low-level gate, bounded gain, and limiter, not spectral
+- final audio is a derived atomic mixdown. Optional microphone volume adjustment
+  measures the raw track in bounded memory and applies capped gain and a limiter
+  only to the final WAV. It does not hard-gate quiet speech or perform spectral
   denoising or acoustic echo cancellation;
 - the shared Tk root, controller workers, meeting hotkey, and tray actions keep
   capture, inference, disk work, and playback off keyboard/Tk callbacks;

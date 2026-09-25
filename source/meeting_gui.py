@@ -949,7 +949,7 @@ class MeetingWindow:
         )
         self.auto_summary_check.pack(anchor="w", fill="x", padx=(self.ui.space_xl, 0))
         self.voice_boost_check = tk.Checkbutton(
-            automation, text="Melhorar a voz do microfone", variable=self.voice_boost,
+            automation, text="Ajustar volume do microfone no áudio final", variable=self.voice_boost,
             font=self.ui.font(), anchor="w", **self.ui.checkbutton_colors(self.ui.card),
         )
         self.voice_boost_check.pack(anchor="w", fill="x", pady=(self.ui.space_xs, 0))

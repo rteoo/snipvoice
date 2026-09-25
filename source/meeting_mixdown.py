@@ -158,24 +158,62 @@ class _Track:
 
 
 class _MicEnhancer:
-    """Small deterministic gate/gain stage, retained across output chunks."""
+    """Apply a bounded gain without deleting quiet speech below a hard gate."""
 
-    def __init__(self):
-        self.threshold = 0.015
-        self.gain = 1.5
+    def __init__(self, gain=1.5):
+        self.gain = gain
         self.limit = 0.95
 
     def apply(self, samples, channels):
         for index in range(0, len(samples), channels):
-            # A fixed floor is deliberate: it removes steady low-level room
-            # noise without estimating a long session in memory. Raise only
-            # with a measured adaptive-noise design and regression coverage.
             for channel in range(channels):
                 value = samples[index + channel]
-                if abs(value) < self.threshold:
-                    samples[index + channel] = 0.0
-                else:
-                    samples[index + channel] = max(-self.limit, min(self.limit, value * self.gain))
+                samples[index + channel] = max(-self.limit, min(self.limit, value * self.gain))
+
+
+def _adaptive_microphone_gain(source, cancel_event):
+    """Measure a recording in bounded memory before deriving its final WAV."""
+    histogram = [0] * 97  # 1 dB RMS buckets from -96 through 0 dBFS.
+    windows = 0
+    peak = 0.0
+    for event, payload in source:
+        _cancel(cancel_event)
+        _validate_event(event, payload, "microphone")
+        window_values = max(1, event["rate"] // 10) * event["channels"]
+        count = 0
+        squared = 0.0
+        for (value,) in struct.iter_unpack("<f", payload):
+            if math.isfinite(value):
+                amplitude = min(1.0, abs(value))
+                peak = max(peak, amplitude)
+                squared += amplitude * amplitude
+            count += 1
+            if count == window_values:
+                rms = math.sqrt(squared / count)
+                bucket = max(0, min(96, int(math.floor(96 + 20 * math.log10(rms))))) if rms else 0
+                histogram[bucket] += 1
+                windows += 1
+                count = 0
+                squared = 0.0
+        if count:
+            rms = math.sqrt(squared / count)
+            bucket = max(0, min(96, int(math.floor(96 + 20 * math.log10(rms))))) if rms else 0
+            histogram[bucket] += 1
+            windows += 1
+    if not windows or not peak:
+        return 1.0
+    rank = math.ceil(windows * 0.9)
+    seen = 0
+    percentile = 0.0
+    for bucket, amount in enumerate(histogram):
+        seen += amount
+        if seen >= rank:
+            percentile = 10 ** ((bucket - 95) / 20)
+            break
+    if percentile < 0.002:
+        return 1.0
+    # Aim for speech around -24 dBFS while preserving transient headroom.
+    return max(1.0, min(8.0, (10 ** (-24 / 20)) / percentile, 0.95 / peak))
 
 
 def _write_header(handle, rate, channels):
@@ -196,6 +234,7 @@ def _finish_header(handle, data_bytes):
 
 
 def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
+                   microphone_gain=1.5,
                    cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES):
     """Mix timestamped ``microphone``/``system`` iterables into an atomic WAV.
 
@@ -211,6 +250,9 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
         raise ValueError("Somente as fontes microfone e sistema são suportadas.")
     if not isinstance(chunk_frames, int) or isinstance(chunk_frames, bool) or not 1 <= chunk_frames <= 65536:
         raise ValueError("chunk_frames deve ser um inteiro entre 1 e 65536.")
+    if (isinstance(microphone_gain, bool) or not isinstance(microphone_gain, (int, float))
+            or not math.isfinite(microphone_gain) or not 1 <= microphone_gain <= 8):
+        raise ValueError("O ganho do microfone deve estar entre 1 e 8.")
     _cancel(cancel_event)
     tracks = [_Track(name, source) for name, source in track_sources.items() if source is not None]
     tracks = [track for track in tracks if not track.done]
@@ -231,7 +273,7 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
     try:
         with os.fdopen(descriptor, "wb") as handle:
             _write_header(handle, rate, output_channels)
-            enhancer = _MicEnhancer() if enhance_microphone else None
+            enhancer = _MicEnhancer(microphone_gain) if enhance_microphone else None
             frame = 0
             # ceiling: output chunks are capped at 4,096 frames (~32 KiB for
             # stereo PCM16); increase only with measured memory profiling.
@@ -291,6 +333,10 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         inside_library = False
     if inside_library:
         raise ValueError("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais.")
+    microphone_gain = (
+        _adaptive_microphone_gain(store.iter_audio(session_id, "microphone"), cancel_event)
+        if enhance_microphone else 1.5
+    )
     sources = {
         track: store.iter_audio(session_id, track)
         for track in ("microphone", "system")
@@ -299,6 +345,7 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         sources,
         destination,
         enhance_microphone=enhance_microphone,
+        microphone_gain=microphone_gain,
         cancel_event=cancel_event,
         chunk_frames=chunk_frames,
     )

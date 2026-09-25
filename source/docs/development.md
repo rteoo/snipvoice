@@ -45,8 +45,10 @@ existing GUI root and keeps new device/disk/inference work on workers.
 `meeting_mixdown.py` derives one bounded, atomic PCM16 WAV from the timestamped
 raw tracks after a normal stop. It linearly adapts a lower native rate to the
 higher source clock and never rewrites the recoverable track segments. The
-optional microphone cleanup is a deterministic low-level gate, bounded gain,
-and limiter; do not describe it as spectral denoising or echo cancellation.
+optional microphone volume adjustment measures the raw track in bounded memory,
+then applies capped gain and a limiter only to the derived WAV. It preserves
+quiet speech instead of hard-gating it; do not describe it as spectral denoising
+or echo cancellation.
 Automatic transcription and summary remain opt-in and run sequentially under
 the existing local inference reservation.
 See [implementation validation and open hardware gates](offline-meeting-validation.md).
