@@ -432,7 +432,7 @@ def import_local_model(profile_or_id, source, cache_dir, cancel_event=None, prog
     """Import only exact catalog bytes without network access or another app's cache."""
     entry = resolve_entry(profile_or_id)
     if entry is None:
-        raise VoiceModelError("Modelo não pertence ao catálogo do Snipvoice.")
+        raise VoiceModelError("Modelo não pertence ao catálogo do SnipVoice.")
     if not os.path.isfile(source) or os.path.getsize(source) != entry["size_bytes"]:
         raise VoiceModelError("O arquivo não tem o tamanho esperado para este modelo.")
     destination = model_path(cache_dir, entry)

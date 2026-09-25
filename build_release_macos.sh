@@ -154,11 +154,11 @@ plutil -replace SnipvoiceReleaseChannel -string "$RELEASE_CHANNEL" \
     "$STAGED_APP/Contents/Info.plist" 2>/dev/null \
     || plutil -insert SnipvoiceReleaseChannel -string "$RELEASE_CHANNEL" \
         "$STAGED_APP/Contents/Info.plist"
-plutil -replace NSMicrophoneUsageDescription -string "O Snipvoice usa o microfone para ditado e gravações locais iniciadas por você." \
+plutil -replace NSMicrophoneUsageDescription -string "O SnipVoice usa o microfone para ditado e gravações locais iniciadas por você." \
     "$STAGED_APP/Contents/Info.plist" 2>/dev/null \
-    || plutil -insert NSMicrophoneUsageDescription -string "O Snipvoice usa o microfone para ditado e gravações locais iniciadas por você." \
+    || plutil -insert NSMicrophoneUsageDescription -string "O SnipVoice usa o microfone para ditado e gravações locais iniciadas por você." \
         "$STAGED_APP/Contents/Info.plist"
-plutil -insert NSAudioCaptureUsageDescription -string "O Snipvoice captura o áudio do sistema em gravações locais iniciadas por você." \
+plutil -insert NSAudioCaptureUsageDescription -string "O SnipVoice captura o áudio do sistema em gravações locais iniciadas por você." \
     "$STAGED_APP/Contents/Info.plist"
 
 SIGN_IDENTITY="${CODESIGN_IDENTITY:-}"

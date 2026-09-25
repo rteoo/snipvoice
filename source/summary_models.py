@@ -29,7 +29,7 @@ def summary_cache_dir():
 def _entry(model_id):
     entry = summary_catalog_entry(model_id)
     if entry is None:
-        raise ValueError("Selecione um modelo de resumo do catálogo do Snipvoice.")
+        raise ValueError("Selecione um modelo de resumo do catálogo do SnipVoice.")
     return entry
 
 
