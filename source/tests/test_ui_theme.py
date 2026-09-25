@@ -15,52 +15,51 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import ui_theme
 
 
-# Fluent-inspired Windows tokens are copied here on purpose: the point is to
-# fail loudly if the visual contract drifts accidentally.
+# Win Design System tokens are copied here to catch accidental drift.
 FLUENT_WINDOWS_COLORS = {
     "surface": "#F3F3F3",
-    "surface_alt": "#FAFAFA",
-    "surface_alt_active": "#EDEDED",
-    "surface_hover": "#EBEBEB",
+    "surface_alt": "#FFFFFF",
+    "surface_alt_active": "#DEDEDE",
+    "surface_hover": "#EAEAEA",
     "card": "#FFFFFF",
     "field": "#FFFFFF",
-    "field_hover": "#F5F9FD",
-    "control": "#F5F5F5",
-    "control_active": "#E6E6E6",
-    "control_border": "#C4C4C4",
-    "text": "#1B1B1B",
-    "text_strong": "#242424",
-    "text_muted": "#616161",
+    "field_hover": "#EAEAEA",
+    "control": "#EAEAEA",
+    "control_active": "#DEDEDE",
+    "control_border": "#767676",
+    "text": "#1A1A1A",
+    "text_strong": "#1A1A1A",
+    "text_muted": "#5C5C5C",
     "text_on_accent": "#FFFFFF",
-    "border": "#E1E1E1",
+    "border": "#D6D6D6",
     "divider": "#D6D6D6",
-    "accent": "#0067C0",
-    "accent_active": "#005A9E",
-    "danger": "#C42B1C",
-    "danger_active": "#A4262C",
+    "accent": "#005FB8",
+    "accent_active": "#004A91",
+    "danger": "#A4262C",
+    "danger_active": "#8D1F24",
     "focus_ring": "#005FB8",
     "link": "#005FB8",
-    "warning": "#8A4B00",
-    "success": "#0F7B0F",
+    "warning": "#7A4D00",
+    "success": "#0F6B36",
     "select_bg": "#DCEEFF",
-    "select_fg": "#1B1B1B",
-    "text_native": "#1B1B1B",
-    "tab_unselected_fg": "#4A4A4A",
+    "select_fg": "#1A1A1A",
+    "text_native": "#1A1A1A",
+    "tab_unselected_fg": "#5C5C5C",
 }
 
 DARK_WINDOWS_COLORS = {
-    "surface": "#111214",
-    "surface_alt": "#191A1D",
-    "card": "#1B1C20",
-    "field": "#222329",
-    "control": "#2C2E35",
-    "control_border": "#4B4E58",
-    "text": "#E9EAEC",
-    "text_strong": "#FFFFFF",
-    "text_muted": "#A4A7AE",
-    "border": "#32343B",
-    "accent": "#FFB347",
-    "accent_active": "#F59E0B",
+    "surface": "#202020",
+    "surface_alt": "#2B2B2B",
+    "card": "#2B2B2B",
+    "field": "#333333",
+    "control": "#333333",
+    "control_border": "#A0A0A0",
+    "text": "#F5F5F5",
+    "text_strong": "#F5F5F5",
+    "text_muted": "#C4C4C4",
+    "border": "#494949",
+    "accent": "#60CDFF",
+    "accent_active": "#A1E2FF",
 }
 
 
@@ -267,7 +266,7 @@ class WidgetOptionTests(unittest.TestCase):
             self.assertEqual(theme.text_colors(), {})
             self.assertEqual(theme.listbox_colors(), {})
             self.assertEqual(theme.checkbutton_colors("#FFFFFF")["bg"], "#FFFFFF")
-            self.assertEqual(theme.button_colors()["bg"], "#F5F5F5")
+            self.assertEqual(theme.button_colors()["bg"], "#EAEAEA")
 
     def test_disabled_checkboxes_keep_readable_secondary_text(self):
         theme = ui_theme.build_theme("light", system="windows")
@@ -289,7 +288,7 @@ class WidgetOptionTests(unittest.TestCase):
         )
         # X11 has neither name.
         self.assertEqual(
-            ui_theme.build_theme("windows", system="linux").text_native, "#1B1B1B"
+            ui_theme.build_theme("windows", system="linux").text_native, "#1A1A1A"
         )
 
     def test_windows_keeps_its_button_widths_and_window_size(self):
@@ -448,13 +447,13 @@ class WidgetOptionTests(unittest.TestCase):
     def test_toolbar_buttons_use_the_editor_surface_and_hover_token(self):
         colors = ui_theme.build_theme("windows", system="windows").toolbar_button_colors("#FFFFFF")
         self.assertEqual(colors["bg"], "#FFFFFF")
-        self.assertEqual(colors["activebackground"], "#EBEBEB")
+        self.assertEqual(colors["activebackground"], "#EAEAEA")
 
     def test_accent_button_uses_the_fluent_windows_tokens(self):
         colors = ui_theme.build_theme("windows", system="windows").button_colors(accent=True)
-        self.assertEqual(colors["bg"], "#0067C0")
+        self.assertEqual(colors["bg"], "#005FB8")
         self.assertEqual(colors["fg"], "#FFFFFF")
-        self.assertEqual(colors["activebackground"], "#005A9E")
+        self.assertEqual(colors["activebackground"], "#004A91")
 
     def test_toolbar_frame_uses_the_editor_card_surface(self):
         for system in ("windows", "linux"):
@@ -482,7 +481,7 @@ class WidgetOptionTests(unittest.TestCase):
         for system in ("windows", "linux"):
             self.assertEqual(
                 ui_theme.build_theme("windows", system=system).tab_unselected_fg,
-                "#4A4A4A",
+                "#5C5C5C",
             )
 
     def test_unselected_tab_foreground_follows_the_appearance_on_macos(self):

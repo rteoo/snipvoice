@@ -460,6 +460,26 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             ],
         )
 
+    def test_manager_destination_shortcuts_follow_tab_order(self):
+        def use_shortcuts(shared_root):
+            self.app._show_manager_window(shared_root)
+            window = self.app.manager_window
+            notebook = self.app._manager_notebook
+            window.update_idletasks()
+            window.focus_force()
+            window.update()
+            selected = []
+            for key in ("2", "4", "1"):
+                window.event_generate(f"<Control-Key-{key}>")
+                window.update()
+                selected.append(notebook.tab(notebook.select(), "text"))
+            return selected
+
+        self.assertEqual(
+            self._on_gui(use_shortcuts),
+            ["Biblioteca", "Configurações", "Gravação"],
+        )
+
     def test_manager_applies_persisted_dark_appearance(self):
         _ensure_voice(self.app)
         self.app.settings["appearance"] = "dark"

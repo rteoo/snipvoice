@@ -357,43 +357,43 @@ class Snipvoice:
         ui_theme.configure_manager_styles(style, ui)
         ui_theme.apply_window_chrome(window, ui)
 
-        header = tk.Frame(window, bg=ui.surface, padx=ui.space_xl, pady=ui.space_lg)
+        header = tk.Frame(window, bg=ui.surface, padx=ui.space_xl, pady=ui.space_md)
         header.pack(fill=tk.X)
         identity = tk.Frame(header, bg=ui.surface)
         identity.pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(
             identity,
             text=APP_DISPLAY_NAME,
-            font=ui.font(16, "bold"),
+            font=ui.font(12, "bold"),
             bg=ui.surface,
             fg=ui.text_strong,
         ).pack(anchor="w")
         tk.Label(
             identity,
-            text="Ditado, gravações, transcrições e resumos no seu computador",
+            text="Gravações e ditado",
             font=ui.font(9),
             bg=ui.surface,
             fg=ui.text_muted,
-        ).pack(anchor="w", pady=(ui.space_xs, 0))
+        ).pack(anchor="w", pady=(2, 0))
         privacy = tk.Frame(
-            header, padx=ui.space_md, pady=ui.space_sm, **ui.card_options()
+            header, bg=ui.surface,
         )
-        privacy.pack(side=tk.RIGHT, padx=(ui.space_lg, 0))
+        privacy.pack(side=tk.RIGHT, padx=(ui.space_lg, 0), anchor="center")
         tk.Label(
             privacy,
             text="100% local",
-            font=ui.font(9, "bold"),
-            bg=ui.card,
+            font=ui.font(8, "bold"),
+            bg=ui.surface,
             fg=ui.success,
         ).pack(anchor="e")
         tk.Label(
             privacy,
             text="sem upload automático",
             font=ui.font(8),
-            bg=ui.card,
+            bg=ui.surface,
             fg=ui.text_muted,
         ).pack(anchor="e", pady=(1, 0))
-        tk.Frame(window, bg=ui.accent, height=2).pack(fill=tk.X)
+        tk.Frame(window, bg=ui.divider, height=1).pack(fill=tk.X)
 
         notebook = ttk.Notebook(window, style="Manager.TNotebook")
         self._manager_notebook = notebook
@@ -401,7 +401,7 @@ class Snipvoice:
             fill=tk.BOTH,
             expand=True,
             padx=ui.space_xl,
-            pady=(ui.space_md, ui.space_lg),
+            pady=(0, ui.space_lg),
         )
         from meeting_gui import add_meeting_tabs
         meeting_view = add_meeting_tabs(
@@ -458,6 +458,17 @@ class Snipvoice:
                 models_parent=getattr(meeting_view, "transcription_models_parent", None),
             )
         notebook.select(meeting_view.recording_tab)
+        # Keep the four destinations available from the keyboard while focus
+        # remains inside a recording, search, or settings control.
+        def select_destination(index):
+            notebook.select(index)
+            return "break"
+
+        for index in range(4):
+            window.bind(
+                f"<Control-Key-{index + 1}>",
+                lambda _event, tab_index=index: select_destination(tab_index),
+            )
         window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
         window_width, window_height = (int(value) for value in geometry.split("x"))
         screen_width = window.winfo_screenwidth()
