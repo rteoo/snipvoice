@@ -1226,17 +1226,34 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertEqual(sections.current, "general")
         self.assertEqual([key for key, frame in sections.frames.items() if frame.winfo_ismapped()],
                          ["general"])
+        self.assertFalse(view.recording_defaults_parent.winfo_ismapped())
+        sections.select("recording")
+        self.root.update()
         self.assertTrue(view.recording_defaults_parent.winfo_ismapped())
         sections.select("privacy")
         self.root.update()
         self.assertFalse(view.recording_defaults_parent.winfo_ismapped())
         self.assertTrue(sections.frames["privacy"].winfo_ismapped())
 
+    def test_recording_screen_keeps_setup_visible_and_opens_settings(self):
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.recording_tab)
+        self.root.update()
+        self.assertIs(view.record_title_entry.master, view.recording_activity)
+        self.assertNotIn(view.recording_defaults_parent, descendants(view.recording_tab))
+        self.assertLessEqual(view.recording_activity.winfo_rootx() + view.recording_activity.winfo_width(),
+                             view.window.winfo_rootx() + view.window.winfo_width())
+        view.show_recording_settings()
+        self.root.update()
+        self.assertEqual(notebook.select(), str(view.settings_tab))
+        self.assertEqual(view.settings_sections.current, "recording")
+        self.assertTrue(view.recording_defaults_parent.winfo_ismapped())
+
     def test_settings_group_transcription_and_summary_models_under_modelos(self):
         view, notebook = self._embedded_view()
         notebook.select(view.settings_tab)
         sections = view.settings_sections
-        self.assertEqual(list(sections.frames), ["general", "privacy", "models"])
+        self.assertEqual(list(sections.frames), ["general", "recording", "privacy", "models"])
         self.assertEqual(sections.buttons["models"].cget("text"), "Modelos")
         sections.select("models")
         self.root.update()
