@@ -11,8 +11,8 @@
 #define MyAppVersion "3.4.0"
 #define MyAppChannel "beta"
 #if MyAppChannel == "beta"
-  #define MyAppDisplayVersion MyAppVersion + " beta 1"
-  #define MyInstallerVersion MyAppVersion + "-beta.1"
+  #define MyAppDisplayVersion MyAppVersion + " beta 2"
+  #define MyInstallerVersion MyAppVersion + "-beta.2"
 #else
   #define MyAppDisplayVersion MyAppVersion
   #define MyInstallerVersion MyAppVersion
