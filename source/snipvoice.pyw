@@ -1498,19 +1498,31 @@ class Snipvoice:
         buttons = tk.Frame(parent, bg=ui.surface)
         buttons.pack(fill=tk.X, pady=(ui.space_sm, 0))
         action_button("Salvar e usar", apply_voice_settings, accent=True).pack(side=tk.LEFT)
-        action_button("Remover modelo", remove_model).pack(side=tk.LEFT, padx=(8, 0))
-        action_button(
-            "Licenças e atribuições…",
-            lambda: self._show_voice_third_party_notices(owner, third_party_notices()),
-        ).pack(side=tk.RIGHT)
+        more_button = tk.Menubutton(
+            buttons, text="Mais opções ▾", direction="below", font=ui.font(),
+            **ui.button_colors(), **ui.button_chrome(),
+        )
+        menu_colors = {}
+        if ui.system != "darwin":
+            menu_colors = {
+                "bg": ui.card, "fg": ui.text,
+                "activebackground": ui.select_bg,
+                "activeforeground": ui.select_fg,
+            }
+        more_menu = tk.Menu(more_button, tearoff=False, **menu_colors)
+        tool_actions = (
+            ("Correções…", lambda: self._show_voice_replacements(owner)),
+            ("Recarregar comandos", self.reload_commands),
+            ("Licenças e atribuições…",
+             lambda: self._show_voice_third_party_notices(owner, third_party_notices())),
+            ("Remover modelo", remove_model),
+        )
+        for label, command in tool_actions:
+            more_menu.add_command(label=label, command=command)
+        more_button.configure(menu=more_menu)
+        more_button.pack(side=tk.RIGHT)
         action_button("Histórico de voz…", lambda: self._open_voice_history(owner)).pack(
-            side=tk.RIGHT, padx=(0, 8)
-        )
-        action_button("Recarregar comandos", self.reload_commands).pack(
-            side=tk.RIGHT, padx=(0, 8)
-        )
-        action_button("Correções…", lambda: self._show_voice_replacements(owner)).pack(
-            side=tk.RIGHT, padx=(0, 8)
+            side=tk.RIGHT, padx=(0, ui.space_sm),
         )
 
         refresh_form()
