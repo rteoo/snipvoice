@@ -56,3 +56,20 @@ python packaging\clean_audio_runtime.py `
   --wheel-dir build\clean-audio-wheel `
   --compliance-dir build\clean-audio-compliance
 ```
+
+## Microsoft Store (MSIX)
+
+`build_msix.py` packs `dist\Snipvoice` into an unsigned MSIX for Partner
+Center; the Store signs it on ingestion, so no code-signing certificate is
+needed. The package identity comes from Partner Center > Product identity and
+is set as the repository variables `SNIPVOICE_MSIX_IDENTITY_NAME`,
+`SNIPVOICE_MSIX_PUBLISHER` (`CN=...`) and
+`SNIPVOICE_MSIX_PUBLISHER_DISPLAY_NAME`; the Windows bundle job packs the MSIX
+only once they exist. Locally, pass the same values as flags after
+`build_release.bat`; `makeappx.exe` comes from the Windows SDK.
+
+The package declares `runFullTrust` (restricted; Partner Center asks for a
+justification), the microphone, and an opt-in startup task that the user
+toggles in Windows Settings instead of a Startup-folder shortcut. Store
+versions must strictly increase, so a beta and its stable release cannot share
+`APP_VERSION`.
