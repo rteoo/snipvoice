@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 3.4.0-beta.1 - 2026-09-25
+
+- Add a three-second microphone and system-source check with live meters and a waveform before recording, without creating a meeting or saving audio.
+- Focus the recording screen on title, sources, waveform, and transport controls; move destination and automation defaults to Configurações > Gravação.
+- Start or replace playback from a selected transcript row with a double-click or Enter.
+
 ## 3.3.2 - 2026-09-23
 
 - Group transcription and summary model downloads under Configurações > Modelos, with Transcrição and Resumos tabs, and give neutral buttons a fill and border that stand out on cards.
