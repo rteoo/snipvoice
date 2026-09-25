@@ -1,6 +1,6 @@
 # Development
 
-Snipvoice source is `3.4.0` on the `beta` channel (`v3.4.0-beta.1`).
+Snipvoice source is `3.4.0` on the `beta` channel (`v3.4.0-beta.2`).
 Runtime dependencies and native voice dependencies remain in separate manifests.
 Use an existing interpreter; do not implicitly update host tooling or packages.
 

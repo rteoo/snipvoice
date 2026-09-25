@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 3.4.0-beta.2 - 2026-09-25
+
+- Isolate the local summary runtime from transcription's native audio libraries to avoid the Windows entry-point failure seen in beta 1.
+- Raise quiet microphone speech in the derived final recording without hard-gating low-level audio or changing the recoverable raw track.
+- Add saved-recording replay with source selection and seeking, and simplify the library's opening view by moving advanced tools behind on-demand controls.
+
 ## 3.4.0-beta.1 - 2026-09-25
 
 - Add a three-second microphone and system-source check with live meters and a waveform before recording, without creating a meeting or saving audio.

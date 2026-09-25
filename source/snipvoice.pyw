@@ -89,8 +89,11 @@ from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "3.4.0"
 RELEASE_CHANNEL = "beta"
+BETA_NUMBER = 2
 APP_DISPLAY_NAME = f"Snipvoice v{APP_VERSION}"
-if RELEASE_CHANNEL != "stable":
+if RELEASE_CHANNEL == "beta":
+    APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} beta {BETA_NUMBER}"
+elif RELEASE_CHANNEL != "stable":
     APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} {RELEASE_CHANNEL}"
 APP_MUTEX_NAME = r"Local\SnipvoiceSingleton"
 APP_MUTEX_HANDLES = []

@@ -72,10 +72,12 @@ The current stable release is
 | Windows x64 | Per-user installer and portable ZIP |
 | macOS 14.4+ ARM64 | Ad-hoc-signed `.app` bundle in a ZIP |
 
-The recording-workflow beta is
-[`v3.4.0-beta.1`](https://github.com/rteoo/snipvoice/releases/tag/v3.4.0-beta.1).
-It adds a pre-recording source check, a simpler recording screen, and transcript-row
-playback. These beta packages need real-device recording feedback before a stable release.
+The current recording-workflow beta is
+[`v3.4.0-beta.2`](https://github.com/rteoo/snipvoice/releases/tag/v3.4.0-beta.2).
+It adds library replay and a clearer recording library, raises quiet microphone
+speech in the final audio, and isolates local summaries from a Windows native
+library conflict. These beta packages need real-device recording feedback before
+a stable release.
 
 The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first
