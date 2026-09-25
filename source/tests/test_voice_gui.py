@@ -466,9 +466,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             window = self.app.manager_window
             notebook = self.app._manager_notebook
             window.update_idletasks()
+            window.focus_force()
+            window.update()
             selected = []
             for key in ("2", "4", "1"):
                 window.event_generate(f"<Control-Key-{key}>")
+                window.update()
                 selected.append(notebook.tab(notebook.select(), "text"))
             return selected
 
