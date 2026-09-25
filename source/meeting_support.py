@@ -1512,7 +1512,7 @@ class MeetingController:
 
     def seek_playback(self, session_id, track, start=0.0):
         """Replace playback from a new point after the old audio stream exits."""
-        if (track not in {"microphone", "system"} or isinstance(start, bool)
+        if (track not in {"microphone", "system", "final"} or isinstance(start, bool)
                 or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0):
             raise ValueError("Escolha uma fonte e um instante de reprodução válido.")
         with self._lock:

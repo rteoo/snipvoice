@@ -1014,8 +1014,28 @@ def export_highlight_clip(store, session_id, highlight, path, cancel_event=None)
     return str(destination)
 
 
+def _final_audio_chunks(metadata, start, cancel_event):
+    final = metadata.get("final_audio")
+    path = final.get("path") if isinstance(final, dict) else None
+    if not isinstance(path, str) or not path or not os.path.isfile(path):
+        raise ValueError("O áudio final não está disponível para reprodução.")
+    try:
+        with wave.open(path, "rb") as reader:
+            rate, channels, width = reader.getframerate(), reader.getnchannels(), reader.getsampwidth()
+            if not 8000 <= rate <= 192000 or channels not in (1, 2) or width != 2:
+                raise ValueError("O arquivo de áudio final não usa WAV PCM16 compatível.")
+            reader.setpos(min(reader.getnframes(), int(start * rate)))
+            while not cancel_event.is_set():
+                raw = reader.readframes(PLAY_FRAMES)
+                if not raw:
+                    return
+                yield rate, channels, _pcm_float(raw, width)
+    except (OSError, wave.Error) as exc:
+        raise ValueError("Não foi possível ler o arquivo de áudio final.") from exc
+
+
 def play_audio(store, session_id, track, start, cancel_event):
-    if track not in {"microphone", "system"} or not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start) or start < 0:
+    if track not in {"microphone", "system", "final"} or not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start) or start < 0:
         raise ValueError("Escolha uma fonte e um instante de reprodução válido.")
     if cancel_event.is_set():
         return
@@ -1026,8 +1046,10 @@ def play_audio(store, session_id, track, start, cancel_event):
     stream = None
     current_format = None
     metadata = store.get(session_id, include_events=False)
+    chunks = (_final_audio_chunks(metadata, float(start), cancel_event) if track == "final" else
+              _audio_chunks(store, session_id, track, float(start), duration=metadata.get("duration")))
     try:
-        for rate, channels, payload in _audio_chunks(store, session_id, track, float(start), duration=metadata.get("duration")):
+        for rate, channels, payload in chunks:
             if cancel_event.is_set():
                 return
             if current_format != (rate, channels):

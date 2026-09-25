@@ -165,6 +165,7 @@ class PackagingExcludeTests(unittest.TestCase):
             text = handle.read()
         for package in ("tkinter", "av", "sounddevice", "soxr", "transcribe_cpp_native"):
             self.assertIn(f"import {package}", text)
+        self.assertIn("probe_summary_isolation()", text)
 
     def test_summary_runtime_probe_requires_packaged_llama_cpp(self):
         path = os.path.join(ROOT, "source", "summary_runtime_probe.py")
@@ -187,6 +188,8 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertLess(text.index(probe_call), text.index("import platform_support"))
         summary_probe = "\nrun_summary_runtime_probe_if_requested()\n"
         self.assertLess(text.index(summary_probe), text.index("import platform_support"))
+        worker = "\nrun_summary_worker_if_requested()\n"
+        self.assertLess(text.index(worker), text.index("import platform_support"))
 
     def test_voice_build_dependencies_are_version_pinned(self):
         path = os.path.join(ROOT, "source", "requirements-voice.txt")

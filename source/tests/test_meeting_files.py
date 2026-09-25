@@ -449,6 +449,36 @@ class MeetingFilesTests(unittest.TestCase):
         output.assert_called_once_with(samplerate=8000, channels=1, dtype="float32", device=None)
         stream.close.assert_called_once()
 
+    def test_replay_final_wav_works_after_raw_track_retention(self):
+        sid = self.session()
+        path = self.root / "final-playback.wav"
+        with wave.open(str(path), "wb") as output_file:
+            output_file.setnchannels(1)
+            output_file.setsampwidth(2)
+            output_file.setframerate(8000)
+            output_file.writeframes(struct.pack("<4h", 0, 8192, 16384, 24576))
+        self.store.save_final_audio(sid, path, voice_boost=True)
+        metadata_path = self.root / "meetings" / sid / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["tracks"]["microphone"].update({"available": False, "raw_removed": True})
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        writes = []
+        stream = mock.Mock()
+        stream.write.side_effect = lambda view: writes.extend(row[0] for row in view.tolist())
+        output = mock.Mock(return_value=stream)
+        with mock.patch.dict(sys.modules, {"sounddevice": types.SimpleNamespace(OutputStream=output)}):
+            play_audio(self.store, sid, "final", 1 / 8000, threading.Event())
+        self.assertEqual(len(writes), 3)
+        self.assertAlmostEqual(writes[0], 0.25)
+        self.assertAlmostEqual(writes[-1], 0.75)
+        output.assert_called_once_with(samplerate=8000, channels=1, dtype="float32", device=None)
+
+    def test_final_replay_reports_missing_file(self):
+        sid = self.session()
+        with mock.patch.dict(sys.modules, {"sounddevice": types.SimpleNamespace(OutputStream=mock.Mock())}):
+            with self.assertRaisesRegex(ValueError, "final"):
+                play_audio(self.store, sid, "final", 0, threading.Event())
+
     def test_cancelled_playback_aborts_stream(self):
         sid = self.session()
         cancellation = threading.Event()
