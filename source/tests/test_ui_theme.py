@@ -226,7 +226,8 @@ class ThemeCacheTests(unittest.TestCase):
 
     def test_theme_resolves_without_a_widget(self):
         theme = ui_theme.theme()
-        self.assertIn(theme.kind, ("windows", "light"))
+        self.assertEqual(theme.system, ui_theme.current_os())
+        self.assertIn(theme.kind, ("windows", "light", "dark"))
 
     def test_bind_replaces_the_cached_theme(self):
         first = ui_theme.bind(None, system="windows")
@@ -529,7 +530,8 @@ class TtkThemeSelectionTests(unittest.TestCase):
         # This is the actual bug: "vista" does not exist off Windows, and the
         # old bare try/except left whatever theme was already active.
         style = self.FakeStyle(("aqua", "clam", "default"))
-        self.assertEqual(ui_theme.apply_ttk_theme(style, "windows"), "default")
+        light = ui_theme.build_theme("windows", system="windows")
+        self.assertEqual(ui_theme.apply_ttk_theme(style, "windows", resolved=light), "default")
         self.assertEqual(style.used, ["default"])
 
     def test_never_raises_when_ttk_misbehaves(self):
