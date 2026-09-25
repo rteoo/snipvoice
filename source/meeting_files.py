@@ -129,7 +129,7 @@ def _pyav_chunks(path, cancel_event=None):
         import av
     except ImportError as error:
         raise RuntimeError(
-            "A importação deste formato exige o decodificador de áudio incluído na instalação completa do Snipvoice."
+            "A importação deste formato exige o decodificador de áudio incluído na instalação completa do SnipVoice."
         ) from error
     try:
         with av.open(str(path), mode="r") as container:
@@ -1022,7 +1022,7 @@ def play_audio(store, session_id, track, start, cancel_event):
     try:
         import sounddevice
     except ImportError as error:
-        raise RuntimeError("A reprodução exige o runtime de áudio local já provisionado. Use uma instalação completa do Snipvoice.") from error
+        raise RuntimeError("A reprodução exige o runtime de áudio local já provisionado. Use uma instalação completa do SnipVoice.") from error
     stream = None
     current_format = None
     metadata = store.get(session_id, include_events=False)

@@ -1703,7 +1703,7 @@ class MeetingWindow:
         ).grid(row=0, column=0, columnspan=3, sticky="w")
         self._label(
             card,
-            "O Snipvoice grava somente após uma ação explícita. As políticas abaixo são locais e preservam chaves futuras do workspace.",
+            "O SnipVoice grava somente após uma ação explícita. As políticas abaixo são locais e preservam chaves futuras do workspace.",
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=860,
         ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
 
@@ -1822,11 +1822,11 @@ class MeetingWindow:
                 "validate": data_relocation.validate_target, "size": data_relocation.directory_size,
                 "description": (
                     "Configurações, histórico de ditado, gravações e a biblioteca de reuniões "
-                    "ficam nesta pasta. Ao escolher outra, o Snipvoice move tudo para lá e "
+                    "ficam nesta pasta. Ao escolher outra, o SnipVoice move tudo para lá e "
                     "reinicia. Os modelos baixados têm uma pasta própria, na seção Modelos."
                 ),
                 "lock_note": "Definida pela variável SNIPVOICE_HOME; altere-a fora do aplicativo.",
-                "confirm": "Mover os dados do Snipvoice",
+                "confirm": "Mover os dados do SnipVoice",
             })
         if self.models_location is not None and self.relocate_models is not None:
             specs.append({
@@ -1911,7 +1911,7 @@ class MeetingWindow:
         if not messagebox.askokcancel(
             spec["title"],
             f"{spec['confirm']} ({size}) de\n{current}\npara\n{target}?\n\n"
-            "O Snipvoice será fechado e aberto de novo. Entre discos diferentes, a cópia "
+            "O SnipVoice será fechado e aberto de novo. Entre discos diferentes, a cópia "
             "pode levar alguns minutos antes de o ícone voltar à bandeja.",
             parent=self.window,
         ):
@@ -1935,7 +1935,7 @@ class MeetingWindow:
         self._label(
             card,
             "Use o tema do sistema ou escolha uma aparência fixa. A mudança reconstrói "
-            "esta janela sem reiniciar o Snipvoice.",
+            "esta janela sem reiniciar o SnipVoice.",
             bg=self.ui.card,
             fg=self.ui.text_muted,
             anchor="w",
@@ -3124,10 +3124,10 @@ class MeetingWindow:
             notice = reader(language) if callable(reader) else self.controller.recording_notice_text(language)
         except Exception:
             notice = (
-                "Esta reunião será gravada localmente pelo Snipvoice. "
+                "Esta reunião será gravada localmente pelo SnipVoice. "
                 "Confirme que todas as pessoas foram informadas e consentiram."
                 if language == "pt-BR" else
-                "This meeting will be recorded locally by Snipvoice. "
+                "This meeting will be recorded locally by SnipVoice. "
                 "Confirm that everyone has been informed and consents."
             )
         dialog = tk.Toplevel(self.window)

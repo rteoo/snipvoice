@@ -12,7 +12,7 @@ class SummaryRuntime:
             from llama_cpp import Llama
         except (ImportError, OSError) as exc:
             raise RuntimeError(
-                "O runtime llama.cpp incluído no Snipvoice não está disponível. Reinstale o aplicativo."
+                "O runtime llama.cpp incluído no SnipVoice não está disponível. Reinstale o aplicativo."
             ) from exc
         try:
             self._llama = Llama(model_path=model_path, n_ctx=context_length,
