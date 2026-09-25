@@ -111,6 +111,43 @@ class MeetingControllerTests(unittest.TestCase):
         snapshot["waveforms"]["microphone"].append(1.0)
         self.assertEqual(len(self.controller.snapshot()["waveforms"]["microphone"]), WAVEFORM_POINTS)
 
+    def test_source_preview_measures_audio_without_saving_a_meeting(self):
+        result = self.controller.preview_sources(MeetingSettings(), seconds=0.03)
+        self.assertEqual(result["enabled"], ("microphone", "system"))
+        self.assertEqual(result["peaks"], {"microphone": 0.0, "system": 0.5})
+        self.assertEqual(result["errors"], ())
+        self.assertTrue(self.capture.closed)
+        self.assertIsNone(self.controller._store)
+        self.assertEqual(self.controller.snapshot()["state"], "idle")
+        self.assertFalse(self.controller.snapshot()["previewing"])
+        self.assertTrue(self.controller.snapshot()["waveforms"]["system"])
+        self.voice.release_meeting.assert_called_once_with("lease")
+
+    def test_source_preview_blocks_recording_until_capture_stops(self):
+        errors = []
+
+        def preview():
+            try:
+                self.controller.preview_sources(MeetingSettings(), seconds=0.2)
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=preview)
+        worker.start()
+        self.assertTrue(self.capture.started.wait(1))
+        self.assertTrue(self.controller.snapshot()["previewing"])
+        self.assertFalse(self.controller.start(MeetingSettings()))
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_source_preview_keeps_reservation_if_teardown_is_unproven(self):
+        self.capture.fail_stop = True
+        with self.assertRaisesRegex(RuntimeError, "teardown pending"):
+            self.controller.preview_sources(MeetingSettings(), seconds=0.03)
+        self.assertEqual(self.controller.snapshot()["state"], "unavailable")
+        self.voice.release_meeting.assert_not_called()
+
     def test_final_audio_path_uses_local_default_and_never_overwrites(self):
         settings = MeetingSettings()
         first = _final_audio_path(Path(self.temp.name) / "meetings", settings,

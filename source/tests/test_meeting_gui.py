@@ -15,7 +15,7 @@ from meeting_gui import (
     MeetingWindow, NOTES_LIMIT, PROFILE_LABELS,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
-    format_time, open_meeting_window, retention_plan_projection, validated_settings,
+    format_time, meter_value, open_meeting_window, retention_plan_projection, validated_settings,
 )
 from meeting_index import INDEX_STATES
 from meeting_settings import EndpointSelection, resolve_meeting_settings
@@ -71,6 +71,22 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_preview_status_distinguishes_signal_from_silence(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.preview_signature = ("both", "default:multimedia", "default:multimedia")
+        view.preview_status = Variable()
+        view._current_settings = mock.Mock(return_value=resolve_meeting_settings({}))
+        view._previewed({
+            "enabled": ("microphone", "system"),
+            "peaks": {"microphone": 0.25, "system": 0.0}, "errors": (),
+        }, None)
+        self.assertEqual(
+            view.preview_status.get(),
+            "Microfone: sinal detectado · Sistema: sem sinal detectado.",
+        )
+        self.assertAlmostEqual(meter_value(0.01), 1 / 3)
+        self.assertEqual(meter_value(float("nan")), 0.0)
+
     def test_every_selectable_profile_has_a_distinct_label(self):
         from voice_catalog import selectable_catalog
         labels = [PROFILE_LABELS[entry["profile"]] for entry in selectable_catalog()]

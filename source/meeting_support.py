@@ -120,6 +120,16 @@ def _amplitude_envelope(values, channels, points=WAVEFORM_BLOCK_POINTS):
     return peaks
 
 
+def _measure_audio(payload, channels):
+    """Return a finite peak and bounded waveform from one native audio block."""
+    values = array.array("f")
+    values.frombytes(payload)
+    if sys.byteorder != "little":
+        values.byteswap()
+    peak = min(1.0, max((abs(value) for value in values if math.isfinite(value)), default=0.0))
+    return peak, _amplitude_envelope(values, channels)
+
+
 def _final_audio_path(root, settings, session_id, title=""):
     """Resolve one non-overwriting visible recording path."""
     if settings.destination:
@@ -184,6 +194,7 @@ class MeetingController:
         self._started = 0.0
         self._elapsed = 0.0
         self._levels = {"microphone": 0.0, "system": 0.0}
+        self._previewing = False
         # ceiling: the UI keeps only the latest 360 measured envelope points
         # per source, independent of recording duration.
         self._waveforms = {track: deque(maxlen=WAVEFORM_POINTS)
@@ -423,6 +434,7 @@ class MeetingController:
                     "elapsed": max(0.0, time.monotonic() - self._started)
                     if self._state in {"starting", "recording", "paused", "stopping"} else self._elapsed,
                     "levels": dict(self._levels),
+                    "previewing": self._previewing,
                     "waveforms": {track: list(values) for track, values in self._waveforms.items()},
                     "final_audio": self._output_path,
                     "postprocess": self._postprocess,
@@ -438,6 +450,81 @@ class MeetingController:
 
     def devices(self):
         return self.capture_factory().list_devices()
+
+    def preview_sources(self, settings, seconds=3.0):
+        """Measure selected sources without creating a meeting or writing audio."""
+        if isinstance(settings, dict):
+            settings = resolve_meeting_settings(settings)
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) \
+                or not math.isfinite(seconds) or not 0 < seconds <= 10:
+            raise ValueError("A duração do teste de áudio é inválida.")
+        enabled = ("microphone", "system") if settings.sources == "both" else (settings.sources,)
+
+        def work():
+            token, capture, failure = None, None, None
+            peaks = {track: 0.0 for track in enabled}
+            errors = set()
+            with self._lock:
+                self._generation += 1
+                generation = self._generation
+                self._previewing = True
+                self._levels = {"microphone": 0.0, "system": 0.0}
+                for values in self._waveforms.values():
+                    values.clear()
+            try:
+                token = self.voice.reserve_for_meeting()
+                capture = self.capture_factory()
+                capture.start(settings, generation)
+                deadline = time.monotonic() + seconds
+                stop_deadline = None
+                while True:
+                    if stop_deadline is None and (time.monotonic() >= deadline or self._cancel.is_set()):
+                        capture.command("stop")
+                        stop_deadline = time.monotonic() + 5
+                    if stop_deadline is not None and time.monotonic() >= stop_deadline:
+                        raise RuntimeError("O capturador não confirmou o fim do teste de áudio.")
+                    item = capture.read_event(timeout=0.1)
+                    if item is None:
+                        continue
+                    event, payload = item
+                    if event["type"] == "stopped":
+                        break
+                    if event["type"] == "source_error" and event.get("track") in enabled:
+                        errors.add(event["track"])
+                    if (event["type"] == "gap" and event.get("track") in enabled
+                            and any(word in str(event.get("reason", "")) for word in
+                                    ("overflow", "invalid", "discontinuity", "timestamp_error"))):
+                        errors.add(event["track"])
+                    if event["type"] != "audio" or event.get("track") not in enabled:
+                        continue
+                    peak, envelope = _measure_audio(payload, event["channels"])
+                    track = event["track"]
+                    peaks[track] = max(peaks[track], peak)
+                    with self._lock:
+                        self._levels[track] = peak
+                        self._waveforms[track].extend(envelope)
+            except Exception as exc:
+                failure = exc
+            finally:
+                live = False
+                if capture is not None:
+                    try:
+                        capture.stop(force=failure is not None)
+                    except Exception as exc:
+                        live = getattr(exc, "resource_live", True)
+                        failure = failure or exc
+                with self._lock:
+                    self._previewing = False
+                    self._levels.update(peaks)
+                    if live:
+                        self._state = "unavailable"
+                if token is not None and not live:
+                    self.voice.release_meeting(token)
+            if failure is not None:
+                raise failure
+            return {"enabled": enabled, "peaks": peaks, "errors": tuple(sorted(errors))}
+
+        return self._file_work(work)
 
     def start(self, settings, title=""):
         if isinstance(settings, dict):
@@ -464,6 +551,7 @@ class MeetingController:
             self._elapsed = 0.0
             self._output_path = ""
             self._postprocess = ""
+            self._levels = {"microphone": 0.0, "system": 0.0}
             for values in self._waveforms.values():
                 values.clear()
             self._started = time.monotonic()
@@ -554,12 +642,7 @@ class MeetingController:
                     break
                 if event["type"] == "audio":
                     self.store.append_audio(session, event, payload)
-                    values = array.array("f")
-                    values.frombytes(payload)
-                    if sys.byteorder != "little":
-                        values.byteswap()
-                    peak = min(1.0, max((abs(value) for value in values), default=0.0))
-                    envelope = _amplitude_envelope(values, event["channels"])
+                    peak, envelope = _measure_audio(payload, event["channels"])
                     with self._lock:
                         self._levels[event["track"]] = peak
                         self._waveforms[event["track"]].extend(envelope)
@@ -1151,8 +1234,9 @@ class MeetingController:
     def _file_work(self, operation, session_id=None):
         # Caller is an IO worker; reserve admission without another nested thread.
         with self._lock:
-            if self._closed or self._retention_active or self._processing or self._state != "idle":
-                raise RuntimeError("Aguarde a gravação ou o processamento terminar.")
+            if (self._closed or self._retention_active or self._processing or self._state != "idle"
+                    or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
+                raise RuntimeError("Aguarde a gravação, reprodução ou processamento terminar.")
             self._processing = True
             self._processing_session = session_id
             self._cancel.clear()
