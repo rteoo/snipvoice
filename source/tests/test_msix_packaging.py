@@ -37,6 +37,13 @@ class MsixManifestTests(unittest.TestCase):
         self.assertEqual(root.find(f"{FOUNDATION}Properties/{FOUNDATION}PublisherDisplayName").text,
                          "Example & Co")
 
+    def test_display_name_matches_the_store_reservation(self):
+        # Partner Center rejects a package whose DisplayName differs from the reserved name.
+        root = ET.fromstring(render())
+        self.assertEqual(root.find(f"{FOUNDATION}Properties/{FOUNDATION}DisplayName").text, "SnipVoice")
+        names = {element.get("DisplayName") for element in root.iter() if element.get("DisplayName")}
+        self.assertEqual(names, {"SnipVoice"})
+
     def test_manifest_declares_microphone_and_opt_in_startup_task(self):
         root = ET.fromstring(render())
         devices = [cap.get("Name") for cap in root.iter(f"{FOUNDATION}DeviceCapability")]
