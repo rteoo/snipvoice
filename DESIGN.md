@@ -12,7 +12,9 @@ screen builders use those tokens instead of literal colors or fonts.
   transcript, summary, questions, and files are peer detail sections. Filters,
   batch actions, and cross-recording questions appear when requested.
 - **Ditado:** choose the active model and language, then use the hotkey. Model
-  downloads and privacy controls belong in settings.
+  downloads and privacy controls belong in settings. Keep history beside the
+  primary save action; corrections, command reload, licenses, and model removal
+  live in the secondary actions menu.
 - **Configurações:** show one settings section at a time. Changes identify
   whether they apply immediately or to the next recording.
 
@@ -32,8 +34,8 @@ consistently, so opaque layers and a one-pixel border carry the hierarchy.
   body text, and secondary captions rather than decorative headings.
 - Spacing follows the 4/8/12/16/24 portion of the system scale. Neutral Tk
   buttons use a visible fill and stronger border so they remain distinct on
-  white cards. The app's existing compact controls and minimum manager size
-  remain until pixel-fit can be verified on a working Tk host.
+  white cards. The recording and library workspaces were visually checked at
+  the 920 × 700 Windows minimum size; the recording page scrolls to its meters.
 - Focus, selection, status, and disabled state must remain visually distinct.
   Never use color as the only explanation of an error or recording state.
 

@@ -193,6 +193,10 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 str(widget.cget("text")) for widget in _descendants(frame)
                 if isinstance(widget, tk.Button)
             ]
+            menus = [
+                widget for widget in _descendants(frame)
+                if isinstance(widget, tk.Menu)
+            ]
             selectors = [
                 widget for widget in _descendants(frame)
                 if isinstance(widget, ttk.Combobox)
@@ -203,16 +207,21 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             ]
             checked = bool(int(checkbox.getvar(checkbox.cget("variable"))))
             checkbox.invoke()
-            return checked, labels, buttons, len(selectors)
+            menu_items = [
+                menus[0].entrycget(index, "label")
+                for index in range(menus[0].index("end") + 1)
+            ]
+            return checked, labels, buttons, menu_items, len(selectors)
 
-        checked, labels, buttons, selector_count = self._on_gui(build)
+        checked, labels, buttons, menu_items, selector_count = self._on_gui(build)
         self.assertTrue(checked)
         self.assertIn("Entrada por voz (pronta)", labels)
         self.assertIn("Salvar e usar", buttons)
-        self.assertIn("Remover modelo", buttons)
-        self.assertIn("Recarregar comandos", buttons)
         self.assertIn("Histórico de voz…", buttons)
-        self.assertIn("Licenças e atribuições…", buttons)
+        self.assertEqual(menu_items, [
+            "Correções…", "Recarregar comandos",
+            "Licenças e atribuições…", "Remover modelo",
+        ])
         self.assertFalse(any("transcribe.cpp — MIT" in text for text in labels))
         self.assertFalse(any(text.startswith("Configurar ditado") for text in buttons))
         self.assertGreaterEqual(selector_count, 2)
@@ -226,12 +235,11 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             root.withdraw()
             frame = tk.Frame(root)
             self.app._create_voice_tab(frame, root)
-            button = next(
+            menu = next(
                 widget for widget in _descendants(frame)
-                if isinstance(widget, tk.Button)
-                and str(widget.cget("text")) == "Licenças e atribuições…"
+                if isinstance(widget, tk.Menu)
             )
-            button.invoke()
+            menu.invoke(2)
             dialog = next(
                 child for child in root.winfo_children()
                 if isinstance(child, tk.Toplevel)
@@ -262,6 +270,43 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertIn("Qwen/Qwen3-ASR-0.6B", notices)
         self.assertEqual(scrollbar_count, 1)
 
+    def test_voice_secondary_tools_are_available_in_menu(self):
+        _ensure_voice(self.app)
+
+        def inspect(shared_root):
+            root = tk.Toplevel(shared_root)
+            frame = tk.Frame(root)
+            frame.pack(fill=tk.BOTH, expand=True)
+            self.app._create_voice_tab(frame, root)
+            buttons = [
+                widget
+                for widget in _descendants(frame)
+                if isinstance(widget, tk.Button)
+            ]
+            more = next(widget for widget in _descendants(frame)
+                        if isinstance(widget, tk.Menubutton))
+            menu = next(widget for widget in _descendants(frame)
+                        if isinstance(widget, tk.Menu))
+            labels = [menu.entrycget(index, "label")
+                      for index in range(menu.index("end") + 1)]
+            primary_visible = all(
+                button.winfo_manager()
+                for button in buttons
+                if button.cget("text") in ("Salvar e usar", "Histórico de voz…")
+            )
+            has_secondary_buttons = any(
+                button.cget("text") in labels for button in buttons
+            )
+            title = more.cget("text")
+            root.destroy()
+            return title, labels, primary_visible, has_secondary_buttons
+
+        title, labels, primary_visible, has_secondary_buttons = self._on_gui(inspect)
+        self.assertEqual(title, "Mais opções ▾")
+        self.assertEqual(len(labels), 4)
+        self.assertTrue(primary_visible)
+        self.assertFalse(has_secondary_buttons)
+
     def test_voice_actions_fit_inside_the_default_manager_height(self):
         _ensure_voice(self.app)
 
@@ -280,13 +325,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             actions = {
                 str(widget.cget("text")): widget
                 for widget in _descendants(frame)
-                if isinstance(widget, tk.Button)
+                if isinstance(widget, (tk.Button, tk.Menubutton))
             }
             expected = {
                 "Salvar e usar",
-                "Remover modelo",
                 "Histórico de voz…",
-                "Licenças e atribuições…",
+                "Mais opções ▾",
             }
             self.assertTrue(expected.issubset(actions), actions)
             result = frame.winfo_height(), {
