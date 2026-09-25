@@ -97,6 +97,42 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_library_empty_state_offers_a_relevant_next_action(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.ui = ui_theme.build_theme("windows", system="windows")
+        view.library_empty_panel = mock.Mock()
+        view.library_empty = Variable()
+        view.query = Variable()
+        view.status_filter = Variable("Todos")
+        view._library_filters = mock.Mock(return_value={"collection": None})
+        for name in ("record", "import", "clear", "retry"):
+            setattr(view, f"library_empty_{name}_button", mock.Mock())
+
+        view._render_library_empty_state([])
+        self.assertIn("Nenhuma gravação ainda", view.library_empty.get())
+        view.library_empty_record_button.pack.assert_called_once()
+        view.library_empty_import_button.pack.assert_called_once()
+
+        view.query.set("missing")
+        view._render_library_empty_state([])
+        self.assertIn("Nenhuma gravação encontrada", view.library_empty.get())
+        view.library_empty_clear_button.pack.assert_called_once()
+
+        view._render_library_empty_state([{"id": "saved"}])
+        view.library_empty_panel.place_forget.assert_called_once()
+
+    def test_clear_library_search_resets_all_scopes_once(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.query = Variable("meeting")
+        view.status_filter = Variable("Concluídas")
+        view.clear_library_filters = mock.Mock()
+
+        view._clear_library_search()
+
+        self.assertEqual(view.query.get(), "")
+        self.assertEqual(view.status_filter.get(), "Todos")
+        view.clear_library_filters.assert_called_once_with()
+
     def test_transcript_double_click_seeks_without_playing_on_selection(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.transcript = mock.Mock()
@@ -1255,6 +1291,11 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         try:
             notebook.select(view.library_tab)
             self.root.update()
+            self.assertTrue(view.status_footer.winfo_ismapped())
+            self.assertLessEqual(
+                view.status_footer.winfo_rooty() + view.status_footer.winfo_height(),
+                manager.winfo_rooty() + manager.winfo_height(),
+            )
             # Pack clips an overflowing row by shrinking its last widgets below
             # their requested width rather than pushing them off the edge.
             clipped = [
@@ -1379,8 +1420,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(view.library_empty_label.winfo_ismapped())
         self.assertIn("Nenhuma gravação ainda", view.library_empty.get())
-        self.assertTrue(view.detail_placeholder.winfo_ismapped())
+        self.assertFalse(view.detail_placeholder.winfo_ismapped())
         self.assertFalse(view.detail_frame.winfo_ismapped())
+        self.assertEqual(len(view.library_panes.panes()), 1)
+        self.assertFalse(view.library_pages.winfo_ismapped())
         view._show_library_detail(True)
         self.root.update()
         self.assertTrue(view.detail_frame.winfo_ismapped())

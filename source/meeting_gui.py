@@ -617,6 +617,7 @@ class MeetingWindow:
         if placeholder is None:
             return
         if visible:
+            self._set_library_detail_visible(True)
             placeholder.grid_remove()
             self.detail_frame.grid()
         else:
@@ -624,21 +625,53 @@ class MeetingWindow:
             placeholder.grid()
 
     def _render_library_empty_state(self, items):
-        label = getattr(self, "library_empty_label", None)
-        if label is None:
+        panel = getattr(self, "library_empty_panel", None)
+        if panel is None:
             return
         if items:
-            label.place_forget()
+            panel.place_forget()
+            self._set_library_detail_visible(True)
             return
+        self._set_library_detail_visible(False)
         narrowed = (
             bool(self.query.get().strip()) or bool(STATUS_FILTERS.get(self.status_filter.get()))
             or any(self._library_filters().values())
         )
         self.library_empty.set(
             "Nenhuma gravação encontrada.\nAjuste a busca ou os filtros." if narrowed
-            else "Nenhuma gravação ainda.\nGrave na aba Gravação ou use Importar áudio…"
+            else "Nenhuma gravação ainda.\nComece gravando ou importe um áudio."
         )
-        label.place(relx=0.5, rely=0.5, anchor="center")
+        for button in (self.library_empty_record_button, self.library_empty_import_button,
+                       self.library_empty_clear_button, self.library_empty_retry_button):
+            button.pack_forget()
+        if narrowed:
+            self.library_empty_clear_button.pack(side="left")
+        else:
+            self.library_empty_record_button.pack(side="left")
+            self.library_empty_import_button.pack(side="left", padx=(self.ui.space_sm, 0))
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+        panel.lift()
+
+    def _set_library_detail_visible(self, visible):
+        panes = getattr(self, "library_panes", None)
+        detail = getattr(self, "library_detail_pane", None)
+        pages = getattr(self, "library_pages", None)
+        if panes is None or detail is None or pages is None:
+            return
+        present = str(detail) in panes.panes()
+        if visible and not present:
+            panes.add(detail, weight=3)
+        elif not visible and present:
+            panes.forget(detail)
+        if visible and not pages.winfo_manager():
+            pages.pack(fill="x", pady=(self.ui.space_sm, 0))
+        elif not visible:
+            pages.pack_forget()
+
+    def _clear_library_search(self):
+        self.query.set("")
+        self.status_filter.set("Todos")
+        self.clear_library_filters()
 
     def _button(self, parent, text, command, accent=False, danger=False):
         return tk.Button(parent, text=text, command=command, font=self.ui.font(),
@@ -767,15 +800,44 @@ class MeetingWindow:
             "Ajuste a gravação, a aparência, a privacidade e os modelos locais.",
         )
         self.status = tk.StringVar(self.window, "Carregando configurações…")
-        for tab in (self.recording_tab, self.library_tab, self.settings_tab):
-            self._label(
-                tab, "", textvariable=self.status, anchor="w", wraplength=940,
-                fg=self.ui.text_muted, font=self.ui.font(9),
-            ).pack(fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
-        recording = ttk.Frame(self.recording_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
-        recording.pack(fill="both", expand=True)
+        footer = tk.Frame(self.window, bg=self.ui.surface_alt)
+        self.status_footer = footer
+        footer.pack(side="bottom", fill="x", before=notebook)
+        tk.Frame(footer, bg=self.ui.divider, height=1).pack(fill="x")
+        self._wrap_label(
+            footer, "", textvariable=self.status, anchor="w", justify="left",
+            bg=self.ui.surface_alt, fg=self.ui.text_muted, font=self.ui.font(8),
+        ).pack(fill="x", padx=self.ui.space_xl, pady=self.ui.space_sm)
+        recording_view = ttk.Frame(self.recording_tab, style="Meeting.TFrame")
+        recording_view.pack(fill="both", expand=True)
+        recording_canvas = tk.Canvas(
+            recording_view, background=self.ui.surface,
+            highlightthickness=0, borderwidth=0,
+        )
+        recording_scrollbar = ttk.Scrollbar(
+            recording_view, orient="vertical", command=recording_canvas.yview,
+        )
+        recording_canvas.configure(yscrollcommand=recording_scrollbar.set)
+        recording_canvas.pack(side="left", fill="both", expand=True)
+        recording_scrollbar.pack(side="right", fill="y")
+        recording = ttk.Frame(
+            recording_canvas, padding=(16, 0, 16, 16), style="Meeting.TFrame",
+        )
+        recording_window = recording_canvas.create_window(
+            (0, 0), window=recording, anchor="nw",
+        )
+
+        def update_recording_scroll_region(_event=None):
+            recording_canvas.configure(scrollregion=recording_canvas.bbox("all"))
+
+        def stretch_recording_content(event):
+            recording_canvas.itemconfigure(recording_window, width=event.width)
+
+        recording.bind("<Configure>", update_recording_scroll_region)
+        recording_canvas.bind("<Configure>", stretch_recording_content)
+        self._bind_mousewheel_region(recording_view, recording_canvas)
+        self.recording_canvas = recording_canvas
         recording.columnconfigure(0, weight=1)
-        recording.rowconfigure(0, weight=1)
         library = ttk.Frame(self.library_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
         settings_view = ttk.Frame(self.settings_tab, style="Meeting.TFrame")
@@ -1013,7 +1075,7 @@ class MeetingWindow:
         self.preview_button = self._button(sources, "Testar fontes", self.preview_sources)
         self.preview_button.grid(row=2, column=1, sticky="e", pady=(4, 0))
         self.waveform = MeetingWaveform(
-            activity, theme=self.ui, height=170,
+            activity, theme=self.ui, height=140,
             track_labels={"microphone": "Microfone", "system": "Áudio do sistema"},
             state_labels={"idle": "Pronto", "checking": "Testando",
                           "recording": "Gravando", "paused": "Pausado"},
@@ -1222,7 +1284,7 @@ class MeetingWindow:
         filter_fields.pack(fill="x")
         # Tk has no portable placeholder text, so each field carries a small
         # caption above it instead.
-        for column, (variable, caption) in enumerate((
+        for index, (variable, caption) in enumerate((
             (self.collection_filter, "Coleção/projeto"),
             (self.tag_filter, "Tag"),
             (self.people_filter, "Pessoa"),
@@ -1230,17 +1292,24 @@ class MeetingWindow:
             (self.date_from_filter, "Data inicial (AAAA-MM-DD)"),
             (self.date_to_filter, "Data final (AAAA-MM-DD)"),
         )):
+            row, column = divmod(index, 3)
+            row *= 2
             self._label(filter_fields, caption, bg=self.ui.card, fg=self.ui.text_muted,
-                        font=self.ui.font(8)).grid(row=0, column=column, sticky="w", padx=(0, 4))
+                        font=self.ui.font(8)).grid(row=row, column=column, sticky="w",
+                                                   padx=(0, self.ui.space_sm),
+                                                   pady=(self.ui.space_sm if row else 0, 0))
             entry = self._entry(filter_fields, variable, 6)
             entry.configure(insertwidth=1)
-            entry.grid(row=1, column=column, sticky="ew", padx=(0, 4))
+            entry.grid(row=row + 1, column=column, sticky="ew",
+                       padx=(0, self.ui.space_sm))
             filter_fields.columnconfigure(column, weight=1)
             variable.trace_add("write", lambda *_args: self._refresh_library_toggles())
-        self._button(filter_fields, "Aplicar filtros", self.search, accent=True).grid(
-            row=1, column=6, padx=(4, 0))
-        self._button(filter_fields, "Limpar filtros", self.clear_library_filters).grid(
-            row=1, column=7, padx=(4, 0))
+        filter_actions = tk.Frame(filter_panel, bg=self.ui.card)
+        filter_actions.pack(fill="x", pady=(self.ui.space_sm, 0))
+        self._button(filter_actions, "Aplicar filtros", self.search, accent=True).pack(
+            side="right")
+        self._button(filter_actions, "Limpar filtros", self.clear_library_filters).pack(
+            side="right", padx=(0, self.ui.space_sm))
         index_row = tk.Frame(filter_panel, bg=self.ui.card)
         index_row.pack(fill="x", pady=(self.ui.space_sm, 0))
         self.index_status = tk.StringVar(self.window, "Índice de busca: estado desconhecido")
@@ -1298,13 +1367,14 @@ class MeetingWindow:
         right_outer = ttk.Frame(panes, style="Meeting.TFrame")
         panes.add(left, weight=1)
         panes.add(right_outer, weight=3)
+        self.library_detail_pane = right_outer
 
         def place_sash(event):
             # The first layout splits by requested widths, which left the
             # list wider than the recording it opens; start at about a third.
-            if event.width > 100:
-                panes.unbind("<Configure>")
+            if event.width > 100 and len(panes.panes()) > 1:
                 panes.sashpos(0, max(260, int(event.width * 0.36)))
+                panes.unbind("<Configure>")
 
         panes.bind("<Configure>", place_sash)
 
@@ -1323,12 +1393,34 @@ class MeetingWindow:
         self.sessions.pack(fill="both", expand=True)
         self.sessions.bind("<<TreeviewSelect>>", self._selection_changed)
         self.library_empty = tk.StringVar(self.window)
+        self.library_empty_panel = tk.Frame(list_frame, bg=self.ui.card)
+        empty_content = tk.Frame(self.library_empty_panel, bg=self.ui.card)
+        empty_content.place(relx=0.5, rely=0.5, anchor="center")
         self.library_empty_label = self._label(
-            list_frame, "", textvariable=self.library_empty, bg=self.ui.card,
-            fg=self.ui.text_muted, justify="center", wraplength=220,
+            empty_content, "", textvariable=self.library_empty,
+            bg=self.ui.card, fg=self.ui.text_strong,
+            font=self.ui.font(10, "bold"), justify="center", wraplength=260,
+        )
+        self.library_empty_label.pack(pady=(0, self.ui.space_md))
+        empty_actions = tk.Frame(empty_content, bg=self.ui.card)
+        empty_actions.pack(anchor="center")
+        self.library_empty_record_button = self._button(
+            empty_actions, "Gravar agora",
+            lambda: self.notebook.select(self.recording_tab), accent=True,
+        )
+        self.library_empty_import_button = self._button(
+            empty_actions, "Importar áudio…", self.import_audio,
+        )
+        self.library_empty_clear_button = self._button(
+            empty_actions, "Limpar busca e filtros", self._clear_library_search,
+            accent=True,
+        )
+        self.library_empty_retry_button = self._button(
+            empty_actions, "Tentar novamente", self.refresh_library, accent=True,
         )
         pages = ttk.Frame(left, style="Meeting.TFrame")
         pages.pack(fill="x", pady=(8, 0))
+        self.library_pages = pages
         self.previous_button = self._button(pages, "‹ Anterior", lambda: self.change_page(-1))
         self.previous_button.pack(side="left")
         self.next_button = self._button(pages, "Próxima ›", lambda: self.change_page(1))
@@ -3421,7 +3513,16 @@ class MeetingWindow:
     def _library_loaded(self, sessions, error):
         if error:
             self._remember_operation_error(error)
-            self.status.set("Não foi possível carregar a biblioteca. Veja os detalhes na aba Gravação.")
+            self.status.set("Não foi possível carregar a biblioteca. Tente novamente.")
+            if not self.sessions.get_children():
+                self._set_library_detail_visible(False)
+                self.library_empty.set("Não foi possível carregar a biblioteca.")
+                for button in (self.library_empty_record_button, self.library_empty_import_button,
+                               self.library_empty_clear_button, self.library_empty_retry_button):
+                    button.pack_forget()
+                self.library_empty_retry_button.pack(side="left")
+                self.library_empty_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+                self.library_empty_panel.lift()
             return
         search_results = []
         generation = self.library_filter_generation
