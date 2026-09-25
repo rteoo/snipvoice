@@ -159,9 +159,10 @@ class MeetingWaveform(tk.Canvas):
     redraws, so the audio callback never paints or calls Tcl.
     """
 
-    STATES = ("idle", "recording", "paused")
+    STATES = ("idle", "checking", "recording", "paused")
     _DEFAULT_TRACK_LABELS = {"microphone": "Microfone", "system": "Sistema"}
-    _DEFAULT_STATE_LABELS = {"idle": "Pronto", "recording": "Gravando", "paused": "Pausado"}
+    _DEFAULT_STATE_LABELS = {"idle": "Pronto", "checking": "Testando",
+                             "recording": "Gravando", "paused": "Pausado"}
 
     def __init__(self, master, model=None, *, theme=None, poll_ms=40,
                  track_labels=None, state_labels=None, **kwargs):

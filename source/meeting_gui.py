@@ -141,6 +141,17 @@ def format_time(seconds):
     return f"{whole // 3600:02d}:{whole // 60 % 60:02d}:{whole % 60:02d}"
 
 
+def meter_value(peak):
+    """Make quiet speech visible on a bounded -60 dB to 0 dB meter."""
+    try:
+        peak = float(peak)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(peak) or peak <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 + math.log10(min(1.0, peak)) / 3.0))
+
+
 def active_transcript_revision(metadata):
     """Choose the library's active revision without loading transcript content."""
     if not isinstance(metadata, dict):
@@ -484,6 +495,7 @@ class MeetingWindow:
         self.trash_entries = []
         self.retention_request = 0
         self.playback_generation = -1
+        self.preview_signature = None
         # Report/Q&A requests carry their own generation so a late worker
         # result can never replace a different meeting's selected output.
         self.report_request = 0
@@ -954,12 +966,16 @@ class MeetingWindow:
                 sources, textvariable=self.endpoint_vars[track], state="readonly",
             )
             combo.grid(row=row, column=1, sticky="ew", pady=2)
+            combo.bind("<<ComboboxSelected>>", self._source_selection_changed)
             self.source_checks[track] = control
             self.endpoint_boxes[track] = combo
+        self.preview_button = self._button(sources, "Testar fontes", self.preview_sources)
+        self.preview_button.grid(row=2, column=1, sticky="e", pady=(4, 0))
         self.waveform = MeetingWaveform(
             activity, theme=self.ui, height=170,
             track_labels={"microphone": "Microfone", "system": "Áudio do sistema"},
-            state_labels={"idle": "Pronto", "recording": "Gravando", "paused": "Pausado"},
+            state_labels={"idle": "Pronto", "checking": "Testando",
+                          "recording": "Gravando", "paused": "Pausado"},
         )
         self.waveform.grid(row=2, column=0, columnspan=2, sticky="nsew",
                            pady=(0, self.ui.space_sm))
@@ -994,6 +1010,13 @@ class MeetingWindow:
             meter = ttk.Progressbar(activity, maximum=1.0)
             meter.grid(row=row, column=1, sticky="ew")
             self.meters[track] = meter
+        self.preview_status = tk.StringVar(
+            self.window, "Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas.",
+        )
+        self._wrap_label(activity, "", textvariable=self.preview_status, anchor="w",
+                         fg=self.ui.text_muted).grid(
+                             row=7, column=0, columnspan=2, sticky="ew", pady=(6, 0),
+                         )
         self._profile_changed()
         self._sync_source_controls()
         self._automation_toggled()
@@ -2851,6 +2874,10 @@ class MeetingWindow:
 
     def _source_toggled(self):
         self._sync_source_controls()
+        self._source_selection_changed()
+
+    def _source_selection_changed(self, _event=None):
+        self.preview_status.set("Fontes alteradas. Teste novamente antes de gravar.")
 
     def _sync_source_controls(self):
         enabled = {"microphone": bool(self.input_enabled.get()),
@@ -2940,7 +2967,48 @@ class MeetingWindow:
         self._submit("save_settings", save, self._saved_settings)
 
     def refresh_devices(self):
+        self.preview_status.set("Dispositivos atualizados. Teste as fontes antes de gravar.")
         self._submit("devices", self.controller.devices, self._devices_loaded)
+
+    @staticmethod
+    def _source_signature(settings):
+        return settings.sources, settings.microphone.argument(), settings.system.argument()
+
+    def preview_sources(self):
+        request = self._validated_recording_request()
+        if request is None:
+            return
+        settings, _title = request
+        self.preview_signature = self._source_signature(settings)
+        self.preview_status.set("Testando por 3 segundos. Fale ou reproduza áudio nas fontes escolhidas…")
+        if not self._submit("preview_sources", lambda: self.controller.preview_sources(settings),
+                            self._previewed):
+            self.preview_status.set("Não foi possível iniciar o teste. Tente novamente.")
+
+    def _previewed(self, result, error):
+        if error:
+            self._remember_operation_error(error)
+            self.preview_status.set("O teste de áudio falhou. Veja os detalhes e tente novamente.")
+            return
+        try:
+            current = self._source_signature(self._current_settings())
+        except (ValueError, StopIteration):
+            current = None
+        if current != self.preview_signature:
+            self.preview_status.set("Fontes alteradas. Teste novamente antes de gravar.")
+            return
+        names = {"microphone": "Microfone", "system": "Sistema"}
+        errors = set(result["errors"])
+        parts = []
+        for track in result["enabled"]:
+            if track in errors:
+                state = "falhou"
+            elif result["peaks"][track] >= 0.01:
+                state = "sinal detectado"
+            else:
+                state = "sem sinal detectado"
+            parts.append(f"{names[track]}: {state}")
+        self.preview_status.set(" · ".join(parts) + ".")
 
     def _devices_loaded(self, devices, error):
         if error:
@@ -5045,8 +5113,10 @@ class MeetingWindow:
                 state == "idle" and not processing and self.settings_loaded
                 and self.retention_ready and self.privacy_ready
                 and not self.privacy_save_inflight
+                and not self.snapshot.get("playback", {}).get("active")
             )
             self.start_button.configure(state="normal" if start_ready else "disabled")
+            self.preview_button.configure(state="normal" if start_ready else "disabled")
             self.stop_button.configure(state="normal" if active else "disabled")
             self.pause_button.configure(text="Retomar" if state == "paused" else "Pausar",
                 state="normal" if state in ("recording", "paused") else "disabled")
@@ -5068,12 +5138,13 @@ class MeetingWindow:
             for track, values in self.snapshot.get("waveforms", {}).items():
                 if track in ("microphone", "system"):
                     self.waveform.append_block(track, values)
-            waveform_state = ("paused" if state == "paused" else "recording"
+            waveform_state = ("checking" if self.snapshot.get("previewing") else
+                              "paused" if state == "paused" else "recording"
                               if state in ("starting", "recording", "stopping") else "idle")
             self.waveform.set_state(waveform_state)
             for track, meter in self.meters.items():
                 value = float(self.snapshot.get("levels", {}).get(track, 0) or 0)
-                meter.configure(value=max(0, min(1, value)) if math.isfinite(value) else 0)
+                meter.configure(value=meter_value(value))
             if self.previous_state in ("recording", "paused", "stopping") and not active:
                 self.refresh_library()
             if state != self.previous_state and self.on_recording_state_changed:
