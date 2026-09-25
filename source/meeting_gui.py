@@ -720,7 +720,7 @@ class MeetingWindow:
         self._page_header(
             self.recording_tab,
             "Gravar reunião",
-            "Escolha as fontes locais, confira os dispositivos e controle a gravação.",
+            "Dê um nome, confira as fontes e comece quando a reunião começar.",
         )
         self._page_header(
             self.library_tab,
@@ -730,7 +730,7 @@ class MeetingWindow:
         self._page_header(
             self.settings_tab,
             "Configurações",
-            "Ajuste a aparência, a privacidade e os modelos locais sem enviar conteúdo à nuvem.",
+            "Ajuste a gravação, a aparência, a privacidade e os modelos locais.",
         )
         self.status = tk.StringVar(self.window, "Carregando configurações…")
         for tab in (self.recording_tab, self.library_tab, self.settings_tab):
@@ -740,8 +740,7 @@ class MeetingWindow:
             ).pack(fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
         recording = ttk.Frame(self.recording_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         recording.pack(fill="both", expand=True)
-        recording.columnconfigure(0, weight=4, minsize=360)
-        recording.columnconfigure(1, weight=7, minsize=440)
+        recording.columnconfigure(0, weight=1)
         recording.rowconfigure(0, weight=1)
         library = ttk.Frame(self.library_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
@@ -783,6 +782,7 @@ class MeetingWindow:
             on_select=lambda _key: settings_canvas.yview_moveto(0),
         )
         general = self.settings_sections.add("general", "Geral")
+        recording_settings = self.settings_sections.add("recording", "Gravação")
         privacy = self.settings_sections.add("privacy", "Privacidade")
         models = self.settings_sections.add("models", "Modelos")
         model_nav = tk.Frame(models, bg=self.ui.surface)
@@ -800,7 +800,7 @@ class MeetingWindow:
         for spec in self._location_specs():
             # The model folder serves both model kinds, so it sits under their tabs.
             self._build_location_card(models if spec["key"] == "models" else general, spec)
-        self.recording_defaults_parent = self._card(general)
+        self.recording_defaults_parent = self._card(recording_settings)
         self.recording_defaults_parent.pack(fill="x", pady=(0, self.ui.space_md))
         self._build_privacy_card(privacy)
         self.transcription_models_parent = tk.Frame(
@@ -882,13 +882,12 @@ class MeetingWindow:
         card_pady = max(2, self.ui.space_xs // 2) if compact_recording else self.ui.space_sm
         row_pady = 1 if compact_recording else 3
         note_pady = (2, 4) if compact_recording else (4, 6)
-        settings_card = self._card(recording, pady=card_pady)
-        settings_card.grid(row=0, column=0, sticky="nsew", padx=(0, self.ui.space_md))
+        settings_card = self._card(recording_settings, pady=card_pady)
+        settings_card.pack(fill="x", pady=(0, self.ui.space_md))
         self._label(
             settings_card, "Detalhes e automação",
             bg=self.ui.card, fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, self.ui.space_sm))
-        rows = [("Título", self._entry(settings_card, self.record_title))]
         destination_row = tk.Frame(settings_card, bg=self.ui.card)
         destination_entry = self._entry(destination_row, self.destination_label)
         destination_entry.configure(state="readonly")
@@ -897,14 +896,10 @@ class MeetingWindow:
             side="left", padx=(self.ui.space_sm, 0))
         self._button(destination_row, "Usar padrão", self.use_default_destination).pack(
             side="left", padx=(self.ui.space_sm, 0))
-        rows.append(("Pasta dos arquivos finais", destination_row))
-        next_row = 1
-        for label, widget in rows:
-            self._label(settings_card, label, anchor="w", bg=self.ui.card).grid(
-                row=next_row, column=0, sticky="w", pady=(row_pady, 0),
-            )
-            widget.grid(row=next_row + 1, column=0, sticky="ew", pady=(0, row_pady))
-            next_row += 2
+        self._label(settings_card, "Pasta dos arquivos finais", anchor="w", bg=self.ui.card).grid(
+            row=1, column=0, sticky="w", pady=(row_pady, 0),
+        )
+        destination_row.grid(row=2, column=0, sticky="ew", pady=(0, row_pady))
         settings_card.columnconfigure(0, weight=1)
         automation = tk.Frame(settings_card, bg=self.ui.card)
         self.auto_transcribe_check = tk.Checkbutton(
@@ -924,7 +919,7 @@ class MeetingWindow:
             font=self.ui.font(), anchor="w", **self.ui.checkbutton_colors(self.ui.card),
         )
         self.voice_boost_check.pack(anchor="w", fill="x", pady=(self.ui.space_xs, 0))
-        automation_row = next_row
+        automation_row = 3
         self._label(settings_card, "Depois de gravar", anchor="w", bg=self.ui.card).grid(
             row=automation_row, column=0, sticky="w", pady=(row_pady, 0))
         automation.grid(row=automation_row + 1, column=0, sticky="ew", pady=(0, row_pady))
@@ -940,18 +935,27 @@ class MeetingWindow:
         note.grid(row=note_row, column=0, sticky="ew", pady=note_pady)
         commands = tk.Frame(settings_card, bg=self.ui.card)
         commands.grid(row=note_row + 1, column=0, sticky="w")
-        self._button(commands, "Atualizar dispositivos", self.refresh_devices).pack(side="left", padx=(0, 8))
         self._button(commands, "Salvar como padrão", self.save_settings).pack(side="left")
         activity = self._card(recording, pady=card_pady)
-        activity.grid(row=0, column=1, sticky="nsew")
+        activity.grid(row=0, column=0, sticky="nsew")
+        self.recording_activity = activity
         self._label(
-            activity, "Controles da gravação", bg=self.ui.card, fg=self.ui.text_strong,
+            activity, "Gravação", bg=self.ui.card, fg=self.ui.text_strong,
             font=self.ui.font(11, "bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, self.ui.space_sm))
+        ).grid(row=0, column=0, sticky="w", pady=(0, self.ui.space_sm))
+        self.recording_options_button = self._button(
+            activity, "Configurar gravação", self.show_recording_settings,
+        )
+        self.recording_options_button.grid(row=0, column=1, sticky="e", pady=(0, self.ui.space_sm))
         activity.columnconfigure(1, weight=1)
-        activity.rowconfigure(2, weight=1)
+        activity.rowconfigure(4, weight=1)
+        self._label(activity, "Título da reunião (opcional)", anchor="w",
+                    bg=self.ui.card).grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.record_title_entry = self._entry(activity, self.record_title)
+        self.record_title_entry.grid(row=2, column=0, columnspan=2, sticky="ew",
+                                     pady=(2, self.ui.space_sm))
         sources = tk.Frame(activity, bg=self.ui.card)
-        sources.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, self.ui.space_sm))
+        sources.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, self.ui.space_sm))
         sources.columnconfigure(1, weight=1)
         self.source_checks = {}
         for row, (track, label, variable) in enumerate((
@@ -969,6 +973,9 @@ class MeetingWindow:
             combo.bind("<<ComboboxSelected>>", self._source_selection_changed)
             self.source_checks[track] = control
             self.endpoint_boxes[track] = combo
+        self._button(sources, "Atualizar dispositivos", self.refresh_devices).grid(
+            row=2, column=0, sticky="w", pady=(4, 0),
+        )
         self.preview_button = self._button(sources, "Testar fontes", self.preview_sources)
         self.preview_button.grid(row=2, column=1, sticky="e", pady=(4, 0))
         self.waveform = MeetingWaveform(
@@ -977,10 +984,10 @@ class MeetingWindow:
             state_labels={"idle": "Pronto", "checking": "Testando",
                           "recording": "Gravando", "paused": "Pausado"},
         )
-        self.waveform.grid(row=2, column=0, columnspan=2, sticky="nsew",
+        self.waveform.grid(row=4, column=0, columnspan=2, sticky="nsew",
                            pady=(0, self.ui.space_sm))
         transport = tk.Frame(activity, bg=self.ui.card)
-        transport.grid(row=3, column=0, columnspan=2, sticky="w")
+        transport.grid(row=5, column=0, columnspan=2, sticky="w")
         self.start_button = self._button(transport, "Iniciar gravação", self.start, accent=True)
         self.start_button.pack(side="left", padx=(0, 8))
         self.pause_button = self._button(transport, "Pausar", self.pause_resume)
@@ -989,7 +996,7 @@ class MeetingWindow:
         self.stop_button.pack(side="left")
         self.record_status = tk.StringVar(self.window, "Pronto · 00:00:00")
         status_row = tk.Frame(activity, bg=self.ui.card)
-        status_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 4))
+        status_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 4))
         self._label(status_row, "", textvariable=self.record_status, anchor="w",
                     wraplength=600, bg=self.ui.card, fg=self.ui.text_muted).pack(
                         side="left", fill="x", expand=True)
@@ -1003,7 +1010,7 @@ class MeetingWindow:
         self.meters = {}
         meters = (("microphone", "Nível do microfone"),
                   ("system", "Nível do sistema"))
-        for row, (track, label) in enumerate(meters, 5):
+        for row, (track, label) in enumerate(meters, 7):
             self._label(activity, label, anchor="w", bg=self.ui.card).grid(
                 row=row, column=0, sticky="w", padx=(0, 18), pady=6,
             )
@@ -1015,7 +1022,7 @@ class MeetingWindow:
         )
         self._wrap_label(activity, "", textvariable=self.preview_status, anchor="w",
                          fg=self.ui.text_muted).grid(
-                             row=7, column=0, columnspan=2, sticky="ew", pady=(6, 0),
+                             row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0),
                          )
         self._profile_changed()
         self._sync_source_controls()
@@ -2875,6 +2882,10 @@ class MeetingWindow:
     def _source_toggled(self):
         self._sync_source_controls()
         self._source_selection_changed()
+
+    def show_recording_settings(self):
+        self.notebook.select(self.settings_tab)
+        self.settings_sections.select("recording")
 
     def _source_selection_changed(self, _event=None):
         self.preview_status.set("Fontes alteradas. Teste novamente antes de gravar.")
