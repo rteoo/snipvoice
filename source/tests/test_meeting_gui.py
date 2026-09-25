@@ -71,6 +71,37 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_transcript_double_click_seeks_without_playing_on_selection(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.transcript = mock.Mock()
+        view.transcript.identify_row.return_value = "segment"
+        view.transcript.selection.return_value = ("segment",)
+        view.segments = {"segment": {"id": "segment", "start": 12.0}}
+        view._transcript_selected = mock.Mock()
+        view.play = mock.Mock()
+        event = types.SimpleNamespace(y=8)
+        self.assertEqual(view._play_transcript_click(event), "break")
+        view.transcript.selection_set.assert_called_once_with("segment")
+        view._transcript_selected.assert_called_once_with()
+        view.play.assert_called_once_with()
+
+        view.transcript.identify_row.return_value = ""
+        self.assertEqual(view._play_transcript_click(event), "break")
+        view.play.assert_called_once()
+
+    def test_play_button_uses_seek_for_selected_meeting(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting"
+        view.snapshot = {"state": "idle"}
+        view.track = Variable("Microfone")
+        view.position = Variable("12.5")
+        view.raw_unavailable_tracks = set()
+        view._action = mock.Mock()
+        view.play()
+        view._action.assert_called_once_with(
+            "seek_playback", "meeting", "microphone", start=12.5, urgent=True,
+        )
+
     def test_preview_status_distinguishes_signal_from_silence(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.preview_signature = ("both", "default:multimedia", "default:multimedia")
@@ -1248,6 +1279,13 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertEqual(notebook.select(), str(view.settings_tab))
         self.assertEqual(view.settings_sections.current, "recording")
         self.assertTrue(view.recording_defaults_parent.winfo_ismapped())
+
+    def test_transcript_exposes_mouse_and_keyboard_playback_navigation(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        self.root.update()
+        self.assertTrue(view.transcript.bind("<Double-1>"))
+        self.assertTrue(view.transcript.bind("<Return>"))
 
     def test_settings_group_transcription_and_summary_models_under_modelos(self):
         view, notebook = self._embedded_view()

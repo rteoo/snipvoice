@@ -1510,6 +1510,22 @@ class MeetingController:
                 self._playback_active = False
                 self._playback_error = ""
 
+    def seek_playback(self, session_id, track, start=0.0):
+        """Replace playback from a new point after the old audio stream exits."""
+        if (track not in {"microphone", "system"} or isinstance(start, bool)
+                or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0):
+            raise ValueError("Escolha uma fonte e um instante de reprodução válido.")
+        with self._lock:
+            if self._closed or self._retention_active or self._state != "idle" or self._processing:
+                return False
+            worker = self._play_thread
+        self.stop_playback()
+        if worker and worker is not threading.current_thread():
+            worker.join(12)
+            if worker.is_alive():
+                raise RuntimeError("A reprodução anterior ainda está encerrando.")
+        return self.play(session_id, track, start=start)
+
     def shutdown(self):
         with self._lock:
             self._closed = True
