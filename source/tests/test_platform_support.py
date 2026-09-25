@@ -203,8 +203,10 @@ class AutostartTests(unittest.TestCase):
         read.assert_not_called()
 
     def test_msix_detection_is_windows_only(self):
-        with mock.patch.object(ps, "current_os", return_value="darwin"):
+        with mock.patch.object(ps.sys, "platform", "darwin"), \
+                mock.patch.object(ps.ctypes, "windll", create=True) as windll:
             self.assertFalse(ps.is_msix_packaged())
+        windll.kernel32.GetCurrentPackageFullName.assert_not_called()
 
     @unittest.skipUnless(sys.platform.startswith("win"), "Windows package identity API")
     def test_unpackaged_test_process_has_no_package_identity(self):

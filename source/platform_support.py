@@ -58,7 +58,9 @@ def is_msix_packaged():
     Packaged apps cannot own a Startup-folder shortcut: AppData writes are
     virtualized per package and the install path changes on every update.
     """
-    if current_os() != "windows":
+    # Package identity belongs to this process, so check the real platform
+    # rather than current_os(), which callers may substitute.
+    if not sys.platform.startswith("win"):
         return False
     length = ctypes.c_uint32(0)
     result = ctypes.windll.kernel32.GetCurrentPackageFullName(ctypes.byref(length), None)
