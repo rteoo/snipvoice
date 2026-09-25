@@ -287,7 +287,7 @@ class PackagingExcludeTests(unittest.TestCase):
             },
         )
 
-    def test_release_metadata_is_stable_and_synchronized(self):
+    def test_beta_release_metadata_is_synchronized(self):
         paths = {
             "source": os.path.join(ROOT, "source", "snipvoice.pyw"),
             "installer": os.path.join(ROOT, "installer", "snipvoice.iss"),
@@ -301,11 +301,18 @@ class PackagingExcludeTests(unittest.TestCase):
         source_version = re.search(r'^APP_VERSION = "([^"]+)"$', texts["source"], re.M)
         installer_version = re.search(r'^#define MyAppVersion "([^"]+)"$', texts["installer"], re.M)
         workflow_version = re.search(r'^  SNIPVOICE_VERSION: "([^"]+)"$', texts["workflow"], re.M)
-        self.assertEqual(source_version.group(1), "3.3.2")
-        self.assertEqual(installer_version.group(1), "3.3.2")
-        self.assertEqual(workflow_version.group(1), "3.3.2")
-        self.assertIn('RELEASE_CHANNEL = "stable"', texts["source"])
-        self.assertIn('#define MyAppChannel "stable"', texts["installer"])
+        self.assertEqual(source_version.group(1), "3.4.0")
+        self.assertEqual(installer_version.group(1), "3.4.0")
+        self.assertEqual(workflow_version.group(1), "3.4.0")
+        self.assertIn('Version: 3.4.0\nChannel: beta', texts["source"])
+        self.assertIn('RELEASE_CHANNEL = "beta"', texts["source"])
+        self.assertIn('#define MyAppChannel "beta"', texts["installer"])
+        self.assertIn('SNIPVOICE_CHANNEL: "beta"', texts["workflow"])
+        self.assertIn('SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.1"', texts["workflow"])
+        self.assertIn('#define MyInstallerVersion MyAppVersion + "-beta.1"',
+                      texts["installer"])
+        self.assertIn('installer/Output/SnipvoiceSetup-${{ env.SNIPVOICE_RELEASE_LABEL }}.exe',
+                      texts["workflow"])
 
     def test_windows_icon_badge_fills_every_frame(self):
         # Tray, Start and taskbar slots are 16-32 px. A transparent margin

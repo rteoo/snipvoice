@@ -39,7 +39,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SNIPVOICE_VERSION: "3.3.2"
+  SNIPVOICE_VERSION: "3.4.0"
+  SNIPVOICE_CHANNEL: "beta"
+  SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.1"
 
 jobs:
   windows:
@@ -74,12 +76,13 @@ jobs:
       - name: Verify release metadata
         shell: pwsh
         run: |
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$env:SNIPVOICE_RELEASE_LABEL") { throw "release tag mismatch" }
           $source = Get-Content -Raw source/snipvoice.pyw
           $installer = Get-Content -Raw installer/snipvoice.iss
           if ($source -notmatch "APP_VERSION = `"$env:SNIPVOICE_VERSION`"") { throw "source version mismatch" }
-          if ($source -notmatch "RELEASE_CHANNEL = `"stable`"") { throw "source channel is not stable" }
+          if ($source -notmatch "RELEASE_CHANNEL = `"$env:SNIPVOICE_CHANNEL`"") { throw "source channel mismatch" }
           if ($installer -notmatch "MyAppVersion `"$env:SNIPVOICE_VERSION`"") { throw "installer version mismatch" }
-          if ($installer -notmatch "MyAppChannel `"stable`"") { throw "installer channel is not stable" }
+          if ($installer -notmatch "MyAppChannel `"$env:SNIPVOICE_CHANNEL`"") { throw "installer channel mismatch" }
 
       - name: Build clean LGPL audio runtime
         shell: msys2 {0}
@@ -115,17 +118,17 @@ jobs:
       - name: Package and checksum
         shell: pwsh
         run: |
-          $archive = "Snipvoice-$env:SNIPVOICE_VERSION-windows-x64.zip"
-          $installer = "installer/Output/SnipvoiceSetup-$env:SNIPVOICE_VERSION.exe"
+          $archive = "Snipvoice-$env:SNIPVOICE_RELEASE_LABEL-windows-x64.zip"
+          $installer = "installer/Output/SnipvoiceSetup-$env:SNIPVOICE_RELEASE_LABEL.exe"
           if (-not (Test-Path -LiteralPath $installer)) { throw "installer not found: $installer" }
           Compress-Archive -Path dist/Snipvoice -DestinationPath $archive
           foreach ($path in @($archive, $installer)) {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
             "$hash  $([IO.Path]::GetFileName($path))" | Set-Content -NoNewline -Encoding ascii "$path.sha256"
           }
-          Copy-Item -LiteralPath build/clean-audio-compliance/ffmpeg-8.1.2.tar.xz -Destination "Snipvoice-$env:SNIPVOICE_VERSION-ffmpeg-source.tar.xz"
-          Compress-Archive -Path build/clean-audio-compliance/* -DestinationPath "Snipvoice-$env:SNIPVOICE_VERSION-windows-ffmpeg-build-info.zip"
-          foreach ($path in @("Snipvoice-$env:SNIPVOICE_VERSION-ffmpeg-source.tar.xz", "Snipvoice-$env:SNIPVOICE_VERSION-windows-ffmpeg-build-info.zip")) {
+          Copy-Item -LiteralPath build/clean-audio-compliance/ffmpeg-8.1.2.tar.xz -Destination "Snipvoice-$env:SNIPVOICE_RELEASE_LABEL-ffmpeg-source.tar.xz"
+          Compress-Archive -Path build/clean-audio-compliance/* -DestinationPath "Snipvoice-$env:SNIPVOICE_RELEASE_LABEL-windows-ffmpeg-build-info.zip"
+          foreach ($path in @("Snipvoice-$env:SNIPVOICE_RELEASE_LABEL-ffmpeg-source.tar.xz", "Snipvoice-$env:SNIPVOICE_RELEASE_LABEL-windows-ffmpeg-build-info.zip")) {
             $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
             "$hash  $([IO.Path]::GetFileName($path))" | Set-Content -NoNewline -Encoding ascii "$path.sha256"
           }
@@ -133,18 +136,18 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name != 'pull_request'
         with:
-          name: snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-x64
+          name: snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-x64
           if-no-files-found: error
           retention-days: 14
           path: |
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-x64.zip
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-x64.zip.sha256
-            installer/Output/SnipvoiceSetup-${{ env.SNIPVOICE_VERSION }}.exe
-            installer/Output/SnipvoiceSetup-${{ env.SNIPVOICE_VERSION }}.exe.sha256
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-ffmpeg-source.tar.xz
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-ffmpeg-source.tar.xz.sha256
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-ffmpeg-build-info.zip
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-windows-ffmpeg-build-info.zip.sha256
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-x64.zip
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-x64.zip.sha256
+            installer/Output/SnipvoiceSetup-${{ env.SNIPVOICE_RELEASE_LABEL }}.exe
+            installer/Output/SnipvoiceSetup-${{ env.SNIPVOICE_RELEASE_LABEL }}.exe.sha256
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-ffmpeg-source.tar.xz
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-ffmpeg-source.tar.xz.sha256
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip.sha256
 
   macos:
     name: macOS ARM64 bundle
@@ -167,8 +170,9 @@ jobs:
       - name: Verify release metadata and architecture
         run: |
           test "$(uname -m)" = "arm64"
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then test "$GITHUB_REF_NAME" = "v$SNIPVOICE_RELEASE_LABEL"; fi
           grep -Fq "APP_VERSION = \"$SNIPVOICE_VERSION\"" source/snipvoice.pyw
-          grep -Fq 'RELEASE_CHANNEL = "stable"' source/snipvoice.pyw
+          grep -Fq "RELEASE_CHANNEL = \"$SNIPVOICE_CHANNEL\"" source/snipvoice.pyw
 
       - name: Build clean LGPL audio runtime
         env:
@@ -197,22 +201,22 @@ jobs:
       - name: Verify, package and checksum
         run: |
           test "$(plutil -extract CFBundleShortVersionString raw dist/Snipvoice.app/Contents/Info.plist)" = "$SNIPVOICE_VERSION"
-          test "$(plutil -extract SnipvoiceReleaseChannel raw dist/Snipvoice.app/Contents/Info.plist)" = "stable"
+          test "$(plutil -extract SnipvoiceReleaseChannel raw dist/Snipvoice.app/Contents/Info.plist)" = "$SNIPVOICE_CHANNEL"
           codesign --verify --deep --strict dist/Snipvoice.app
-          archive="Snipvoice-$SNIPVOICE_VERSION-macos-arm64.zip"
+          archive="Snipvoice-$SNIPVOICE_RELEASE_LABEL-macos-arm64.zip"
           ditto -c -k --keepParent dist/Snipvoice.app "$archive"
           shasum -a 256 "$archive" > "$archive.sha256"
-          ditto -c -k build/clean-audio-compliance "Snipvoice-$SNIPVOICE_VERSION-macos-ffmpeg-build-info.zip"
-          shasum -a 256 "Snipvoice-$SNIPVOICE_VERSION-macos-ffmpeg-build-info.zip" > "Snipvoice-$SNIPVOICE_VERSION-macos-ffmpeg-build-info.zip.sha256"
+          ditto -c -k build/clean-audio-compliance "Snipvoice-$SNIPVOICE_RELEASE_LABEL-macos-ffmpeg-build-info.zip"
+          shasum -a 256 "Snipvoice-$SNIPVOICE_RELEASE_LABEL-macos-ffmpeg-build-info.zip" > "Snipvoice-$SNIPVOICE_RELEASE_LABEL-macos-ffmpeg-build-info.zip.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: github.event_name != 'pull_request'
         with:
-          name: snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-arm64
+          name: snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-macos-arm64
           if-no-files-found: error
           retention-days: 14
           path: |
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-arm64.zip
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-arm64.zip.sha256
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-ffmpeg-build-info.zip
-            Snipvoice-${{ env.SNIPVOICE_VERSION }}-macos-ffmpeg-build-info.zip.sha256
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-macos-arm64.zip
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-macos-arm64.zip.sha256
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-macos-ffmpeg-build-info.zip
+            Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-macos-ffmpeg-build-info.zip.sha256

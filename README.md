@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml"><img src="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/rteoo/snipvoice/tags"><img src="https://img.shields.io/github/v/tag/rteoo/snipvoice?label=stable" alt="Stable tag"></a>
+  <a href="https://github.com/rteoo/snipvoice/releases/tag/v3.3.2"><img src="https://img.shields.io/badge/stable-v3.3.2-blue.svg" alt="Stable v3.3.2"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
@@ -71,6 +71,11 @@ The current stable release is
 | --- | --- |
 | Windows x64 | Per-user installer and portable ZIP |
 | macOS 14.4+ ARM64 | Ad-hoc-signed `.app` bundle in a ZIP |
+
+The recording-workflow beta is
+[`v3.4.0-beta.1`](https://github.com/rteoo/snipvoice/releases/tag/v3.4.0-beta.1).
+It adds a pre-recording source check, a simpler recording screen, and transcript-row
+playback. These beta packages need real-device recording feedback before a stable release.
 
 The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first
