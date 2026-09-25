@@ -15,7 +15,8 @@ from meeting_gui import (
     MeetingWindow, NOTES_LIMIT, PROFILE_LABELS,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
-    format_time, meter_value, open_meeting_window, retention_plan_projection, validated_settings,
+    format_time, meter_value, open_meeting_window, playback_sources,
+    retention_plan_projection, validated_settings,
 )
 from meeting_index import INDEX_STATES
 from meeting_settings import EndpointSelection, resolve_meeting_settings
@@ -47,6 +48,31 @@ class Variable:
 
     def set(self, value):
         self.value = value
+
+
+class ReplayChoiceTests(unittest.TestCase):
+    def test_final_mix_is_primary_even_after_raw_retention(self):
+        tracks = {"microphone": {"available": False, "raw_removed": True},
+                  "system": {"available": True}}
+        self.assertEqual(playback_sources(tracks, True), ("Áudio final", "Sistema"))
+        self.assertEqual(playback_sources(tracks, False), ("Sistema",))
+        self.assertEqual(playback_sources({}, False), ())
+
+    def test_direct_replay_starts_saved_mix_at_selected_position(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting"
+        view.detail_ready = True
+        view.snapshot = {"state": "idle"}
+        view.playback_choices = ("Áudio final", "Microfone")
+        view.audio_source = Variable("Áudio final")
+        view.playback_position = Variable(12.5)
+        view.playback_duration = 30.0
+        view.playback_status = Variable()
+        view._action = mock.Mock()
+        view.play_selected_recording()
+        self.assertEqual(view._action.call_args.args[:3],
+                         ("seek_playback", "meeting", "final"))
+        self.assertEqual(view._action.call_args.kwargs["start"], 12.5)
 
 
 class Text:
@@ -257,7 +283,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
             "system": {"available": True},
         })
         self.assertEqual(view.raw_unavailable_tracks, {"microphone"})
-        view.play_button.configure.assert_called_with(state="disabled")
+        self.assertEqual(view.playback_choices, ("Sistema",))
+        view.play_button.configure.assert_called_with(state="normal")
         view.transcribe_button.configure.assert_called_with(state="normal")
         self.assertIn("transcrição", view.audio_capability_status.get().lower())
 
@@ -839,6 +866,12 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
     def test_detail_projection_bounds_notes_bookmarks_and_transcript_text(self):
         view = self.make_edit_view()
+        view.detail_sections = mock.Mock()
+        view.play_button = mock.Mock()
+        view.replay_stop_button = mock.Mock()
+        view.audio_overview = Variable()
+        view.playback_status = Variable()
+        view.playback_position = Variable(0.0)
         view.bridge, view.transcript = mock.Mock(), mock.Mock()
         view.transcript.get_children.return_value = []
         view.segment_text = Text()
@@ -1012,6 +1045,20 @@ class MeetingGuiLogicTests(unittest.TestCase):
                          "session_id": "session", "track": "microphone"},
         })
         self.assertEqual(view.playback_status.get(), "Reprodução parada.")
+
+    def test_previous_recording_playback_does_not_replace_selected_status(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.playback_generation = 0
+        view.playback_status = Variable("Carregando áudio…")
+        view.selected = "new-session"
+        view.replay_stop_button = mock.Mock()
+        view._apply_playback_snapshot({
+            "playback": {"generation": 1, "active": True, "position": 9,
+                         "session_id": "old-session", "track": "microphone"},
+        })
+        self.assertEqual(view.playback_status.get(), "Carregando áudio…")
+        view.replay_stop_button.configure.assert_called_once_with(state="disabled")
 
     def test_embedded_close_runs_owner_callback_without_destroying_shared_window(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1338,7 +1385,29 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(view.detail_frame.winfo_ismapped())
         self.assertFalse(view.detail_placeholder.winfo_ismapped())
-        self.assertEqual(view.detail_sections.current, "notes")
+        self.assertEqual(view.detail_sections.current, "audio")
+        self.assertTrue(view.play_button.winfo_ismapped())
+        self.assertFalse(view.notes_tools.winfo_ismapped())
+        self.assertFalse(view.transcript_tools.winfo_ismapped())
+        self.assertFalse(view.report_frame.winfo_ismapped())
+
+    def test_library_replay_button_dispatches_saved_mix(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        view._show_library_detail(True)
+        view.selected = "synthetic-session"
+        view.detail_ready = True
+        view.playback_duration = 30.0
+        view.playback_position.set(5.0)
+        view._set_audio_capabilities({"microphone": {"available": True}}, True)
+        self.root.update()
+        self.assertEqual(view.audio_source.get(), "Áudio final")
+        self.assertEqual(str(view.play_button.cget("state")), "normal")
+        view.play_button.invoke()
+        wait_for(lambda: (self.root.update(), view.controller.seek_playback.called)[1])
+        view.controller.seek_playback.assert_called_once_with(
+            "synthetic-session", "final", start=5.0,
+        )
 
     def test_every_index_state_has_a_portuguese_label(self):
         self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))

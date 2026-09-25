@@ -61,11 +61,34 @@ class MeetingMixdownTests(unittest.TestCase):
         self.assertEqual(channels, 2)
         self.assertEqual(struct.unpack("<4h", raw), (32767, 32767, 32767, 32767))
 
-    def test_opt_in_mic_booster_gates_noise_and_raises_voice(self):
+    def test_opt_in_mic_booster_preserves_quiet_speech(self):
         source = [_event("microphone", [0.005, 0.2, -0.2], timestamp=0.0)]
         mixdown_tracks({"microphone": source}, self.destination, enhance_microphone=True)
         raw = _read(self.destination)[2]
-        self.assertEqual(struct.unpack("<3h", raw), (0, 9830, -9830))
+        self.assertEqual(struct.unpack("<3h", raw), (246, 9830, -9830))
+
+    def test_export_adapts_quiet_mic_without_clipping_a_loud_one(self):
+        quiet = _Store({"microphone": [_event("microphone", [0.005] * 1000, rate=1000)]})
+        export_mixdown(quiet, "session", self.destination, enhance_microphone=True)
+        samples = struct.unpack("<1000h", _read(self.destination)[2])
+        self.assertGreater(samples[0], 1000)
+        self.assertLess(samples[0], 1500)
+        self.assertEqual(quiet.reads.count("microphone"), 2)
+
+        loud = _Store({"microphone": [_event("microphone", [0.5] * 1000, rate=1000)]})
+        export_mixdown(loud, "session", self.destination, enhance_microphone=True)
+        self.assertEqual(struct.unpack("<h", _read(self.destination)[2][:2])[0], 16384)
+
+    def test_export_restricts_gain_for_transients_and_near_silence(self):
+        transient = _Store({"microphone": [_event("microphone", [0.005] * 999 + [0.9], rate=1000)]})
+        export_mixdown(transient, "session", self.destination, enhance_microphone=True)
+        samples = struct.unpack("<1000h", _read(self.destination)[2])
+        self.assertLessEqual(samples[-1], round(0.95 * 32767))
+        self.assertLess(samples[0], 300)
+
+        silent = _Store({"microphone": [_event("microphone", [0.001] * 1000, rate=1000)]})
+        export_mixdown(silent, "session", self.destination, enhance_microphone=True)
+        self.assertLess(struct.unpack("<h", _read(self.destination)[2][:2])[0], 100)
 
     def test_cancellation_removes_temp_and_preserves_existing_destination(self):
         self.destination.write_bytes(b"old output")

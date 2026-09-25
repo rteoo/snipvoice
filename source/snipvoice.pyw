@@ -34,6 +34,15 @@ def run_summary_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+def run_summary_worker_if_requested(argv=None):
+    """Start the isolated llama.cpp process before desktop or voice imports."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--summary-worker" not in arguments:
+        return False
+    from summary_runtime_worker import main as worker_main
+    raise SystemExit(worker_main())
+
+
 def run_sqlite_runtime_probe_if_requested(argv=None):
     """Run the SQLite/FTS diagnostic before desktop or user-data imports."""
     arguments = sys.argv[1:] if argv is None else argv
@@ -43,6 +52,7 @@ def run_sqlite_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+run_summary_worker_if_requested()
 run_voice_runtime_probe_if_requested()
 run_summary_runtime_probe_if_requested()
 run_sqlite_runtime_probe_if_requested()
