@@ -466,9 +466,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             window = self.app.manager_window
             notebook = self.app._manager_notebook
             window.update_idletasks()
+            window.focus_force()
+            window.update()
             selected = []
             for key in ("2", "4", "1"):
                 window.event_generate(f"<Control-Key-{key}>")
+                window.update()
                 selected.append(notebook.tab(notebook.select(), "text"))
             return selected
 
@@ -710,6 +713,27 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         controls_bottom, visible_bottom = self._on_gui(measure)
         self.assertLessEqual(controls_bottom, visible_bottom)
+
+    def test_recording_controls_remain_reachable_at_minimum_height(self):
+        def measure(shared_root):
+            self.app._show_manager_window(shared_root)
+            manager = self.app.manager_window
+            manager.geometry("920x700")
+            manager.update()
+            view = self.app._manager_meeting_view
+            canvas = view.recording_canvas
+            initial_end = canvas.yview()[1]
+            canvas.yview_moveto(1)
+            manager.update()
+            meter_bottom = max(
+                meter.winfo_rooty() + meter.winfo_height()
+                for meter in view.meters.values()
+            )
+            return initial_end, meter_bottom, canvas.winfo_rooty() + canvas.winfo_height()
+
+        initial_end, meter_bottom, canvas_bottom = self._on_gui(measure)
+        self.assertLess(initial_end, 1)
+        self.assertLessEqual(meter_bottom, canvas_bottom)
 
     def test_ditado_tab_is_last_and_recording_is_default_when_voice_is_unavailable(self):
         self.app.voice = None
