@@ -20,7 +20,7 @@ private struct CaptureError: Error, CustomStringConvertible {
 
 private func checked(_ status: OSStatus, _ operation: String) throws {
     guard status == noErr else {
-        throw CaptureError("\(operation) failed (CoreAudio \(status)). Check the selected device and enable Snipvoice in System Settings > Privacy & Security > Microphone / Screen & System Audio Recording, then start a new recording.")
+        throw CaptureError("\(operation) failed (CoreAudio \(status)). Check the selected device and enable SnipVoice in System Settings > Privacy & Security > Microphone / Screen & System Audio Recording, then start a new recording.")
     }
 }
 
@@ -135,7 +135,7 @@ private final class Transport {
                     _ = poll(&descriptor, 1, 20)
                     continue
                 }
-                throw CaptureError("The recording process stopped reading audio. Stop and restart Snipvoice; recover the saved recording from the meeting workspace.")
+                throw CaptureError("The recording process stopped reading audio. Stop and restart SnipVoice; recover the saved recording from the meeting workspace.")
             }
         }
     }
@@ -369,14 +369,14 @@ private final class Source {
                 // ceiling: one output stream per endpoint. Reject multi-stream hardware instead of silently capturing a subset.
                 guard streams.count == 1 else { throw CaptureError("This output device has multiple native streams. Choose a single-stream output device for system recording.") }
                 let description = CATapDescription(excludingProcesses: [], deviceUID: endpoint.uid, stream: 0)
-                description.name = "Snipvoice private output capture"
+                description.name = "SnipVoice private output capture"
                 description.isPrivate = true
                 description.muteBehavior = .unmuted
                 try checked(AudioHardwareCreateProcessTap(description, &createdTap), "Create system-audio tap")
                 nativeFormat = try scalar(createdTap, kAudioTapPropertyFormat, nativeFormat)
                 let tapUID = try stringProperty(createdTap, kAudioTapPropertyUID)
                 let dictionary: [String: Any] = [
-                    kAudioAggregateDeviceNameKey: "Snipvoice private capture",
+                    kAudioAggregateDeviceNameKey: "SnipVoice private capture",
                     kAudioAggregateDeviceUIDKey: "snipvoice-capture-" + UUID().uuidString,
                     kAudioAggregateDeviceIsPrivateKey: true,
                     kAudioAggregateDeviceIsStackedKey: false,
@@ -433,7 +433,7 @@ private final class Source {
         closed = true
         // CoreAudio teardown is synchronous; a wedged driver must not hold the helper forever.
         let watchdog = DispatchWorkItem {
-            diagnostic("Native audio cleanup exceeded eight seconds. Restart Snipvoice and reconnect the audio device; recover the saved recording.")
+            diagnostic("Native audio cleanup exceeded eight seconds. Restart SnipVoice and reconnect the audio device; recover the saved recording.")
             _exit(1)
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8, execute: watchdog)
@@ -445,7 +445,7 @@ private final class Source {
             self.ioProc = nil
         }
         state.lock(); quitting = true; state.unlock()
-        if finished.wait(timeout: .now() + 3) == .timedOut { reportCleanup(CaptureError("The audio writer did not stop within three seconds. Restart Snipvoice and recover the saved recording.")) }
+        if finished.wait(timeout: .now() + 3) == .timedOut { reportCleanup(CaptureError("The audio writer did not stop within three seconds. Restart SnipVoice and recover the saved recording.")) }
         if aggregate != 0 {
             do { try checked(AudioHardwareDestroyAggregateDevice(aggregate), "Destroy private capture aggregate") }
             catch { reportCleanup(error) }
@@ -594,8 +594,8 @@ private func capture(_ transport: Transport, _ options: [String: String], _ gene
                     case .notDetermined:
                         throw CaptureError("Approve the macOS microphone permission dialog to record your microphone. Recording waits up to 60 seconds; you can stop at any time.")
                     case .denied, .restricted:
-                        throw CaptureError("Microphone access is denied. Enable Snipvoice in System Settings > Privacy & Security > Microphone, then start a new recording.")
-                    @unknown default: throw CaptureError("macOS returned an unknown microphone permission status. Restart Snipvoice and retry.")
+                        throw CaptureError("Microphone access is denied. Enable SnipVoice in System Settings > Privacy & Security > Microphone, then start a new recording.")
+                    @unknown default: throw CaptureError("macOS returned an unknown microphone permission status. Restart SnipVoice and retry.")
                     }
                 }
                 let endpoint = try selections[kind]!.resolve(kind, devices)

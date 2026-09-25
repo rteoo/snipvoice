@@ -621,7 +621,7 @@ class MeetingIntelligence:
     def _model(self, model):
         entry = summary_catalog_entry(model)
         if entry is None:
-            raise ValueError("Selecione um modelo de resumo do catálogo do Snipvoice.")
+            raise ValueError("Selecione um modelo de resumo do catálogo do SnipVoice.")
         model_file = self.model_path_resolver(model)
         if model_file is None:
             raise ValueError("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo.")

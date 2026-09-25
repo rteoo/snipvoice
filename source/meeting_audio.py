@@ -97,7 +97,7 @@ class NativeCapture:
         if sys.platform not in ("win32", "darwin"):
             raise MeetingAudioError("A captura de reuniões suporta Windows e macOS.")
         if not self.path.is_file():
-            raise MeetingAudioError("Capturador nativo ausente. Compile ou instale o pacote do Snipvoice.")
+            raise MeetingAudioError("Capturador nativo ausente. Compile ou instale o pacote do SnipVoice.")
         options = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
                    "stderr": subprocess.PIPE, "bufsize": 0}
         if os.name == "nt":

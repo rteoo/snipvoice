@@ -114,7 +114,7 @@ def resolve_data_dir():
     fallback = default_data_dir()
     os.makedirs(fallback, exist_ok=True)
     return fallback, (
-        f"A pasta de dados {path} está indisponível. O Snipvoice está usando "
+        f"A pasta de dados {path} está indisponível. O SnipVoice está usando "
         f"{fallback} nesta sessão."
     )
 

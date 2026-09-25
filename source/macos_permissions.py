@@ -247,7 +247,7 @@ def build_prompt_message(status):
         return ""
 
     lines = [
-        "O Snipvoice precisa de permissões do macOS para funcionar.",
+        "O SnipVoice precisa de permissões do macOS para funcionar.",
         "",
     ]
     for name in missing:
@@ -257,10 +257,10 @@ def build_prompt_message(status):
         "Sem elas o app abre normalmente, mas nada é expandido:",
         "o macOS bloqueia a captura do atalho em silêncio.",
         "",
-        "O Snipvoice não armazena nem envia o que você digita;",
+        "O SnipVoice não armazena nem envia o que você digita;",
         "todo o processamento acontece no seu Mac.",
         "",
-        "Abra o painel, marque o Snipvoice na lista e reinicie o app.",
+        "Abra o painel, marque o SnipVoice na lista e reinicie o app.",
     ]
     return "\n".join(lines)
 
@@ -301,7 +301,7 @@ def recheck_outcome(previous, current):
 
     if not still_denied:
         return RECHECK_RESOLVED, (
-            "Permissões concedidas. Reinicie o Snipvoice para que a captura "
+            "Permissões concedidas. Reinicie o SnipVoice para que a captura "
             "de teclado passe a funcionar."
         )
 
@@ -309,10 +309,10 @@ def recheck_outcome(previous, current):
     if len(still_denied) < len(was_denied):
         return RECHECK_PARTIAL, (
             f"Ainda falta: {names}. Conceda a permissão restante e reinicie o "
-        "Snipvoice."
+        "SnipVoice."
         )
     return RECHECK_PENDING, (
-        f"Nada mudou: {names} continua sem permissão. Marque o Snipvoice na "
+        f"Nada mudou: {names} continua sem permissão. Marque o SnipVoice na "
         "lista do painel do macOS."
     )
 

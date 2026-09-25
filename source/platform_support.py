@@ -447,7 +447,7 @@ def activate_application_when_ready(
         timer = threading.Timer(
             timeout_seconds,
             fail,
-            args=("Timed out waiting for Snipvoice to receive keyboard focus",),
+            args=("Timed out waiting for SnipVoice to receive keyboard focus",),
         )
         timer.daemon = True
         state["timer"] = timer
@@ -461,10 +461,10 @@ def activate_application_when_ready(
         if app.isActive():
             complete()
         elif not activation_accepted:
-            fail("macOS refused to activate Snipvoice")
+            fail("macOS refused to activate SnipVoice")
         return cancel
     except Exception as exc:
-        fail(f"Could not activate Snipvoice: {exc}")
+        fail(f"Could not activate SnipVoice: {exc}")
         return cancel
 
 

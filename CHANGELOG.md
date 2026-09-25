@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Style the product name as SnipVoice in the app, installer, macOS permission prompts, and README; the executable, data folders, and existing installs are unchanged.
+
 ## 3.4.0-beta.1 - 2026-09-25
 
 - Add a three-second microphone and system-source check with live meters and a waveform before recording, without creating a meeting or saving audio.

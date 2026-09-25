@@ -89,7 +89,7 @@ from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "3.4.0"
 RELEASE_CHANNEL = "beta"
-APP_DISPLAY_NAME = f"Snipvoice v{APP_VERSION}"
+APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
 if RELEASE_CHANNEL != "stable":
     APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} {RELEASE_CHANNEL}"
 APP_MUTEX_NAME = r"Local\SnipvoiceSingleton"
@@ -108,7 +108,7 @@ def acquire_single_instance_mutex():
     kernel32.GetLastError.restype = ctypes.c_ulong
     handle = kernel32.CreateMutexW(None, False, APP_MUTEX_NAME)
     if not handle:
-        raise OSError("Could not acquire the Snipvoice instance mutex")
+        raise OSError("Could not acquire the SnipVoice instance mutex")
     if kernel32.GetLastError() == 183:
         kernel32.CloseHandle(handle)
         return False
@@ -261,7 +261,7 @@ class Snipvoice:
 
     def _request_meeting_start_on_gui(self, root):
         if not self._meeting_startup_ready:
-            self.notify_error("A gravação aguarda a recuperação local do Snipvoice.", key="meeting-startup")
+            self.notify_error("A gravação aguarda a recuperação local do SnipVoice.", key="meeting-startup")
             return
         self._show_manager_window(root)
         if self._manager_meeting_view is not None:
@@ -321,7 +321,7 @@ class Snipvoice:
             if key:
                 self._notification_times[key] = now
         if self.icon is not None:
-            self.icon.notify(message, "Snipvoice")
+            self.icon.notify(message, "SnipVoice")
         else:
             self.logger.warning(message)
 
@@ -559,14 +559,14 @@ class Snipvoice:
         if platform_support.IS_MAC:
             status = macos_permissions.check_permissions()
             if macos_permissions.needs_onboarding(status):
-                self.notify_error("Conceda Monitoramento de Entrada e Acessibilidade ao Snipvoice e reinicie.")
+                self.notify_error("Conceda Monitoramento de Entrada e Acessibilidade ao SnipVoice e reinicie.")
         if self.voice.is_enabled():
             self.voice.enable()
         if self._meeting_startup_ready:
             self._rebuild_meeting_monitor()
         else:
             self.notify_error(
-                "A recuperação local do Snipvoice precisa de revisão manual; o atalho de reunião foi desativado.",
+                "A recuperação local do SnipVoice precisa de revisão manual; o atalho de reunião foi desativado.",
                 key="meeting-recovery",
             )
         try:
@@ -603,9 +603,9 @@ class Snipvoice:
             else:
                 changed = platform_support.install_autostart()
             if not changed:
-                self.notify_error("Não foi possível alterar a inicialização automática do Snipvoice.")
+                self.notify_error("Não foi possível alterar a inicialização automática do SnipVoice.")
         except OSError:
-            self.notify_error("Não foi possível alterar a inicialização automática do Snipvoice.")
+            self.notify_error("Não foi possível alterar a inicialização automática do SnipVoice.")
         self._autostart_state = platform_support.autostart_state()
         self.refresh_tray_menu()
 
@@ -830,7 +830,7 @@ class Snipvoice:
         if macos_permissions.check_microphone() == macos_permissions.DENIED:
             self.notify_error(
                 "O macOS bloqueou o microfone. Conceda Microfone em Privacidade "
-                "e reinicie o Snipvoice.",
+                "e reinicie o SnipVoice.",
                 key="voice-mic",
             )
             macos_permissions.open_settings_pane(macos_permissions.MICROPHONE)

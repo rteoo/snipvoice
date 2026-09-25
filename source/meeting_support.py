@@ -288,14 +288,14 @@ class MeetingController:
             language = "en"
         if language == "en":
             return (
-                "This meeting is being recorded locally by Snipvoice. "
+                "This meeting is being recorded locally by SnipVoice. "
                 "Audio and transcripts stay on this device and are not uploaded by the app. "
                 "Please confirm that everyone has been informed and consents before recording."
             )
         if language != "pt-BR":
             raise ValueError("O idioma do aviso de gravação é inválido.")
         return (
-            "Esta reunião está sendo gravada localmente pelo Snipvoice. "
+            "Esta reunião está sendo gravada localmente pelo SnipVoice. "
             "O áudio e as transcrições ficam neste dispositivo e não são enviados pelo app. "
             "Confirme que todas as pessoas foram informadas e consentiram antes de gravar."
         )
