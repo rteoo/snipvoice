@@ -1444,7 +1444,9 @@ class MeetingWindow:
         self.transcribe_button = self._button(actions, "Transcrever novamente", self.transcribe)
         self.transcribe_button.pack(side="left", padx=(0, 6))
         self._button(actions, "Cancelar processamento", lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
-        self.transcript_timing = tk.StringVar(self.window, "Os horários indicam trechos de áudio, não palavras.")
+        self.transcript_timing = tk.StringVar(
+            self.window, "Dois cliques ou Enter para ouvir; horários marcam blocos de áudio, não palavras.",
+        )
         self._wrap_label(
             transcript_page, "", textvariable=self.transcript_timing, anchor="w",
             fg=self.ui.text_muted,
@@ -1469,6 +1471,8 @@ class MeetingWindow:
             self.transcript.column(column, width=width, stretch=column == "text")
         self.transcript.pack(fill="both", expand=True, padx=(12, 0))
         self.transcript.bind("<<TreeviewSelect>>", self._transcript_selected)
+        self.transcript.bind("<Double-1>", self._play_transcript_click)
+        self.transcript.bind("<Return>", self._play_transcript_selected)
         transcript_pages = ttk.Frame(transcript_page, style="Meeting.TFrame")
         transcript_pages.pack(fill="x", padx=(12, 0), pady=(4, 0))
         self.transcript_previous_button = self._button(
@@ -4651,8 +4655,21 @@ class MeetingWindow:
                 self.highlight_start.set(str(segment.get("start", 0)))
                 self.highlight_end.set(str(segment.get("end", segment.get("start", 0))))
             self.transcript_timing.set(
-                "Trecho selecionado · horários representam blocos de áudio, não palavras."
+                "Trecho selecionado · dois cliques ou Enter para ouvir; horário por bloco, não por palavra."
             )
+
+    def _play_transcript_click(self, event):
+        row = self.transcript.identify_row(event.y)
+        if row in self.segments:
+            self.transcript.selection_set(row)
+            self._play_transcript_selected()
+        return "break"
+
+    def _play_transcript_selected(self, _event=None):
+        if self.transcript.selection():
+            self._transcript_selected()
+            self.play()
+        return "break"
 
     def _speaker_label_for_segment(self, segment):
         segment_id = segment.get("id") if isinstance(segment, dict) else None
@@ -4853,7 +4870,7 @@ class MeetingWindow:
         except ValueError as exc:
             self.status.set(str(exc))
             return
-        self._action("play", self.selected, track, start=position)
+        self._action("seek_playback", self.selected, track, start=position, urgent=True)
 
     def transcribe(self):
         if not self.selected:

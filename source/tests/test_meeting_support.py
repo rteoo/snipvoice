@@ -352,6 +352,34 @@ class MeetingControllerTests(unittest.TestCase):
             playback._play_thread.join(2)
             playback.shutdown()
 
+    def test_seek_replaces_active_playback_after_old_stream_stops(self):
+        first_started = threading.Event()
+        second_started = threading.Event()
+        calls = []
+
+        def fake_play(_store, session, track, start, stop_event):
+            calls.append((session, track, start))
+            (first_started if len(calls) == 1 else second_started).set()
+            stop_event.wait(2)
+
+        with patch("meeting_files.play_audio", side_effect=fake_play):
+            self.assertTrue(self.controller.play("meeting", "microphone", start=2.0))
+            self.assertTrue(first_started.wait(1))
+            before = self.controller.snapshot()["playback"]["generation"]
+            with self.assertRaisesRegex(ValueError, "instante de reprodução válido"):
+                self.controller.seek_playback("meeting", "system", start=-1.0)
+            self.assertTrue(self.controller.snapshot()["playback"]["active"])
+            self.assertTrue(self.controller.seek_playback("meeting", "system", start=18.0))
+            self.assertTrue(second_started.wait(1))
+            current = self.controller.snapshot()["playback"]
+            self.assertGreater(current["generation"], before)
+            self.assertEqual((current["track"], current["start"]), ("system", 18.0))
+            self.assertEqual(calls, [
+                ("meeting", "microphone", 2.0), ("meeting", "system", 18.0),
+            ])
+            self.controller.stop_playback()
+            self.controller._play_thread.join(2)
+
 
 class MeetingLibraryControllerWiringTests(unittest.TestCase):
     def setUp(self):
