@@ -89,8 +89,10 @@ class PackagingExcludeTests(unittest.TestCase):
             '"source/native/**"',
         ):
             self.assertIn(required_path, text)
-        self.assertEqual(text.count("if: github.event_name != 'pull_request'"), 2)
-        self.assertEqual(text.count("retention-days: 14"), 2)
+        uploads = text.count("uses: actions/upload-artifact@")
+        self.assertEqual(uploads, 3)
+        self.assertEqual(text.count("if: github.event_name != 'pull_request'"), uploads)
+        self.assertEqual(text.count("retention-days: 14"), uploads)
         self.assertEqual(text.count("timeout-minutes: 30"), 2)
 
     def test_windows_and_macos_scripts_exclude_the_dead_ml_stack(self):

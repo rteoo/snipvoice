@@ -572,10 +572,21 @@ class Snipvoice:
         if view is not None and not getattr(view, "closed", False):
             view.set_startup_status(self._meeting_startup_ready, self._meeting_startup_status)
 
+    def _autostart_menu_label(self, item=None):
+        if self._autostart_state == platform_support.AUTOSTART_MANAGED:
+            return "Iniciar com o sistema…"
+        return "Iniciar com o sistema"
+
     def toggle_autostart(self, icon=None, item=None):
         self.task_runner.start(self._toggle_autostart, name="autostart-toggle")
 
     def _toggle_autostart(self):
+        if self._autostart_state == platform_support.AUTOSTART_MANAGED:
+            try:
+                platform_support.open_startup_settings()
+            except OSError:
+                self.notify_error("Não foi possível abrir as configurações de inicialização do Windows.")
+            return
         try:
             if self._autostart_state == platform_support.AUTOSTART_CURRENT:
                 changed = platform_support.remove_autostart()
@@ -666,7 +677,7 @@ class Snipvoice:
                              enabled=self._meeting_stop_enabled),
             pystray.MenuItem(self._voice_menu_label, self.toggle_voice, checked=self._voice_menu_checked),
             pystray.MenuItem("Configurar ditado…", self.open_voice_settings),
-            pystray.MenuItem("Iniciar com o sistema", self.toggle_autostart,
+            pystray.MenuItem(self._autostart_menu_label, self.toggle_autostart,
                              checked=lambda item: self._autostart_state == platform_support.AUTOSTART_CURRENT),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(APP_DISPLAY_NAME, lambda icon, item: None, enabled=False),
