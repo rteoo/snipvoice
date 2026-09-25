@@ -89,7 +89,7 @@ from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "3.4.0"
 RELEASE_CHANNEL = "beta"
-BETA_NUMBER = 2
+BETA_NUMBER = 3
 APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
 if RELEASE_CHANNEL == "beta":
     APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} beta {BETA_NUMBER}"

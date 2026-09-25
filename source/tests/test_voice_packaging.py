@@ -311,14 +311,17 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertEqual(workflow_version.group(1), "3.4.0")
         self.assertIn('Version: 3.4.0\nChannel: beta', texts["source"])
         self.assertIn('RELEASE_CHANNEL = "beta"', texts["source"])
-        self.assertIn('BETA_NUMBER = 2', texts["source"])
+        self.assertIn('BETA_NUMBER = 3', texts["source"])
         self.assertIn('#define MyAppChannel "beta"', texts["installer"])
         self.assertIn('SNIPVOICE_CHANNEL: "beta"', texts["workflow"])
-        self.assertIn('SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.2"', texts["workflow"])
-        self.assertIn('#define MyInstallerVersion MyAppVersion + "-beta.2"',
+        self.assertIn('SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.3"', texts["workflow"])
+        self.assertIn('#define MyAppDisplayVersion MyAppVersion + " beta 3"',
+                      texts["installer"])
+        self.assertIn('#define MyInstallerVersion MyAppVersion + "-beta.3"',
                       texts["installer"])
         self.assertIn('installer/Output/SnipvoiceSetup-${{ env.SNIPVOICE_RELEASE_LABEL }}.exe',
                       texts["workflow"])
+        self.assertIn("env.SNIPVOICE_CHANNEL == 'stable'", texts["workflow"])
 
     def test_windows_icon_badge_fills_every_frame(self):
         # Tray, Start and taskbar slots are 16-32 px. A transparent margin

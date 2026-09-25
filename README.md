@@ -73,11 +73,13 @@ The current stable release is
 | macOS 14.4+ ARM64 | Ad-hoc-signed `.app` bundle in a ZIP |
 
 The current recording-workflow beta is
-[`v3.4.0-beta.2`](https://github.com/rteoo/snipvoice/releases/tag/v3.4.0-beta.2).
-It adds library replay and a clearer recording library, raises quiet microphone
-speech in the final audio, and isolates local summaries from a Windows native
-library conflict. These beta packages need real-device recording feedback before
-a stable release.
+[`v3.4.0-beta.3`](https://github.com/rteoo/snipvoice/releases/tag/v3.4.0-beta.3).
+It applies the Win Design System to the manager, keeps recording controls reachable
+at the minimum window size, simplifies the library's empty and filtered states,
+and groups less-used dictation tools in a menu. These beta packages need real-device
+recording feedback before a stable release.
+This beta omits MSIX: beta 2 already used Store package version `3.4.0.0`,
+and Store submissions require a higher version.
 
 The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first

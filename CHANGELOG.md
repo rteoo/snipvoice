@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 3.4.0-beta.3 - 2026-09-25
+
+- Apply the Win Design System to the manager's light and dark appearance, improve control contrast, and add Ctrl+1 through Ctrl+4 destination shortcuts.
+- Keep both recording tracks and the level meters reachable when the window is at its minimum size, with a quiet status footer.
+- Simplify the library filters and give empty, filtered, and error states direct next actions while keeping saved-recording playback first.
+- Put corrections, command reload, licenses, and model removal in the dictation page's secondary menu.
+- Omit the duplicate-version Store MSIX from this beta; the Windows installer and portable ZIP remain available.
+
 ## 3.4.0-beta.2 - 2026-09-25
 
 - Isolate the local summary runtime from transcription's native audio libraries to avoid the Windows entry-point failure seen in beta 1.
