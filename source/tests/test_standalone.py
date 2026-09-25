@@ -310,6 +310,16 @@ class StandaloneTests(unittest.TestCase):
         self.instance.notify_error.assert_called_once()
         self.assertEqual(self.instance._autostart_state, "absent")
 
+    def test_packaged_autostart_opens_windows_startup_settings(self):
+        self.instance._autostart_state = app.platform_support.AUTOSTART_MANAGED
+        self.instance.refresh_tray_menu = mock.Mock()
+        with mock.patch.object(app.platform_support, "open_startup_settings") as open_settings, \
+                mock.patch.object(app.platform_support, "install_autostart") as install:
+            self.instance._toggle_autostart()
+        open_settings.assert_called_once_with()
+        install.assert_not_called()
+        self.assertEqual(self.instance._autostart_menu_label(), "Iniciar com o sistema…")
+
     def test_startup_creates_root_before_mac_tray(self):
         self.instance.gui = mock.Mock()
         self.instance.gui.adopt_main_thread.return_value = True

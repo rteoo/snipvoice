@@ -49,6 +49,24 @@ IS_MAC = current_os() == "darwin"
 IS_LINUX = current_os() == "linux"
 
 
+_APPMODEL_ERROR_NO_PACKAGE = 15700
+
+
+def is_msix_packaged():
+    """True when this process runs with MSIX package identity (Microsoft Store).
+
+    Packaged apps cannot own a Startup-folder shortcut: AppData writes are
+    virtualized per package and the install path changes on every update.
+    """
+    # Package identity belongs to this process, so check the real platform
+    # rather than current_os(), which callers may substitute.
+    if not sys.platform.startswith("win"):
+        return False
+    length = ctypes.c_uint32(0)
+    result = ctypes.windll.kernel32.GetCurrentPackageFullName(ctypes.byref(length), None)
+    return result != _APPMODEL_ERROR_NO_PACKAGE
+
+
 def paste_modifier_is_cmd():
     """True where the paste shortcut is Cmd+V (macOS) rather than Ctrl+V."""
     return IS_MAC
@@ -429,7 +447,7 @@ def activate_application_when_ready(
         timer = threading.Timer(
             timeout_seconds,
             fail,
-            args=("Timed out waiting for Snipvoice to receive keyboard focus",),
+            args=("Timed out waiting for SnipVoice to receive keyboard focus",),
         )
         timer.daemon = True
         state["timer"] = timer
@@ -443,10 +461,10 @@ def activate_application_when_ready(
         if app.isActive():
             complete()
         elif not activation_accepted:
-            fail("macOS refused to activate Snipvoice")
+            fail("macOS refused to activate SnipVoice")
         return cancel
     except Exception as exc:
-        fail(f"Could not activate Snipvoice: {exc}")
+        fail(f"Could not activate SnipVoice: {exc}")
         return cancel
 
 
@@ -999,6 +1017,10 @@ def default_autostart_command():
 AUTOSTART_ABSENT = "absent"
 AUTOSTART_CURRENT = "current"
 AUTOSTART_STALE = "stale"
+# The MSIX manifest declares a startup task that Windows owns; the user toggles
+# it in Settings > Apps > Startup rather than through a shortcut we write.
+AUTOSTART_MANAGED = "managed"
+STARTUP_SETTINGS_URI = "ms-settings:startupapps"
 
 
 def read_autostart_command(app_name=APP_NAME):
@@ -1058,6 +1080,8 @@ def autostart_state(app_name=APP_NAME, command=None):
     An entry we cannot read counts as stale: it cannot be shown as enabled when
     we were unable to confirm what it launches.
     """
+    if is_msix_packaged():
+        return AUTOSTART_MANAGED
     try:
         existing = read_autostart_command(app_name)
     except OSError:
@@ -1163,6 +1187,11 @@ def install_autostart(app_name=APP_NAME, command=None):
     if not os.path.exists(path):
         raise OSError(f"Entrada de inicialização automática não foi criada: {path}")
     return path
+
+
+def open_startup_settings():
+    """Open the Windows Startup apps page, where packaged startup tasks live."""
+    os.startfile(STARTUP_SETTINGS_URI)
 
 
 def remove_autostart(app_name=APP_NAME):

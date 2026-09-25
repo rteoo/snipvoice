@@ -196,6 +196,22 @@ class AutostartTests(unittest.TestCase):
         self.assertIn("<key>RunAtLoad</key><true/>", plist)
         self.assertIn("/usr/bin/txt", plist)
 
+    def test_msix_package_reports_managed_without_reading_a_shortcut(self):
+        with mock.patch.object(ps, "is_msix_packaged", return_value=True), \
+                mock.patch.object(ps, "read_autostart_command") as read:
+            self.assertEqual(ps.autostart_state("Snipvoice"), ps.AUTOSTART_MANAGED)
+        read.assert_not_called()
+
+    def test_msix_detection_is_windows_only(self):
+        with mock.patch.object(ps.sys, "platform", "darwin"), \
+                mock.patch.object(ps.ctypes, "windll", create=True) as windll:
+            self.assertFalse(ps.is_msix_packaged())
+        windll.kernel32.GetCurrentPackageFullName.assert_not_called()
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows package identity API")
+    def test_unpackaged_test_process_has_no_package_identity(self):
+        self.assertFalse(ps.is_msix_packaged())
+
     def test_linux_desktop_entry_is_wellformed(self):
         entry = ps.linux_desktop_entry("Snipvoice", "python snipvoice.pyw")
         self.assertIn("[Desktop Entry]", entry)
@@ -918,7 +934,7 @@ class ApplicationActivationBarrierTests(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"AppKit": appkit}):
             cancel = ps.activate_application_when_ready(on_active, on_failed)
         on_active.assert_not_called()
-        on_failed.assert_called_once_with("macOS refused to activate Snipvoice")
+        on_failed.assert_called_once_with("macOS refused to activate SnipVoice")
         center.removeObserver_.assert_called_once()
         cancel()
 
@@ -931,7 +947,7 @@ class ApplicationActivationBarrierTests(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"AppKit": appkit}):
             cancel = ps.activate_application_when_ready(on_active, on_failed)
         on_active.assert_not_called()
-        on_failed.assert_called_once_with("Could not activate Snipvoice: no app")
+        on_failed.assert_called_once_with("Could not activate SnipVoice: no app")
         cancel()
 
     def test_timeout_fails_without_revealing_the_dialog(self):

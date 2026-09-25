@@ -7,6 +7,7 @@
 - Isolate the local summary runtime from transcription's native audio libraries to avoid the Windows entry-point failure seen in beta 1.
 - Raise quiet microphone speech in the derived final recording without hard-gating low-level audio or changing the recoverable raw track.
 - Add saved-recording replay with source selection and seeking, and simplify the library's opening view by moving advanced tools behind on-demand controls.
+- Style the product name as SnipVoice in the app, installer, macOS permission prompts, and README; the executable, data folders, and existing installs are unchanged.
 
 ## 3.4.0-beta.1 - 2026-09-25
 

@@ -149,6 +149,25 @@ jobs:
             Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip
             Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip.sha256
 
+      # Microsoft Store package. The identity is public Partner Center metadata
+      # held in repository variables; until they exist there is nothing to pack.
+      - name: Pack Microsoft Store MSIX
+        if: vars.SNIPVOICE_MSIX_IDENTITY_NAME != ''
+        shell: pwsh
+        env:
+          SNIPVOICE_MSIX_IDENTITY_NAME: ${{ vars.SNIPVOICE_MSIX_IDENTITY_NAME }}
+          SNIPVOICE_MSIX_PUBLISHER: ${{ vars.SNIPVOICE_MSIX_PUBLISHER }}
+          SNIPVOICE_MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.SNIPVOICE_MSIX_PUBLISHER_DISPLAY_NAME }}
+        run: python packaging/build_msix.py
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.event_name != 'pull_request' && vars.SNIPVOICE_MSIX_IDENTITY_NAME != ''
+        with:
+          name: snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-x64-msix
+          if-no-files-found: error
+          retention-days: 14
+          path: dist/msix/*.msix
+
   macos:
     name: macOS ARM64 bundle
     runs-on: macos-15

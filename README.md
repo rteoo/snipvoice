@@ -1,7 +1,7 @@
-# Snipvoice
+# SnipVoice
 
 <p align="center">
-  <img src="source/snipvoice-icon.png" width="128" alt="Snipvoice app icon">
+  <img src="source/snipvoice-icon.png" width="128" alt="SnipVoice app icon">
 </p>
 
 <p align="center">
@@ -15,12 +15,12 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
-Hold a shortcut, speak, and release. Snipvoice transcribes with an installed
+Hold a shortcut, speak, and release. SnipVoice transcribes with an installed
 local model and inserts the result at the cursor target captured when recording
 started. It can also record meetings from the microphone, speaker output, or
 both, while keeping each source in its own recoverable track.
 
-Snipvoice is the standalone voice companion extracted from
+SnipVoice is the standalone voice companion extracted from
 [Sniptype](https://github.com/rteoo/sniptype). It has separate settings, models,
 recordings, shortcuts, process identity, and installers.
 
@@ -53,10 +53,10 @@ python -m pip install -r requirements.txt -r requirements-voice.txt
 python snipvoice.pyw
 ```
 
-Compressed audio import additionally requires Snipvoice's clean PyAV/FFmpeg
+Compressed audio import additionally requires SnipVoice's clean PyAV/FFmpeg
 runtime. Build it using [`packaging/README.md`](packaging/README.md); official
 release bundles already include it. Do not substitute PyAV's upstream binary
-wheel when producing a Snipvoice release.
+wheel when producing a SnipVoice release.
 
 Use `pythonw snipvoice.pyw` on Windows after setup when you do not need console
 output. Models are not bundled. Voice starts disabled until a model is selected
@@ -87,13 +87,13 @@ launch. The Windows installer uses no administrator rights and installs under
 ### What's new in v3.3.2
 
 - Whisper Small, Whisper Large v3 Turbo and Whisper Large v3 are available as optional local transcription models.
-- The Snipvoice data folder and the downloaded-models folder can each be moved to another location, including a models folder shared with other apps.
+- The SnipVoice data folder and the downloaded-models folder can each be moved to another location, including a models folder shared with other apps.
 - Configurações groups transcription and summary model downloads under Modelos, and download buttons stand out clearly on their cards.
 
 ## First use
 
-1. Start Snipvoice and find its icon in the Windows tray or macOS menu bar.
-2. Open **Configurar voz…**. The Snipvoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
+1. Start SnipVoice and find its icon in the Windows tray or macOS menu bar.
+2. Open **Configurar voz…**. The SnipVoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
 3. In **Ditado**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
@@ -108,12 +108,12 @@ focus from the target application.
 
 ## Dictation and commands
 
-The default dictation shortcut is `ctrl+alt+space`. Snipvoice captures the target
+The default dictation shortcut is `ctrl+alt+space`. SnipVoice captures the target
 before opening the microphone, keeps capture and inference off the keyboard
 listener, and restores the target only after transcription completes.
 
 Optional spoken commands use `ctrl+alt+shift+space`. Create a private
-`commands.json` under the Snipvoice data directory, for example:
+`commands.json` under the SnipVoice data directory, for example:
 
 ```json
 {"hello": "Hello, how can I help?"}
@@ -126,7 +126,7 @@ are deliberately not imported.
 ## Meetings
 
 The **Gravação**, **Biblioteca**, **Ditado**, and **Configurações** tabs keep meeting
-capture independent from dictation inside the main Snipvoice window. Recording
+capture independent from dictation inside the main SnipVoice window. Recording
 works when dictation is disabled and before any model is installed.
 
 | Capability | Behavior |
@@ -139,7 +139,7 @@ works when dictation is disabled and before any model is installed.
 | Processing | Opt-in transcription followed by optional summary, with durable local-model revisions |
 | Files | Timestamp-aligned final PCM16 WAV plus bounded WAV/MP3/AAC/M4A/FLAC/OGG/Opus import and text/JSON/per-track exports |
 
-Selecting an output captures the mix already routed to that device; Snipvoice
+Selecting an output captures the mix already routed to that device; SnipVoice
 does not move another application's audio. Source labels identify tracks, not
 individual speakers. Acoustic echo cancellation and diarization are not included.
 
@@ -190,7 +190,7 @@ Model downloads happen only after an explicit action in voice settings. Meeting
 processing accepts installed catalog models and never downloads one implicitly.
 Recordings remain usable before transcription and preserve earlier revisions.
 
-Structured summaries run inside Snipvoice through llama.cpp. Qwen3.5 0.8B is
+Structured summaries run inside SnipVoice through llama.cpp. Qwen3.5 0.8B is
 the 503 MiB compute-budget option for constrained hardware, while Qwen3.5 2B
 Q4_K_M remains the recommended default and Qwen3.5 4B favors quality. LiquidAI
 LFM2.5-2.6B is the efficient alternative, and Gemma 4 E2B/E4B are Google's
@@ -210,7 +210,7 @@ cited decisions and action items before using them.
 Settings, optional commands, logs, voice history, raw meetings, and the default
 final-recording folder live under
 `~/.snipvoice` by default. **Configurações > Geral > Pasta de dados** moves
-that whole folder to another location (for example `D:\snipvoice`): Snipvoice
+that whole folder to another location (for example `D:\snipvoice`): SnipVoice
 restarts, copies and verifies every file when the new folder is on another
 drive, and only then deletes the old copy. The chosen location is recorded in
 `location.json` under `%LOCALAPPDATA%\Snipvoice` (macOS:
@@ -224,7 +224,7 @@ and `summary-models\<model>\`, each beside a `manifest.json`. Other
 compatible apps can open those files directly. **Configurações > Modelos >
 Pasta dos modelos** moves them to another folder with the same restart and
 verified copy; that folder may be shared with other apps, and only the two
-Snipvoice subfolders are written there. A model already present at the
+SnipVoice subfolders are written there. A model already present at the
 destination is kept and the old copy is left in place. `SNIPVOICE_VOICE_CACHE`
 and `SNIPVOICE_SUMMARY_CACHE` override the location per model type and disable
 the move controls.
@@ -245,7 +245,7 @@ or cloud fallback by default. Local inference uses installed models; model
 acquisition remains an explicit settings action.
 Do not commit or share live recordings, personal commands, settings, model
 files, logs, backups, or the SQLite catalog. Playback is blocked during
-recording so Snipvoice does not capture itself.
+recording so SnipVoice does not capture itself.
 
 For the storage contract, backup/restore guidance, downgrade behavior, repair,
 exports, and current validation limits, see
@@ -253,7 +253,7 @@ exports, and current validation limits, see
 
 ## Platform status and limitations
 
-Snipvoice packages Windows x64 and Apple Silicon macOS 14.4+.
+SnipVoice packages Windows x64 and Apple Silicon macOS 14.4+.
 
 - **Windows:** speaker output uses WASAPI loopback. The installer and executable are currently unsigned.
 - **macOS:** system audio uses Core Audio taps and requires macOS 14.4+. Microphone, System Audio Recording, Input Monitoring, and Accessibility permissions may be requested. The public bundle is ad-hoc signed and not notarized.
@@ -293,6 +293,6 @@ build inputs; a lockfile alone does not make the whole binary reproducible.
 
 ## License
 
-Snipvoice is released under the [MIT License](LICENSE). Packaged builds retain
+SnipVoice is released under the [MIT License](LICENSE). Packaged builds retain
 the predecessor copyright notice and include the applicable dependency index in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

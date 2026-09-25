@@ -7,7 +7,7 @@
 ; on uninstall — the installer only manages the program files under {app}.
 ; Snipvoice never migrates another application's user data.
 
-#define MyAppName "Snipvoice"
+#define MyAppName "SnipVoice"
 #define MyAppVersion "3.4.0"
 #define MyAppChannel "beta"
 #if MyAppChannel == "beta"
