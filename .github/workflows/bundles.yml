@@ -41,7 +41,7 @@ concurrency:
 env:
   SNIPVOICE_VERSION: "3.4.0"
   SNIPVOICE_CHANNEL: "beta"
-  SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.2"
+  SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.3"
 
 jobs:
   windows:
@@ -149,10 +149,10 @@ jobs:
             Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip
             Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip.sha256
 
-      # Microsoft Store package. The identity is public Partner Center metadata
-      # held in repository variables; until they exist there is nothing to pack.
+      # Store package versions must increase, and the fourth field is reserved
+      # as zero. Beta 2 already used 3.4.0.0; keep beta 3 out of Store builds.
       - name: Pack Microsoft Store MSIX
-        if: vars.SNIPVOICE_MSIX_IDENTITY_NAME != ''
+        if: vars.SNIPVOICE_MSIX_IDENTITY_NAME != '' && env.SNIPVOICE_CHANNEL == 'stable'
         shell: pwsh
         env:
           SNIPVOICE_MSIX_IDENTITY_NAME: ${{ vars.SNIPVOICE_MSIX_IDENTITY_NAME }}
@@ -161,7 +161,7 @@ jobs:
         run: python packaging/build_msix.py
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: github.event_name != 'pull_request' && vars.SNIPVOICE_MSIX_IDENTITY_NAME != ''
+        if: github.event_name != 'pull_request' && vars.SNIPVOICE_MSIX_IDENTITY_NAME != '' && env.SNIPVOICE_CHANNEL == 'stable'
         with:
           name: snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-x64-msix
           if-no-files-found: error
