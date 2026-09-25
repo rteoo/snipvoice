@@ -2,6 +2,7 @@
 
 from voice_runtime import create_backend
 from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime
+from summary_runtime import probe_summary_isolation
 
 
 def probe_voice_runtime():
@@ -16,6 +17,7 @@ def probe_voice_runtime():
     backend = create_backend()
     if not backend.available():
         raise RuntimeError("transcribe.cpp backend is unavailable")
+    probe_summary_isolation()
     return True
 
 

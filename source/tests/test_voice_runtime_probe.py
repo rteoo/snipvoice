@@ -22,8 +22,10 @@ class VoiceRuntimeProbeTests(unittest.TestCase):
         }
         with mock.patch.dict(sys.modules, modules), \
                 mock.patch.object(voice_runtime_probe, "create_backend", return_value=backend), \
-                mock.patch.object(voice_runtime_probe, "verify_clean_ffmpeg_runtime") as verify:
+                mock.patch.object(voice_runtime_probe, "verify_clean_ffmpeg_runtime") as verify, \
+                mock.patch.object(voice_runtime_probe, "probe_summary_isolation") as isolate:
             self.assertTrue(voice_runtime_probe.probe_voice_runtime())
+            isolate.assert_called_once_with()
         verify.assert_called_once_with(modules["av"])
 
     def test_probe_fails_when_the_backend_cannot_load(self):
@@ -38,7 +40,8 @@ class VoiceRuntimeProbeTests(unittest.TestCase):
         }
         with mock.patch.dict(sys.modules, modules), \
                 mock.patch.object(voice_runtime_probe, "create_backend", return_value=backend), \
-                mock.patch.object(voice_runtime_probe, "verify_clean_ffmpeg_runtime"):
+                mock.patch.object(voice_runtime_probe, "verify_clean_ffmpeg_runtime"), \
+                mock.patch.object(voice_runtime_probe, "probe_summary_isolation"):
             with self.assertRaisesRegex(RuntimeError, "transcribe.cpp"):
                 voice_runtime_probe.probe_voice_runtime()
 
