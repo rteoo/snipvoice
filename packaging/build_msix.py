@@ -42,7 +42,7 @@ MANIFEST_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
   IgnorableNamespaces="uap desktop rescap">
   <Identity Name={name} Publisher={publisher} Version={version} ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>Snipvoice</DisplayName>
+    <DisplayName>SnipVoice</DisplayName>
     <PublisherDisplayName>{publisher_display_name}</PublisherDisplayName>
     <Logo>Assets\\StoreLogo.png</Logo>
   </Properties>
@@ -55,14 +55,14 @@ MANIFEST_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
   <Applications>
     <Application Id="Snipvoice" Executable="{executable}" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="Snipvoice"
+        DisplayName="SnipVoice"
         Description={description}
         BackgroundColor="transparent"
         Square150x150Logo="Assets\\Square150x150Logo.png"
         Square44x44Logo="Assets\\Square44x44Logo.png" />
       <Extensions>
         <desktop:Extension Category="windows.startupTask" Executable="{executable}" EntryPoint="Windows.FullTrustApplication">
-          <desktop:StartupTask TaskId="{startup_task_id}" Enabled="false" DisplayName="Snipvoice" />
+          <desktop:StartupTask TaskId="{startup_task_id}" Enabled="false" DisplayName="SnipVoice" />
         </desktop:Extension>
       </Extensions>
     </Application>
