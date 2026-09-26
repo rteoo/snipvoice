@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml"><img src="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/stable-v1.0.0-blue.svg" alt="Stable v1.0.0"></a>
+  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/stable-v1.1.0-blue.svg" alt="Stable v1.1.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
@@ -45,7 +45,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v1.0.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.0.0).
+[stable v1.1.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.1.0).
 To run from source with Python installed:
 
 ```powershell
@@ -67,7 +67,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v1.0.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.0.0):
+[`v1.1.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.1.0):
 
 | Platform | Package |
 | --- | --- |
@@ -84,6 +84,12 @@ macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
 
+### What's new in v1.1.0
+
+- The manager navigates from a left sidebar, so every page gets the window's full height and most no longer scroll.
+- **Gravação** shows setup on the left and the live waveform, meters, clock, and recording controls on the right.
+- In **Biblioteca**, search sits above the recording list and the player sits above the transcript, replacing the separate **Ouvir** tab.
+
 ### What's new in v1.0.0
 
 - The interface is available in Brazilian Portuguese (default) and US English; switch in **Configurações > Geral > Idioma** without restarting.
@@ -94,11 +100,11 @@ launch. The Windows installer uses no administrator rights and installs under
 ## First use
 
 1. Start SnipVoice and find its icon in the Windows tray or macOS menu bar.
-2. Open **Configurar voz…**. The SnipVoice window keeps voice setup, recording, the meeting library, and summary models in separate tabs.
+2. Open **Configurar voz…**. The SnipVoice window keeps voice setup, recording, the meeting library, and summary models in separate pages listed in its sidebar.
 3. In **Ditado**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
-5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
-6. Open **Configurações** to follow the system appearance or choose a fixed light or dark theme. Under **Geral > Idioma**, choose **English (US)** to switch the interface to English; the tabs then read Recording, Library, Dictation, and Settings.
+5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut opens this page in the same window.
+6. Open **Configurações** to follow the system appearance or choose a fixed light or dark theme. Under **Geral > Idioma**, choose **English (US)** to switch the interface to English; the sidebar then reads Recording, Library, Dictation, and Settings.
 7. In the same tab, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
