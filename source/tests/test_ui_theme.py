@@ -673,6 +673,49 @@ class TtkThemeSelectionTests(unittest.TestCase):
         theme = ui_theme.build_theme("dark", system="darwin")
         self.assertIsNone(ui_theme.configure_combobox_popdown(FakeCombo(), theme))
 
+    def test_macos_popdown_fit_widens_only_through_the_post_offset(self):
+        calls = []
+
+        class FakeTk:
+            def call(self, *args):
+                calls.append(args)
+
+        class FakeWindow:
+            def winfo_width(self):
+                return 900
+
+            def winfo_rootx(self):
+                return 0
+
+        class FakeCombo:
+            tk = FakeTk()
+
+            def __str__(self):
+                return ".device"
+
+            def cget(self, option):
+                return {"values": ("A long endpoint name",), "style": "system.Device.TCombobox"}[option]
+
+            def winfo_toplevel(self):
+                return FakeWindow()
+
+            def winfo_width(self):
+                return 200
+
+            def winfo_rootx(self):
+                return 100
+
+        theme = ui_theme.build_theme("dark", system="darwin")
+        with mock.patch.object(ui_theme.tkfont, "Font") as font:
+            font.return_value.measure.return_value = 360
+            self.assertIsNone(
+                ui_theme.configure_combobox_popdown(FakeCombo(), theme, fit_values=True))
+        self.assertEqual(len(calls), 1)
+        command, subcommand, style, option, offset = calls[0]
+        self.assertEqual((command, subcommand, style, option),
+                         ("ttk::style", "configure", "system.Device.TCombobox", "-postoffset"))
+        self.assertGreaterEqual(200 + offset[2], 360)
+
     def test_dark_manager_styles_replace_clam_light_defaults(self):
         class Recorder:
             def __init__(self):

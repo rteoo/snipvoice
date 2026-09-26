@@ -586,28 +586,30 @@ def configure_combobox_popdown(combo, resolved=None, *, fit_values=False):
     """Theme a ttk combobox's transient listbox on non-native platforms.
 
     ttk creates the popdown lazily, so this is intended for the combobox's
-    ``postcommand`` callback.  Aqua owns the native macOS control and must be
-    left untouched.
+    ``postcommand`` callback.  Aqua owns the native macOS list's colors and
+    font, so there the listbox is left untouched and ``None`` is returned;
+    only an opted-in ``fit_values`` width applies, through the style's post
+    offset, which ttk honors on every platform.
     """
     ui = resolved or theme()
-    if ui.system == "darwin":
-        return None
-    popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
-    listbox = f"{popdown}.f.l"
-    combo.tk.call(
-        listbox,
-        "configure",
-        "-background", ui.field,
-        "-foreground", ui.text,
-        "-selectbackground", ui.select_bg,
-        "-selectforeground", ui.select_fg,
-        "-font", ui.font(10),
-        "-relief", "flat",
-        "-borderwidth", ui.space_sm,
-        "-highlightthickness", 0,
-        "-selectborderwidth", 0,
-        "-activestyle", "none",
-    )
+    listbox = None
+    if ui.system != "darwin":
+        popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
+        listbox = f"{popdown}.f.l"
+        combo.tk.call(
+            listbox,
+            "configure",
+            "-background", ui.field,
+            "-foreground", ui.text,
+            "-selectbackground", ui.select_bg,
+            "-selectforeground", ui.select_fg,
+            "-font", ui.font(10),
+            "-relief", "flat",
+            "-borderwidth", ui.space_sm,
+            "-highlightthickness", 0,
+            "-selectborderwidth", 0,
+            "-activestyle", "none",
+        )
     if fit_values:
         # Callers opt in with their own style so unrelated comboboxes retain
         # their popup geometry. Fit long endpoint names inside the window.
