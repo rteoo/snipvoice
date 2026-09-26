@@ -1,14 +1,15 @@
 """Streaming local mixdown for the microphone and system meeting tracks.
 
 The meeting store keeps the two sources as timestamped little-endian float32
-blocks.  This module turns those blocks into one ordinary PCM16 WAV without
-changing or rewriting the source recordings.  It intentionally has no audio
-dependencies: format conversion is limited to bounded linear upsampling,
-channel adaptation, and PCM16 quantisation.
+blocks. This module derives an MP3 or PCM16 WAV without changing the source
+recordings. Mixing stays bounded; MP3 encoding uses the bundled PyAV/LAME
+runtime and WAV export requires only the standard library.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from fractions import Fraction
 import math
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ OUTPUT_CHUNK_FRAMES = 4096
 MAX_OUTPUT_BYTES = 0xFFFFFFFF
 _FLOAT_BYTES = 4
 _PCM16 = struct.Struct("<h")
+MP3_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
 
 
 class MixdownCancelled(RuntimeError):
@@ -172,16 +174,31 @@ class _MicEnhancer:
 
 
 def _adaptive_microphone_gain(source, cancel_event):
-    """Measure a recording in bounded memory before deriving its final WAV."""
+    """Measure a recording in bounded memory before deriving its final audio."""
     histogram = [0] * 97  # 1 dB RMS buckets from -96 through 0 dBFS.
     windows = 0
     peak = 0.0
+    count = 0
+    squared = 0.0
+    native_format = None
+
+    def add_window():
+        nonlocal windows
+        rms = math.sqrt(squared / count)
+        # Measure audible windows, not the time the microphone was silent.
+        # This only controls gain analysis; no source samples are gated out.
+        if rms >= 0.002:
+            bucket = max(0, min(96, int(math.floor(96 + 20 * math.log10(rms)))))
+            histogram[bucket] += 1
+            windows += 1
+
     for event, payload in source:
         _cancel(cancel_event)
-        _validate_event(event, payload, "microphone")
+        rate, channels, _, _, _ = _validate_event(event, payload, "microphone")
+        if native_format is not None and native_format != (rate, channels):
+            raise ValueError("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume.")
+        native_format = (rate, channels)
         window_values = max(1, event["rate"] // 10) * event["channels"]
-        count = 0
-        squared = 0.0
         for (value,) in struct.iter_unpack("<f", payload):
             if math.isfinite(value):
                 amplitude = min(1.0, abs(value))
@@ -189,17 +206,11 @@ def _adaptive_microphone_gain(source, cancel_event):
                 squared += amplitude * amplitude
             count += 1
             if count == window_values:
-                rms = math.sqrt(squared / count)
-                bucket = max(0, min(96, int(math.floor(96 + 20 * math.log10(rms))))) if rms else 0
-                histogram[bucket] += 1
-                windows += 1
+                add_window()
                 count = 0
                 squared = 0.0
-        if count:
-            rms = math.sqrt(squared / count)
-            bucket = max(0, min(96, int(math.floor(96 + 20 * math.log10(rms))))) if rms else 0
-            histogram[bucket] += 1
-            windows += 1
+    if count:
+        add_window()
     if not windows or not peak:
         return 1.0
     rank = math.ceil(windows * 0.9)
@@ -233,10 +244,76 @@ def _finish_header(handle, data_bytes):
     handle.seek(end)
 
 
+@contextmanager
+def _encoded_output(handle, rate, channels, format, cancel_event):
+    """Yield a bounded PCM16 sink and finalize the selected container on success."""
+    if format == "wav":
+        _write_header(handle, rate, channels)
+        data_bytes = 0
+
+        def write_pcm(payload):
+            nonlocal data_bytes
+            if data_bytes + len(payload) > MAX_OUTPUT_BYTES - 36:
+                raise ValueError("A mixagem excede o limite de 4 GiB do WAV PCM.")
+            handle.write(payload)
+            data_bytes += len(payload)
+
+        yield write_pcm
+        _cancel(cancel_event)
+        _finish_header(handle, data_bytes)
+        return
+
+    try:
+        import av
+        av.codec.Codec("libmp3lame", "w")
+    except (ImportError, ValueError) as exc:
+        raise RuntimeError(
+            "A gravação MP3 exige o codificador incluído na instalação completa do Snipvoice. "
+            "O áudio original foi preservado; atualize o aplicativo ou exporte como WAV."
+        ) from exc
+    output_rate = min(MP3_RATES, key=lambda candidate: abs(candidate - rate))
+    layout = "mono" if channels == 1 else "stereo"
+    with av.open(handle, mode="w", format="mp3") as container:
+        stream = container.add_stream("libmp3lame", rate=output_rate)
+        stream.layout = layout
+        stream.codec_context.format = "fltp"
+        if output_rate < 16000:
+            stream.bit_rate = 32000 if channels == 1 else 64000
+        elif output_rate < 32000:
+            stream.bit_rate = 64000 if channels == 1 else 96000
+        else:
+            stream.bit_rate = 128000 if channels == 1 else 192000
+        position = 0
+
+        def write_pcm(payload):
+            nonlocal position
+            _cancel(cancel_event)
+            samples = len(payload) // (channels * 2)
+            if not samples:
+                return
+            frame = av.AudioFrame(format="s16", layout=layout, samples=samples)
+            frame.planes[0].update(payload)
+            frame.sample_rate = rate
+            frame.time_base = Fraction(1, rate)
+            frame.pts = position
+            position += samples
+            # PyAV resamples and reframes for the encoder without retaining
+            # the complete recording. The original track clocks stay intact.
+            for packet in stream.encode(frame):
+                _cancel(cancel_event)
+                container.mux(packet)
+
+        yield write_pcm
+        _cancel(cancel_event)
+        for packet in stream.encode(None):
+            _cancel(cancel_event)
+            container.mux(packet)
+
+
 def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
                    microphone_gain=1.5,
                    cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES):
-    """Mix timestamped ``microphone``/``system`` iterables into an atomic WAV.
+    """Mix timestamped tracks into an atomic MP3 or WAV selected by extension.
 
     ``track_sources`` is a mapping whose values yield ``(event, float32
     payload)`` pairs, matching :meth:`MeetingStore.iter_audio`.  The output
@@ -263,16 +340,18 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
     rate = max(track.rate for track in tracks)
     output_channels = max(track.channels for track in tracks)
     destination = Path(destination).absolute()
+    format = destination.suffix.lower().lstrip(".")
+    if format not in {"mp3", "wav"}:
+        raise ValueError("Escolha um arquivo MP3 ou WAV para salvar o áudio final.")
     if not destination.parent.is_dir() or destination.is_dir():
         raise ValueError("A pasta destino deve existir e o destino deve ser um arquivo.")
 
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent
     )
-    data_bytes = 0
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            _write_header(handle, rate, output_channels)
+        with os.fdopen(descriptor, "w+b") as handle, _encoded_output(
+                handle, rate, output_channels, format, cancel_event) as write_pcm:
             enhancer = _MicEnhancer(microphone_gain) if enhance_microphone else None
             frame = 0
             # ceiling: output chunks are capped at 4,096 frames (~32 KiB for
@@ -300,17 +379,15 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
                 encoded = bytearray(len(samples) * 2)
                 for index, value in enumerate(samples):
                     _PCM16.pack_into(encoded, index * 2, _float_to_pcm16(value))
-                if data_bytes + len(encoded) > MAX_OUTPUT_BYTES - 36:
-                    raise ValueError("A mixagem excede o limite de 4 GiB do WAV PCM.")
-                handle.write(encoded)
-                data_bytes += len(encoded)
+                write_pcm(encoded)
                 frame = next_end
                 if all_done:
                     break
             _cancel(cancel_event)
-            _finish_header(handle, data_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
+        # Container trailers and encoder delay metadata are written by the
+        # output context before the atomic publication.
+        with open(temporary, "r+b") as completed:
+            os.fsync(completed.fileno())
         _cancel(cancel_event)
         os.replace(temporary, destination)
     except Exception:

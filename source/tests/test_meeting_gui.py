@@ -1,5 +1,6 @@
 """Workspace concurrency, selection, persistence, and shared-root smoke checks."""
 
+import gc
 import os
 import sys
 import threading
@@ -11,8 +12,8 @@ from tkinter import ttk
 from unittest import mock
 
 from meeting_gui import (
-    APPEARANCE_LABELS, BackgroundBridge, BOOKMARK_LIMIT, INDEX_STATE_LABELS, MAX_PAGE_BACKSTACK,
-    MeetingWindow, NOTES_LIMIT, PROFILE_LABELS,
+    APPEARANCE_LABELS, BackgroundBridge, INDEX_STATE_LABELS, MAX_PAGE_BACKSTACK,
+    MeetingWindow, PROFILE_LABELS,
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, meter_value, open_meeting_window, playback_sources,
@@ -124,14 +125,12 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def test_clear_library_search_resets_all_scopes_once(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.query = Variable("meeting")
-        view.status_filter = Variable("Concluídas")
-        view.clear_library_filters = mock.Mock()
+        view.search = mock.Mock()
 
         view._clear_library_search()
 
         self.assertEqual(view.query.get(), "")
-        self.assertEqual(view.status_filter.get(), "Todos")
-        view.clear_library_filters.assert_called_once_with()
+        view.search.assert_called_once_with()
 
     def test_transcript_double_click_seeks_without_playing_on_selection(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -311,7 +310,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.transcribe_button = mock.Mock()
         view.export_audio_button = mock.Mock()
         view.raw_remove_button = mock.Mock()
-        view.highlight_export_button = mock.Mock()
         view.audio_capability_status = Variable()
         view.track = Variable("Microfone")
         view._set_audio_capabilities({
@@ -335,7 +333,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.transcribe_button = mock.Mock()
         view.export_audio_button = mock.Mock()
         view.raw_remove_button = mock.Mock()
-        view.highlight_export_button = mock.Mock()
         view.audio_capability_status = Variable()
         view.track = Variable("Sistema")
         view._set_audio_capabilities({
@@ -357,21 +354,19 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.save_answer()
         self.assertIn("memory_only", view.ask_status.get())
 
-    def test_stale_summary_save_does_not_replace_new_selection_status(self):
+    def test_copy_summary_uses_rendered_readable_text(self):
         view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
-        view.selected = "meeting-1"
-        view.detail_ready = True
-        view.summary = Text("reviewed")
-        view.status = Variable("working")
-        view.controller = mock.Mock()
+        view.summary_text = "Resumo legível\n\nDecisões:\n• Enviar relatório"
+        view.status = Variable()
         view._submit = mock.Mock(return_value=True)
-        view._remember_operation_error = mock.Mock()
-        view.save_summary()
-        callback = view._submit.call_args.args[2]
-        view.selected = "meeting-2"
-        callback(True, None)
-        self.assertEqual(view.status.get(), "working")
+        with mock.patch("meeting_gui.Clipboard.set_content", return_value=True) as copy:
+            view.copy_summary()
+            key, operation, callback = view._submit.call_args.args
+            self.assertEqual(key, "copy_summary")
+            operation()
+            callback(True, None)
+        copy.assert_called_once_with(view.summary_text)
+        self.assertEqual(view.status.get(), "Resumo copiado.")
 
     def test_stale_trash_result_is_ignored_after_close_or_refresh(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -525,20 +520,31 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIsNone(result)
         canvas.yview_scroll.assert_not_called()
 
-    def test_library_filters_normalize_multi_value_labels_without_file_access(self):
+    def test_library_query_has_no_manual_filter_payload(self):
         view = MeetingWindow.__new__(MeetingWindow)
-        view.collection_filter = Variable("project-1, project-2")
-        view.tag_filter = Variable("planning")
-        view.people_filter = Variable("Alice, Bob")
-        view.series_filter = Variable("")
-        view.date_from_filter = Variable("2026-09-01")
-        view.date_to_filter = Variable("2026-09-30")
+        view.library_cursor = None
+        view.library_next_cursor = None
+        view.library_back_stack = [None]
+        view.library_page_index = 0
+        view.offset = 0
+        view.library_filter_generation = 0
+        view.query = Variable("planning")
+        view.controller = mock.Mock()
+        view.controller.list_sessions_page.return_value = {
+            "items": [], "next_cursor": None,
+        }
+        view._submit = mock.Mock()
 
-        self.assertEqual(view._library_filters(), {
-            "collection": ["project-1", "project-2"],
-            "tag": "planning", "person": ["Alice", "Bob"], "series": None,
-            "date_from": "2026-09-01", "date_to": "2026-09-30",
-        })
+        view.refresh_library()
+        operation = view._submit.call_args.args[1]
+        operation()
+
+        call = view.controller.list_sessions_page.call_args
+        self.assertEqual(call.kwargs["query"], "planning")
+        self.assertNotIn("collection", call.kwargs)
+        self.assertNotIn("tag", call.kwargs)
+        self.assertNotIn("person", call.kwargs)
+        self.assertNotIn("series", call.kwargs)
 
     def test_library_cursor_backstack_is_bounded_and_stale_page_callback_is_ignored(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -593,12 +599,10 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view = MeetingWindow.__new__(MeetingWindow)
         view.cross_question = Variable("What was decided?")
         view.summary_model = Variable("local-model")
-        view.status_filter = Variable("Concluídos")
         view.cross_cancel_button = mock.Mock()
         view.cross_status = Variable()
         view.cross_request = 0
         view.closed = False
-        view._library_filters = mock.Mock(return_value={"tag": "planning"})
         view.controller = mock.Mock()
         view._submit = mock.Mock()
 
@@ -608,7 +612,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
         view.controller.ask_across_meetings.assert_called_once_with(
             "What was decided?", "local-model",
-            filters={"tag": "planning", "status": "completed"},
+            filters={},
         )
 
     def test_search_resolution_callback_ignores_stale_generation(self):
@@ -834,9 +838,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def make_edit_view(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected, view.detail_ready = "one", True
-        view.truncated, view.dirty = False, True
-        view.title, view.notes = Variable("Title"), Text("Notes")
-        view.bookmarks = []
+        view.dirty = True
+        view.title = Variable("Title")
         view.status = Variable()
         view.controller = mock.Mock()
         view.refresh_library = mock.Mock()
@@ -844,10 +847,10 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.delete_button = mock.Mock()
         return view
 
-    def test_failed_save_preserves_unsaved_notes_and_does_not_navigate(self):
+    def test_failed_save_preserves_unsaved_title_and_does_not_navigate(self):
         view = self.make_edit_view()
         after = mock.Mock()
-        view.save_notes(after)
+        view.save_title(after)
         callback = view._submit.call_args.args[2]
         callback(False, None)
         self.assertTrue(view.dirty)
@@ -857,18 +860,31 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def test_edit_during_save_is_not_cleared_or_discarded(self):
         view = self.make_edit_view()
         after = mock.Mock()
-        view.save_notes(after)
+        view.save_title(after)
         callback = view._submit.call_args.args[2]
-        view.bookmarks.append({"timestamp": 2, "label": "new"})
+        view.title.set("New title")
         callback(True, None)
         self.assertTrue(view.dirty)
         after.assert_not_called()
 
-    def test_loading_detail_prevents_saving_old_notes_to_new_session(self):
+    def test_loading_detail_prevents_saving_old_title_to_new_session(self):
         view = self.make_edit_view()
         view.detail_ready = False
-        view.save_notes()
+        view.save_title()
         view._submit.assert_not_called()
+
+    def test_save_title_dispatches_only_a_rename_and_clears_saved_changes(self):
+        view = self.make_edit_view()
+        after = mock.Mock()
+        view.save_title(after)
+        key, operation, callback = view._submit.call_args.args
+        self.assertEqual(key, "save_title")
+        operation()
+        view.controller.rename_session.assert_called_once_with("one", "Title")
+        view.controller.update_notes.assert_not_called()
+        callback(True, None)
+        self.assertFalse(view.dirty)
+        after.assert_called_once_with()
 
     def test_delete_selected_requires_confirmation_and_runs_in_background(self):
         view = self.make_edit_view()
@@ -900,7 +916,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._submit.assert_not_called()
         view.controller.delete_session.assert_not_called()
 
-    def test_detail_projection_bounds_notes_bookmarks_and_transcript_text(self):
+    def test_detail_projection_omits_legacy_notes_and_bounds_transcript_text(self):
         view = self.make_edit_view()
         view.detail_sections = mock.Mock()
         view.play_button = mock.Mock()
@@ -911,22 +927,239 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.bridge, view.transcript = mock.Mock(), mock.Mock()
         view.transcript.get_children.return_value = []
         view.segment_text = Text()
+        view.summary = Text()
+        view.summary_model_installed = {}
         view.segments = {}
         view.controller.get_session.return_value = {
-            "id": "two", "notes": "x" * (NOTES_LIMIT + 1),
-            "bookmarks": [{"timestamp": 1}] * (BOOKMARK_LIMIT + 1),
+            "id": "two", "notes": "Legacy notes",
+            "bookmarks": [{"timestamp": 1, "label": "Legacy bookmark"}],
+            "tracks": {"microphone": {"available": True, "raw_removed": False}},
             "events": ["private audio descriptors"],
         }
         view.controller.get_transcript.return_value = [{"text": "a" * 10000, "track": "microphone", "start": 0}]
         view.load_session("two")
         self.assertFalse(view.detail_ready)
-        self.assertEqual(view.notes.state, "disabled")
         metadata, segments = view._submit.call_args.args[1]()
-        self.assertEqual(len(metadata["notes"]), NOTES_LIMIT)
-        self.assertEqual(len(metadata["bookmarks"]), BOOKMARK_LIMIT)
-        self.assertTrue(metadata["truncated"])
+        self.assertNotIn("notes", metadata)
+        self.assertNotIn("bookmarks", metadata)
         self.assertNotIn("events", metadata)
+        self.assertIn("microphone", metadata["tracks"])
         self.assertEqual(len(segments[0]["text"]), 8000)
+
+    def test_transcript_document_defaults_to_full_text_and_switches_style(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.transcript_style = Variable("Texto completo")
+        view.transcript_document_request = 0
+        view.transcript_document_ready = False
+        view.transcript_document_truncated = False
+        view.transcript_document = Text()
+        view.copy_transcript_button = mock.Mock()
+        view.transcript_document_status = Variable()
+        view.bridge = mock.Mock()
+        view.controller = mock.Mock()
+        view.controller.get_transcript_preview.side_effect = [
+            {"text": "texto corrido", "truncated": False},
+            {"text": "00:00:00 Microfone: texto", "truncated": False},
+        ]
+        view._submit = mock.Mock()
+        view._load_transcript_document()
+        operation, callback = view._submit.call_args.args[1:]
+        self.assertEqual(operation(), {"text": "texto corrido", "truncated": False})
+        view.controller.get_transcript_preview.assert_called_once_with(
+            "meeting-1", revision="revision-1", style="full_text",
+        )
+        callback({"text": "texto corrido", "truncated": False}, None)
+        self.assertEqual(view.transcript_document.get(), "texto corrido")
+
+        view.transcript_style.set("Com horários")
+        view._sync_transcript_style = mock.Mock()
+        view._load_transcript_document()
+        operation, callback = view._submit.call_args.args[1:]
+        operation()
+        self.assertEqual(view.controller.get_transcript_preview.call_args.kwargs["style"], "timestamped")
+        callback({"text": "00:00:00 Microfone: texto", "truncated": False}, None)
+        self.assertEqual(view.transcript_document.get(), "00:00:00 Microfone: texto")
+
+    def test_late_transcript_document_callback_cannot_replace_new_selection_or_style(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.selected = "old"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.transcript_style = Variable("Texto completo")
+        view.transcript_document_request = 3
+        view.transcript_document_ready = False
+        view.transcript_document_truncated = False
+        view.transcript_document = Text("new content")
+        view.copy_transcript_button = mock.Mock()
+        view.transcript_document_status = Variable()
+        view.bridge = mock.Mock()
+        view.controller = mock.Mock()
+        view.controller.get_transcript_preview.return_value = {
+            "text": "old content", "truncated": False,
+        }
+        view._submit = mock.Mock()
+        view._load_transcript_document()
+        callback = view._submit.call_args.args[2]
+        # A newer style/selection request invalidates the old callback.
+        view.transcript_style.set("Com horários")
+        view.selected = "new"
+        view.transcript_document_request += 1
+        callback({"text": "old content", "truncated": False}, None)
+        self.assertEqual(view.transcript_document.get(), "new content")
+
+    def test_export_transcript_uses_selected_style_and_revision(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.transcript_revision = "revision-2"
+        view.transcript_style = Variable("Com horários")
+        view.window = mock.Mock()
+        view._action = mock.Mock()
+        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="export.txt"):
+            view.export_transcript()
+        view._action.assert_called_once_with(
+            "export_transcript", "meeting-1", "export.txt",
+            style="timestamped", revision="revision-2",
+        )
+
+    def test_audio_export_defaults_to_mp3_and_keeps_wav_available(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.raw_tracks_present = {"microphone"}
+        view.raw_unavailable_tracks = set()
+        view.window = mock.Mock()
+        view.status = Variable()
+        view._current_settings = mock.Mock(return_value=types.SimpleNamespace(
+            destination="", voice_boost=True,
+        ))
+        view._action = mock.Mock()
+        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="recording.mp3") as dialog:
+            view.export_audio()
+        self.assertEqual(dialog.call_args.kwargs["defaultextension"], ".mp3")
+        self.assertEqual(dialog.call_args.kwargs["filetypes"],
+                         (("Áudio MP3", "*.mp3"), ("Áudio WAV", "*.wav")))
+        view._action.assert_called_once_with(
+            "export_mixdown", "meeting-1", "recording.mp3", enhance_microphone=True,
+        )
+
+    def test_summary_display_is_readable_and_read_only(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.summary = Text()
+        view.summary_status = Variable()
+        view.summary_model_installed = {"local": True}
+        view.summary_model = Variable("local")
+        view._show_summary({
+            "summary": "A reunião terminou.",
+            "segment_ids": ["microphone:0:1"],
+            "decisions": [{"text": "Enviar o relatório."}],
+        })
+        self.assertIn("A reunião terminou.", view.summary.get())
+        self.assertIn("Enviar o relatório.", view.summary.get())
+        self.assertNotIn("segment_ids", view.summary.get())
+        self.assertEqual(view.summary.state, "disabled")
+
+    def test_regenerate_summary_dispatches_for_selected_recording(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.generate_report = mock.Mock()
+        view.summarize()
+        view.generate_report.assert_called_once_with()
+
+    def test_adjust_audio_regenerates_final_audio_for_microphone_recording(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.raw_tracks_present = {"microphone"}
+        view.raw_unavailable_tracks = set()
+        view.controller = mock.Mock()
+        view._action = mock.Mock(
+            side_effect=lambda method, session_id, **_kwargs:
+            view.controller.regenerate_final_audio(session_id)
+        )
+        view.adjust_audio()
+
+        self.assertEqual(view._action.call_args.args[:2],
+                         ("regenerate_final_audio", "meeting-1"))
+        self.assertIn("callback", view._action.call_args.kwargs)
+        view.controller.regenerate_final_audio.assert_called_once_with("meeting-1")
+
+    def test_adjust_audio_marks_only_the_successful_recording_for_final_selection(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.raw_tracks_present = {"microphone"}
+        view.raw_unavailable_tracks = set()
+        view._action = mock.Mock()
+        view._processing_launched = mock.Mock()
+        view.adjust_audio()
+        callback = view._action.call_args.kwargs["callback"]
+        callback(True, None)
+        self.assertEqual(view._adjusted_audio_target, "meeting-1")
+
+    def test_refresh_outputs_selects_final_audio_only_for_adjusted_recording(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.transcript_offset = 0
+        view.audio_source = Variable("Microfone")
+        view.status = Variable()
+        view._adjusted_audio_target = "meeting-1"
+        view.controller = mock.Mock()
+        view.controller.get_session.return_value = {
+            "summary": {"summary": "Resumo"},
+            "tracks": {"microphone": {"available": True}},
+            "final_audio": {"path": "final.wav"},
+        }
+        view._read_transcript_page = mock.Mock(return_value={
+            "segments": [], "offset": 0, "has_previous": False, "has_more": False,
+        })
+        view._set_audio_capabilities = mock.Mock()
+        view._show_summary = mock.Mock()
+        view._render_transcript = mock.Mock()
+        view._render_annotations = mock.Mock()
+        view._update_transcript_paging_controls = mock.Mock()
+        view._load_transcript_document = mock.Mock()
+        view.refresh_reports = mock.Mock()
+        view._submit = mock.Mock()
+        with mock.patch("meeting_gui.os.path.isfile", return_value=True):
+            view.refresh_outputs("meeting-1")
+            operation, callback = view._submit.call_args.args[1:]
+            callback(operation(), None)
+        self.assertEqual(view.audio_source.get(), "Áudio final")
+        self.assertIsNone(view._adjusted_audio_target)
+
+    def test_recording_finished_opens_clean_new_recording_and_tracks_processing(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.dirty = False
+        view.processing_target = None
+        view.refresh_library = mock.Mock()
+        view.notebook = mock.Mock()
+        view.library_tab = mock.Mock()
+        view.load_session = mock.Mock()
+        view._recording_finished({"session_id": "meeting-2", "processing": True})
+        view.refresh_library.assert_called_once_with()
+        view.notebook.select.assert_called_once_with(view.library_tab)
+        view.load_session.assert_called_once_with("meeting-2")
+        self.assertEqual(view.processing_target, "meeting-2")
+
+    def test_recording_finished_preserves_dirty_title_and_does_not_load_new_recording(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.dirty = True
+        view.processing_target = None
+        view.refresh_library = mock.Mock()
+        view.notebook = mock.Mock()
+        view.library_tab = mock.Mock()
+        view.load_session = mock.Mock()
+        view._recording_finished({"session_id": "meeting-2", "processing": False})
+        view.refresh_library.assert_called_once_with()
+        view.notebook.select.assert_not_called()
+        view.load_session.assert_not_called()
+        self.assertIsNone(view.processing_target)
 
     def test_report_history_projection_drops_payloads_and_keeps_only_metadata(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1052,16 +1285,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(len(page["segments"]), TRANSCRIPT_PAGE_SIZE)
         self.assertEqual(len(consumed), TRANSCRIPT_PAGE_SIZE + 1)
         self.assertTrue(page["has_more"])
-
-    def test_manual_speaker_label_overrides_generated_projection(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.speaker_labels = {
-            "speaker-1": {"segment_id": "segment-1", "label": "Manual label"},
-        }
-        self.assertEqual(
-            view._speaker_for_segment({"id": "segment-1", "speaker": "Generated label"}),
-            "Manual label",
-        )
 
     def test_stale_playback_snapshot_does_not_update_tk_state(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1215,6 +1438,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.root.destroy()
+        cls.root = None
+        # Collect closed window cycles on Tk's thread before worker tests.
+        gc.collect()
 
     def test_shared_root_build_and_background_settings_devices(self):
         controller = mock.Mock()
@@ -1250,8 +1476,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view = window._meeting_view
         try:
             self.root.update()
-            for check in (view.auto_transcribe_check, view.auto_summary_check, view.voice_boost_check):
-                self.assertEqual(check.cget("anchor"), "w")
+            if hasattr(view, "voice_boost_check"):
+                self.assertEqual(view.voice_boost_check.cget("anchor"), "w")
+            self.assertFalse(hasattr(view, "auto_transcribe_check"))
+            self.assertFalse(hasattr(view, "auto_summary_check"))
             # Side-packed siblings squeeze the full-width answer into a corner.
             answer_siblings = view.cross_answer.master.pack_slaves()
             self.assertEqual([w for w in answer_siblings if w.pack_info()["side"] == "left"], [])
@@ -1259,7 +1487,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             labels = {w.cget("text") for w in descendants(view.window) if isinstance(w, tk.Label)}
             for caption in ("Coleção/projeto", "Tag", "Pessoa", "Série",
                             "Coleções/projetos", "Tags", "Pessoas"):
-                self.assertIn(caption, labels)
+                self.assertNotIn(caption, labels)
         finally:
             view.close()
             self.root.update()
@@ -1394,24 +1622,18 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertTrue(models.frames["summary"].winfo_ismapped())
         self.assertFalse(view.transcription_models_parent.winfo_ismapped())
 
-    def test_library_panels_open_on_demand_and_count_active_filters(self):
+    def test_library_panels_open_on_demand_without_manual_filters(self):
         view, notebook = self._embedded_view()
         notebook.select(view.library_tab)
         self.root.update()
-        self.assertFalse(view.library_panels["filters"].winfo_ismapped())
         self.assertFalse(view.library_panels["cross"].winfo_ismapped())
-        self.assertEqual(view.filters_toggle.cget("text"), "Filtros ▾")
-        view.filters_toggle.invoke()
+        self.assertFalse(view.library_panels["tools"].winfo_ismapped())
+        view.library_panel_toggles["cross"].invoke()
         self.root.update()
-        self.assertTrue(view.library_panels["filters"].winfo_ismapped())
-        self.assertEqual(view.filters_toggle.cget("text"), "Filtros ▴")
-        view.tag_filter.set("cliente")
-        view.date_from_filter.set("2026-01-01")
-        self.assertEqual(view.filters_toggle.cget("text"), "Filtros (2) ▴")
-        view.filters_toggle.invoke()
+        self.assertTrue(view.library_panels["cross"].winfo_ismapped())
+        view.library_panel_toggles["cross"].invoke()
         self.root.update()
-        self.assertFalse(view.library_panels["filters"].winfo_ismapped())
-        self.assertEqual(view.filters_toggle.cget("text"), "Filtros (2) ▾")
+        self.assertFalse(view.library_panels["cross"].winfo_ismapped())
 
     def test_library_explains_empty_list_and_unselected_detail(self):
         view, notebook = self._embedded_view()
@@ -1428,10 +1650,15 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(view.detail_frame.winfo_ismapped())
         self.assertFalse(view.detail_placeholder.winfo_ismapped())
-        self.assertEqual(view.detail_sections.current, "audio")
-        self.assertTrue(view.play_button.winfo_ismapped())
-        self.assertFalse(view.notes_tools.winfo_ismapped())
-        self.assertFalse(view.transcript_tools.winfo_ismapped())
+        self.assertEqual(view.detail_sections.current, "transcript")
+        self.assertTrue(view.transcript_document.winfo_ismapped())
+        self.assertFalse(view.play_button.winfo_ismapped())
+        self.assertNotIn("notes", view.detail_sections.frames)
+        self.assertFalse(hasattr(view, "notes"))
+        self.assertFalse(hasattr(view, "bookmark_picker"))
+        self.assertFalse(hasattr(view, "transcript_tools_toggle"))
+        self.assertNotIn("speaker", view.transcript["columns"])
+        self.assertEqual(tuple(view.transcript["columns"]), ("time", "track", "text"))
         self.assertFalse(view.report_frame.winfo_ismapped())
 
     def test_library_replay_button_dispatches_saved_mix(self):
@@ -1451,6 +1678,106 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.controller.seek_playback.assert_called_once_with(
             "synthetic-session", "final", start=5.0,
         )
+
+    def test_chat_send_button_keeps_conversation_and_composer_visible(self):
+        callback_errors = []
+        previous_reporter = self.root.report_callback_exception
+        self.root.report_callback_exception = lambda *args: callback_errors.append(args)
+        self.addCleanup(setattr, self.root, "report_callback_exception", previous_reporter)
+        self.addCleanup(lambda: self.assertEqual(callback_errors, []))
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view._show_library_detail(True)
+        view.selected = "synthetic-session"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.summary_model.set("synthetic-model")
+        view.summary_model_installed = {"synthetic-model": True}
+        view.controller.ask_this_meeting.return_value = {
+            "answer": "A revisão será na sexta-feira.", "citations": ["microphone:0:1"],
+            "uncertainty": "low", "revision": "revision-1",
+        }
+        view.detail_sections.select("ask")
+        view._sync_qa_controls()
+        self.root.update()
+        view.meeting_chat.set_question("Qual foi a decisão?")
+        view.meeting_chat.send_button.invoke()
+        wait_for(lambda: (self.root.update(), view.ask_pending is None)[1])
+        turns = view.ask_conversations[view.selected]
+        self.assertEqual(turns[0]["status"], "complete")
+        self.assertEqual(turns[0]["answer"], "A revisão será na sexta-feira.")
+        view.controller.ask_this_meeting.assert_called_once_with(
+            "synthetic-session", "Qual foi a decisão?", "synthetic-model",
+            revision="revision-1", history=[],
+        )
+        self.assertEqual(view.detail_sections.buttons["ask"].cget("text"), "Chat")
+        composer = view.meeting_chat.composer
+        self.assertTrue(composer.winfo_ismapped())
+        self.assertLessEqual(composer.winfo_rooty() + composer.winfo_height(),
+                             view.detail_canvas.winfo_rooty() + view.detail_canvas.winfo_height())
+        self.assertLessEqual(view.meeting_chat.send_button.winfo_rootx()
+                             + view.meeting_chat.send_button.winfo_width(),
+                             view.detail_canvas.winfo_rootx() + view.detail_canvas.winfo_width())
+
+    def test_summary_templates_generate_in_primary_view_with_optional_focus(self):
+        callback_errors = []
+        previous_reporter = self.root.report_callback_exception
+        self.root.report_callback_exception = lambda *args: callback_errors.append(args)
+        self.addCleanup(setattr, self.root, "report_callback_exception", previous_reporter)
+        self.addCleanup(lambda: self.assertEqual(callback_errors, []))
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view._show_library_detail(True)
+        view.selected = "synthetic-session"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.summary_model.set("synthetic-model")
+        view.summary_model_installed = {"synthetic-model": True}
+        self.assertEqual([item["id"] for item in view.report_profiles[:5]],
+                         ["meeting_notes", "interview", "one_on_one", "sales", "customer_feedback"])
+        self.assertEqual(view._selected_report_profile()["id"], "meeting_notes")
+        hints = set()
+        for label, profile in view.report_profile_by_label.items():
+            if profile["id"] in {"meeting_notes", "interview", "one_on_one", "sales", "customer_feedback"}:
+                view.report_profile_choice.set(label)
+                view._report_profile_changed()
+                hints.add(view.summary_format_hint.get())
+        self.assertEqual(len(hints), 5)
+        label = next(label for label, item in view.report_profile_by_label.items()
+                     if item["id"] == "customer_feedback")
+        view.report_profile_choice.set(label)
+        view._report_profile_changed()
+        view.detail_sections.select("summary")
+        view.summary_focus_toggle.invoke()
+        view.summary_focus.insert("1.0", "Priorize o acompanhamento.")
+        generated = {"summary": "Conversa revisada.", "feedback": [{"text": "A busca é útil."}],
+                     "action_items": [{"text": "Revisar filtros", "owner": None, "deadline": None}]}
+        view.controller.generate_report.return_value = dict(generated, report_id="saved-1")
+        view.controller.list_reports.return_value = [{"id": "saved-1", "kind": "report",
+                                                      "profile_id": "customer_feedback"}]
+        view.controller.get_report.return_value = {"id": "saved-1", "kind": "report",
+                                                   "profile_id": "customer_feedback", "generated": generated}
+        view._sync_summary_controls()
+        self.root.update()
+        self.assertFalse(view.report_frame.winfo_ismapped())
+        for widget in (view.report_profile_box, view.regenerate_summary_button, view.summary_focus):
+            self.assertTrue(widget.winfo_ismapped())
+            self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(),
+                                 view.detail_canvas.winfo_rootx() + view.detail_canvas.winfo_width())
+        view.regenerate_summary_button.invoke()
+        wait_for(lambda: (self.root.update(), view.summary_pending is None
+                         and view.selected_report is not None)[1])
+        self.assertEqual(view.controller.generate_report.call_args.kwargs["profile"]["id"], "customer_feedback")
+        self.assertEqual(view.controller.generate_report.call_args.kwargs["focus"], "Priorize o acompanhamento.")
+        self.assertIn("A busca é útil.", view.summary_text)
+        self.assertIn("Revisar filtros", view.summary_text)
+        self.assertNotIn("segment_ids", view.summary_text)
+        self.assertFalse(view.report_frame.winfo_ismapped())
+        self.assertTrue(view.copy_summary_button.winfo_ismapped())
+        self.assertLessEqual(view.copy_summary_button.winfo_rooty() + view.copy_summary_button.winfo_height(),
+                             view.detail_canvas.winfo_rooty() + view.detail_canvas.winfo_height())
 
     def test_every_index_state_has_a_portuguese_label(self):
         self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))

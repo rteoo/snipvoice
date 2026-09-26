@@ -11,7 +11,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from meeting_intelligence import (
     BUILTIN_PROFILE_IDS,
+    FINAL_REPORT_OUTPUT_BYTES,
     MAX_CROSS_CANONICAL_SCAN,
+    MAX_FOCUS_CHARS,
+    MAX_HISTORY_BYTES,
+    MAX_HISTORY_TURNS,
     SUPPORTED_SECTIONS,
     MeetingIntelligence,
     profile_hash,
@@ -33,6 +37,11 @@ class MeetingIntelligenceProfileTests(unittest.TestCase):
                 clean = validate_profile(profile, language=language)
                 self.assertEqual(clean["profile_hash"], profile_hash(clean))
                 self.assertTrue(set(clean["sections"]).issubset(SUPPORTED_SECTIONS))
+
+        self.assertIn("meeting_notes", BUILTIN_PROFILE_IDS)
+        self.assertNotEqual(
+            MeetingIntelligence.builtin_profiles("pt-BR")[0]["id"], "meeting_notes",
+        )
 
     def test_malformed_custom_profile_is_rejected_before_workspace_mutation(self):
         valid = {
@@ -187,6 +196,146 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertTrue(runtime.closed)
         self.assertEqual(self.store.get(self.session_id)["summary"]["summary"], result["summary"])
 
+    def test_meeting_notes_profile_and_focus_are_bounded_and_cited(self):
+        def response(_prompt, evidence):
+            profile = next(item for item in evidence if item.get("kind") == "profile")
+            self.assertIn("key_points", profile["sections"])
+            self.assertEqual(profile["max_items"], 8)
+            self.assertGreater(profile["max_output_bytes"], 0)
+            self.assertLessEqual(len(json.dumps(evidence, ensure_ascii=False).encode("utf-8")), 2560)
+            self.assertTrue(any(item.get("kind") == "focus" for item in evidence))
+            return json.dumps({
+                "summary": "A reunião avançou.",
+                "key_points": [{"text": "O relatório será revisado.", "segment_ids": ["s1"]}],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": ["s1"],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(
+            self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+            focus="Priorize decisões e próximos passos.",
+        )
+        self.assertEqual(result["key_points"][0]["segment_ids"], ["s1"])
+        self.assertTrue(runtime.closed)
+        with self.assertRaises(ValueError):
+            intelligence.generate_report(
+                self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+                focus="x" * (MAX_FOCUS_CHARS + 1),
+            )
+
+    def test_single_chunk_meeting_notes_uses_final_report_budget(self):
+        def response(_prompt, evidence):
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            return json.dumps({
+                "summary": "Resumo detalhado. " * 30,
+                "key_points": [{"text": "Ponto confirmado. " * 20,
+                                 "segment_ids": [identifier]} for _ in range(2)],
+                "decisions": [{"text": "Decisão confirmada. " * 20,
+                                "segment_ids": [identifier]}],
+                "action_items": [{"text": "Revisar o relatório. " * 20,
+                                   "owner": "Alice", "deadline": "Friday",
+                                   "segment_ids": [identifier]}],
+                "open_questions": [{"text": "Qual será o próximo passo? " * 20,
+                                    "segment_ids": [identifier]}],
+                "segment_ids": [identifier],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(
+            self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+        )
+        serialized = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+        self.assertGreater(serialized, 1024)
+        self.assertLessEqual(serialized, FINAL_REPORT_OUTPUT_BYTES)
+        self.assertEqual(len(runtime.calls), 1)
+        self.assertEqual(self.store.get(self.session_id)["summary"]["summary"], result["summary"])
+
+    def test_single_chunk_final_report_overflow_preserves_previous_report(self):
+        def response(_prompt, evidence):
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            return json.dumps({
+                "summary": "Resumo. ",
+                "key_points": [{"text": "Ponto. " * 160,
+                                 "segment_ids": [identifier]} for _ in range(8)],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(ValueError):
+            intelligence.generate_report(
+                self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+            )
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+        self.assertTrue(runtime.closed)
+
+    def test_multichunk_final_synthesis_is_outside_pairwise_reduction(self):
+        revision = self.store.begin_revision(self.session_id, "local", "pt")
+        for index in range(3):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"budget-{index}", "track": "microphone", "start": index,
+                "end": index + 1, "text": (f"Fact {index}. " * 300),
+            })
+        self.store.finish_revision(self.session_id, revision)
+        calls = []
+
+        def response(_prompt, evidence):
+            calls.append(evidence)
+            identifier = next(item.get("id") or item.get("segment_ids", [None])[0]
+                              for item in evidence if item.get("id") or item.get("segment_ids"))
+            return json.dumps({
+                "summary": "A reunião avançou.", "decisions": [],
+                "action_items": [{"text": "Acompanhar o próximo passo.",
+                                   "owner": None, "deadline": None,
+                                   "segment_ids": [identifier]}],
+                "segment_ids": [identifier],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertGreater(len(calls), 2)
+        final_evidence = [item for item in calls[-1] if item.get("kind") != "profile"]
+        self.assertEqual(len(final_evidence), 1)
+        self.assertIn("segment_ids", final_evidence[0])
+        self.assertNotIn("id", final_evidence[0])
+
+    def test_focus_is_preserved_across_multichunk_reduction_and_not_persisted(self):
+        revision = self.store.begin_revision(self.session_id, "local", "pt")
+        for index in range(3):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"focus-{index}", "track": "microphone", "start": index * 10,
+                "end": (index + 1) * 10, "text": ("The team confirmed the next step. " * 300),
+            })
+        self.store.finish_revision(self.session_id, revision)
+
+        def response(_prompt, evidence):
+            identifiers = [
+                item.get("id") or item.get("segment_ids", [None])[0]
+                for item in evidence if isinstance(item, dict)
+            ]
+            identifier = next(item for item in identifiers if item)
+            return json.dumps({
+                "summary": "The next step was confirmed.",
+                "key_points": [{"text": "The next step was confirmed.", "segment_ids": [identifier]}],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(
+            self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+            focus="Prioritize confirmed next steps.",
+        )
+        self.assertGreater(len(runtime.calls), 2)
+        self.assertTrue(all(
+            any(item.get("kind") == "focus" and item.get("text") == "Prioritize confirmed next steps."
+                for item in call[1] if isinstance(item, dict))
+            for call in runtime.calls
+        ))
+        self.assertNotIn("focus", self.store.get(self.session_id)["summary"])
+        self.assertEqual(result["profile_id"], "meeting_notes")
+
     def test_library_generation_persists_immutable_report_with_model_provenance(self):
         library = MeetingLibrary(self.store, workspace_root=self.temp.name)
         intelligence, runtime = self._intelligence()
@@ -293,6 +442,71 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertNotIn(question, question_prompt)
         self.assertEqual(question_evidence[-1]["kind"], "question")
         self.assertEqual(question_evidence[-1]["question"], question)
+
+    def test_question_history_is_context_only_and_current_question_stays_separate(self):
+        intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Friday.", "citations": ["s1"],
+            "uncertainty": "low",
+        }))
+        history = [{"question": "What was decided?", "answer": "The review was approved."}]
+        intelligence.ask_this_meeting(
+            self.session_id, "When is that due?", DEFAULT_SUMMARY_MODEL, history=history,
+        )
+        prompt, evidence, *_ = runtime.calls[0]
+        self.assertIn("Conversation history is context", prompt)
+        self.assertEqual(evidence[-1], {"kind": "question", "question": "When is that due?"})
+        self.assertEqual(evidence[-2]["kind"], "conversation_context")
+        self.assertEqual(evidence[-2]["turns"], history)
+        self.assertTrue(runtime.closed)
+
+    def test_question_history_is_bounded_to_recent_turns_and_model_budget(self):
+        intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Friday.", "citations": [next(item["id"] for item in evidence if "id" in item)],
+            "uncertainty": "low",
+        }))
+        history = [
+            {"question": f"Question {index}", "answer": "A" * 900}
+            for index in range(MAX_HISTORY_TURNS + 2)
+        ]
+        intelligence.ask_this_meeting(
+            self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL, history=history,
+        )
+        turns = runtime.calls[0][1][-2]["turns"]
+        self.assertLessEqual(len(turns), MAX_HISTORY_TURNS)
+        self.assertLessEqual(
+            len(json.dumps(runtime.calls[0][1][-2], ensure_ascii=False).encode("utf-8")),
+            MAX_HISTORY_BYTES,
+        )
+        self.assertEqual(runtime.calls[0][1][-1]["question"], "Follow up")
+
+    def test_question_history_rejects_metadata_and_oversized_input(self):
+        intelligence, _runtime = self._intelligence()
+        with self.assertRaises(ValueError):
+            intelligence.ask_this_meeting(
+                self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL,
+                history=[{"question": "Q", "answer": "A", "citations": ["s1"]}],
+            )
+        with self.assertRaises(ValueError):
+            intelligence.ask_this_meeting(
+                self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL,
+                history=[{"question": "Q", "answer": "A" * (MAX_HISTORY_BYTES + 1)}],
+            )
+
+    def test_long_current_question_reserves_transcript_budget_before_history(self):
+        intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Friday.", "citations": ["s1"],
+            "uncertainty": "low",
+        }))
+        question = "Follow up " + ("x" * 1_700)
+        intelligence.ask_this_meeting(
+            self.session_id, question, DEFAULT_SUMMARY_MODEL,
+            history=[{"question": "Earlier?", "answer": "A" * 900}],
+        )
+        self.assertEqual(runtime.calls[0][1][-1]["question"], question)
+        context = next((item for item in runtime.calls[0][1]
+                        if item.get("kind") == "conversation_context"), None)
+        if context is not None:
+            self.assertLessEqual(len(json.dumps(context).encode("utf-8")), MAX_HISTORY_BYTES)
 
     def test_action_owner_and_deadline_must_appear_in_each_item_citation(self):
         # The revision is already completed; use a fresh completed revision so

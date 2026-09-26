@@ -430,7 +430,7 @@ class MeetingStore:
             return copy.deepcopy(value)
 
     def save_final_audio(self, session_id, path, voice_boost=False):
-        """Record the derived final WAV without changing the source tracks."""
+        """Record the derived playback file without changing the source tracks."""
         if not isinstance(path, (str, os.PathLike)):
             raise ValueError("O caminho do áudio final é inválido.")
         destination = os.path.abspath(os.fspath(path))

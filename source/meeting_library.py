@@ -57,7 +57,7 @@ DEFAULT_TRASH_RETENTION_DAYS = 30.0
 SUPPORTED_NOTICE_LANGUAGES = frozenset(("pt-BR", "en", "en-US"))
 SUPPORTED_QA_MODES = frozenset(("memory_only", "explicit_save"))
 REPORT_SECTIONS = frozenset({
-    "summary", "decisions", "action_items", "open_questions", "risks",
+    "summary", "key_points", "decisions", "action_items", "open_questions", "risks",
     "objections", "feedback", "follow_up_email", "answer",
 })
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")

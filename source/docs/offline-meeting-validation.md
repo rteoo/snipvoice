@@ -11,12 +11,15 @@ The meeting workspace preserves Snipvoice's capture and recovery boundary:
 - microphone and selected speaker-output sources remain independent native PCM
   tracks, with append-only segments, CRC journaling, atomic metadata, explicit
   gaps, pause/resume, and interrupted-session recovery;
-- transcription is installed-model-only, opt-in, sequential, revision-preserving,
-  and bounded by transcript chunks; model acquisition remains an explicit
-  settings action;
-- final audio is a derived atomic mixdown. Optional microphone volume adjustment
+- transcription and summaries run automatically with installed models,
+  sequentially and with preserved revisions. Transcription is bounded by
+  audio chunks; unavailable models are skipped and acquisition remains an
+  explicit settings action;
+- final audio is a derived atomic MP3 mixdown; WAV remains an export option and
+  existing WAV recordings remain playable. Original raw tracks remain the
+  model input and recovery source. Optional microphone volume adjustment
   measures the raw track in bounded memory and applies capped gain and a limiter
-  only to the final WAV. It does not hard-gate quiet speech or perform spectral
+  only to the final playback file. It does not hard-gate quiet speech or perform spectral
   denoising or acoustic echo cancellation;
 - the shared Tk root, controller workers, meeting hotkey, and tray actions keep
   capture, inference, disk work, and playback off keyboard/Tk callbacks;
@@ -30,10 +33,10 @@ canonical-bundle/disposable-index architecture:
 | --- | --- |
 | 1. Report profiles | Built-in and custom versioned profiles; bounded local reports with model and transcript provenance; immutable report history and separate review. |
 | 2. Post-meeting artifacts | Decisions, actions, questions, risks, objections, feedback, and follow-up drafts are reviewable, cited, and exportable without sending or mutating external systems. |
-| 3. Transcript interaction | Revision-scoped manual speaker labels, highlights, navigation, source-track clips, and bounded transcript pages; timings remain chunk-level. |
+| 3. Transcript interaction | Full text with paragraphs by default, switchable timestamps, complete text export, and bounded previews; advanced labels, highlights, navigation and source-track clips remain available. Timings remain chunk-level. |
 | 4. Single-meeting Q&A | Local `Ask this meeting` with bounded answers, validated transcript citations, uncertainty, and explicit save-to-QA-report behavior. |
-| 5. Organization | Canonical collections, tags, people, and manually assigned series with filtered library views and bounded batch assignment. |
-| 6. Search and cross-meeting Q&A | SQLite/FTS5 projection, provenance snippets, safe query handling, filters, rebuild/repair, and cited local answers across selected meetings. |
+| 5. Organization | Existing canonical collections, tags, people, and series metadata is preserved; manual categorization and filter controls are removed from the library interface. |
+| 6. Search and cross-meeting Q&A | SQLite/FTS5 projection, provenance snippets, safe query handling, rebuild/repair, and cited local answers across recordings. |
 | 7. Privacy and retention | Visible consent reminder/settings, memory-only or explicit-save Q&A policy, retention previews, same-root trash/restore, journaled raw-track staging, and separately confirmed permanent purge. |
 
 ## Offline and privacy boundary

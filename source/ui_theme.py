@@ -580,6 +580,47 @@ def apply_ttk_theme(style, system=None, resolved=None):
         return None
 
 
+def configure_combobox_popdown(combo, resolved=None, *, fit_values=False):
+    """Theme a ttk combobox's transient listbox on non-native platforms.
+
+    ttk creates the popdown lazily, so this is intended for the combobox's
+    ``postcommand`` callback.  Aqua owns the native macOS control and must be
+    left untouched.
+    """
+    ui = resolved or theme()
+    if ui.system == "darwin":
+        return None
+    popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
+    listbox = f"{popdown}.f.l"
+    combo.tk.call(
+        listbox,
+        "configure",
+        "-background", ui.field,
+        "-foreground", ui.text,
+        "-selectbackground", ui.select_bg,
+        "-selectforeground", ui.select_fg,
+        "-font", ui.font(10),
+        "-relief", "flat",
+        "-borderwidth", ui.space_sm,
+        "-highlightthickness", 0,
+        "-selectborderwidth", 0,
+        "-activestyle", "none",
+    )
+    if fit_values:
+        # Callers opt in with their own style so unrelated comboboxes retain
+        # their popup geometry. Fit long endpoint names inside the window.
+        font = tkfont.Font(root=combo, font=ui.font(10))
+        widest = max((font.measure(str(value)) for value in combo.cget("values")), default=0)
+        window = combo.winfo_toplevel()
+        width = max(combo.winfo_width(), min(widest + 2 * ui.space_sm + 24,
+                                            window.winfo_width() - 2 * ui.space_md))
+        right = window.winfo_rootx() + window.winfo_width() - ui.space_md
+        shift = min(0, right - combo.winfo_rootx() - width)
+        combo.tk.call("ttk::style", "configure", combo.cget("style"), "-postoffset",
+                      (shift, 0, width - combo.winfo_width(), 0))
+    return listbox
+
+
 def configure_manager_styles(style, resolved=None):
     """Apply the shared Fluent shell styles to a live ttk style object."""
     ui = resolved or theme()
@@ -652,6 +693,30 @@ def configure_manager_styles(style, resolved=None):
         foreground=[("readonly", ui.text), ("disabled", ui.text_muted)],
         selectbackground=[("readonly", ui.field)],
         selectforeground=[("readonly", ui.text)],
+    )
+    style.configure(
+        "Device.TCombobox",
+        padding=(10, 8),
+        font=ui.font(10),
+    )
+    style.map(
+        "Device.TCombobox",
+        background=[("disabled", ui.surface_alt), ("pressed", ui.control_active),
+                    ("active", ui.field_hover), ("!disabled", ui.surface_alt)],
+        arrowcolor=[("disabled", ui.text_muted), ("!disabled", ui.text)],
+        fieldbackground=[
+            ("disabled", ui.surface_alt),
+            ("focus", ui.field),
+            ("readonly", ui.field),
+        ],
+        foreground=[
+            ("disabled", ui.text_muted),
+            ("focus", ui.text),
+            ("readonly", ui.text),
+        ],
+        bordercolor=[("focus", ui.focus_ring), ("!focus", ui.border)],
+        lightcolor=[("focus", ui.focus_ring), ("!focus", ui.border)],
+        darkcolor=[("focus", ui.focus_ring), ("!focus", ui.border)],
     )
     for orientation in ("Vertical", "Horizontal"):
         style.configure(

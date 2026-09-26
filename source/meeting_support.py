@@ -141,12 +141,12 @@ def _final_audio_path(root, settings, session_id, title=""):
         destination.mkdir(parents=True, exist_ok=True)
     clean_title = _INVALID_FILENAME.sub("-", str(title)).strip(" .-")[:120]
     stem = session_id + (" - " + clean_title if clean_title else "")
-    candidate = destination / (stem + ".wav")
+    candidate = destination / (stem + ".mp3")
     # ceiling: a session will not probe an unbounded hostile destination.
     for suffix in range(2, 1002):
         if not candidate.exists():
             return candidate
-        candidate = destination / f"{stem} ({suffix}).wav"
+        candidate = destination / f"{stem} ({suffix}).mp3"
     raise RuntimeError("A pasta de gravações contém muitas cópias com o mesmo nome.")
 
 
@@ -704,7 +704,12 @@ class MeetingController:
                 self.notify(error)
 
     def _postprocess_recording(self, session_id, title, settings):
-        """Create the final WAV, then run requested local processing in order."""
+        """Create the final MP3, then run available local processing in order.
+
+        New recordings automatically use installed models.  Legacy boolean
+        switches remain compatibility fields, but do not disable processing
+        when a model is available locally.
+        """
         errors = []
         resource_live = False
         try:
@@ -722,14 +727,17 @@ class MeetingController:
         except Exception as exc:
             errors.append("não foi possível gerar o áudio final: " + str(exc))
 
+        transcription_profile = self._installed_voice_profile(settings.profile)
         transcription_ready = False
-        if settings.auto_transcribe and not self._cancel.is_set():
+        if transcription_profile and not self._cancel.is_set():
             try:
                 with self._lock:
                     self._postprocess = "Transcrevendo localmente"
                 from meeting_transcription import transcribe_meeting
+                from voice_catalog import default_language_for_profile
                 transcribe_meeting(
-                    self.store, session_id, settings.profile, settings.language,
+                    self.store, session_id, transcription_profile,
+                    default_language_for_profile(transcription_profile, settings.language),
                     self.voice.cache_dir, cancel_event=self._cancel,
                 )
                 if self._cancel.is_set():
@@ -743,12 +751,13 @@ class MeetingController:
                 if getattr(exc, "resource_live", False):
                     resource_live = True
 
-        if settings.auto_summary and transcription_ready and not self._cancel.is_set():
+        summary_model = self._installed_summary_model(settings.summary_model)
+        if summary_model and transcription_ready and not self._cancel.is_set():
             try:
                 with self._lock:
                     self._postprocess = "Gerando o resumo local"
                 from meeting_summary import summarize_meeting
-                summarize_meeting(self.store, session_id, settings.summary_model,
+                summarize_meeting(self.store, session_id, summary_model,
                                   cancel_event=self._cancel)
                 self._queue_projection(session_id)
             except Exception as exc:
@@ -756,6 +765,43 @@ class MeetingController:
         with self._lock:
             self._postprocess = "Pós-processamento concluído" if not errors else "Pós-processamento parcial"
         return errors, resource_live
+
+    def _installed_voice_profile(self, preferred):
+        """Return the preferred installed ASR profile, then a stable fallback."""
+        from voice_catalog import catalog_entry, selectable_catalog
+        from voice_models import model_is_installed
+
+        entries = []
+        preferred_entry = catalog_entry(preferred)
+        if preferred_entry is not None:
+            entries.append(preferred_entry)
+        entries.extend(entry for entry in selectable_catalog() if entry not in entries)
+        for entry in entries:
+            try:
+                if model_is_installed(entry, self.voice.cache_dir):
+                    return entry["profile"]
+            except (OSError, TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _installed_summary_model(preferred):
+        """Return the preferred installed summary model, then catalog order."""
+        from summary_catalog import summary_catalog, summary_catalog_entry
+        from summary_models import summary_model_is_installed
+
+        entries = []
+        preferred_entry = summary_catalog_entry(preferred)
+        if preferred_entry is not None:
+            entries.append(preferred_entry)
+        entries.extend(entry for entry in summary_catalog() if entry not in entries)
+        for entry in entries:
+            try:
+                if summary_model_is_installed(entry["id"]):
+                    return entry["id"]
+            except (OSError, TypeError, ValueError):
+                continue
+        return None
 
     def _queue_projection(self, session_id):
         """Queue disposable indexing without making capture/finalization depend on it."""
@@ -985,6 +1031,15 @@ class MeetingController:
         limit = min(limit, TRANSCRIPT_LIMIT)
         return list(itertools.islice(self.library.get_transcript(session_id, revision), offset, offset + limit))
 
+    def get_transcript_preview(self, session_id, revision=None, style="full_text", max_chars=None):
+        """Return a formatted transcript preview without changing canonical data."""
+        from meeting_text import transcript_preview
+
+        options = {"style": style}
+        if max_chars is not None:
+            options["max_chars"] = max_chars
+        return transcript_preview(self.library.get_transcript(session_id, revision), **options)
+
     def get_transcript_page(self, session_id, revision=None, offset=0, limit=TRANSCRIPT_PAGE_SIZE):
         """Return a bounded page plus navigation metadata for the transcript workspace."""
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -1110,6 +1165,14 @@ class MeetingController:
             self.store, session_id, highlight, path, cancel_event=self._cancel,
         ), session_id=session_id)
 
+    def rename_session(self, session_id, title, *, expected_generation=_UNSET):
+        """Rename a recording without rewriting legacy notes or bookmarks."""
+        expected = self._annotation_expected_generation(session_id, expected_generation)
+        self._annotation_result(session_id, self.library.update_annotations(
+            session_id, {"title": title}, expected_generation=expected,
+        ))
+        return True
+
     def update_notes(self, session_id, title, notes, bookmarks=None, expected_generation=_UNSET):
         fields = {"title": title, "notes": notes}
         if bookmarks is not None:
@@ -1160,25 +1223,50 @@ class MeetingController:
 
     def transcribe(self, session_id, profile, language):
         def work():
-            from meeting_transcription import transcribe_meeting
-            token = self.voice.reserve_for_meeting()
-            release = True
-            try:
-                transcribe_meeting(self.store, session_id, profile, language,
-                                   self.voice.cache_dir, cancel_event=self._cancel)
-                if not self._cancel.is_set():
-                    self._refine_automatic_title(session_id)
-                    self._queue_projection(session_id)
-            except Exception as exc:
-                if getattr(exc, "resource_live", False):
-                    release = False
-                    with self._lock:
-                        self._state = "unavailable"
-                raise
-            finally:
-                if release:
-                    self.voice.release_meeting(token)
+            self._transcribe_and_summarize(session_id, profile, language)
         return self._launch_processing(work, session_id=session_id)
+
+    def _transcribe_and_summarize(self, session_id, profile, language, preferred_summary=None):
+        """Run installed-only transcription and summary on one processing lane."""
+        from meeting_transcription import transcribe_meeting
+
+        token = self.voice.reserve_for_meeting()
+        release = True
+        try:
+            transcribe_meeting(
+                self.store, session_id, profile, language,
+                self.voice.cache_dir, cancel_event=self._cancel,
+            )
+            if self._cancel.is_set():
+                return False
+            self._refine_automatic_title(session_id)
+            self._queue_projection(session_id)
+            if preferred_summary is None:
+                metadata = self.library.get_session(session_id)
+                stored = metadata.get("settings") if isinstance(metadata, dict) else None
+                preferred_summary = stored.get("meeting_summary_model") if isinstance(stored, dict) else None
+            self._run_installed_summary(session_id, preferred_summary)
+            return True
+        except Exception as exc:
+            if getattr(exc, "resource_live", False):
+                release = False
+                with self._lock:
+                    self._state = "unavailable"
+            raise
+        finally:
+            if release:
+                self.voice.release_meeting(token)
+
+    def _run_installed_summary(self, session_id, preferred=None):
+        """Generate a summary only when a verified local model is installed."""
+        model = self._installed_summary_model(preferred)
+        if not model or self._cancel.is_set():
+            return False
+        from meeting_summary import summarize_meeting
+        summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
+        if not self._cancel.is_set():
+            self._queue_projection(session_id)
+        return True
 
     def _refine_automatic_title(self, session_id):
         metadata = self.library.get_session(session_id)
@@ -1213,6 +1301,14 @@ class MeetingController:
         from meeting_files import import_audio
         def work():
             session_id = import_audio(self.store, path, settings, cancel_event=self._cancel)
+            transcription_profile = self._installed_voice_profile(settings.profile)
+            if transcription_profile and not self._cancel.is_set():
+                from voice_catalog import default_language_for_profile
+                self._transcribe_and_summarize(
+                    session_id, transcription_profile,
+                    default_language_for_profile(transcription_profile, settings.language),
+                    settings.summary_model,
+                )
             self._queue_projection(session_id)
             return session_id
         return self._file_work(work)
@@ -1225,11 +1321,59 @@ class MeetingController:
             session_id, path, format, cancel_event=self._cancel,
         ), session_id=session_id)
 
+    def export_transcript(self, session_id, path, *, style="full_text", revision=None):
+        """Export one complete formatted transcript through the file worker."""
+        def operation():
+            from meeting_files import export_transcript
+            return export_transcript(
+                self.store, session_id, path, style=style, revision=revision,
+                cancel_event=self._cancel,
+            )
+        return self._file_work(operation, session_id=session_id)
+
     def export_mixdown(self, session_id, path, enhance_microphone=False):
         return self._file_work(lambda: export_mixdown(
             self.store, session_id, path, enhance_microphone=enhance_microphone,
             cancel_event=self._cancel,
         ), session_id=session_id)
+
+    def regenerate_final_audio(self, session_id):
+        """Publish a new level-adjusted mix, preserving every previous audio file."""
+        def work():
+            metadata = self.store.get(session_id, include_events=False)
+            microphone = metadata.get("tracks", {}).get("microphone")
+            if (not isinstance(microphone, dict) or microphone.get("available") is False
+                    or microphone.get("raw_removed")):
+                raise ValueError("O áudio original do microfone não está disponível para ajustar o volume.")
+            if metadata.get("status") == "recording":
+                raise ValueError("Finalize a gravação antes de ajustar o volume.")
+            with self._lock:
+                self._postprocess = "Ajustando o volume do microfone"
+            # Capture omits private destination settings from session metadata;
+            # the previous final file still identifies the user's output folder.
+            previous = metadata.get("final_audio") or {}
+            previous_path = previous.get("path") if isinstance(previous, dict) else None
+            stored_settings = metadata.get("settings") or {}
+            folder = stored_settings.get("meeting_destination", "")
+            if isinstance(previous_path, str) and os.path.isabs(previous_path):
+                folder = str(Path(previous_path).parent)
+            destination = _final_audio_path(
+                self.root, resolve_meeting_settings({"meeting_destination": folder}), session_id,
+                metadata.get("title", ""),
+            )
+            output = export_mixdown(
+                self.store, session_id, destination,
+                enhance_microphone=True, cancel_event=self._cancel,
+            )
+            self.store.save_final_audio(session_id, output, voice_boost=True)
+            self._queue_projection(session_id)
+            with self._lock:
+                self._postprocess = "Áudio final ajustado; originais preservados"
+
+        with self._lock:
+            if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
+                return False
+            return self._launch_processing(work, session_id=session_id)
 
     def _file_work(self, operation, session_id=None):
         # Caller is an IO worker; reserve admission without another nested thread.
@@ -1251,11 +1395,10 @@ class MeetingController:
 
     def summarize(self, session_id, model):
         def work():
-            from meeting_summary import summarize_meeting
             token = self.voice.reserve_for_meeting()
             try:
-                summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
-                self._queue_projection(session_id)
+                if not self._run_installed_summary(session_id, model):
+                    raise ValueError("Nenhum modelo de resumo instalado; instale um modelo local antes de gerar o resumo.")
             finally:
                 self.voice.release_meeting(token)
         return self._launch_processing(work, session_id=session_id)
@@ -1343,21 +1486,21 @@ class MeetingController:
         )
 
     def generate_report(self, session_id, model, *, profile=None, revision=None,
-                        language=None):
+                        language=None, focus=None):
         """Generate one immutable structured report off the GUI thread."""
         def work():
             token = self.voice.reserve_for_meeting()
             try:
                 return self._intelligence().generate_report(
                     session_id, model, profile=profile, revision=revision,
-                    language=language, cancel_event=self._cancel,
+                    language=language, focus=focus, cancel_event=self._cancel,
                 )
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work)
+        return self._file_work(work, session_id=session_id)
 
     def ask_this_meeting(self, session_id, question, model, *, revision=None,
-                         revision_id=None, language=None):
+                         revision_id=None, language=None, history=None):
         """Run a memory-only answer; nothing is saved until save_answer()."""
         def work():
             token = self.voice.reserve_for_meeting()
@@ -1365,7 +1508,7 @@ class MeetingController:
                 result = self._intelligence().ask_this_meeting(
                     session_id, question, model, revision=revision,
                     revision_id=revision_id, language=language,
-                    cancel_event=self._cancel, include_provenance=True,
+                    cancel_event=self._cancel, include_provenance=True, history=history,
                 )
                 if isinstance(result, dict):
                     result = dict(result)

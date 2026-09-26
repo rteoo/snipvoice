@@ -4,15 +4,17 @@ Official Snipvoice releases do not install PyAV's prebuilt wheel. The desktop
 bundle workflow runs `clean_audio_runtime.py`, which builds PyAV 18.1.0 from
 hash-pinned source against a hash-pinned FFmpeg 8.1.2 build.
 
-The FFmpeg build uses shared libraries and native audio decoders only. It
-disables GPL, nonfree, version-3, network, auto-detected external libraries,
-programs, encoders, and video decoders. The repaired wheel is rejected unless
-all seven FFmpeg libraries required by PyAV are dynamic and no known GPL codec
-library is present.
+The FFmpeg build uses shared libraries and native audio decoders plus the
+LGPL LAME 3.100 MP3 encoder. It disables GPL, nonfree, version-3, network,
+auto-detected external libraries, programs, and video decoders. The repaired
+wheel is rejected unless all seven FFmpeg libraries required by PyAV are
+dynamic, the approved LAME encoder and MP3 muxer are enabled, and no known GPL
+codec library is present.
 
 Each platform bundle contains `THIRD_PARTY_LICENSES/FFmpeg` with:
 
 - the exact FFmpeg source archive and SHA-256;
+- the exact LAME source archive, SHA-256, and LGPL license text;
 - the complete configure invocation, config header, and config log;
 - the unmodified-source patch (empty by design) and build recipe;
 - PyAV and FFmpeg license texts; and

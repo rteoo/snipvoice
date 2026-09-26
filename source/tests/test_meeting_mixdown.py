@@ -90,6 +90,29 @@ class MeetingMixdownTests(unittest.TestCase):
         export_mixdown(silent, "session", self.destination, enhance_microphone=True)
         self.assertLess(struct.unpack("<h", _read(self.destination)[2][:2])[0], 100)
 
+    def test_adjustment_keeps_quiet_speech_audible_in_a_mostly_silent_track(self):
+        source = _Store({"microphone": [
+            _event("microphone", [0.0] * 1900 + [0.005] * 100, rate=1000),
+        ]})
+        export_mixdown(source, "session", self.destination, enhance_microphone=True)
+        samples = struct.unpack("<2000h", _read(self.destination)[2])
+        self.assertEqual(samples[:1900], (0,) * 1900)
+        self.assertGreater(samples[-1], 1000)
+        self.assertLess(samples[-1], 1500)
+
+    def test_adjustment_is_independent_of_native_packet_sizes(self):
+        values = [0.0] * 90 + [0.02] * 10
+        contiguous = _Store({"microphone": [_event("microphone", values, rate=1000)]})
+        fragmented = _Store({"microphone": [
+            _event("microphone", values[index:index + 10], rate=1000,
+                   timestamp=index / 1000, sequence=index // 10)
+            for index in range(0, len(values), 10)
+        ]})
+        export_mixdown(contiguous, "session", self.destination, enhance_microphone=True)
+        expected = _read(self.destination)[2]
+        export_mixdown(fragmented, "session", self.destination, enhance_microphone=True)
+        self.assertEqual(_read(self.destination)[2], expected)
+
     def test_cancellation_removes_temp_and_preserves_existing_destination(self):
         self.destination.write_bytes(b"old output")
         cancelled = threading.Event()

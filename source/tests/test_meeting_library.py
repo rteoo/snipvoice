@@ -623,6 +623,33 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
             saved = self.library.save_report("fixture-meeting-v1", duplicate)
         self.assertEqual(saved["id"], "report-citation-duplicates")
 
+    def test_meeting_notes_key_points_round_trip_and_reject_unknown_citation(self):
+        envelope = {
+            "schema_version": 1, "id": "meeting-notes-report", "kind": "report",
+            "profile_id": "meeting_notes", "profile_version": 1,
+            "session_id": "fixture-meeting-v1", "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "f" * 64, "runtime": "llama.cpp"},
+            "generated": {
+                "summary": "The milestone was confirmed.",
+                "key_points": [{"text": "The next milestone is confirmed.", "segment_ids": ["segment-1"]}],
+                "decisions": [], "action_items": [], "open_questions": [],
+            },
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        with mock.patch.object(
+            self.library.store, "get_transcript",
+            return_value=[{"id": "segment-1"}],
+        ):
+            saved = self.library.save_report("fixture-meeting-v1", envelope)
+            loaded = self.library.get_report("fixture-meeting-v1", saved["id"])
+            self.assertEqual(loaded["generated"]["key_points"][0]["segment_ids"], ["segment-1"])
+
+            invalid = dict(envelope, id="meeting-notes-invalid")
+            invalid["generated"] = dict(envelope["generated"])
+            invalid["generated"]["key_points"] = [{"text": "Unsupported", "segment_ids": ["missing"]}]
+            with self.assertRaises(SchemaError):
+                self.library.save_report("fixture-meeting-v1", invalid)
+
     def test_memory_only_policy_blocks_qa_at_canonical_save_boundary(self):
         self.library.update_workspace(
             {"privacy_defaults": {"qa_mode": "memory_only"}},

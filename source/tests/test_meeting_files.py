@@ -14,6 +14,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from meeting_files import (
     IMPORT_FRAMES,
+    PLAY_FRAMES,
+    _audio_chunks,
+    _final_audio_chunks,
+    _pyav_final_audio_chunks,
     export_highlight_clip,
     export_meeting,
     export_report,
@@ -449,6 +453,96 @@ class MeetingFilesTests(unittest.TestCase):
         output.assert_called_once_with(samplerate=8000, channels=1, dtype="float32", device=None)
         stream.close.assert_called_once()
 
+    def test_playback_snaps_small_timestamp_overlap_without_dropping_frames(self):
+        sid = self.store.begin({})
+        packet = [0.25] * 480
+        self.audio(sid, packet, timestamp=0.0, rate=48000)
+        self.audio(sid, packet, timestamp=0.0099, sequence=1, rate=48000)
+        self.audio(sid, packet, timestamp=0.020, sequence=2, rate=48000)
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.03))
+        self.assertEqual(sum(len(payload) // 4 for _, _, payload in chunks), 1440)
+        samples = [value for _, _, payload in chunks for value in struct.unpack("<" + "f" * (len(payload) // 4), payload)]
+        self.assertTrue(all(value == 0.25 for value in samples))
+
+    def test_playback_snaps_small_forward_jitter_only_when_next_packet_closes_it(self):
+        sid = self.store.begin({})
+        packet = [0.25] * 480
+        self.audio(sid, packet, timestamp=0.0, rate=48000)
+        self.audio(sid, packet, timestamp=0.0101, sequence=1, rate=48000)
+        self.audio(sid, packet, timestamp=0.020, sequence=2, rate=48000)
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.03))
+        self.assertEqual(sum(len(payload) // 4 for _, _, payload in chunks), 1440)
+        self.assertTrue(all(
+            value == 0.25
+            for _, _, payload in chunks
+            for value in struct.unpack("<" + "f" * (len(payload) // 4), payload)
+        ))
+
+    def test_playback_preserves_isolated_forward_gap(self):
+        sid = self.store.begin({})
+        self.audio(sid, [0.1] * 4, rate=8000)
+        self.audio(sid, [0.2] * 2, timestamp=0.001, sequence=1, rate=8000)
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.00125))
+        samples = [value for _, _, payload in chunks for value in struct.unpack("<" + "f" * (len(payload) // 4), payload)]
+        self.assertEqual(len(samples), 10)
+        self.assertTrue(all(abs(value - 0.1) < 1e-6 for value in samples[:4]))
+        self.assertEqual(samples[4:8], [0.0] * 4)
+        self.assertTrue(all(abs(value - 0.2) < 1e-6 for value in samples[8:]))
+
+    def test_playback_preserves_gap_when_following_packets_are_contiguous(self):
+        sid = self.store.begin({})
+        packet = [0.25] * 480
+        self.audio(sid, packet, timestamp=0.0, rate=48000)
+        self.audio(sid, packet, timestamp=0.015, sequence=1, rate=48000)
+        self.audio(sid, packet, timestamp=0.025, sequence=2, rate=48000)
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.035))
+        samples = [value for _, _, payload in chunks for value in struct.unpack("<" + "f" * (len(payload) // 4), payload)]
+        self.assertEqual(len(samples), 1680)
+        self.assertEqual(samples[480:720], [0.0] * 240)
+
+    def test_playback_trims_material_overlap(self):
+        sid = self.store.begin({})
+        self.audio(sid, [0.1] * 1000, rate=8000)
+        self.audio(sid, [0.2] * 1000, timestamp=0.125, sequence=1, rate=8000)
+        self.audio(sid, [0.3] * 1000, timestamp=0.225, sequence=2, rate=8000)
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.35))
+        samples = [value for _, _, payload in chunks for value in struct.unpack("<" + "f" * (len(payload) // 4), payload)]
+        self.assertEqual(sum(abs(value - 0.3) < 1e-6 for value in samples), 800)
+
+    def test_playback_does_not_normalize_overlap_across_generation_boundary(self):
+        sid = self.store.begin({})
+        packet = [0.25] * 480
+        self.audio(sid, packet, timestamp=0.0, rate=48000)
+        self.store.append_audio(
+            sid,
+            {"type": "audio", "generation": 1, "track": "microphone", "sequence": 1,
+             "timestamp": 0.0099, "rate": 48000, "channels": 1, "frames": 480},
+            struct.pack("<" + "f" * 480, *packet),
+        )
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.01989))
+        self.assertEqual(sum(len(payload) // 4 for _, _, payload in chunks), 955)
+
+    def test_playback_does_not_normalize_overlap_across_format_boundary(self):
+        sid = self.store.begin({})
+        self.audio(sid, [0.25] * 480, timestamp=0.0, rate=48000)
+        self.audio(sid, [0.5] * 441, timestamp=0.0099, sequence=1, rate=44100)
+        self.store.finish(sid)
+
+        chunks = list(_audio_chunks(self.store, sid, "microphone", duration=0.01989))
+        self.assertEqual(sum(len(payload) // (channels * 4) for _, channels, payload in chunks), 917)
+
     def test_replay_final_wav_works_after_raw_track_retention(self):
         sid = self.session()
         path = self.root / "final-playback.wav"
@@ -472,6 +566,139 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertAlmostEqual(writes[0], 0.25)
         self.assertAlmostEqual(writes[-1], 0.75)
         output.assert_called_once_with(samplerate=8000, channels=1, dtype="float32", device=None)
+
+    def test_replay_final_mp3_uses_bounded_pyav_decoder(self):
+        sid = self.session()
+        metadata = {"final_audio": {"path": str(self.root / "final.mp3")}}
+        chunk = (44100, 1, struct.pack("<4f", 0.0, 0.25, 0.5, 0.75))
+        with mock.patch("meeting_files.os.path.isfile", return_value=True), \
+                mock.patch("meeting_files._pyav_final_audio_chunks", return_value=iter((chunk,))) as decode:
+            result = list(_final_audio_chunks(metadata, 2.0, threading.Event()))
+        self.assertEqual(result, [chunk])
+        decode.assert_called_once_with(str(self.root / "final.mp3"), 2.0, mock.ANY)
+
+    def test_replay_final_mp3_reports_missing_decoder(self):
+        metadata = {"final_audio": {"path": str(self.root / "final.mp3")}}
+        with mock.patch("meeting_files.os.path.isfile", return_value=True), \
+                mock.patch.dict(sys.modules, {"av": None}):
+            with self.assertRaisesRegex(RuntimeError, "MP3"):
+                list(_final_audio_chunks(metadata, 0.0, threading.Event()))
+
+    def test_mp3_decoder_seeks_and_stops_at_eof_in_bounded_chunks(self):
+        payload = struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)
+
+        class Frame:
+            sample_rate = 8000
+            samples = 4
+            time = 0.0
+            layout = types.SimpleNamespace(nb_channels=1, name="mono")
+            format = types.SimpleNamespace(name="flt")
+            planes = (memoryview(payload),)
+
+            def __init__(self, timestamp):
+                self.time = timestamp
+
+        class Resampler:
+            def __init__(self, **_kwargs):
+                self.frames = []
+
+            def resample(self, frame):
+                return [Frame(1.09975)] if frame is None else [frame]
+
+        class Container:
+            def __init__(self):
+                self.stream = types.SimpleNamespace(time_base=1 / 1000, start_time=100, duration=2000)
+                self.streams = types.SimpleNamespace(best=lambda _kind: self.stream)
+                self.seek_offset = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def seek(self, offset, **_kwargs):
+                self.seek_offset = offset
+
+            def decode(self, _stream):
+                return iter((Frame(0.5), Frame(1.1)))
+
+        container = Container()
+        fake_av = types.SimpleNamespace(
+            FFmpegError=(), AudioResampler=Resampler,
+            open=lambda *_args, **_kwargs: container,
+        )
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            chunks = list(_pyav_final_audio_chunks("final.mp3", 1.0, threading.Event()))
+        self.assertEqual(container.seek_offset, 850)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0][0:2], (8000, 1))
+        self.assertLessEqual(len(chunks[0][2]) // 4, PLAY_FRAMES)
+        self.assertEqual(len(chunks[-1][2]) // 4, 2)
+        container.seek_offset = None
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            list(_pyav_final_audio_chunks("final.mp3", 0.0, threading.Event()))
+        self.assertIsNone(container.seek_offset)
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            self.assertEqual(list(_pyav_final_audio_chunks("final.mp3", 8.0, threading.Event())), [])
+        self.assertIsNone(container.seek_offset)
+        # Stream duration is a length, not an end timestamp relative to origin.
+        container.decode = lambda _stream: iter((Frame(2.09975),))
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            self.assertTrue(list(_pyav_final_audio_chunks("final.mp3", 1.99975, threading.Event())))
+
+    def test_mp3_decoder_rejects_empty_decoded_stream(self):
+        stream = types.SimpleNamespace(time_base=1 / 1000)
+        container = mock.MagicMock()
+        container.__enter__.return_value = container
+        container.streams.best.return_value = stream
+        container.decode.return_value = iter(())
+        fake_av = types.SimpleNamespace(
+            FFmpegError=(), open=lambda *_args, **_kwargs: container,
+        )
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            with self.assertRaisesRegex(ValueError, "decodificável"):
+                list(_pyav_final_audio_chunks("empty.mp3", 0.0, threading.Event()))
+
+    def test_mp3_seek_rejects_timestamp_less_positioning(self):
+        payload = struct.pack("<4f", 0.1, 0.2, 0.3, 0.4)
+        frame = types.SimpleNamespace(
+            sample_rate=8000, samples=4, time=None, pts=None, time_base=None,
+            layout=types.SimpleNamespace(nb_channels=1, name="mono"),
+            format=types.SimpleNamespace(name="flt"), planes=(memoryview(payload),),
+        )
+        stream = types.SimpleNamespace(time_base=1 / 1000, start_time=0)
+        container = mock.MagicMock()
+        container.__enter__.return_value = container
+        container.streams.best.return_value = stream
+        container.decode.return_value = iter((frame,))
+        fake_av = types.SimpleNamespace(
+            FFmpegError=(), AudioResampler=lambda **_kwargs: types.SimpleNamespace(
+                resample=lambda source: [] if source is None else [frame]),
+            open=lambda *_args, **_kwargs: container,
+        )
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            with self.assertRaisesRegex(ValueError, "timestamps"):
+                list(_pyav_final_audio_chunks("untimed.mp3", 1.0, threading.Event()))
+
+        # Decoding from the beginning can trim accurately by sample count.
+        container.reset_mock()
+        container.decode.return_value = iter((frame,))
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            chunks = list(_pyav_final_audio_chunks("untimed.mp3", 2 / 8000, threading.Event()))
+        self.assertEqual(chunks, [(8000, 1, payload[8:])])
+        container.seek.assert_not_called()
+
+        # After a timestamp anchors a seek, later untimed frames use the cursor.
+        timed = types.SimpleNamespace(**vars(frame))
+        timed.time = 1.0
+        container.decode.return_value = iter((timed, frame))
+        fake_av.AudioResampler = lambda **_kwargs: types.SimpleNamespace(
+            resample=lambda source: [] if source is None else [source],
+        )
+        with mock.patch.dict(sys.modules, {"av": fake_av}):
+            chunks = list(_pyav_final_audio_chunks("untimed.mp3", 1 + 2 / 8000, threading.Event()))
+        self.assertEqual(chunks, [(8000, 1, payload[8:]), (8000, 1, payload)])
 
     def test_final_replay_reports_missing_file(self):
         sid = self.session()

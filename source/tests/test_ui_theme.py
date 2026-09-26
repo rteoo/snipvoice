@@ -100,6 +100,23 @@ class WindowsPaletteTests(unittest.TestCase):
         )
 
 
+class LinuxPaletteTests(unittest.TestCase):
+    def test_windows_palette_uses_literal_native_colors_on_linux(self):
+        # ``SystemButtonText`` is a Win32 Tk color name. Linux may still use
+        # the Windows/Fluent appearance preference, but X11 Tk needs the
+        # literal fallback for widgets that receive an explicit foreground.
+        theme = ui_theme.build_theme("windows", system="linux")
+        self.assertEqual(theme.text_native, theme.text)
+        for options in (
+            theme.checkbutton_colors(theme.surface),
+            theme.toolbar_button_colors(theme.card),
+            theme.nav_button_colors(theme.surface),
+            theme.glyph_button_colors(theme.card),
+            theme.button_colors(),
+        ):
+            self.assertNotIn("SystemButtonText", options.values())
+
+
 class MacPaletteTests(unittest.TestCase):
 
     def test_backgrounds_and_text_use_aqua_dynamic_colors(self):
@@ -570,6 +587,81 @@ class TtkThemeSelectionTests(unittest.TestCase):
             style.mapped["Manager.Treeview"]["background"],
             [("selected", theme.select_bg)],
         )
+
+    def test_device_combobox_style_has_roomy_font_and_focus_states(self):
+        class Recorder:
+            def __init__(self):
+                self.configured = {}
+                self.mapped = {}
+
+            def configure(self, name, **options):
+                self.configured[name] = options
+
+            def map(self, name, **options):
+                self.mapped[name] = options
+
+        style = Recorder()
+        theme = ui_theme.build_theme("dark", system="windows")
+        ui_theme.configure_manager_styles(style, theme)
+        self.assertEqual(style.configured["Device.TCombobox"]["padding"], (10, 8))
+        self.assertEqual(style.configured["Device.TCombobox"]["font"], theme.font(10))
+        self.assertIn(("focus", theme.field),
+                      style.mapped["Device.TCombobox"]["fieldbackground"])
+        self.assertIn(("disabled", theme.text_muted),
+                      style.mapped["Device.TCombobox"]["foreground"])
+        self.assertIn(("focus", theme.focus_ring),
+                      style.mapped["Device.TCombobox"]["bordercolor"])
+
+    def test_combobox_popdown_styles_its_actual_listbox(self):
+        class FakeTk:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, *args):
+                self.calls.append(args)
+                return ".device.popdown"
+
+        class FakeCombo:
+            def __init__(self):
+                self.tk = FakeTk()
+
+            def __str__(self):
+                return ".device"
+
+        combo = FakeCombo()
+        theme = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(
+            ui_theme.configure_combobox_popdown(combo, theme),
+            ".device.popdown.f.l",
+        )
+        self.assertEqual(combo.tk.calls[0],
+                         ("ttk::combobox::PopdownWindow", ".device"))
+        configure = combo.tk.calls[1]
+        self.assertEqual(configure[0], ".device.popdown.f.l")
+        options = dict(zip(configure[2::2], configure[3::2]))
+        self.assertEqual(options["-background"], theme.field)
+        self.assertEqual(options["-foreground"], theme.text)
+        self.assertEqual(options["-selectbackground"], theme.select_bg)
+        self.assertEqual(options["-selectforeground"], theme.select_fg)
+        self.assertEqual(options["-font"], theme.font(10))
+        self.assertEqual(options["-relief"], "flat")
+        self.assertEqual(options["-highlightthickness"], 0)
+        self.assertEqual(options["-selectborderwidth"], 0)
+        self.assertEqual(options["-activestyle"], "none")
+
+    def test_combobox_popdown_leaves_macos_native(self):
+        class FakeTk:
+            def call(self, *args):
+                raise AssertionError("Aqua must own the combobox popdown")
+
+        class FakeCombo:
+            tk = FakeTk()
+
+            def __str__(self):
+                return ".device"
+
+        theme = ui_theme.build_theme("dark", system="darwin")
+        self.assertIsNone(ui_theme.configure_combobox_popdown(FakeCombo(), theme))
 
     def test_dark_manager_styles_replace_clam_light_defaults(self):
         class Recorder:
