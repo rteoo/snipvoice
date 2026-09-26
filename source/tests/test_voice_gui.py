@@ -805,13 +805,21 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 and notebook not in _ancestors(widget)
             ]
             labels = [button.cget("text") for button in buttons]
+            logos = [
+                widget for widget in _descendants(window)
+                if isinstance(widget, tk.Label) and widget.cget("image")
+                and notebook not in _ancestors(widget)
+            ]
+            logo_size = (logos[0].winfo_reqwidth(), logos[0].winfo_reqheight()) if logos else None
             library = buttons[labels.index("Biblioteca")]
             library.invoke()
             window.update()
             return (labels, notebook.tab(notebook.select(), "text"),
-                    str(library.cget("font")), str(buttons[0].cget("font")))
+                    str(library.cget("font")), str(buttons[0].cget("font")), len(logos), logo_size)
 
-        labels, selected, library_font, recording_font = self._on_gui(navigate)
+        labels, selected, library_font, recording_font, logos, logo_size = self._on_gui(navigate)
+        self.assertEqual(logos, 1, "expected the app icon beside the name")
+        self.assertGreaterEqual(min(logo_size), 16)
         self.assertEqual(labels, ["Gravação", "Biblioteca", "Ditado", "Configurações"])
         self.assertEqual(selected, "Biblioteca")
         self.assertIn("bold", library_font)
