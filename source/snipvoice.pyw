@@ -6,9 +6,11 @@ Recording is explicit and local. Audio and transcripts are kept in recoverable
 history; model downloads are the only transcription-related network operation.
 """
 
+import base64
 import ctypes
 import functools
 import gc
+import io
 import json
 import os
 import sys
@@ -366,22 +368,29 @@ class Snipvoice:
         sidebar = tk.Frame(window, bg=ui.surface_alt, padx=ui.space_md, pady=ui.space_lg)
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
         tk.Frame(window, bg=ui.divider, width=1).pack(side=tk.LEFT, fill=tk.Y)
+        identity = tk.Frame(sidebar, bg=ui.surface_alt)
+        identity.pack(fill=tk.X, padx=(ui.space_sm, 0), pady=(0, ui.space_lg))
+        logo = self._sidebar_logo(window)
+        if logo is not None:
+            logo_label = tk.Label(identity, image=logo, bg=ui.surface_alt)
+            logo_label.image = logo  # Tk keeps no reference of its own.
+            logo_label.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, ui.space_sm))
         tk.Label(
-            sidebar,
+            identity,
             text=APP_DISPLAY_NAME,
             font=ui.font(12, "bold"),
             bg=ui.surface_alt,
             fg=ui.text_strong,
             anchor="w",
-        ).pack(fill=tk.X, padx=(ui.space_sm, 0))
+        ).grid(row=0, column=1, sticky="w")
         tk.Label(
-            sidebar,
+            identity,
             text=tr("Gravações e ditado"),
             font=ui.font(9),
             bg=ui.surface_alt,
             fg=ui.text_muted,
             anchor="w",
-        ).pack(fill=tk.X, padx=(ui.space_sm, 0), pady=(2, ui.space_lg))
+        ).grid(row=1, column=1, sticky="w", pady=(2, 0))
         nav = tk.Frame(sidebar, bg=ui.surface_alt)
         nav.pack(fill=tk.X)
         privacy = tk.Frame(sidebar, bg=ui.surface_alt)
@@ -582,6 +591,24 @@ class Snipvoice:
         if window is not None:
             window.destroy()
         gc.collect()
+
+    def _sidebar_logo(self, window, size=32):
+        """The app icon at ``size`` logical pixels, or None if it cannot load.
+
+        Built from the bundled .ico (packaged builds ship no PNG) and handed to
+        Tk as PNG data, so no Pillow-Tk bridge has to be packaged.
+        """
+        pixels = max(16, round(size * window.winfo_fpixels("1i") / 96))
+        try:
+            with Image.open(os.path.join(get_runtime_resource_dir(), "snipvoice.ico")) as icon:
+                icon.size = max(icon.info.get("sizes") or {icon.size})
+                image = icon.convert("RGBA").resize((pixels, pixels), Image.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            return tk.PhotoImage(master=window, data=base64.b64encode(buffer.getvalue()))
+        except (OSError, ValueError, tk.TclError):
+            self.logger.warning("Could not load the sidebar icon")
+            return None
 
     def _set_window_icon(self, window):
         if platform_support.IS_WINDOWS:
