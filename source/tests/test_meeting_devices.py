@@ -142,14 +142,27 @@ class DeviceMenuNativeTests(unittest.TestCase):
                 combo = view.endpoint_boxes["microphone"]
                 view.window.deiconify()
                 view.window.update()
-                combo.tk.call("ttk::combobox::Post", str(combo))
-                self.root.update()
                 popup = str(combo.tk.call("ttk::combobox::PopdownWindow", str(combo)))
                 listbox = popup + ".f.l"
-                for option, expected in (("background", view.ui.field), ("foreground", view.ui.text),
-                                         ("selectbackground", view.ui.select_bg),
-                                         ("selectforeground", view.ui.select_fg)):
-                    self.assertEqual(combo.tk.call(listbox, "cget", "-" + option), expected)
+                aqua_popup_before = None
+                if ui_theme.current_os() == "darwin":
+                    # Aqua owns this listbox; the application must leave its
+                    # dynamic colors untouched when the popup is posted.
+                    aqua_popup_before = {
+                        option: combo.tk.call(listbox, "cget", "-" + option)
+                        for option in ("background", "foreground",
+                                       "selectbackground", "selectforeground")
+                    }
+                combo.tk.call("ttk::combobox::Post", str(combo))
+                self.root.update()
+                if aqua_popup_before is not None:
+                    for option, expected in aqua_popup_before.items():
+                        self.assertEqual(combo.tk.call(listbox, "cget", "-" + option), expected)
+                else:
+                    for option, expected in (("background", view.ui.field), ("foreground", view.ui.text),
+                                             ("selectbackground", view.ui.select_bg),
+                                             ("selectforeground", view.ui.select_fg)):
+                        self.assertEqual(combo.tk.call(listbox, "cget", "-" + option), expected)
                 combo.tk.call("event", "generate", listbox, "<KeyPress-Down>")
                 combo.tk.call("event", "generate", listbox, "<KeyPress-Return>")
                 self.root.update()
