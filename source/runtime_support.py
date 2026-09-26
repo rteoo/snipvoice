@@ -8,6 +8,7 @@ from logging.handlers import RotatingFileHandler
 import json
 
 from clipboard_support import Clipboard
+from i18n import tr
 from platform_support import default_insertion_timings
 from rich_text_support import extract_plain_text
 from snippet_utils import write_json_atomic
@@ -212,11 +213,11 @@ class TextInserter:
             # line in a terminal. Leaving the payload for a manual Ctrl+V is the
             # only recovery that cannot fire something irreversible.
             if Clipboard.set_content(value):
-                message = ("Não foi possível colar o snippet automaticamente. "
-                           "Ele está na área de transferência: use Ctrl+V.")
+                message = (tr("Não foi possível colar o snippet automaticamente. "
+                           "Ele está na área de transferência: use Ctrl+V."))
             else:
-                message = ("Não foi possível colar o snippet nem copiá-lo "
-                           "para a área de transferência.")
+                message = (tr("Não foi possível colar o snippet nem copiá-lo "
+                           "para a área de transferência."))
             self.logger.warning(message)
             if self.notify:
                 self.notify(message, key="paste-failed")

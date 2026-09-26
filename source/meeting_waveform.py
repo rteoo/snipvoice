@@ -11,6 +11,7 @@ import math
 import queue
 import tkinter as tk
 
+from i18n import N_, tr
 import ui_theme
 
 
@@ -160,9 +161,9 @@ class MeetingWaveform(tk.Canvas):
     """
 
     STATES = ("idle", "checking", "recording", "paused")
-    _DEFAULT_TRACK_LABELS = {"microphone": "Microfone", "system": "Sistema"}
-    _DEFAULT_STATE_LABELS = {"idle": "Pronto", "checking": "Testando",
-                             "recording": "Gravando", "paused": "Pausado"}
+    _DEFAULT_TRACK_LABELS = {"microphone": N_("Microfone"), "system": N_("Sistema")}
+    _DEFAULT_STATE_LABELS = {"idle": N_("Pronto"), "checking": N_("Testando"),
+                             "recording": N_("Gravando"), "paused": N_("Pausado")}
 
     def __init__(self, master, model=None, *, theme=None, poll_ms=40,
                  track_labels=None, state_labels=None, **kwargs):
@@ -200,7 +201,7 @@ class MeetingWaveform(tk.Canvas):
 
     @property
     def status_text(self):
-        return f"Estado: {self.state_labels.get(self._state, self._state)}"
+        return tr("Estado: {state}", state=tr(self.state_labels.get(self._state, self._state)))
 
     def set_state(self, state):
         """Set the visible status; must be called from the Tk thread."""
@@ -305,7 +306,7 @@ class MeetingWaveform(tk.Canvas):
             )
             self.create_text(
                 margin_x, lane_top - label_height / 2.0,
-                text=self.track_labels.get(track, track), anchor="w",
+                text=tr(self.track_labels.get(track, track)), anchor="w",
                 fill=self.ui.text, font=self.ui.font(9, "bold"), tags=("labels",),
             )
             points = self.model.geometry(track, lane_width, lane_height, x=margin_x, y=lane_top)

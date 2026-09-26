@@ -15,6 +15,8 @@ import threading
 import time
 import uuid
 
+from i18n import tr
+
 
 STATUS_RECORDING = "recording"
 STATUS_PENDING = "pending"
@@ -70,7 +72,7 @@ class VoiceRecording:
         while offset < len(payload):
             written = self._handle.write(payload[offset:])
             if not isinstance(written, int) or written <= 0:
-                raise OSError("A gravação de áudio não avançou no disco.")
+                raise OSError(tr("A gravação de áudio não avançou no disco."))
             offset += written
             self._bytes_written += written
 
@@ -204,7 +206,7 @@ class VoiceHistoryStore:
                 self.update(
                     entry["id"],
                     status=STATUS_INTERRUPTED,
-                    error="A gravação foi interrompida antes de terminar.",
+                    error=tr("A gravação foi interrompida antes de terminar."),
                 )
 
     def update(self, record_id, **fields):
@@ -287,18 +289,18 @@ class VoiceHistoryStore:
             with open(self._audio_path(record_id), "rb") as handle:
                 payload = handle.read()
         except OSError as exc:
-            raise ValueError("O áudio salvo não está disponível.") from exc
+            raise ValueError(tr("O áudio salvo não está disponível.")) from exc
         if not payload:
-            raise ValueError("O áudio salvo está vazio.")
+            raise ValueError(tr("O áudio salvo está vazio."))
         if len(payload) % array.array("f").itemsize:
-            raise ValueError("O áudio salvo está corrompido.")
+            raise ValueError(tr("O áudio salvo está corrompido."))
         samples = array.array("f")
         samples.frombytes(payload)
         return samples.tolist()
 
     def _item_dir(self, record_id):
         if not self._valid_record_id(record_id):
-            raise ValueError("Identificador de histórico inválido.")
+            raise ValueError(tr("Identificador de histórico inválido."))
         return os.path.join(self.root_dir, str(record_id))
 
     @staticmethod

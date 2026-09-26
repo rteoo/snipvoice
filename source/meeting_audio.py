@@ -10,6 +10,8 @@ import subprocess
 import sys
 import threading
 
+from i18n import tr
+
 VERSION = 1
 MAX_HEADER = 65536
 MAX_PAYLOAD = 4 * 1024 * 1024
@@ -29,8 +31,8 @@ def _read_exact(stream, size):
         chunk = stream.read(size - len(result))
         if not chunk:
             if not result:
-                raise EOFError("O capturador de áudio encerrou o fluxo.")
-            raise MeetingAudioError("O capturador enviou um bloco de áudio incompleto.")
+                raise EOFError(tr("O capturador de áudio encerrou o fluxo."))
+            raise MeetingAudioError(tr("O capturador enviou um bloco de áudio incompleto."))
         result.extend(chunk)
     return bytes(result)
 
@@ -38,16 +40,16 @@ def _read_exact(stream, size):
 def read_frame(stream):
     size = struct.unpack("<I", _read_exact(stream, 4))[0]
     if not 0 < size <= MAX_HEADER:
-        raise MeetingAudioError("Cabeçalho do capturador inválido.")
+        raise MeetingAudioError(tr("Cabeçalho do capturador inválido."))
     try:
         event = json.loads(_read_exact(stream, size))
     except (ValueError, UnicodeError) as exc:
-        raise MeetingAudioError("Resposta do capturador inválida.") from exc
+        raise MeetingAudioError(tr("Resposta do capturador inválida.")) from exc
     if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-        raise MeetingAudioError("Evento do capturador inválido.")
+        raise MeetingAudioError(tr("Evento do capturador inválido."))
     length = struct.unpack("<I", _read_exact(stream, 4))[0]
     if length > MAX_PAYLOAD:
-        raise MeetingAudioError("Bloco do capturador excedeu o limite seguro.")
+        raise MeetingAudioError(tr("Bloco do capturador excedeu o limite seguro."))
     payload = _read_exact(stream, length) if length else b""
     if event["type"] == "audio":
         rate, channels, frames = (event.get(k) for k in ("rate", "channels", "frames"))
@@ -61,16 +63,16 @@ def read_frame(stream):
                 or not isinstance(event.get("sequence"), int)
                 or isinstance(event["sequence"], bool)
                 or event["sequence"] < 0):
-            raise MeetingAudioError("Formato ou relógio de captura inválido.")
+            raise MeetingAudioError(tr("Formato ou relógio de captura inválido."))
     elif payload:
-        raise MeetingAudioError("Evento de controle contém áudio inesperado.")
+        raise MeetingAudioError(tr("Evento de controle contém áudio inesperado."))
     return event, payload
 
 
 def encode_frame(event, payload=b""):
     header = json.dumps(event, ensure_ascii=False, allow_nan=False).encode("utf-8")
     if not 0 < len(header) <= MAX_HEADER or len(payload) > MAX_PAYLOAD:
-        raise MeetingAudioError("Evento excedeu o limite de transporte.")
+        raise MeetingAudioError(tr("Evento excedeu o limite de transporte."))
     return struct.pack("<I", len(header)) + header + struct.pack("<I", len(payload)) + payload
 
 
@@ -95,9 +97,9 @@ class NativeCapture:
 
     def _spawn(self, arguments):
         if sys.platform not in ("win32", "darwin"):
-            raise MeetingAudioError("A captura de reuniões suporta Windows e macOS.")
+            raise MeetingAudioError(tr("A captura de reuniões suporta Windows e macOS."))
         if not self.path.is_file():
-            raise MeetingAudioError("Capturador nativo ausente. Compile ou instale o pacote do SnipVoice.")
+            raise MeetingAudioError(tr("Capturador nativo ausente. Compile ou instale o pacote do SnipVoice."))
         options = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE,
                    "stderr": subprocess.PIPE, "bufsize": 0}
         if os.name == "nt":
@@ -119,20 +121,20 @@ class NativeCapture:
                 generation = event.get("generation")
                 if (not isinstance(generation, int) or isinstance(generation, bool)
                         or generation < 0 or generation != self._generation):
-                    raise MeetingAudioError("O capturador enviou uma sessão antiga.")
+                    raise MeetingAudioError(tr("O capturador enviou uma sessão antiga."))
                 if not self._ready.is_set():
                     if event["type"] != "ready" or event.get("version") != VERSION:
-                        raise MeetingAudioError("Versão ou inicialização do capturador incompatível.")
+                        raise MeetingAudioError(tr("Versão ou inicialização do capturador incompatível."))
                     self._ready.set()
                     continue
                 try:
                     self._queue.put((event, payload), timeout=0.25)
                 except queue.Full as exc:
-                    raise MeetingAudioError("O disco não acompanhou a captura; o áudio parcial foi preservado.") from exc
+                    raise MeetingAudioError(tr("O disco não acompanhou a captura; o áudio parcial foi preservado.")) from exc
                 if event["type"] == "stopped":
                     return
         except EOFError:
-            self._failure = MeetingAudioError("O capturador encerrou antes de confirmar a parada.")
+            self._failure = MeetingAudioError(tr("O capturador encerrou antes de confirmar a parada."))
         except (OSError, ValueError, MeetingAudioError) as exc:
             self._failure = exc
         finally:
@@ -141,7 +143,7 @@ class NativeCapture:
 
     def start(self, settings, generation):
         if self._process is not None:
-            raise MeetingAudioError("Já existe uma captura em andamento.")
+            raise MeetingAudioError(tr("Já existe uma captura em andamento."))
         self._generation = generation
         self._process = self._spawn(["--capture", "--sources", settings.sources,
                                     "--microphone", settings.microphone.argument(),
@@ -153,7 +155,7 @@ class NativeCapture:
         self._reader.start()
         if not self._ready.wait(8) or self._failure is not None:
             self.stop(force=True)
-            raise MeetingAudioError("Não foi possível iniciar a captura nativa.") from self._failure
+            raise MeetingAudioError(tr("Não foi possível iniciar a captura nativa.")) from self._failure
 
     def read_event(self, timeout=0.1):
         try:
@@ -165,12 +167,12 @@ class NativeCapture:
 
     def command(self, command):
         if self._process is None or self._process.poll() is not None:
-            raise MeetingAudioError("O capturador de áudio não está ativo.")
+            raise MeetingAudioError(tr("O capturador de áudio não está ativo."))
         try:
             self._process.stdin.write((json.dumps({"command": command}) + "\n").encode())
             self._process.stdin.flush()
         except (OSError, ValueError) as exc:
-            raise MeetingAudioError("Não foi possível controlar a captura.") from exc
+            raise MeetingAudioError(tr("Não foi possível controlar a captura.")) from exc
 
     def pause(self):
         self.command("pause")
@@ -195,13 +197,13 @@ class NativeCapture:
         if self._reader is not None:
             self._reader.join(2)
             if self._reader.is_alive():
-                raise MeetingAudioError("O capturador ainda está encerrando; aguarde antes de gravar novamente.",
+                raise MeetingAudioError(tr("O capturador ainda está encerrando; aguarde antes de gravar novamente."),
                                         resource_live=True)
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
         if process.returncode and not force:
-            raise MeetingAudioError("O capturador encerrou com erro; o áudio parcial foi preservado.")
+            raise MeetingAudioError(tr("O capturador encerrou com erro; o áudio parcial foi preservado."))
 
     def _query(self, argument):
         process = self._spawn([argument])
@@ -235,33 +237,33 @@ class NativeCapture:
         except subprocess.TimeoutExpired as exc:
             process.kill()
             process.wait(timeout=3)
-            raise MeetingAudioError("O capturador não respondeu à consulta.") from exc
+            raise MeetingAudioError(tr("O capturador não respondeu à consulta.")) from exc
         finally:
             thread.join(2)
             diagnostics.join(2)
             for stream in (process.stdin, process.stdout, process.stderr):
                 stream.close()
         if process.returncode or errors or thread.is_alive():
-            raise MeetingAudioError("Falha na consulta ao capturador nativo.")
+            raise MeetingAudioError(tr("Falha na consulta ao capturador nativo."))
         return values
 
     def list_devices(self):
         frames = self._query("--list")
         if (not frames or frames[0].get("type") != "devices"
                 or frames[0].get("version") != VERSION):
-            raise MeetingAudioError("Lista de dispositivos incompatível.")
+            raise MeetingAudioError(tr("Lista de dispositivos incompatível."))
         devices = frames[0].get("devices")
         if not isinstance(devices, list) or len(devices) > 256:
-            raise MeetingAudioError("Lista de dispositivos inválida.")
+            raise MeetingAudioError(tr("Lista de dispositivos inválida."))
         for device in devices:
             if (not isinstance(device, dict) or device.get("kind") not in ("microphone", "system")
                     or not isinstance(device.get("id"), str)
                     or not isinstance(device.get("name"), str)):
-                raise MeetingAudioError("Dispositivo de áudio inválido.")
+                raise MeetingAudioError(tr("Dispositivo de áudio inválido."))
         return devices
 
     def self_test(self):
         frames = self._query("--self-test")
         if not frames or frames[0].get("type") != "ready" or frames[0].get("version") != VERSION:
-            raise MeetingAudioError("Autoteste do capturador falhou.")
+            raise MeetingAudioError(tr("Autoteste do capturador falhou."))
         return True

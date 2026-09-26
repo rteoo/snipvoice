@@ -10,6 +10,7 @@ import threading
 import time
 
 from clipboard_support import Clipboard
+from i18n import N_, tr
 from voice_audio import (
     AudioCapture,
     CaptureIssue,
@@ -71,39 +72,39 @@ class _TrackedWorker:
 
 _CAPTURE_ISSUE_MESSAGES = {
     CaptureIssue.DURATION_LIMIT: (
-        "A gravação de voz atingiu o limite e foi cancelada. "
-        "O áudio parcial foi salvo no histórico."
+        N_("A gravação de voz atingiu o limite e foi cancelada. "
+           "O áudio parcial foi salvo no histórico.")
     ),
     CaptureIssue.INPUT_STATUS: (
-        "O microfone relatou uma falha durante a gravação. "
-        "O áudio parcial foi salvo no histórico."
+        N_("O microfone relatou uma falha durante a gravação. "
+           "O áudio parcial foi salvo no histórico.")
     ),
     CaptureIssue.RAW_QUEUE: (
-        "A captura de áudio não acompanhou o microfone. "
-        "O áudio parcial foi salvo no histórico."
+        N_("A captura de áudio não acompanhou o microfone. "
+           "O áudio parcial foi salvo no histórico.")
     ),
     CaptureIssue.NORMALIZED_QUEUE: (
-        "A transcrição em tempo real não acompanhou a gravação. "
-        "O áudio foi salvo no histórico."
+        N_("A transcrição em tempo real não acompanhou a gravação. "
+           "O áudio foi salvo no histórico.")
     ),
     CaptureIssue.NORMALIZATION: (
-        "Não foi possível normalizar o áudio do microfone. "
-        "O áudio disponível foi salvo no histórico."
+        N_("Não foi possível normalizar o áudio do microfone. "
+           "O áudio disponível foi salvo no histórico.")
     ),
     CaptureIssue.JOURNAL: (
-        "Não foi possível salvar toda a gravação durante a captura."
+        N_("Não foi possível salvar toda a gravação durante a captura.")
     ),
-    CaptureIssue.STOP: "O microfone falhou ao encerrar a gravação.",
-    CaptureIssue.CLOSE: "O microfone falhou ao liberar a gravação.",
+    CaptureIssue.STOP: N_("O microfone falhou ao encerrar a gravação."),
+    CaptureIssue.CLOSE: N_("O microfone falhou ao liberar a gravação."),
 }
 
 _STATE_LABELS = {
-    STATE_UNAVAILABLE: "Entrada por voz (indisponível)",
-    STATE_LOADING: "Entrada por voz (carregando…)",
-    STATE_IDLE: "Entrada por voz (pronta)",
-    STATE_RECORDING: "Entrada por voz (gravando…)",
-    STATE_TRANSCRIBING: "Entrada por voz (transcrevendo…)",
-    STATE_ROUTING: "Entrada por voz (inserindo…)",
+    STATE_UNAVAILABLE: N_("Entrada por voz (indisponível)"),
+    STATE_LOADING: N_("Entrada por voz (carregando…)"),
+    STATE_IDLE: N_("Entrada por voz (pronta)"),
+    STATE_RECORDING: N_("Entrada por voz (gravando…)"),
+    STATE_TRANSCRIBING: N_("Entrada por voz (transcrevendo…)"),
+    STATE_ROUTING: N_("Entrada por voz (inserindo…)"),
 }
 
 
@@ -385,19 +386,19 @@ class VoiceController:
     def status_label(self):
         with self._lock:
             if self._meeting_token is not None:
-                return "Entrada por voz (ocupada pela gravação)"
+                return tr("Entrada por voz (ocupada pela gravação)")
         with self._lock:
             if self._model_download_active:
                 if self._download_total:
                     percent = min(100, int(100 * self._download_done / self._download_total))
-                    return f"Entrada por voz (baixando {percent}%)"
-                return "Entrada por voz (baixando modelo…)"
+                    return tr("Entrada por voz (baixando {percent}%)", percent=percent)
+                return tr("Entrada por voz (baixando modelo…)")
             if not self.settings.enabled:
-                return "Entrada por voz"
+                return tr("Entrada por voz")
             if self._state == STATE_LOADING and self._download_total:
                 percent = min(100, int(100 * self._download_done / self._download_total))
-                return f"Entrada por voz (baixando {percent}%)"
-            return _STATE_LABELS.get(self._state, "Entrada por voz")
+                return tr("Entrada por voz (baixando {percent}%)", percent=percent)
+            return tr(_STATE_LABELS.get(self._state, N_("Entrada por voz")))
 
     def _emit_status(self):
         callback = self._on_status_change
@@ -493,7 +494,7 @@ class VoiceController:
                 or not self.settings.enabled
             ):
                 self._notify(
-                    "Ative a entrada por voz e aguarde ela ficar pronta para tentar novamente.",
+                    tr("Ative a entrada por voz e aguarde ela ficar pronta para tentar novamente."),
                     key="voice-history",
                 )
                 return False
@@ -660,7 +661,7 @@ class VoiceController:
             unload_busy = self._unload_pending or self._unload_in_progress
         if unload_busy:
             self._notify(
-                "A entrada por voz ainda está encerrando; tente ativá-la novamente em instantes.",
+                tr("A entrada por voz ainda está encerrando; tente ativá-la novamente em instantes."),
                 key="voice-load",
             )
             return
@@ -684,7 +685,7 @@ class VoiceController:
                 self._download_total = 0
         if blocked_by_download:
             self._notify(
-                "Aguarde o download do modelo terminar antes de ativar a voz.",
+                tr("Aguarde o download do modelo terminar antes de ativar a voz."),
                 key="voice-model-download",
             )
             return
@@ -786,7 +787,7 @@ class VoiceController:
                         self._finish_startup_locked(generation)
                 if current:
                     self._notify(
-                        "O macOS bloqueou o microfone. Conceda a permissão e reinicie o app.",
+                        tr("O macOS bloqueou o microfone. Conceda a permissão e reinicie o app."),
                         key="voice-mic",
                     )
                 return False
@@ -801,7 +802,7 @@ class VoiceController:
                     self._finish_startup_locked(generation)
             if current:
                 self._warn(f"Não foi possível capturar o destino da voz: {exc}")
-                self._notify("Não foi possível preparar o destino da voz.", key="voice-target")
+                self._notify(tr("Não foi possível preparar o destino da voz."), key="voice-target")
             return False
         session_form = None
         if form_apply is not None and mode != MODE_COMMAND:
@@ -829,7 +830,7 @@ class VoiceController:
             if current:
                 self._warn(f"Não foi possível preparar o histórico de voz: {exc}")
                 self._notify(
-                    "Não foi possível iniciar uma gravação recuperável.",
+                    tr("Não foi possível iniciar uma gravação recuperável."),
                     key="voice-history",
                 )
             return False
@@ -867,7 +868,7 @@ class VoiceController:
         except Exception as exc:
             current = self._abort_capture_start(generation, capture, recording, exc)
             if current:
-                self._notify(f"Não foi possível gravar: {exc}", key="voice-audio")
+                self._notify(tr("Não foi possível gravar: {error}", error=exc), key="voice-audio")
             return False
         with self._lock:
             startup_aborted = not self._startup_valid_locked(generation)
@@ -1045,7 +1046,7 @@ class VoiceController:
         try:
             if not self.capture_available():
                 raise VoiceRuntimeError(
-                    "A captura de áudio não está disponível neste aplicativo."
+                    tr("A captura de áudio não está disponível neste aplicativo.")
                 )
             self._prepare_provider()
             if self._cancel.is_set() or self._shutdown.is_set():
@@ -1062,7 +1063,7 @@ class VoiceController:
                 self._state = STATE_UNAVAILABLE
                 self._load_error = str(exc)
             self._warn(f"Falha ao ativar a entrada por voz: {exc}")
-            self._notify(f"Falha ao ativar a entrada por voz: {exc}", key="voice-load")
+            self._notify(tr("Falha ao ativar a entrada por voz: {error}", error=exc), key="voice-load")
             self._emit_status()
             return
         with self._lock:
@@ -1146,7 +1147,7 @@ class VoiceController:
             self._persist_payload(rollback_payload)
             try:
                 if not self._provider.profile_installed(previous.profile):
-                    raise VoiceRuntimeError("O modelo anterior não está mais instalado.")
+                    raise VoiceRuntimeError(tr("O modelo anterior não está mais instalado."))
                 self._provider.prepare(previous.profile, previous.language)
                 with self._lock:
                     if not self._switch_valid_locked(generation):
@@ -1216,7 +1217,7 @@ class VoiceController:
             )
             if not self._model_download_cancel.is_set() and not self._shutdown.is_set():
                 self._notify(
-                    "Modelo de voz baixado e verificado.",
+                    tr("Modelo de voz baixado e verificado."),
                     key="voice-model-download",
                 )
         except (VoiceModelError, VoiceRuntimeError) as exc:
@@ -1226,7 +1227,7 @@ class VoiceController:
             if not self._model_download_cancel.is_set():
                 self._warn(f"Falha ao baixar o modelo de voz: {exc}")
                 self._notify(
-                    f"Falha ao baixar o modelo de voz: {exc}",
+                    tr("Falha ao baixar o modelo de voz: {error}", error=exc),
                     key="voice-model-download",
                 )
         finally:
@@ -1254,7 +1255,7 @@ class VoiceController:
                 if self._shutdown.is_set():
                     return
                 self._recording_failed_if_current(generation, recording, exc)
-                self._fail_to_idle(f"Falha ao encerrar a gravação: {exc}", generation)
+                self._fail_to_idle(tr("Falha ao encerrar a gravação: {error}", error=exc), generation)
                 return
         if self._shutdown.is_set():
             return
@@ -1279,17 +1280,17 @@ class VoiceController:
         except Exception as exc:
             self._recording_failed_if_current(generation, recording, exc)
             self._fail_to_idle(
-                f"Falha ao salvar a gravação recuperável: {exc}", generation
+                tr("Falha ao salvar a gravação recuperável: {error}", error=exc), generation
             )
             return
         if capture_result.issue is not None:
             error = capture_result.message or capture_result.issue.value
             self._recording_failed_if_current(generation, recording, error)
             self._fail_to_idle(
-                _CAPTURE_ISSUE_MESSAGES.get(
+                tr(_CAPTURE_ISSUE_MESSAGES.get(
                     capture_result.issue,
-                    "A captura de áudio falhou. O áudio parcial foi salvo no histórico.",
-                ),
+                    N_("A captura de áudio falhou. O áudio parcial foi salvo no histórico."),
+                )),
                 generation,
             )
             return
@@ -1307,7 +1308,7 @@ class VoiceController:
                         stream_done = self._stream_worker_events.get(generation)
                     if stream_done is None or not stream_done.wait(0.25):
                         raise VoiceRuntimeError(
-                            "A transcrição contínua não encerrou a tempo."
+                            tr("A transcrição contínua não encerrou a tempo.")
                         )
                     if not self._drain_stream_chunks(capture, generation):
                         return
@@ -1331,7 +1332,7 @@ class VoiceController:
             return
         except Exception as exc:
             self._recording_failed_if_current(generation, recording, exc)
-            self._fail_to_idle(f"Falha na transcrição: {exc}", generation)
+            self._fail_to_idle(tr("Falha na transcrição: {error}", error=exc), generation)
             return
         if self._cancel.is_set() or self._shutdown.is_set():
             self._cancel_recording_if_current(generation, recording)
@@ -1394,7 +1395,7 @@ class VoiceController:
         except Exception as exc:
             self._recording_failed_if_current(generation, recording, exc)
             self._fail_to_idle(
-                f"Falha ao processar o texto de voz: {exc}", generation
+                tr("Falha ao processar o texto de voz: {error}", error=exc), generation
             )
             return
         self._finish_outcome(outcome, generation, recording, transcript)
@@ -1577,46 +1578,46 @@ class VoiceController:
         if outcome == OUTCOME_CANCELLED:
             return
         if outcome == OUTCOME_NO_MATCH:
-            self._notify("Nenhum atalho corresponde ao que foi falado.", key="voice-nomatch")
+            self._notify(tr("Nenhum atalho corresponde ao que foi falado."), key="voice-nomatch")
         elif outcome == OUTCOME_SECURE_INPUT:
             if result.clipboard_saved:
                 message = (
-                    "Entrada segura do macOS ativa. "
-                    "O texto ficou na área de transferência."
+                    tr("Entrada segura do macOS ativa. "
+                       "O texto ficou na área de transferência.")
                 )
             else:
                 message = (
-                    "Entrada segura do macOS ativa. Não foi possível copiar o texto "
-                    "para a área de transferência."
+                    tr("Entrada segura do macOS ativa. Não foi possível copiar o texto "
+                       "para a área de transferência.")
                 )
             self._notify(message, key="voice-secure")
         elif outcome == OUTCOME_TARGET_LOST:
             if result.clipboard_saved:
                 message = (
-                    "O aplicativo de destino não está mais na frente. "
-                    "O texto ficou na área de transferência."
+                    tr("O aplicativo de destino não está mais na frente. "
+                       "O texto ficou na área de transferência.")
                 )
             else:
                 message = (
-                    "O aplicativo de destino não está mais na frente e não foi "
-                    "possível copiar o texto para a área de transferência."
+                    tr("O aplicativo de destino não está mais na frente e não foi "
+                       "possível copiar o texto para a área de transferência.")
                 )
             self._notify(message, key="voice-target")
         elif outcome == OUTCOME_EMPTY:
-            self._notify("Nenhuma fala foi reconhecida.", key="voice-empty")
+            self._notify(tr("Nenhuma fala foi reconhecida."), key="voice-empty")
         elif outcome == OUTCOME_FAILED:
             if result.clipboard_saved is True:
                 message = (
-                    "Não foi possível inserir o texto de voz automaticamente. "
-                    "Ele está na área de transferência."
+                    tr("Não foi possível inserir o texto de voz automaticamente. "
+                       "Ele está na área de transferência.")
                 )
             elif result.clipboard_saved is False:
                 message = (
-                    "Não foi possível inserir o texto de voz nem copiá-lo "
-                    "para a área de transferência."
+                    tr("Não foi possível inserir o texto de voz nem copiá-lo "
+                       "para a área de transferência.")
                 )
             else:
-                message = "Não foi possível inserir o texto de voz."
+                message = tr("Não foi possível inserir o texto de voz.")
             self._notify(message, key="voice-insert")
 
     def _recording_failed_if_current(self, generation, recording, error):
@@ -1680,7 +1681,7 @@ class VoiceController:
             entry = self._history.get(record_id) or {}
             pcm = self._history.load_samples(record_id)
             if not pcm:
-                raise ValueError("A gravação salva está vazia.")
+                raise ValueError(tr("A gravação salva está vazia."))
             updated, _ = self._run_retry_history_side_effect(
                 generation,
                 self._history.update,
@@ -1698,7 +1699,7 @@ class VoiceController:
             )
             inference_duration = max(0.0, time.monotonic() - inference_started)
             if not str(raw_transcript or "").strip():
-                raise ValueError("Nenhuma fala foi reconhecida na gravação.")
+                raise ValueError(tr("Nenhuma fala foi reconhecida na gravação."))
             if self._retry_aborted(generation):
                 return
             transcript = self._apply_text_replacements(
@@ -1726,12 +1727,12 @@ class VoiceController:
                 return
             if copied:
                 message = (
-                    "A gravação foi recuperada. O texto está na área de transferência."
+                    tr("A gravação foi recuperada. O texto está na área de transferência.")
                 )
             else:
                 message = (
-                    "A gravação foi recuperada no histórico, mas não foi possível "
-                    "copiar o texto."
+                    tr("A gravação foi recuperada no histórico, mas não foi possível "
+                       "copiar o texto.")
                 )
             self._run_retry_side_effect(
                 generation,
@@ -1752,7 +1753,7 @@ class VoiceController:
                 self._run_retry_side_effect(
                     generation,
                     self._notify,
-                    f"Não foi possível recuperar a gravação: {exc}",
+                    tr("Não foi possível recuperar a gravação: {error}", error=exc),
                     key="voice-history",
                 )
         finally:
@@ -1962,8 +1963,8 @@ class VoiceController:
             unload_busy = self._unload_pending or self._unload_in_progress
         if unload_busy:
             self._notify(
-                "A entrada por voz ainda está encerrando; tente remover o modelo "
-                "novamente em instantes.",
+                tr("A entrada por voz ainda está encerrando; tente remover o modelo "
+                   "novamente em instantes."),
                 key="voice-model",
             )
             return False
@@ -1979,17 +1980,17 @@ class VoiceController:
                     or self._disable_requested or self._model_download_active
                     or self._state not in (STATE_IDLE, STATE_UNAVAILABLE)
                     or self._capture_starting):
-                raise VoiceRuntimeError("Aguarde a entrada por voz terminar antes de gravar.")
+                raise VoiceRuntimeError(tr("Aguarde a entrada por voz terminar antes de gravar."))
             self._meeting_token = token
             previous_state = self._state
             self._state = STATE_UNAVAILABLE
         self._emit_status()
         try:
             if not self._join_workers(_SHUTDOWN_JOIN_SECONDS):
-                raise VoiceRuntimeError("A entrada por voz ainda está encerrando.")
+                raise VoiceRuntimeError(tr("A entrada por voz ainda está encerrando."))
             with self._unload_lock:
                 if self._unload_pending or self._unload_in_progress:
-                    raise VoiceRuntimeError("O modelo de ditado ainda está encerrando.")
+                    raise VoiceRuntimeError(tr("O modelo de ditado ainda está encerrando."))
             self._provider.unload()
             self._stop_monitor()
             return token

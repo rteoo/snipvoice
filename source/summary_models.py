@@ -3,6 +3,7 @@
 import os
 
 import app_paths
+from i18n import tr
 from summary_catalog import summary_catalog_entry
 from voice_models import delete_model, download_model, installed_model_path, model_is_installed
 
@@ -29,7 +30,7 @@ def summary_cache_dir():
 def _entry(model_id):
     entry = summary_catalog_entry(model_id)
     if entry is None:
-        raise ValueError("Selecione um modelo de resumo do catálogo do SnipVoice.")
+        raise ValueError(tr("Selecione um modelo de resumo do catálogo do SnipVoice."))
     return entry
 
 

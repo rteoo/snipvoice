@@ -14,6 +14,8 @@ import sys
 import tempfile
 import wave
 
+from i18n import tr
+
 
 # ceiling: 1,024 frames per playback write and 8,192 per import; raise only after cancellation/memory profiling.
 PLAY_FRAMES = 1024
@@ -32,7 +34,7 @@ TIMESTAMP_JITTER_SECONDS = 0.02
 
 def _cancel(cancel_event):
     if cancel_event is not None and cancel_event.is_set():
-        raise RuntimeError("A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados.")
+        raise RuntimeError(tr("A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."))
 
 
 def _pcm_float(raw, width):
@@ -52,10 +54,10 @@ def _check_wav(path, cancel_event=None):
         size = os.fstat(handle.fileno()).st_size
         header = handle.read(12)
         if len(header) != 12 or header[:4] != b"RIFF" or header[8:] != b"WAVE":
-            raise ValueError("Escolha um arquivo WAV RIFF com PCM de 8, 16, 24 ou 32 bits.")
+            raise ValueError(tr("Escolha um arquivo WAV RIFF com PCM de 8, 16, 24 ou 32 bits."))
         end = struct.unpack_from("<I", header, 4)[0] + 8
         if end > size or end < 12:
-            raise ValueError("O arquivo WAV está incompleto; preserve o original e escolha um arquivo válido.")
+            raise ValueError(tr("O arquivo WAV está incompleto; preserve o original e escolha um arquivo válido."))
         seen_format = False
         seen_data = False
         chunks = 0
@@ -64,27 +66,27 @@ def _check_wav(path, cancel_event=None):
             chunks += 1
             # ceiling: 4096 RIFF chunks; unusually fragmented containers need a separately reviewed parser.
             if chunks > 4096:
-                raise ValueError("O WAV contém blocos demais. Converta para PCM padrão antes de importar.")
+                raise ValueError(tr("O WAV contém blocos demais. Converta para PCM padrão antes de importar."))
             name, length = struct.unpack("<4sI", handle.read(8))
             position = handle.tell()
             if position + length > end:
-                raise ValueError("O arquivo WAV contém um bloco incompleto.")
+                raise ValueError(tr("O arquivo WAV contém um bloco incompleto."))
             if name == b"fmt ":
                 if seen_format or length != 16:
-                    raise ValueError("Use WAV PCM padrão, sem compressão ou formato extensível.")
+                    raise ValueError(tr("Use WAV PCM padrão, sem compressão ou formato extensível."))
                 tag, channels, rate, byte_rate, alignment, bits = struct.unpack("<HHIIHH", handle.read(16))
                 if (tag != 1 or channels not in range(1, 9) or not 8000 <= rate <= 192000
                         or bits not in (8, 16, 24, 32) or alignment != channels * (bits // 8)
                         or byte_rate != rate * alignment):
-                    raise ValueError("Use WAV PCM de 8–192 kHz, 1–8 canais e 8, 16, 24 ou 32 bits.")
+                    raise ValueError(tr("Use WAV PCM de 8–192 kHz, 1–8 canais e 8, 16, 24 ou 32 bits."))
                 seen_format = True
             elif name == b"data":
                 if not seen_format or seen_data or not length or length % alignment:
-                    raise ValueError("O arquivo WAV não contém frames PCM completos.")
+                    raise ValueError(tr("O arquivo WAV não contém frames PCM completos."))
                 seen_data = True
             handle.seek(position + length + (length & 1))
         if not seen_format or not seen_data:
-            raise ValueError("O arquivo WAV não contém áudio PCM válido.")
+            raise ValueError(tr("O arquivo WAV não contém áudio PCM válido."))
 
 
 def import_wav(store, path, settings, cancel_event=None):
@@ -97,7 +99,7 @@ def import_wav(store, path, settings, cancel_event=None):
         with wave.open(str(path), "rb") as reader:
             width, channels, rate = reader.getsampwidth(), reader.getnchannels(), reader.getframerate()
             if width not in (1, 2, 3, 4) or channels not in range(1, 9) or not 8000 <= rate <= 192000:
-                raise ValueError("O formato WAV mudou durante a leitura. Escolha novamente um arquivo PCM válido.")
+                raise ValueError(tr("O formato WAV mudou durante a leitura. Escolha novamente um arquivo PCM válido."))
             total = reader.getnframes()
             session = store.begin(snapshot, path.stem[:400])
             store.add_event(session, {"type": "imported_wav", "timestamp": 0.0,
@@ -110,7 +112,7 @@ def import_wav(store, path, settings, cancel_event=None):
                 expected = min(IMPORT_FRAMES, total - frames_read)
                 raw = reader.readframes(expected)
                 if len(raw) != expected * channels * width:
-                    raise ValueError("A leitura do WAV foi interrompida; o áudio já importado foi preservado.")
+                    raise ValueError(tr("A leitura do WAV foi interrompida; o áudio já importado foi preservado."))
                 store.append_audio(session, {
                     "type": "audio", "generation": 0, "track": "microphone", "sequence": sequence,
                     "rate": rate, "channels": channels, "frames": expected, "timestamp": frames_read / rate,
@@ -126,7 +128,7 @@ def import_wav(store, path, settings, cancel_event=None):
                 status = "cancelled" if cancel_event is not None and cancel_event.is_set() else "failed"
                 store.finish(session, status, str(error))
             except Exception as persistence_error:
-                raise OSError("A importação falhou e não foi possível registrar o estado final. Preserve a reunião para recuperação.") from persistence_error
+                raise OSError(tr("A importação falhou e não foi possível registrar o estado final. Preserve a reunião para recuperação.")) from persistence_error
         raise
 
 
@@ -135,13 +137,13 @@ def _pyav_chunks(path, cancel_event=None):
         import av
     except ImportError as error:
         raise RuntimeError(
-            "A importação deste formato exige o decodificador de áudio incluído na instalação completa do SnipVoice."
+            tr("A importação deste formato exige o decodificador de áudio incluído na instalação completa do SnipVoice.")
         ) from error
     try:
         with av.open(str(path), mode="r") as container:
             stream = container.streams.best("audio")
             if stream is None:
-                raise ValueError("O arquivo não contém uma faixa de áudio compatível.")
+                raise ValueError(tr("O arquivo não contém uma faixa de áudio compatível."))
             resampler = None
             rate = channels = None
             decoded = False
@@ -151,7 +153,7 @@ def _pyav_chunks(path, cancel_event=None):
                     rate = source_frame.sample_rate
                     channels = source_frame.layout.nb_channels
                     if channels not in range(1, 9) or not isinstance(rate, int) or not 8000 <= rate <= 192000:
-                        raise ValueError("Use áudio de 8–192 kHz e 1–8 canais.")
+                        raise ValueError(tr("Use áudio de 8–192 kHz e 1–8 canais."))
                     resampler = av.AudioResampler(
                         format="flt", layout=source_frame.layout.name, rate=rate,
                         frame_size=IMPORT_FRAMES,
@@ -164,30 +166,30 @@ def _pyav_chunks(path, cancel_event=None):
                     decoded = True
                     yield rate, channels, _packed_float_frame(frame, rate, channels)
             if not decoded:
-                raise ValueError("O arquivo não contém áudio decodificável.")
+                raise ValueError(tr("O arquivo não contém áudio decodificável."))
     except Exception as error:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError(
-                "A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."
+                tr("A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados.")
             ) from error
         ffmpeg_error = getattr(av, "FFmpegError", ())
         if isinstance(error, ffmpeg_error):
-            raise ValueError("Não foi possível decodificar o arquivo de áudio selecionado.") from error
+            raise ValueError(tr("Não foi possível decodificar o arquivo de áudio selecionado.")) from error
         if isinstance(error, (OSError, ValueError)):
             raise
-        raise ValueError("Não foi possível decodificar o arquivo de áudio selecionado.") from error
+        raise ValueError(tr("Não foi possível decodificar o arquivo de áudio selecionado.")) from error
 
 
 def _packed_float_frame(frame, rate, channels):
     if (frame.sample_rate != rate or frame.layout.nb_channels != channels
             or frame.format.name != "flt" or len(frame.planes) != 1):
-        raise ValueError("O formato do áudio mudou durante a decodificação.")
+        raise ValueError(tr("O formato do áudio mudou durante a decodificação."))
     if not isinstance(frame.samples, int) or frame.samples < 1 or frame.samples > IMPORT_FRAMES:
-        raise ValueError("O decodificador retornou um bloco de áudio inválido.")
+        raise ValueError(tr("O decodificador retornou um bloco de áudio inválido."))
     expected = frame.samples * channels * 4
     plane = memoryview(frame.planes[0])
     if len(plane) < expected:
-        raise ValueError("O decodificador retornou um bloco de áudio incompleto.")
+        raise ValueError(tr("O decodificador retornou um bloco de áudio incompleto."))
     payload = bytes(plane[:expected])
     if sys.byteorder != "little":
         values = array.array("f")
@@ -203,14 +205,14 @@ def import_audio(store, path, settings, cancel_event=None):
     path = Path(path)
     suffix = path.suffix.casefold()
     if suffix not in SUPPORTED_AUDIO_EXTENSIONS:
-        raise ValueError("Escolha um arquivo WAV, MP3, AAC/M4A, FLAC, OGG ou Opus.")
+        raise ValueError(tr("Escolha um arquivo WAV, MP3, AAC/M4A, FLAC, OGG ou Opus."))
     if suffix == ".wav":
         return import_wav(store, path, settings, cancel_event)
     snapshot = settings.payload() if hasattr(settings, "payload") else dict(settings)
     chunks = iter(_pyav_chunks(path, cancel_event))
     first = next(chunks, None)
     if first is None:
-        raise ValueError("O arquivo não contém áudio decodificável.")
+        raise ValueError(tr("O arquivo não contém áudio decodificável."))
     session = None
     try:
         session = store.begin(snapshot, path.stem[:400])
@@ -225,7 +227,7 @@ def import_audio(store, path, settings, cancel_event=None):
             _cancel(cancel_event)
             frames = len(payload) // (channels * 4)
             if frames < 1 or frames > IMPORT_FRAMES or len(payload) != frames * channels * 4:
-                raise ValueError("O decodificador retornou um bloco de áudio inválido.")
+                raise ValueError(tr("O decodificador retornou um bloco de áudio inválido."))
             store.append_audio(session, {
                 "type": "audio", "generation": 0, "track": "microphone", "sequence": sequence,
                 "rate": rate, "channels": channels, "frames": frames, "timestamp": frames_read / rate,
@@ -242,7 +244,7 @@ def import_audio(store, path, settings, cancel_event=None):
                 store.finish(session, status, str(error))
             except Exception as persistence_error:
                 raise OSError(
-                    "A importação falhou e não foi possível registrar o estado final. Preserve a reunião para recuperação."
+                    tr("A importação falhou e não foi possível registrar o estado final. Preserve a reunião para recuperação.")
                 ) from persistence_error
         raise
     finally:
@@ -514,9 +516,10 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
         handle.write(str(value) + "\n")
     title = _redact_absolute_paths(metadata.get("title") or session)
     line(("# " if markdown else "") + title)
-    line(f"ID: {session}; estado: {metadata.get('status')}; duração: {metadata.get('duration', 0):.3f} s")
-    line("Fontes: microfone/sistema; rótulos não identificam pessoas. Tempos da transcrição representam blocos de áudio.")
-    line("\nDisponibilidade das fontes:")
+    line(tr("ID: {session}; estado: {status}; duração: {duration:.3f} s", session=session,
+            status=metadata.get('status'), duration=metadata.get('duration', 0)))
+    line(tr("Fontes: microfone/sistema; rótulos não identificam pessoas. Tempos da transcrição representam blocos de áudio."))
+    line(tr("\nDisponibilidade das fontes:"))
     for track, value in metadata.get("tracks", {}).items():
         _cancel(cancel_event)
         if isinstance(value, dict):
@@ -537,22 +540,22 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
                     for segment in value.get("segments", ())
                 )
             )
-            state = "removida pela retenção" if unavailable else "disponível"
+            state = tr("removida pela retenção") if unavailable else tr("disponível")
             line(f"{track}: {state}")
-    line("\nNotas:")
+    line(tr("\nNotas:"))
     line(_redact_absolute_paths(metadata.get("notes", "")))
-    line("\nMarcadores:")
+    line(tr("\nMarcadores:"))
     for bookmark in metadata.get("bookmarks", []):
         _cancel(cancel_event)
         line(json.dumps(_redact_free_form_export(_export_value(bookmark)), ensure_ascii=False))
-    line("\nProveniência e lacunas:")
+    line(tr("\nProveniência e lacunas:"))
     for event in _events(store, session, metadata):
         _cancel(cancel_event)
         if event.get("type") != "audio":
             line(json.dumps(_redact_free_form_export(_export_value(event)), ensure_ascii=False))
     for revision in metadata.get("revisions", []):
         _cancel(cancel_event)
-        line("\nRevisão: " + json.dumps(
+        line(tr("\nRevisão: ") + json.dumps(
             _redact_free_form_export(_export_value(revision)), ensure_ascii=False,
         ))
         for segment in store.get_transcript(session, revision["id"]):
@@ -560,20 +563,20 @@ def _text_export(handle, store, session, metadata, markdown, cancel_event=None):
             text = _redact_absolute_paths(segment.get("text", ""))
             line(f"[{segment.get('start', 0):.3f}–{segment.get('end', 0):.3f} s | {segment.get('track', 'unknown')} | {segment.get('id', '')}] {text}")
     if metadata.get("summary"):
-        line("\nResumo local editável:")
+        line(tr("\nResumo local editável:"))
         line(json.dumps(_redact_free_form_export(metadata["summary"]), ensure_ascii=False))
     if metadata.get("reviewed_summary"):
-        line("\nResumo revisado manualmente:")
+        line(tr("\nResumo revisado manualmente:"))
         line(_redact_absolute_paths(metadata["reviewed_summary"]))
     annotations = _annotation_export_projection(store, session, metadata)
     _cancel(cancel_event)
     if annotations:
-        line("\nAnotações canônicas:")
+        line(tr("\nAnotações canônicas:"))
         line(json.dumps(_redact_free_form_export(annotations), ensure_ascii=False))
     report_history = _report_history_for_export(store, session, cancel_event)
     _cancel(cancel_event)
     if report_history:
-        line("\nHistórico de relatórios (metadados e citações):")
+        line(tr("\nHistórico de relatórios (metadados e citações):"))
         for report in report_history:
             _cancel(cancel_event)
             line(json.dumps(report, ensure_ascii=False))
@@ -593,7 +596,7 @@ def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=
         rate, channels = event["rate"], event["channels"]
         frame_bytes = channels * 4
         if len(payload) != event["frames"] * frame_bytes:
-            raise ValueError("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la.")
+            raise ValueError(tr("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la."))
         _cancel(cancel_event)
         pending = next(events, None)
         event_timestamp = float(event["timestamp"])
@@ -667,7 +670,7 @@ def _clip_audio_chunks(store, session, track, start, end, cancel_event=None, gap
         frame_bytes = channels * 4
         frames = event["frames"]
         if len(payload) != frames * frame_bytes:
-            raise ValueError("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la.")
+            raise ValueError(tr("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la."))
         event_start = float(event["timestamp"])
         event_end = event_start + frames / rate
         if event_end <= start:
@@ -677,7 +680,7 @@ def _clip_audio_chunks(store, session, track, start, end, cancel_event=None, gap
         native_format = (rate, channels)
         if output_format is not None and native_format != output_format:
             raise ValueError(
-                "A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente."
+                tr("A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente.")
             )
         if output_format is None:
             output_format = native_format
@@ -708,7 +711,7 @@ def _clip_audio_chunks(store, session, track, start, end, cancel_event=None, gap
         saw_audio = True
 
     if not saw_audio or output_format is None:
-        raise ValueError("A fonte escolhida não contém áudio no intervalo do destaque.")
+        raise ValueError(tr("A fonte escolhida não contém áudio no intervalo do destaque."))
     rate, channels = output_format
     if cursor < end:
         gap_frames = max(0, math.ceil((end - cursor) * rate - 1e-9))
@@ -735,7 +738,7 @@ def _wav_export(handle, store, session, metadata, track, cancel_event=None):
     chunks = iter(_audio_chunks(store, session, track, cancel_event=cancel_event, duration=metadata.get("duration")))
     first = next(chunks, None)
     if first is None:
-        raise ValueError("A fonte escolhida não contém áudio para exportar.")
+        raise ValueError(tr("A fonte escolhida não contém áudio para exportar."))
     rate, channels, _ = first
     handle.write(b"RIFF\0\0\0\0WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * channels * 2, channels * 2, 16))
     provenance_header = handle.tell()
@@ -751,7 +754,7 @@ def _wav_export(handle, store, session, metadata, track, cancel_event=None):
     _json_export(writer, store, session, provenance, cancel_event)
     provenance_length = handle.tell() - provenance_start
     if provenance_length > RIFF_LIMIT:
-        raise ValueError("A proveniência excede o limite do formato WAV. Exporte JSON.")
+        raise ValueError(tr("A proveniência excede o limite do formato WAV. Exporte JSON."))
     if provenance_length & 1:
         handle.write(b"\0")
     data_header = handle.tell()
@@ -762,9 +765,9 @@ def _wav_export(handle, store, session, metadata, track, cancel_event=None):
         _cancel(cancel_event)
         native_rate, native_channels, raw = chunk
         if (native_rate, native_channels) != (rate, channels):
-            raise ValueError("A fonte mudou de formato durante a gravação. Exporte JSON ou texto; os segmentos originais permanecem separados.")
+            raise ValueError(tr("A fonte mudou de formato durante a gravação. Exporte JSON ou texto; os segmentos originais permanecem separados."))
         if handle.tell() + len(raw) // 2 - 8 > RIFF_LIMIT:
-            raise ValueError("O áudio excede o limite de 4 GiB do WAV. Exporte os segmentos separadamente.")
+            raise ValueError(tr("O áudio excede o limite de 4 GiB do WAV. Exporte os segmentos separadamente."))
         handle.write(_pcm16(raw))
     write_audio(first)
     for chunk in chunks:
@@ -779,22 +782,22 @@ def _wav_export(handle, store, session, metadata, track, cancel_event=None):
 def export_meeting(store, session_id, path, format="markdown", cancel_event=None):
     _cancel(cancel_event)
     if format not in {"markdown", "plain", "text", "json", "wav", "wav-microphone", "wav-system"}:
-        raise ValueError("Escolha Markdown, texto, JSON ou WAV de uma fonte.")
+        raise ValueError(tr("Escolha Markdown, texto, JSON ou WAV de uma fonte."))
     destination = Path(path).absolute()
     if not destination.parent.is_dir() or destination.is_dir():
-        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+        raise ValueError(tr("Escolha um arquivo em uma pasta existente para exportar."))
     library = os.path.realpath(store.root)
     try:
         inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
     except ValueError:
         inside_library = False
     if inside_library:
-        raise ValueError("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais.")
+        raise ValueError(tr("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais."))
     metadata = store.get(session_id, include_events=False)
     if format == "wav":
         tracks = list(metadata.get("tracks", {}))
         if len(tracks) != 1:
-            raise ValueError("Selecione WAV do microfone ou WAV do sistema para exportar uma fonte por arquivo.")
+            raise ValueError(tr("Selecione WAV do microfone ou WAV do sistema para exportar uma fonte por arquivo."))
         format = "wav-" + tracks[0]
     descriptor, temporary = tempfile.mkstemp(prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent)
     try:
@@ -827,17 +830,17 @@ def export_transcript(store, session_id, path, *, style="full_text", revision=No
 
     _cancel(cancel_event)
     if style not in {"full_text", "timestamped"}:
-        raise ValueError("Escolha texto completo ou texto com horários.")
+        raise ValueError(tr("Escolha texto completo ou texto com horários."))
     destination = Path(path).absolute()
     if not destination.parent.is_dir() or destination.is_dir():
-        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+        raise ValueError(tr("Escolha um arquivo em uma pasta existente para exportar."))
     library = os.path.realpath(store.root)
     try:
         inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
     except ValueError:
         inside_library = False
     if inside_library:
-        raise ValueError("Escolha uma pasta fora da biblioteca para preservar os arquivos originais.")
+        raise ValueError(tr("Escolha uma pasta fora da biblioteca para preservar os arquivos originais."))
     paragraphs = iter_transcript_text(store.get_transcript(session_id, revision), style)
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
@@ -886,10 +889,10 @@ def _report_export_value(value, key=None):
 def report_export_projection(report, *, section=None):
     """Return a detached, path-free report projection for copy/export flows."""
     if not isinstance(report, dict):
-        raise ValueError("O relatório deve ser um objeto.")
+        raise ValueError(tr("O relatório deve ser um objeto."))
     generated = report.get("generated", report.get("payload"))
     if not isinstance(generated, dict):
-        raise ValueError("As seções geradas são inválidas.")
+        raise ValueError(tr("As seções geradas são inválidas."))
     reviewed = report.get("reviewed_artifact")
     reviewed_sections = reviewed.get("sections") if isinstance(reviewed, dict) else None
     selected = copy.deepcopy(generated)
@@ -897,7 +900,7 @@ def report_export_projection(report, *, section=None):
         selected.update(copy.deepcopy(reviewed_sections))
     if section is not None:
         if not isinstance(section, str) or section not in selected:
-            raise ValueError("A seção selecionada não existe neste relatório.")
+            raise ValueError(tr("A seção selecionada não existe neste relatório."))
         selected = {section: selected[section]}
     return {
         "report_id": report.get("id", report.get("report_id")),
@@ -916,18 +919,20 @@ def export_report(report, path, format="markdown", *, section=None, cancel_event
     """Atomically export a selected report or section without local paths."""
     _cancel(cancel_event)
     if format not in {"markdown", "plain", "text", "json"}:
-        raise ValueError("Escolha Markdown, texto ou JSON para exportar o relatório.")
+        raise ValueError(tr("Escolha Markdown, texto ou JSON para exportar o relatório."))
     destination = Path(path).absolute()
     if not destination.parent.is_dir() or destination.is_dir():
-        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+        raise ValueError(tr("Escolha um arquivo em uma pasta existente para exportar."))
     projection = report_export_projection(report, section=section)
     if format == "json":
         content = json.dumps(projection, ensure_ascii=False, indent=2) + "\n"
     else:
-        title = projection.get("report_id") or "Relatório local"
+        title = projection.get("report_id") or tr("Relatório local")
         lines = [("# " if format == "markdown" else "") + str(title),
-                 f"Tipo: {projection.get('kind')}; perfil: {projection.get('profile_id')}",
-                 f"Revisão de transcrição: {projection.get('transcript_revision')}", ""]
+                 tr("Tipo: {kind}; perfil: {profile}", kind=projection.get('kind'),
+                    profile=projection.get('profile_id')),
+                 tr("Revisão de transcrição: {revision}",
+                    revision=projection.get('transcript_revision')), ""]
         for name, value in projection["sections"].items():
             lines.append(("## " if format == "markdown" else "") + str(name))
             if isinstance(value, str):
@@ -940,7 +945,7 @@ def export_report(report, path, format="markdown", *, section=None, cancel_event
             content += "\n"
     encoded_length = len(content.encode("utf-8"))
     if encoded_length > 2 * 1024 * 1024:
-        raise ValueError("O relatório excede o limite permitido para exportação.")
+        raise ValueError(tr("O relatório excede o limite permitido para exportação."))
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
     )
@@ -994,7 +999,7 @@ def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
     ))
     first = next(chunks, None)
     if first is None:
-        raise ValueError("A fonte escolhida não contém áudio no intervalo do destaque.")
+        raise ValueError(tr("A fonte escolhida não contém áudio no intervalo do destaque."))
     rate, channels, _ = first
     handle.write(b"RIFF\0\0\0\0WAVEfmt ")
     handle.write(struct.pack(
@@ -1011,11 +1016,11 @@ def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
         native_rate, native_channels, raw = chunk
         if (native_rate, native_channels) != (rate, channels):
             raise ValueError(
-                "A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente."
+                tr("A fonte mudou de formato durante o destaque. Exporte os segmentos originais separadamente.")
             )
         pcm = _pcm16(raw)
         if data_length + len(pcm) > RIFF_LIMIT:
-            raise ValueError("O áudio excede o limite de 4 GiB do WAV.")
+            raise ValueError(tr("O áudio excede o limite de 4 GiB do WAV."))
         data_length += len(pcm)
         handle.write(pcm)
 
@@ -1038,16 +1043,16 @@ def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
             provenance, ensure_ascii=False, allow_nan=False, separators=(",", ":"),
         ).encode("utf-8")
     except (TypeError, ValueError) as error:
-        raise ValueError("A proveniência do destaque não é serializável.") from error
+        raise ValueError(tr("A proveniência do destaque não é serializável.")) from error
     if len(provenance_bytes) > RIFF_LIMIT:
-        raise ValueError("A proveniência excede o limite de 4 GiB do formato WAV.")
+        raise ValueError(tr("A proveniência excede o limite de 4 GiB do formato WAV."))
     handle.write(b"svpr" + struct.pack("<I", len(provenance_bytes)) + provenance_bytes)
     if len(provenance_bytes) & 1:
         handle.write(b"\0")
     file_end = handle.tell()
     riff_length = file_end - 8
     if riff_length > RIFF_LIMIT:
-        raise ValueError("O áudio excede o limite de 4 GiB do WAV.")
+        raise ValueError(tr("O áudio excede o limite de 4 GiB do WAV."))
     for position, length in ((4, riff_length), (data_header + 4, data_length)):
         handle.seek(position)
         handle.write(struct.pack("<I", length))
@@ -1057,28 +1062,28 @@ def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
 def export_highlight_clip(store, session_id, highlight, path, cancel_event=None):
     """Export one source-track highlight as an atomic, non-overwriting PCM16 WAV."""
     if not isinstance(highlight, dict):
-        raise ValueError("O destaque deve ser um objeto.")
+        raise ValueError(tr("O destaque deve ser um objeto."))
     track = highlight.get("track")
     start, end = highlight.get("start"), highlight.get("end")
     if track not in {"microphone", "system"}:
-        raise ValueError("A fonte do destaque é inválida.")
+        raise ValueError(tr("A fonte do destaque é inválida."))
     if (isinstance(start, bool) or isinstance(end, bool)
             or not isinstance(start, (int, float)) or not isinstance(end, (int, float))
             or not math.isfinite(start) or not math.isfinite(end)
             or start < 0 or end <= start):
-        raise ValueError("O intervalo do destaque é inválido.")
+        raise ValueError(tr("O intervalo do destaque é inválido."))
     destination = Path(path).absolute()
     if not destination.parent.is_dir() or destination.is_dir() or os.path.lexists(destination):
         if os.path.lexists(destination):
-            raise FileExistsError("O arquivo de destino já existe; escolha um novo nome para preservar o clipe anterior.")
-        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+            raise FileExistsError(tr("O arquivo de destino já existe; escolha um novo nome para preservar o clipe anterior."))
+        raise ValueError(tr("Escolha um arquivo em uma pasta existente para exportar."))
     library = os.path.realpath(store.root)
     try:
         inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
     except ValueError:
         inside_library = False
     if inside_library:
-        raise ValueError("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais.")
+        raise ValueError(tr("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais."))
     store.get(session_id, include_events=False)
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
@@ -1106,7 +1111,7 @@ def _final_audio_chunks(metadata, start, cancel_event):
     final = metadata.get("final_audio")
     path = final.get("path") if isinstance(final, dict) else None
     if not isinstance(path, str) or not path or not os.path.isfile(path):
-        raise ValueError("O áudio final não está disponível para reprodução.")
+        raise ValueError(tr("O áudio final não está disponível para reprodução."))
     suffix = os.path.splitext(path)[1].casefold()
     if suffix == ".mp3":
         yield from _pyav_final_audio_chunks(path, float(start), cancel_event)
@@ -1115,7 +1120,7 @@ def _final_audio_chunks(metadata, start, cancel_event):
         with wave.open(path, "rb") as reader:
             rate, channels, width = reader.getframerate(), reader.getnchannels(), reader.getsampwidth()
             if not 8000 <= rate <= 192000 or channels not in (1, 2) or width != 2:
-                raise ValueError("O arquivo de áudio final não usa WAV PCM16 compatível.")
+                raise ValueError(tr("O arquivo de áudio final não usa WAV PCM16 compatível."))
             reader.setpos(min(reader.getnframes(), int(start * rate)))
             while not cancel_event.is_set():
                 raw = reader.readframes(PLAY_FRAMES)
@@ -1123,7 +1128,7 @@ def _final_audio_chunks(metadata, start, cancel_event):
                     return
                 yield rate, channels, _pcm_float(raw, width)
     except (OSError, wave.Error) as exc:
-        raise ValueError("Não foi possível ler o arquivo de áudio final.") from exc
+        raise ValueError(tr("Não foi possível ler o arquivo de áudio final.")) from exc
 
 
 def _pyav_final_audio_chunks(path, start, cancel_event):
@@ -1132,13 +1137,13 @@ def _pyav_final_audio_chunks(path, start, cancel_event):
         import av
     except ImportError as error:
         raise RuntimeError(
-            "A reprodução de MP3 exige o decodificador de áudio incluído na instalação completa do SnipVoice."
+            tr("A reprodução de MP3 exige o decodificador de áudio incluído na instalação completa do SnipVoice.")
         ) from error
     try:
         with av.open(str(path), mode="r") as container:
             stream = container.streams.best("audio")
             if stream is None:
-                raise ValueError("O arquivo MP3 não contém uma faixa de áudio compatível.")
+                raise ValueError(tr("O arquivo MP3 não contém uma faixa de áudio compatível."))
             target = max(0.0, float(start))
             time_base = getattr(stream, "time_base", None)
             time_scale = float(time_base) if time_base else None
@@ -1172,7 +1177,7 @@ def _pyav_final_audio_chunks(path, start, cancel_event):
                         rate = source_frame.sample_rate
                         channels = source_frame.layout.nb_channels
                         if channels not in (1, 2) or not isinstance(rate, int) or not 8000 <= rate <= 48000:
-                            raise ValueError("O MP3 final deve usar áudio de 8–48 kHz e 1–2 canais.")
+                            raise ValueError(tr("O MP3 final deve usar áudio de 8–48 kHz e 1–2 canais."))
                         resampler = av.AudioResampler(
                             format="flt", layout=source_frame.layout.name, rate=rate,
                             frame_size=PLAY_FRAMES,
@@ -1183,7 +1188,7 @@ def _pyav_final_audio_chunks(path, start, cancel_event):
                 for frame in decoded:
                     _cancel(cancel_event)
                     if frame.samples > PLAY_FRAMES:
-                        raise ValueError("O decodificador retornou um bloco MP3 grande demais.")
+                        raise ValueError(tr("O decodificador retornou um bloco MP3 grande demais."))
                     payload = _packed_float_frame(frame, rate, channels)
                     frame_time = getattr(frame, "time", None)
                     if frame_time is None:
@@ -1193,7 +1198,7 @@ def _pyav_final_audio_chunks(path, start, cancel_event):
                             frame_time = float(pts * frame_base)
                     if frame_time is None:
                         if not timeline_known:
-                            raise ValueError("O decodificador MP3 não informou timestamps para uma busca precisa.")
+                            raise ValueError(tr("O decodificador MP3 não informou timestamps para uma busca precisa."))
                         frame_time = sample_cursor
                     else:
                         frame_time = float(frame_time) - origin
@@ -1212,31 +1217,31 @@ def _pyav_final_audio_chunks(path, start, cancel_event):
             for source_frame in container.decode(stream):
                 yield from frames_from(source_frame)
             if not source_seen and target <= 0:
-                raise ValueError("O arquivo MP3 não contém áudio decodificável.")
+                raise ValueError(tr("O arquivo MP3 não contém áudio decodificável."))
             if resampler is not None:
                 yield from frames_from(None)
     except Exception as error:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError(
-                "A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."
+                tr("A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados.")
             ) from error
         ffmpeg_error = getattr(av, "FFmpegError", ())
         if isinstance(error, ffmpeg_error):
-            raise ValueError("Não foi possível decodificar o MP3 final.") from error
+            raise ValueError(tr("Não foi possível decodificar o MP3 final.")) from error
         if isinstance(error, (OSError, ValueError, RuntimeError)):
             raise
-        raise ValueError("Não foi possível decodificar o MP3 final.") from error
+        raise ValueError(tr("Não foi possível decodificar o MP3 final.")) from error
 
 
 def play_audio(store, session_id, track, start, cancel_event):
     if track not in {"microphone", "system", "final"} or not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start) or start < 0:
-        raise ValueError("Escolha uma fonte e um instante de reprodução válido.")
+        raise ValueError(tr("Escolha uma fonte e um instante de reprodução válido."))
     if cancel_event.is_set():
         return
     try:
         import sounddevice
     except ImportError as error:
-        raise RuntimeError("A reprodução exige o runtime de áudio local já provisionado. Use uma instalação completa do SnipVoice.") from error
+        raise RuntimeError(tr("A reprodução exige o runtime de áudio local já provisionado. Use uma instalação completa do SnipVoice.")) from error
     stream = None
     current_format = None
     metadata = store.get(session_id, include_events=False)

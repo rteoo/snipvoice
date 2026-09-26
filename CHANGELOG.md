@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add an interface language option under Configurações > Geral > Idioma. Brazilian Portuguese remains the default, and English (US) covers the whole interface: tabs, dialogs, tray menu, status and error messages, exports, and the Windows installer's own options. Switching rebuilds the window without restarting.
+
 ## 3.4.0-beta.3 - 2026-09-25
 
 - Apply the Win Design System to the manager's light and dark appearance, improve control contrast, and add Ctrl+1 through Ctrl+4 destination shortcuts.

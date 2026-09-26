@@ -18,6 +18,8 @@ import time
 import unicodedata
 import uuid
 
+from i18n import N_, tr
+
 
 INDEX_SCHEMA_VERSION = 1
 STATE_READY = "ready"
@@ -82,7 +84,7 @@ def _cross_process_lock(path):
         and (os.path.islink(lock_path)
              or getattr(os.path, "isjunction", lambda _path: False)(lock_path))
     ):
-        raise IndexUnavailable("O bloqueio do índice aponta para um link ou junction.")
+        raise IndexUnavailable(tr("O bloqueio do índice aponta para um link ou junction."))
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     handle = open(lock_path, "a+b")
     locked = False
@@ -104,8 +106,8 @@ def _cross_process_lock(path):
                 except OSError as error:
                     if time.monotonic() >= deadline:
                         raise IndexUnavailable(
-                            "O bloqueio do índice está ocupado há muito tempo; "
-                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                            tr("O bloqueio do índice está ocupado há muito tempo; "
+                               "feche a outra instância ou remova o bloqueio após verificar o processo.")
                         ) from error
                     threading.Event().wait(LOCK_POLL_SECONDS)
         else:
@@ -119,8 +121,8 @@ def _cross_process_lock(path):
                 except (BlockingIOError, OSError) as error:
                     if time.monotonic() >= deadline:
                         raise IndexUnavailable(
-                            "O bloqueio do índice está ocupado há muito tempo; "
-                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                            tr("O bloqueio do índice está ocupado há muito tempo; "
+                               "feche a outra instância ou remova o bloqueio após verificar o processo.")
                         ) from error
                     threading.Event().wait(LOCK_POLL_SECONDS)
         locked = True
@@ -198,9 +200,9 @@ def _bounded_text(value, limit=MAX_SNIPPET_CHARS):
 def _query_parts(query):
     """Parse safe literal terms and phrases for both FTS and fallback scans."""
     if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS:
-        raise ValueError("A busca do índice é inválida.")
+        raise ValueError(tr("A busca do índice é inválida."))
     if any(unicodedata.category(character).startswith("C") for character in query):
-        raise ValueError("A busca do índice não pode conter caracteres de controle.")
+        raise ValueError(tr("A busca do índice não pode conter caracteres de controle."))
     parts = []
     index = 0
     while index < len(query):
@@ -245,7 +247,7 @@ def _encode_cursor(value):
         _json_piece(value).encode("utf-8")
     ).decode("ascii").rstrip("=")
     if len(encoded) > MAX_CURSOR_CHARS:
-        raise ValueError("O cursor do índice é grande demais.")
+        raise ValueError(tr("O cursor do índice é grande demais."))
     return encoded
 
 
@@ -253,14 +255,14 @@ def _decode_cursor(value):
     if value is None:
         return None
     if not isinstance(value, str) or not value or len(value) > MAX_CURSOR_CHARS:
-        raise ValueError("O cursor do índice é inválido.")
+        raise ValueError(tr("O cursor do índice é inválido."))
     try:
         padding = "=" * (-len(value) % 4)
         decoded = json.loads(base64.urlsafe_b64decode(value + padding).decode("utf-8"))
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError("O cursor do índice é inválido.") from error
+        raise ValueError(tr("O cursor do índice é inválido.")) from error
     if not isinstance(decoded, dict) or decoded.get("v") != 1:
-        raise ValueError("O cursor do índice é incompatível.")
+        raise ValueError(tr("O cursor do índice é incompatível."))
     return decoded
 
 
@@ -316,11 +318,11 @@ class MeetingIndex:
 
     def __init__(self, path, *, busy_timeout_ms=DEFAULT_BUSY_TIMEOUT_MS, batch_size=DEFAULT_BATCH_SIZE):
         if not isinstance(path, (str, os.PathLike)):
-            raise ValueError("O caminho do índice é inválido.")
+            raise ValueError(tr("O caminho do índice é inválido."))
         if isinstance(busy_timeout_ms, bool) or not isinstance(busy_timeout_ms, int) or busy_timeout_ms < 0:
-            raise ValueError("O tempo de espera do índice é inválido.")
+            raise ValueError(tr("O tempo de espera do índice é inválido."))
         if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 10_000:
-            raise ValueError("O lote do índice é inválido.")
+            raise ValueError(tr("O lote do índice é inválido."))
         candidate = os.path.abspath(os.fspath(path))
         if os.path.isdir(candidate):
             candidate = os.path.join(candidate, "library.sqlite")
@@ -354,19 +356,19 @@ class MeetingIndex:
     def _safe_database_path(self, path=None):
         target = self.path if path is None else os.path.abspath(os.fspath(path))
         if _has_link_component(os.path.dirname(target)):
-            raise IndexUnavailable("A pasta do índice não pode conter links ou junctions.")
+            raise IndexUnavailable(tr("A pasta do índice não pode conter links ou junctions."))
         if os.path.lexists(target) and (
             os.path.islink(target) or getattr(os.path, "isjunction", lambda _path: False)(target)
         ):
-            raise IndexUnavailable("O caminho do índice não pode ser um link ou junction.")
+            raise IndexUnavailable(tr("O caminho do índice não pode ser um link ou junction."))
         return target
 
     def _connect(self, path=None, *, create=False):
         target = self._safe_database_path(path)
         if not self._probe.get("fts5"):
-            raise IndexUnavailable("FTS5 não está disponível neste interpretador.")
+            raise IndexUnavailable(tr("FTS5 não está disponível neste interpretador."))
         if not create and not os.path.exists(target):
-            raise IndexUnavailable("O índice ainda não foi criado.")
+            raise IndexUnavailable(tr("O índice ainda não foi criado."))
         if create:
             os.makedirs(os.path.dirname(target), exist_ok=True)
         connection = sqlite3.connect(
@@ -445,7 +447,7 @@ class MeetingIndex:
         )
         current = connection.execute("PRAGMA user_version").fetchone()[0]
         if current not in (0, INDEX_SCHEMA_VERSION):
-            raise IndexUnavailable("A versão do índice não é compatível.")
+            raise IndexUnavailable(tr("A versão do índice não é compatível."))
         if current == 0:
             connection.execute(f"PRAGMA user_version={INDEX_SCHEMA_VERSION}")
         connection.execute(
@@ -484,7 +486,7 @@ class MeetingIndex:
             connection = self._connect(create=False)
             current = connection.execute("PRAGMA user_version").fetchone()[0]
             if current != INDEX_SCHEMA_VERSION:
-                raise IndexUnavailable("A versão do índice não é compatível.")
+                raise IndexUnavailable(tr("A versão do índice não é compatível."))
             self._set_memory_state(self._read_state(connection), "on-disk")
         except (sqlite3.DatabaseError, OSError, IndexUnavailable) as error:
             self._set_memory_state(STATE_UNAVAILABLE, str(error))
@@ -504,7 +506,7 @@ class MeetingIndex:
     @staticmethod
     def _write_state(connection, state, reason=None):
         if state not in INDEX_STATES:
-            raise ValueError("Estado do índice inválido.")
+            raise ValueError(tr("Estado do índice inválido."))
         connection.execute(
             "INSERT INTO index_metadata(key, value) VALUES ('state', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -572,7 +574,7 @@ class MeetingIndex:
     def _projection_rows(metadata, annotations, transcripts, reports):
         session_id = metadata.get("id")
         if not isinstance(session_id, str) or not session_id:
-            raise ValueError("A projeção exige um identificador de reunião.")
+            raise ValueError(tr("A projeção exige um identificador de reunião."))
         title = metadata.get("title", "")
         notes = metadata.get("notes", "")
         if annotations:
@@ -641,7 +643,7 @@ class MeetingIndex:
         else:
             requested = False
         if requested:
-            raise IndexCancelled("A reconstrução do índice foi cancelada.")
+            raise IndexCancelled(tr("A reconstrução do índice foi cancelada."))
 
     def _insert_projection(self, connection, metadata, annotations=None, transcripts=None, reports=None,
                            *, cancel_event=None, cancel_check=None):
@@ -653,10 +655,10 @@ class MeetingIndex:
         meeting (or report collection) into Python lists.
         """
         if not isinstance(metadata, dict):
-            raise ValueError("A projeção exige metadados de reunião válidos.")
+            raise ValueError(tr("A projeção exige metadados de reunião válidos."))
         session_id = metadata.get("id")
         if not isinstance(session_id, str) or not session_id:
-            raise ValueError("A projeção exige um identificador de reunião.")
+            raise ValueError(tr("A projeção exige um identificador de reunião."))
         title = metadata.get("title", "")
         notes = metadata.get("notes", "")
         if annotations:
@@ -826,7 +828,7 @@ class MeetingIndex:
     def index_session(self, metadata, annotations=None, transcripts=None, reports=None):
         """Atomically replace one session projection."""
         if not isinstance(metadata, dict):
-            raise ValueError("Os metadados da reunião são inválidos.")
+            raise ValueError(tr("Os metadados da reunião são inválidos."))
         with self._lock:
             with _writer_lock(self.path):
                 connection = None
@@ -846,7 +848,7 @@ class MeetingIndex:
                     self._set_memory_state(STATE_STALE if os.path.exists(self.path) else STATE_UNAVAILABLE, str(error))
                     if isinstance(error, (ValueError, IndexUnavailable)):
                         raise
-                    raise MeetingIndexError("Não foi possível atualizar o índice descartável.") from error
+                    raise MeetingIndexError(tr("Não foi possível atualizar o índice descartável.")) from error
                 finally:
                     if connection is not None:
                         connection.close()
@@ -866,7 +868,7 @@ class MeetingIndex:
 
     def remove_session(self, session_id):
         if not isinstance(session_id, str) or not session_id:
-            raise ValueError("O identificador de reunião é inválido.")
+            raise ValueError(tr("O identificador de reunião é inválido."))
         with self._lock:
             with _writer_lock(self.path):
                 connection = None
@@ -886,7 +888,7 @@ class MeetingIndex:
                     if connection is not None:
                         connection.rollback()
                     self._set_memory_state(STATE_STALE, str(error))
-                    raise MeetingIndexError("Não foi possível remover a projeção descartável.") from error
+                    raise MeetingIndexError(tr("Não foi possível remover a projeção descartável.")) from error
                 finally:
                     if connection is not None:
                         connection.close()
@@ -933,11 +935,11 @@ class MeetingIndex:
         elif isinstance(value, (list, tuple, set, frozenset)):
             value = tuple(value)
         else:
-            raise ValueError(f"O filtro {label} é inválido.")
+            raise ValueError(tr("O filtro {label} é inválido.", label=tr(label)))
         result, seen = [], set()
         for item in value:
             if not isinstance(item, str) or not item:
-                raise ValueError(f"O filtro {label} é inválido.")
+                raise ValueError(tr("O filtro {label} é inválido.", label=tr(label)))
             item = unicodedata.normalize("NFC", item)
             if item.casefold() not in seen:
                 result.append(item)
@@ -950,16 +952,16 @@ class MeetingIndex:
         fts_query = cls._fts_query(query)
         filters = {
             "query": fts_query,
-            "status": cls._filter_values(status, "estado"),
-            "collection": cls._filter_values(collection, "coleção"),
-            "tag": cls._filter_values(tag, "tag"),
-            "person": cls._filter_values(person, "pessoa"),
-            "series": cls._filter_values(series, "série"),
+            "status": cls._filter_values(status, N_("estado")),
+            "collection": cls._filter_values(collection, N_("coleção")),
+            "tag": cls._filter_values(tag, N_("tag")),
+            "person": cls._filter_values(person, N_("pessoa")),
+            "series": cls._filter_values(series, N_("série")),
             "date_from": date_from or "", "date_to": date_to or "",
         }
-        for value, label in ((date_from, "data inicial"), (date_to, "data final")):
+        for value, label in ((date_from, N_("data inicial")), (date_to, N_("data final"))):
             if value is not None and (not isinstance(value, str) or len(value) > 64):
-                raise ValueError(f"O filtro {label} é inválido.")
+                raise ValueError(tr("O filtro {label} é inválido.", label=tr(label)))
         digest = hashlib.sha256(_json_piece(filters).encode("utf-8")).hexdigest()
         return filters, digest
 
@@ -999,11 +1001,11 @@ class MeetingIndex:
                            series_id=None, offset=0):
         """List meetings with stable keyset pagination and combined filters."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
-            raise ValueError("O limite do índice é inválido.")
+            raise ValueError(tr("O limite do índice é inválido."))
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento do índice é inválido.")
+            raise ValueError(tr("O deslocamento do índice é inválido."))
         if cursor is not None and offset:
-            raise ValueError("O cursor não pode ser combinado com deslocamento.")
+            raise ValueError(tr("O cursor não pode ser combinado com deslocamento."))
         if limit == 0 or self.state != STATE_READY:
             return {"items": [], "next_cursor": None}
         if collection is None:
@@ -1023,12 +1025,12 @@ class MeetingIndex:
                 decoded.get("kind") != "sessions" or decoded.get("revision") != revision
                 or decoded.get("filters") != filter_digest
             ):
-                raise ValueError("O cursor do índice expirou; reinicie a listagem.")
+                raise ValueError(tr("O cursor do índice expirou; reinicie a listagem."))
             clauses, params = self._where_for_filters(filters)
             if decoded is not None:
                 position = decoded.get("position")
                 if not isinstance(position, list) or len(position) != 2:
-                    raise ValueError("O cursor do índice é inválido.")
+                    raise ValueError(tr("O cursor do índice é inválido."))
                 clauses.append(
                     "(COALESCE(s.created_at,'') < ? OR "
                     "(COALESCE(s.created_at,'') = ? AND s.session_id < ?))"
@@ -1065,9 +1067,9 @@ class MeetingIndex:
 
     def list_sessions(self, *, offset=0, limit=50, query="", status="", **filters):
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento do índice é inválido.")
+            raise ValueError(tr("O deslocamento do índice é inválido."))
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
-            raise ValueError("O limite do índice é inválido.")
+            raise ValueError(tr("O limite do índice é inválido."))
         if limit == 0:
             return []
         page = self.list_sessions_page(limit=limit, offset=offset, query=query,
@@ -1082,9 +1084,9 @@ class MeetingIndex:
         if self.state != STATE_READY:
             return []
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
-            raise ValueError("O limite da busca é inválido.")
+            raise ValueError(tr("O limite da busca é inválido."))
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento da busca é inválido.")
+            raise ValueError(tr("O deslocamento da busca é inválido."))
         fts_query = self._fts_query(query)
         if collection is None:
             collection = collection_id
@@ -1173,7 +1175,7 @@ class MeetingIndex:
         if isinstance(item, dict):
             return item, None, None, None
         if not isinstance(item, (tuple, list)) or not item or not isinstance(item[0], dict):
-            raise ValueError("A entrada do rebuild é inválida.")
+            raise ValueError(tr("A entrada do rebuild é inválida."))
         values = list(item) + [None] * 4
         return values[0], values[1], values[2], values[3]
 
@@ -1195,7 +1197,7 @@ class MeetingIndex:
     def rebuild(self, sessions, *, cancel_event=None, progress=None):
         """Build a deterministic disposable replacement and publish it once."""
         if cancel_event is not None and cancel_event.is_set():
-            raise IndexCancelled("A reconstrução do índice foi cancelada.")
+            raise IndexCancelled(tr("A reconstrução do índice foi cancelada."))
         with self._lock:
             with _writer_lock(self.path):
                 had_existing = os.path.exists(self.path) and self.state in {
@@ -1209,7 +1211,7 @@ class MeetingIndex:
                         self._set_existing_state(STATE_REBUILDING, "building replacement")
                     except Exception as error:
                         self._set_memory_state(STATE_UNAVAILABLE, str(error))
-                        raise IndexUnavailable("O índice existente não pode ser preparado para rebuild.") from error
+                        raise IndexUnavailable(tr("O índice existente não pode ser preparado para rebuild.")) from error
                 connection = None
                 published = False
                 processed = 0
@@ -1225,7 +1227,7 @@ class MeetingIndex:
                     total = len(sessions) if hasattr(sessions, "__len__") else None
                     for raw in sessions:
                         if cancel_event is not None and cancel_event.is_set():
-                            raise IndexCancelled("A reconstrução do índice foi cancelada.")
+                            raise IndexCancelled(tr("A reconstrução do índice foi cancelada."))
                         metadata, annotations, transcripts, reports = self._normalize_rebuild_item(raw)
                         self._insert_projection(
                             connection, metadata, annotations, transcripts, reports,
@@ -1294,7 +1296,7 @@ class MeetingIndex:
                         self._set_memory_state(STATE_UNAVAILABLE, str(error))
                     if isinstance(error, (ValueError, IndexUnavailable)):
                         raise
-                    raise MeetingIndexError("A reconstrução do índice falhou; o catálogo descartável foi preservado.") from error
+                    raise MeetingIndexError(tr("A reconstrução do índice falhou; o catálogo descartável foi preservado.")) from error
                 finally:
                     if connection is not None:
                         connection.close()

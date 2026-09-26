@@ -7,6 +7,8 @@ call a model, mutate a meeting, or impose a UI-sized limit on full exports.
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Mapping, Optional
 
+from i18n import N_, tr
+
 
 READABLE = "readable"
 FULL_TEXT = "full_text"
@@ -18,8 +20,8 @@ DEFAULT_PARAGRAPH_CHARS = 900
 DEFAULT_PAUSE_SECONDS = 4.0
 
 _TRACK_LABELS = {
-    "microphone": "Microfone",
-    "system": "Áudio do sistema",
+    "microphone": N_("Microfone"),
+    "system": N_("Áudio do sistema"),
 }
 
 
@@ -69,7 +71,7 @@ def _timestamped(segments: Iterable[Mapping]) -> Iterator[str]:
         label = _TRACK_LABELS.get(segment.get("track"))
         prefix = _timestamp(segment.get("start", 0))
         if label:
-            prefix += f" {label}:"
+            prefix += f" {tr(label)}:"
         else:
             prefix += ":"
         yield f"{prefix} {text}"
@@ -169,14 +171,14 @@ _SUMMARY_SECTION_ORDER = (
     "open_questions", "action_items", "follow_up_email",
 )
 _SUMMARY_SECTION_LABELS = {
-    "key_points": "Pontos principais",
-    "decisions": "Decisões",
-    "feedback": "Feedback",
-    "objections": "Objeções",
-    "risks": "Riscos",
-    "open_questions": "Questões em aberto",
-    "action_items": "Ações",
-    "follow_up_email": "E-mail de acompanhamento",
+    "key_points": N_("Pontos principais"),
+    "decisions": N_("Decisões"),
+    "feedback": N_("Feedback"),
+    "objections": N_("Objeções"),
+    "risks": N_("Riscos"),
+    "open_questions": N_("Questões em aberto"),
+    "action_items": N_("Ações"),
+    "follow_up_email": N_("E-mail de acompanhamento"),
 }
 
 
@@ -220,9 +222,9 @@ def _summary_items(value, section) -> list[str]:
                 owner = _value(item.get("owner"))
                 deadline = _value(item.get("deadline"))
                 if owner:
-                    details.append(f"responsável: {owner}")
+                    details.append(tr("responsável: {owner}", owner=owner))
                 if deadline:
-                    details.append(f"prazo: {deadline}")
+                    details.append(tr("prazo: {deadline}", deadline=deadline))
                 if details:
                     text = f"{text} ({'; '.join(details)})"
         else:
@@ -251,7 +253,7 @@ def format_summary(value) -> str:
                 body = _value(current.get("body", current.get("text")))
                 lines = []
                 if subject:
-                    lines.append(f"Assunto: {subject}")
+                    lines.append(tr("Assunto: {subject}", subject=subject))
                 if body:
                     lines.append(body)
             else:
@@ -259,7 +261,7 @@ def format_summary(value) -> str:
         else:
             lines = _summary_items(current, section)
         if lines:
-            label = _SUMMARY_SECTION_LABELS[section]
+            label = tr(_SUMMARY_SECTION_LABELS[section])
             sections.append("\n".join([f"{label}:"] + [f"• {line}" for line in lines])
                             if section != "follow_up_email" else
                             "\n".join([f"{label}:"] + lines))

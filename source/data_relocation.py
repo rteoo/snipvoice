@@ -11,6 +11,7 @@ import os
 import shutil
 
 import app_paths
+from i18n import tr
 from snippet_utils import write_json_atomic
 
 DEFAULT_FOLDER_NAME = "snipvoice"
@@ -60,24 +61,24 @@ def validate_target(current, target):
     """Return the normalized target, or raise RelocationError."""
     if app_paths.env_data_dir():
         raise RelocationError(
-            f"A pasta de dados está definida pela variável {app_paths.ENV_HOME}."
+            tr("A pasta de dados está definida pela variável {name}.", name=app_paths.ENV_HOME)
         )
     if not isinstance(target, str) or not target.strip() or not os.path.isabs(target):
-        raise RelocationError("Escolha uma pasta com caminho completo.")
+        raise RelocationError(tr("Escolha uma pasta com caminho completo."))
     target = os.path.abspath(target.strip())
     if _same(current, target):
-        raise RelocationError("Essa já é a pasta de dados atual.")
+        raise RelocationError(tr("Essa já é a pasta de dados atual."))
     if _is_root(target) or _same(target, os.path.expanduser("~")):
-        raise RelocationError("Escolha uma pasta própria, não a raiz do disco ou a pasta pessoal.")
+        raise RelocationError(tr("Escolha uma pasta própria, não a raiz do disco ou a pasta pessoal."))
     if _inside(target, current) or _inside(current, target):
-        raise RelocationError("A nova pasta não pode ficar dentro da atual, nem conter a atual.")
+        raise RelocationError(tr("A nova pasta não pode ficar dentro da atual, nem conter a atual."))
     if not os.path.isdir(os.path.dirname(target)):
-        raise RelocationError("A pasta onde a nova pasta seria criada não existe.")
+        raise RelocationError(tr("A pasta onde a nova pasta seria criada não existe."))
     if os.path.lexists(target):
         if not os.path.isdir(target):
-            raise RelocationError("Já existe um arquivo com esse nome no destino.")
+            raise RelocationError(tr("Já existe um arquivo com esse nome no destino."))
         if _non_empty(target):
-            raise RelocationError("A pasta de destino precisa estar vazia.")
+            raise RelocationError(tr("A pasta de destino precisa estar vazia."))
     return target
 
 
@@ -117,7 +118,7 @@ def _copy_verified(src, dst):
     needed = sum(manifest.values())
     free = shutil.disk_usage(os.path.dirname(dst)).free
     if needed > free:
-        raise RelocationError("Não há espaço livre suficiente na pasta de destino.")
+        raise RelocationError(tr("Não há espaço livre suficiente na pasta de destino."))
     os.makedirs(dst, exist_ok=True)
     with open(os.path.join(dst, _INCOMPLETE_MARKER), "w", encoding="utf-8"):
         pass
@@ -125,7 +126,7 @@ def _copy_verified(src, dst):
     for relative, size in manifest.items():
         copied = os.path.join(dst, relative)
         if not os.path.isfile(copied) or os.path.getsize(copied) != size:
-            raise RelocationError(f"A cópia de {relative} não confere com o original.")
+            raise RelocationError(tr("A cópia de {path} não confere com o original.", path=relative))
     return manifest
 
 
@@ -241,17 +242,21 @@ def complete_pending_relocation():
             location.pop("pending_move", None)
             location["data_dir"] = src
             app_paths.write_location(location)
-            return f"Não foi possível mover os dados para {dst}: {exc}. Nada foi alterado."
+            return tr(
+                "Não foi possível mover os dados para {path}: {error}. Nada foi alterado.",
+                path=dst, error=exc,
+            )
     rebase_final_audio_paths(dst, src)
     location.pop("pending_move", None)
     location["data_dir"] = dst
     app_paths.write_location(location)
     if manifest is not None and not _remove_copied(src, manifest):
-        return (
-            f"Dados movidos para {dst}. Alguns arquivos antigos em {src} não puderam "
-            "ser apagados; remova essa pasta manualmente."
+        return tr(
+            "Dados movidos para {path}. Alguns arquivos antigos em {old} não puderam "
+            "ser apagados; remova essa pasta manualmente.",
+            path=dst, old=src,
         )
-    return f"Dados movidos para {dst}."
+    return tr("Dados movidos para {path}.", path=dst)
 
 
 MODEL_FOLDERS = ("voice-models", "summary-models")
@@ -271,21 +276,21 @@ def validate_models_target(current, target):
     """
     if models_env_locked():
         raise RelocationError(
-            "A pasta dos modelos está definida por SNIPVOICE_VOICE_CACHE ou "
-            "SNIPVOICE_SUMMARY_CACHE."
+            tr("A pasta dos modelos está definida por SNIPVOICE_VOICE_CACHE ou "
+               "SNIPVOICE_SUMMARY_CACHE.")
         )
     if not isinstance(target, str) or not target.strip() or not os.path.isabs(target):
-        raise RelocationError("Escolha uma pasta com caminho completo.")
+        raise RelocationError(tr("Escolha uma pasta com caminho completo."))
     target = os.path.abspath(target.strip())
     if _same(current, target):
-        raise RelocationError("Essa já é a pasta dos modelos atual.")
+        raise RelocationError(tr("Essa já é a pasta dos modelos atual."))
     for folder in MODEL_FOLDERS:
         if _inside(target, os.path.join(current, folder)):
-            raise RelocationError("A nova pasta não pode ficar dentro da pasta atual dos modelos.")
+            raise RelocationError(tr("A nova pasta não pode ficar dentro da pasta atual dos modelos."))
     if os.path.lexists(target) and not os.path.isdir(target):
-        raise RelocationError("Já existe um arquivo com esse nome no destino.")
+        raise RelocationError(tr("Já existe um arquivo com esse nome no destino."))
     if not os.path.isdir(target) and not os.path.isdir(os.path.dirname(target)):
-        raise RelocationError("A pasta onde a nova pasta seria criada não existe.")
+        raise RelocationError(tr("A pasta onde a nova pasta seria criada não existe."))
     return target
 
 
@@ -363,7 +368,10 @@ def complete_pending_models_relocation():
         location.pop("pending_models_move", None)
         location["models_dir"] = src
         app_paths.write_location(location)
-        return f"Não foi possível mover os modelos para {dst}: {exc}. Nada foi alterado."
+        return tr(
+            "Não foi possível mover os modelos para {path}: {error}. Nada foi alterado.",
+            path=dst, error=exc,
+        )
     location.pop("pending_models_move", None)
     location["models_dir"] = dst
     app_paths.write_location(location)
@@ -375,12 +383,13 @@ def complete_pending_models_relocation():
             os.rmdir(os.path.join(src, folder))
         except OSError:
             pass
-    message = f"Modelos movidos para {dst}."
+    message = tr("Modelos movidos para {path}.", path=dst)
     if kept:
-        message += (
-            f" Estes modelos já estavam no destino e foram mantidos lá: {', '.join(kept)}. "
-            f"As cópias antigas continuam em {src}."
+        message += tr(
+            " Estes modelos já estavam no destino e foram mantidos lá: {names}. "
+            "As cópias antigas continuam em {old}.",
+            names=", ".join(kept), old=src,
         )
     if leftovers:
-        message += f" Alguns arquivos antigos em {src} não puderam ser apagados."
+        message += tr(" Alguns arquivos antigos em {old} não puderam ser apagados.", old=src)
     return message

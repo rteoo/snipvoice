@@ -9,6 +9,8 @@ import sys
 import threading
 import time
 
+from i18n import N_, tr
+
 
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_WIRE_BYTES = 8 * MAX_OUTPUT_BYTES
@@ -44,7 +46,7 @@ def _profile_response_schema(evidence):
     if not profiles:
         return {"type": "json_object"}
     if len(profiles) != 1:
-        raise ValueError("O relatório deve conter exatamente um perfil de saída.")
+        raise ValueError(tr("O relatório deve conter exatamente um perfil de saída."))
     profile = profiles[0]
     sections = profile.get("sections")
     max_items = profile.get("max_items")
@@ -59,7 +61,7 @@ def _profile_response_schema(evidence):
             or not 1 <= max_items <= MAX_PROFILE_ITEMS
             or isinstance(max_chars, bool) or not isinstance(max_chars, int)
             or not 64 <= max_chars <= MAX_PROFILE_SECTION_CHARS):
-        raise ValueError("O perfil de saída contém limites ou seções inválidos.")
+        raise ValueError(tr("O perfil de saída contém limites ou seções inválidos."))
 
     citation_ids = []
     seen_ids = set()
@@ -68,19 +70,19 @@ def _profile_response_schema(evidence):
         if values is None:
             return
         if not isinstance(values, list):
-            raise ValueError("Os IDs de evidência devem ser uma lista.")
+            raise ValueError(tr("Os IDs de evidência devem ser uma lista."))
         for value in values:
             if value is None:
                 continue
             if (not isinstance(value, str) or not value or len(value) > 128
                     or any(ord(char) < 32 or ord(char) == 127 for char in value)):
-                raise ValueError("Um ID de evidência é inválido ou excede o limite seguro.")
+                raise ValueError(tr("Um ID de evidência é inválido ou excede o limite seguro."))
             if value in seen_ids:
                 continue
             if len(citation_ids) >= MAX_SCHEMA_CITATION_ENUM:
                 raise ValueError(
-                    "A evidência contém IDs demais para gerar um relatório seguro; "
-                    "reduza a evidência antes de tentar novamente."
+                    tr("A evidência contém IDs demais para gerar um relatório seguro; "
+                       "reduza a evidência antes de tentar novamente.")
                 )
             seen_ids.add(value)
             citation_ids.append(value)
@@ -102,7 +104,7 @@ def _profile_response_schema(evidence):
             elif isinstance(value, dict):
                 add_ids(value.get("segment_ids"))
     if not citation_ids:
-        raise ValueError("O perfil de saída não contém IDs de evidência válidos.")
+        raise ValueError(tr("O perfil de saída não contém IDs de evidência válidos."))
     citations = {
         "type": "array", "items": {"type": "string", "enum": citation_ids},
         "minItems": 1, "maxItems": MAX_PROFILE_CITATIONS,
@@ -163,17 +165,17 @@ class NativeSummaryRuntime:
             from llama_cpp import Llama
         except (ImportError, OSError) as exc:
             raise RuntimeError(
-                "O runtime llama.cpp incluído no SnipVoice não está disponível. Reinstale o aplicativo."
+                tr("O runtime llama.cpp incluído no SnipVoice não está disponível. Reinstale o aplicativo.")
             ) from exc
         try:
             self._llama = Llama(model_path=model_path, n_ctx=context_length,
                                 n_gpu_layers=-1, verbose=False)
         except Exception as exc:
-            raise RuntimeError(f"Não foi possível abrir o modelo local de resumo: {exc}") from exc
+            raise RuntimeError(tr("Não foi possível abrir o modelo local de resumo: {error}", error=exc)) from exc
 
     def generate(self, system_prompt, evidence, cancel_event=None, disable_thinking=False):
         if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("O resumo foi cancelado; o resumo anterior foi preservado.")
+            raise RuntimeError(tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         prompt = system_prompt + ("\n/no_think" if disable_thinking else "")
         try:
             stream = self._llama.create_chat_completion(
@@ -186,21 +188,21 @@ class NativeSummaryRuntime:
             size = 0
             for item in stream:
                 if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("O resumo foi cancelado; o resumo anterior foi preservado.")
+                    raise RuntimeError(tr("O resumo foi cancelado; o resumo anterior foi preservado."))
                 choices = item.get("choices") if isinstance(item, dict) else None
                 if (isinstance(choices, list) and choices
                         and choices[0].get("finish_reason") == "length"):
                     raise SummaryOutputLimitError(
-                        "O resumo atingiu o limite de geração antes de terminar; "
-                        "o resultado anterior foi preservado."
+                        tr("O resumo atingiu o limite de geração antes de terminar; "
+                           "o resultado anterior foi preservado.")
                     )
                 delta = choices[0].get("delta", {}) if isinstance(choices, list) and choices else {}
                 text = delta.get("content", "") if isinstance(delta, dict) else ""
                 if not isinstance(text, str):
-                    raise ValueError("O runtime local retornou conteúdo inválido.")
+                    raise ValueError(tr("O runtime local retornou conteúdo inválido."))
                 size += len(text.encode("utf-8"))
                 if size > MAX_OUTPUT_BYTES:
-                    raise ValueError("O runtime local retornou uma resposta maior que o limite permitido.")
+                    raise ValueError(tr("O runtime local retornou uma resposta maior que o limite permitido."))
                 chunks.append(text)
             return "".join(chunks)
         except SummaryOutputLimitError:
@@ -208,11 +210,11 @@ class NativeSummaryRuntime:
         except RuntimeError as exc:
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError(
-                    "O resumo foi cancelado; o resumo anterior foi preservado."
+                    tr("O resumo foi cancelado; o resumo anterior foi preservado.")
                 ) from exc
-            raise RuntimeError(f"O llama.cpp não conseguiu gerar o resumo local: {exc}") from exc
+            raise RuntimeError(tr("O llama.cpp não conseguiu gerar o resumo local: {error}", error=exc)) from exc
         except Exception as exc:
-            raise RuntimeError(f"O llama.cpp não conseguiu gerar o resumo local: {exc}") from exc
+            raise RuntimeError(tr("O llama.cpp não conseguiu gerar o resumo local: {error}", error=exc)) from exc
 
     def close(self):
         llama, self._llama = self._llama, None
@@ -244,7 +246,7 @@ class _WorkerClient:
         try:
             self.process = _spawn_worker()
         except OSError as exc:
-            raise RuntimeError("Não foi possível iniciar o runtime local de resumo.") from exc
+            raise RuntimeError(tr("Não foi possível iniciar o runtime local de resumo.")) from exc
         self.responses = queue.Queue()
         self.closed = False
         self.reader = threading.Thread(target=self._read, name="SummaryWorkerReader", daemon=True)
@@ -263,43 +265,43 @@ class _WorkerClient:
 
     def request(self, payload, *, cancel_event=None, timeout=120):
         if self.closed:
-            raise RuntimeError("O runtime local de resumo foi encerrado.")
+            raise RuntimeError(tr("O runtime local de resumo foi encerrado."))
         if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError("O resumo foi cancelado; o resultado anterior foi preservado.")
+            raise RuntimeError(tr("O resumo foi cancelado; o resultado anterior foi preservado."))
         try:
             line = json.dumps(payload, ensure_ascii=False, allow_nan=False)
             if len(line.encode("utf-8")) > MAX_OUTPUT_BYTES:
-                raise ValueError("A solicitação de resumo excedeu o limite seguro.")
+                raise ValueError(tr("A solicitação de resumo excedeu o limite seguro."))
             self.process.stdin.write(line + "\n")
             self.process.stdin.flush()
         except (OSError, ValueError, TypeError) as exc:
             self.close()
-            raise RuntimeError("Não foi possível enviar a solicitação ao runtime local de resumo.") from exc
+            raise RuntimeError(tr("Não foi possível enviar a solicitação ao runtime local de resumo.")) from exc
         deadline = time.monotonic() + timeout
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 self.close(force=True)
-                raise RuntimeError("O resumo foi cancelado; o resultado anterior foi preservado.")
+                raise RuntimeError(tr("O resumo foi cancelado; o resultado anterior foi preservado."))
             try:
                 response = self.responses.get(timeout=0.1)
             except queue.Empty:
                 if time.monotonic() >= deadline:
                     self.close(force=True)
-                    raise RuntimeError("O runtime local de resumo demorou além do limite permitido.")
+                    raise RuntimeError(tr("O runtime local de resumo demorou além do limite permitido."))
                 continue
             if response is None:
                 self.close(force=True)
-                raise RuntimeError("O runtime local de resumo encerrou antes de responder.")
+                raise RuntimeError(tr("O runtime local de resumo encerrou antes de responder."))
             try:
                 value = json.loads(response)
             except ValueError as exc:
                 self.close(force=True)
-                raise RuntimeError("O runtime local de resumo retornou uma resposta inválida.") from exc
+                raise RuntimeError(tr("O runtime local de resumo retornou uma resposta inválida.")) from exc
             if not isinstance(value, dict) or not isinstance(value.get("ok"), bool):
                 self.close(force=True)
-                raise RuntimeError("O runtime local de resumo retornou uma resposta inválida.")
+                raise RuntimeError(tr("O runtime local de resumo retornou uma resposta inválida."))
             if not value["ok"]:
-                raise RuntimeError(value.get("error") or "O runtime local de resumo falhou.")
+                raise RuntimeError(tr(value.get("error") or N_("O runtime local de resumo falhou.")))
             return value
 
     def close(self, force=False):
@@ -353,7 +355,7 @@ class SummaryRuntime:
         }, cancel_event=cancel_event, timeout=3600)
         text = response.get("text")
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            raise RuntimeError("O runtime local de resumo retornou conteúdo inválido.")
+            raise RuntimeError(tr("O runtime local de resumo retornou conteúdo inválido."))
         return text
 
     def close(self):

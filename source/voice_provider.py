@@ -7,6 +7,7 @@ future provider from leaking download or transport decisions into the hotkey
 state machine.
 """
 
+from i18n import tr
 from voice_catalog import catalog_entry
 from voice_models import (
     VoiceModelError,
@@ -30,7 +31,7 @@ class VoiceProvider:
         return False
 
     def prepare(self, profile, language, progress=None, cancel_event=None, allow_download=True):
-        raise VoiceRuntimeError("Provedor de voz indisponível.")
+        raise VoiceRuntimeError(tr("Provedor de voz indisponível."))
 
     def unload(self):
         return None
@@ -39,13 +40,13 @@ class VoiceProvider:
         return None
 
     def transcribe(self, pcm, cancel_event=None):
-        raise VoiceRuntimeError("Provedor de voz indisponível.")
+        raise VoiceRuntimeError(tr("Provedor de voz indisponível."))
 
     def supports_stream(self):
         return False
 
     def start_stream(self):
-        raise VoiceRuntimeError("Este provedor não faz transcrição contínua.")
+        raise VoiceRuntimeError(tr("Este provedor não faz transcrição contínua."))
 
     def feed(self, pcm_chunk):
         return ""
@@ -57,7 +58,7 @@ class VoiceProvider:
         return False
 
     def download_profile(self, profile, progress=None, cancel_event=None):
-        raise VoiceModelError("Provedor de voz indisponível.")
+        raise VoiceModelError(tr("Provedor de voz indisponível."))
 
     def delete_profile(self, profile):
         return None
@@ -97,7 +98,7 @@ class LocalVoiceProvider(VoiceProvider):
     def download_profile(self, profile, progress=None, cancel_event=None):
         entry = catalog_entry(profile)
         if entry is None:
-            raise VoiceModelError("Perfil de voz desconhecido.")
+            raise VoiceModelError(tr("Perfil de voz desconhecido."))
         if self._is_installed(entry, self.cache_dir):
             return self._installed_path(entry, self.cache_dir)
 
@@ -115,8 +116,8 @@ class LocalVoiceProvider(VoiceProvider):
     def prepare(self, profile, language, progress=None, cancel_event=None, allow_download=True):
         if not self.available():
             raise VoiceRuntimeError(
-                "O runtime transcribe.cpp não está instalado. "
-                "A voz fica desligada até o pacote nativo estar disponível."
+                tr("O runtime transcribe.cpp não está instalado. "
+                   "A voz fica desligada até o pacote nativo estar disponível.")
             )
         if allow_download:
             path = self.download_profile(
@@ -127,8 +128,8 @@ class LocalVoiceProvider(VoiceProvider):
             path = self._installed_path(entry, self.cache_dir) if entry is not None else None
             if path is None:
                 raise VoiceModelError(
-                    "Modelo local ausente ou inválido. Importe um arquivo verificado "
-                    "ou baixe o modelo explicitamente nas configurações."
+                    tr("Modelo local ausente ou inválido. Importe um arquivo verificado "
+                       "ou baixe o modelo explicitamente nas configurações.")
                 )
         if cancel_event is not None and cancel_event.is_set():
             return

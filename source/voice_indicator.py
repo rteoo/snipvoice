@@ -3,6 +3,7 @@
 import ctypes
 import tkinter as tk
 
+from i18n import tr
 import ui_theme
 from macos_voice_overlay import MacVoiceStatusPanel
 from platform_support import current_os
@@ -61,25 +62,25 @@ def indicator_content(state, mode=None):
     """Return the visible copy and accent token for a voice state."""
     if state == "recording":
         if mode == "command":
-            return "Ouvindo comando", "warning"
-        return "Ouvindo", "warning"
+            return tr("Ouvindo comando"), "warning"
+        return tr("Ouvindo"), "warning"
     if state == "transcribing":
-        return "Transcrevendo", "accent"
+        return tr("Transcrevendo"), "accent"
     if state == "routing":
-        return "Inserindo texto", "success"
+        return tr("Inserindo texto"), "success"
     return None
 
 
 def indicator_subtitle(state, mode=None):
     """Return concise guidance without making the overlay interactive."""
     if state == "recording" and mode == "command":
-        return "Solte para executar · Esc cancela"
+        return tr("Solte para executar · Esc cancela")
     if state == "recording":
-        return "Solte para transcrever · Esc cancela"
+        return tr("Solte para transcrever · Esc cancela")
     if state == "transcribing":
-        return "Processando localmente"
+        return tr("Processando localmente")
     if state == "routing":
-        return "Enviando para o campo ativo"
+        return tr("Enviando para o campo ativo")
     return ""
 
 

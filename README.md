@@ -27,6 +27,7 @@ recordings, shortcuts, process identity, and installers.
 ## Highlights
 
 - Local push-to-talk dictation with configurable shortcuts and languages.
+- Brazilian Portuguese (default) or US English interface, switchable in **Configurações > Geral > Idioma** without restarting.
 - System-aware light and dark appearance, with explicit Light/Dark overrides.
 - Separate microphone and selected speaker-output recording on Windows and macOS.
 - Independent microphone/system toggles, live two-track waveforms, and OS-default or manually pinned endpoints.
@@ -100,7 +101,7 @@ launch. The Windows installer uses no administrator rights and installs under
 3. In **Ditado**, choose a profile and language, then download or import its local model.
 4. Enable voice input, hold `ctrl+alt+space`, speak, and release to transcribe.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut selects this tab in the same window.
-6. Open **Configurações** to follow the system appearance or choose a fixed light or dark theme.
+6. Open **Configurações** to follow the system appearance or choose a fixed light or dark theme. Under **Geral > Idioma**, choose **English (US)** to switch the interface to English; the tabs then read Recording, Library, Dictation, and Settings.
 7. In the same tab, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in

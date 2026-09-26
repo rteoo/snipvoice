@@ -3,6 +3,8 @@
 import re
 import time
 
+from i18n import tr
+
 
 _FALLBACK_WORDS = ("Gravacao", "sem", "transcricao")
 _FALLBACK_DESCRIPTION = "-".join(_FALLBACK_WORDS)
@@ -23,7 +25,7 @@ _STOPWORDS = frozenset({
 def initial_recording_title(title, timestamp=None):
     """Preserve a supplied title or create a local timestamp placeholder."""
     if not isinstance(title, str):
-        raise ValueError("O título da gravação deve ser texto.")
+        raise ValueError(tr("O título da gravação deve ser texto."))
     title = title.strip()
     if title:
         return title
@@ -34,7 +36,7 @@ def initial_recording_title(title, timestamp=None):
 def refine_recording_title(title, session_id, segments):
     """Replace only an automatic placeholder with 3–5 transcript words."""
     if not isinstance(title, str) or not isinstance(session_id, str):
-        raise ValueError("Os dados do título automático são inválidos.")
+        raise ValueError(tr("Os dados do título automático são inválidos."))
     match = _AUTO_TITLE.fullmatch(title.strip())
     if title.strip() and match is None:
         return title

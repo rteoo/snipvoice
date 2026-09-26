@@ -18,6 +18,7 @@ worker thread — never from the keyboard listener.
 
 import re
 
+from i18n import tr
 from rich_text_support import extract_plain_text
 from snippet_utils import check_dynamic_pattern, get_dynamic_prefixes
 
@@ -96,15 +97,15 @@ def resolve_inline(text, snippets, get_clipboard, _seen=None, prefixes=None, not
                 value = get_clipboard()
             except Exception as exc:
                 raise VariableResolutionError(
-                    "Não foi possível ler a área de transferência."
+                    tr("Não foi possível ler a área de transferência.")
                 ) from exc
             if value is None:
                 raise VariableResolutionError(
-                    "Não foi possível ler a área de transferência."
+                    tr("Não foi possível ler a área de transferência.")
                 )
             if not isinstance(value, str):
                 raise VariableResolutionError(
-                    "A área de transferência não retornou texto válido."
+                    tr("A área de transferência não retornou texto válido.")
                 )
             text = text.replace(f"%%{name}%%", value)
         elif name in _seen:
@@ -133,7 +134,7 @@ def _resolve_dynamic(name, snippets, notify_failure):
         result = snippets[name]()
     except Exception as e:
         if notify_failure:
-            notify_failure(name, f"[Erro: {e}]")
+            notify_failure(name, tr("[Erro: {error}]", error=e))
         return ""
     if not result:
         return ""

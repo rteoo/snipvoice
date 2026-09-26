@@ -75,6 +75,8 @@ import app_paths
 import data_relocation
 from gui_support import center_dialog, center_on_screen
 from gui_thread import GuiThread
+import i18n
+from i18n import N_, tr
 import macos_permissions
 from runtime_support import AppLogger, BackgroundTaskRunner, TextInserter, configure_logging
 from settings_support import load_settings, save_settings
@@ -138,6 +140,7 @@ class Snipvoice:
         self.gui = GuiThread(logger=self.logger)
         self.settings_file = os.path.join(self.data_dir, "settings.json")
         self.settings = load_settings(self.settings_file)
+        i18n.set_language(self.settings.get("language"))
         self.keyboard_controller = Controller()
         timings = platform_support.insertion_timings(self.settings)
         self.text_inserter = TextInserter(
@@ -162,7 +165,7 @@ class Snipvoice:
         self.voice = None
         self._meeting_monitor = None
         self._meeting_startup_ready = False
-        self._meeting_startup_status = "Preparando privacidade e recuperação local…"
+        self._meeting_startup_status = N_("Preparando privacidade e recuperação local…")
         self._meeting_startup_error = ""
         self._settings_lock = threading.RLock()
         self.snippets = {}
@@ -226,7 +229,7 @@ class Snipvoice:
                 monitor.start()
                 self._meeting_monitor = monitor
             except Exception:
-                self.notify_error("Atalho de gravação indisponível. Revise os atalhos nas configurações.")
+                self.notify_error(tr("Atalho de gravação indisponível. Revise os atalhos nas configurações."))
 
     def _meeting_hotkey_request(self):
         """Bounded keyboard callback: enqueue the shared GUI toggle path."""
@@ -264,7 +267,7 @@ class Snipvoice:
 
     def _request_meeting_start_on_gui(self, root):
         if not self._meeting_startup_ready:
-            self.notify_error("A gravação aguarda a recuperação local do SnipVoice.", key="meeting-startup")
+            self.notify_error(tr("A gravação aguarda a recuperação local do SnipVoice."), key="meeting-startup")
             return
         self._show_manager_window(root)
         if self._manager_meeting_view is not None:
@@ -302,7 +305,7 @@ class Snipvoice:
             commands = {}
         except (OSError, ValueError) as exc:
             self.logger.warning(f"Could not load spoken commands: {type(exc).__name__}")
-            self.notify_error("Não foi possível ler commands.json. Os comandos anteriores foram preservados.")
+            self.notify_error(tr("Não foi possível ler commands.json. Os comandos anteriores foram preservados."))
             return False
         self.snippets = commands
         self.trigger_index = compile_trigger_index(commands, set())
@@ -330,7 +333,7 @@ class Snipvoice:
 
     def toggle_voice(self, icon=None, item=None):
         if self.voice is None:
-            self.notify_error("Entrada por voz indisponível. Verifique o runtime de transcrição.")
+            self.notify_error(tr("Entrada por voz indisponível. Verifique o runtime de transcrição."))
             return
         if self.voice.is_enabled():
             self.task_runner.start(self._disable_voice, name="voice-disable")
@@ -370,7 +373,7 @@ class Snipvoice:
         ).pack(anchor="w")
         tk.Label(
             identity,
-            text="Gravações e ditado",
+            text=tr("Gravações e ditado"),
             font=ui.font(9),
             bg=ui.surface,
             fg=ui.text_muted,
@@ -381,14 +384,14 @@ class Snipvoice:
         privacy.pack(side=tk.RIGHT, padx=(ui.space_lg, 0), anchor="center")
         tk.Label(
             privacy,
-            text="100% local",
+            text=tr("100% local"),
             font=ui.font(8, "bold"),
             bg=ui.surface,
             fg=ui.success,
         ).pack(anchor="e")
         tk.Label(
             privacy,
-            text="sem upload automático",
+            text=tr("sem upload automático"),
             font=ui.font(8),
             bg=ui.surface,
             fg=ui.text_muted,
@@ -413,6 +416,9 @@ class Snipvoice:
             on_appearance_changed=lambda preference: self._reopen_manager_for_appearance(
                 root, preference,
             ),
+            on_language_changed=lambda language: self._reopen_manager_for_language(
+                root, language,
+            ),
             data_location=self.data_location,
             relocate_data=self.request_data_relocation,
             models_location=self.models_location,
@@ -423,12 +429,12 @@ class Snipvoice:
         self._manager_library_tab = meeting_view.library_tab
         meeting_view.set_startup_status(
             self._meeting_startup_ready,
-            self._meeting_startup_status,
+            tr(self._meeting_startup_status),
         )
         settings_tab = getattr(meeting_view, "settings_tab", None)
         tab = tk.Frame(notebook, bg=ui.surface)
         self._manager_voice_tab = tab
-        notebook.add(tab, text="Ditado")
+        notebook.add(tab, text=tr("Ditado"))
         # The meeting view owns the Configurações page and adds it before the voice tab. Move
         # that existing tab to the end so the user-facing order stays stable:
         # Gravação, Biblioteca, Ditado, Configurações.
@@ -438,13 +444,13 @@ class Snipvoice:
             except tk.TclError:
                 self.logger.debug("Não foi possível reposicionar a aba Configurações")
         if self.voice is None:
-            tk.Label(tab, text="Entrada por voz indisponível. Verifique o runtime de transcrição.",
+            tk.Label(tab, text=tr("Entrada por voz indisponível. Verifique o runtime de transcrição."),
                      bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(padx=24, pady=24)
             models_parent = getattr(meeting_view, "transcription_models_parent", None)
             if models_parent is not None:
                 tk.Label(
                     models_parent,
-                    text="Modelos de transcrição indisponíveis. Verifique o runtime de transcrição.",
+                    text=tr("Modelos de transcrição indisponíveis. Verifique o runtime de transcrição."),
                     bg=ui.card,
                     fg=ui.text_muted,
                     font=ui.font(9),
@@ -488,9 +494,18 @@ class Snipvoice:
         """
         preference = ui_theme.normalize_preference(preference)
         self.settings["appearance"] = preference
+        self._reopen_manager(root, before_reopen=ui_theme.reset)
 
+    def _reopen_manager_for_language(self, root, language):
+        """Apply a persisted interface language to the tray and a rebuilt manager."""
+        self.settings["language"] = i18n.set_language(language)
+        self.refresh_tray_menu()
+        self._reopen_manager(root)
+
+    def _reopen_manager(self, root, *, before_reopen=None):
         def reopen():
-            ui_theme.reset()
+            if before_reopen is not None:
+                before_reopen()
             self._show_manager_window(root)
             view = self._manager_meeting_view
             if view is not None and self._manager_notebook is not None:
@@ -548,7 +563,7 @@ class Snipvoice:
 
     def _resolve_startup(self):
         startup_error = ""
-        startup_status = "Privacidade e recuperação local verificadas."
+        startup_status = N_("Privacidade e recuperação local verificadas.")
         # Privacy defaults and interrupted retention journals are resolved in
         # one worker before the meeting hotkey or destructive UI is admitted.
         # Expired trash is deliberately left untouched here.
@@ -556,12 +571,12 @@ class Snipvoice:
             self.meetings.refresh_privacy_defaults()
             recovered = self.meetings.recover_retention_operations()
             if recovered:
-                startup_status = "Recuperação local concluída; revise a lixeira se necessário."
+                startup_status = N_("Recuperação local concluída; revise a lixeira se necessário.")
             else:
-                startup_status = "Privacidade e recuperação local verificadas."
+                startup_status = N_("Privacidade e recuperação local verificadas.")
         except Exception as exc:
             startup_error = type(exc).__name__
-            startup_status = (
+            startup_status = N_(
                 "A recuperação local exige reconciliação manual; gravação, hotkeys e exclusões estão bloqueadas."
             )
         # Keep only an internal classification; exception text may contain a
@@ -573,14 +588,14 @@ class Snipvoice:
         if platform_support.IS_MAC:
             status = macos_permissions.check_permissions()
             if macos_permissions.needs_onboarding(status):
-                self.notify_error("Conceda Monitoramento de Entrada e Acessibilidade ao SnipVoice e reinicie.")
+                self.notify_error(tr("Conceda Monitoramento de Entrada e Acessibilidade ao SnipVoice e reinicie."))
         if self.voice.is_enabled():
             self.voice.enable()
         if self._meeting_startup_ready:
             self._rebuild_meeting_monitor()
         else:
             self.notify_error(
-                "A recuperação local do SnipVoice precisa de revisão manual; o atalho de reunião foi desativado.",
+                tr("A recuperação local do SnipVoice precisa de revisão manual; o atalho de reunião foi desativado."),
                 key="meeting-recovery",
             )
         try:
@@ -594,12 +609,12 @@ class Snipvoice:
     def _surface_meeting_startup(self, _root=None):
         view = self._manager_meeting_view
         if view is not None and not getattr(view, "closed", False):
-            view.set_startup_status(self._meeting_startup_ready, self._meeting_startup_status)
+            view.set_startup_status(self._meeting_startup_ready, tr(self._meeting_startup_status))
 
     def _autostart_menu_label(self, item=None):
         if self._autostart_state == platform_support.AUTOSTART_MANAGED:
-            return "Iniciar com o sistema…"
-        return "Iniciar com o sistema"
+            return tr("Iniciar com o sistema…")
+        return tr("Iniciar com o sistema")
 
     def toggle_autostart(self, icon=None, item=None):
         self.task_runner.start(self._toggle_autostart, name="autostart-toggle")
@@ -609,7 +624,7 @@ class Snipvoice:
             try:
                 platform_support.open_startup_settings()
             except OSError:
-                self.notify_error("Não foi possível abrir as configurações de inicialização do Windows.")
+                self.notify_error(tr("Não foi possível abrir as configurações de inicialização do Windows."))
             return
         try:
             if self._autostart_state == platform_support.AUTOSTART_CURRENT:
@@ -617,9 +632,9 @@ class Snipvoice:
             else:
                 changed = platform_support.install_autostart()
             if not changed:
-                self.notify_error("Não foi possível alterar a inicialização automática do SnipVoice.")
+                self.notify_error(tr("Não foi possível alterar a inicialização automática do SnipVoice."))
         except OSError:
-            self.notify_error("Não foi possível alterar a inicialização automática do SnipVoice.")
+            self.notify_error(tr("Não foi possível alterar a inicialização automática do SnipVoice."))
         self._autostart_state = platform_support.autostart_state()
         self.refresh_tray_menu()
 
@@ -644,7 +659,7 @@ class Snipvoice:
         """Record a model-folder move and restart. Return "" or a user-facing reason."""
         downloading = self.voice is not None and self.voice.model_download_in_progress()
         if self.meetings.is_busy() or downloading:
-            return "Aguarde downloads, gravações e processamentos terminarem antes de mover os modelos."
+            return tr("Aguarde downloads, gravações e processamentos terminarem antes de mover os modelos.")
         try:
             data_relocation.request_models_relocation(app_paths.configured_models_dir(), target)
         except (OSError, data_relocation.RelocationError) as exc:
@@ -656,7 +671,7 @@ class Snipvoice:
     def request_data_relocation(self, target):
         """Record a move and restart. Return "" on success or a user-facing reason."""
         if self.meetings.is_busy():
-            return "Aguarde a gravação, o processamento ou a reprodução terminar antes de mover os dados."
+            return tr("Aguarde a gravação, o processamento ou a reprodução terminar antes de mover os dados.")
         try:
             data_relocation.request_relocation(self.data_dir, target)
         except (OSError, data_relocation.RelocationError) as exc:
@@ -694,18 +709,18 @@ class Snipvoice:
         if platform_support.tk_runs_on_main_thread():
             platform_support.hide_dock_icon()
         menu = pystray.Menu(
-            pystray.MenuItem("Abrir Gravação…", self.open_meetings, default=True),
+            pystray.MenuItem(lambda _item: tr("Abrir Gravação…"), self.open_meetings, default=True),
             pystray.MenuItem(self._meeting_menu_label, self.request_meeting_start,
                              enabled=self._meeting_start_enabled),
-            pystray.MenuItem("Parar gravação", self.request_meeting_stop,
+            pystray.MenuItem(lambda _item: tr("Parar gravação"), self.request_meeting_stop,
                              enabled=self._meeting_stop_enabled),
             pystray.MenuItem(self._voice_menu_label, self.toggle_voice, checked=self._voice_menu_checked),
-            pystray.MenuItem("Configurar ditado…", self.open_voice_settings),
+            pystray.MenuItem(lambda _item: tr("Configurar ditado…"), self.open_voice_settings),
             pystray.MenuItem(self._autostart_menu_label, self.toggle_autostart,
                              checked=lambda item: self._autostart_state == platform_support.AUTOSTART_CURRENT),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(APP_DISPLAY_NAME, lambda icon, item: None, enabled=False),
-            pystray.MenuItem("Sair", self.quit_app),
+            pystray.MenuItem(lambda _item: tr("Sair"), self.quit_app),
         )
         with Image.open(os.path.join(get_runtime_resource_dir(), "snipvoice.ico")) as image:
             tray_image = image.copy()
@@ -757,7 +772,7 @@ class Snipvoice:
 
     def _voice_menu_label(self, _text=None):
         if self.voice is None:
-            return "Entrada por voz"
+            return tr("Entrada por voz")
         return self.voice.status_label()
 
     def _meeting_menu_label(self, _item=None):
@@ -767,8 +782,8 @@ class Snipvoice:
         except Exception:
             state = "idle"
         if state in {"starting", "recording", "paused", "stopping"}:
-            return "Gravação em andamento"
-        return "Iniciar gravação"
+            return tr("Gravação em andamento")
+        return tr("Iniciar gravação")
 
     def _meeting_start_enabled(self, _item=None):
         if not self._meeting_startup_ready:
@@ -843,8 +858,8 @@ class Snipvoice:
 
         if macos_permissions.check_microphone() == macos_permissions.DENIED:
             self.notify_error(
-                "O macOS bloqueou o microfone. Conceda Microfone em Privacidade "
-                "e reinicie o SnipVoice.",
+                tr("O macOS bloqueou o microfone. Conceda Microfone em Privacidade "
+                   "e reinicie o SnipVoice."),
                 key="voice-mic",
             )
             macos_permissions.open_settings_pane(macos_permissions.MICROPHONE)
@@ -853,14 +868,16 @@ class Snipvoice:
         entry = catalog_entry(self.voice.settings.profile)
         if entry is not None and not self.voice.model_installed():
             size = format_size(entry["size_bytes"])
-            message = (
-                f"Baixar o modelo {entry['id']} ({size})?\n\n"
-                f"{entry['purpose']}\n\n"
-                f"Licença: {entry['license_id']}\n"
-                f"{entry['attribution']}\n\n"
-                "O arquivo fica num cache local, não na pasta de snippets."
+            message = tr(
+                "Baixar o modelo {model} ({size})?\n\n"
+                "{purpose}\n\n"
+                "Licença: {license}\n"
+                "{attribution}\n\n"
+                "O arquivo fica num cache local, não na pasta de snippets.",
+                model=entry["id"], size=size, purpose=tr(entry["purpose"]),
+                license=entry["license_id"], attribution=entry["attribution"],
             )
-            if not messagebox.askyesno("Entrada por voz", message):
+            if not messagebox.askyesno(tr("Entrada por voz"), message):
                 self._refresh_manager_voice_tab()
                 return
         self.voice.enable()
@@ -875,7 +892,7 @@ class Snipvoice:
         except Exception as exc:
             self.logger.error(f"Erro ao abrir configurações de voz: {exc}")
             self.notify_error(
-                f"Erro ao abrir configurações de voz: {exc}",
+                tr("Erro ao abrir configurações de voz: {error}", error=exc),
                 key="voice-settings-open",
                 cooldown_seconds=5,
             )
@@ -898,7 +915,7 @@ class Snipvoice:
         """Show model licenses in a bounded, scrollable child window."""
         ui = ui_theme.theme()
         dialog = tk.Toplevel(owner)
-        dialog.title("Licenças e atribuições")
+        dialog.title(tr("Licenças e atribuições"))
         dialog.geometry("700x420")
         dialog.minsize(520, 300)
         dialog.configure(bg=ui.surface)
@@ -912,7 +929,7 @@ class Snipvoice:
 
         tk.Label(
             container,
-            text="Licenças e atribuições",
+            text=tr("Licenças e atribuições"),
             font=ui.font(11, "bold"),
             bg=ui.surface,
             fg=ui.text,
@@ -942,7 +959,7 @@ class Snipvoice:
 
         tk.Button(
             container,
-            text="Fechar",
+            text=tr("Fechar"),
             width=ui.button_width(10),
             command=dialog.destroy,
             **ui.button_colors(),
@@ -961,7 +978,7 @@ class Snipvoice:
 
         ui = ui_theme.theme()
         dialog = tk.Toplevel(owner)
-        dialog.title("Correções da transcrição")
+        dialog.title(tr("Correções da transcrição"))
         dialog.transient(owner)
         dialog.resizable(True, True)
         dialog.minsize(480, 300)
@@ -969,7 +986,7 @@ class Snipvoice:
         container.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             container,
-            text="Corrija termos recorrentes reconhecidos incorretamente.",
+            text=tr("Corrija termos recorrentes reconhecidos incorretamente."),
             bg=ui.surface,
             fg=ui.text,
             font=ui.font(9),
@@ -1004,7 +1021,7 @@ class Snipvoice:
             source = list(replacements)[selection[0]]
             replacement = replacements[source]
             new_value = simpledialog.askstring(
-                "Substituição", f"Texto para substituir: {source}",
+                tr("Substituição"), tr("Texto para substituir: {source}", source=source),
                 initialvalue=replacement, parent=dialog,
             )
             if new_value is None:
@@ -1013,8 +1030,8 @@ class Snipvoice:
             checked[source] = new_value
             if not validate_replacements(checked):
                 messagebox.showerror(
-                    "Correção inválida",
-                    "A substituição não pode ser vazia ou muito longa.",
+                    tr("Correção inválida"),
+                    tr("A substituição não pode ser vazia ou muito longa."),
                     parent=dialog,
                 )
                 return
@@ -1023,15 +1040,15 @@ class Snipvoice:
 
         def add_entry():
             source = simpledialog.askstring(
-                "Nova correção",
-                "Texto reconhecido incorretamente:",
+                tr("Nova correção"),
+                tr("Texto reconhecido incorretamente:"),
                 parent=dialog,
             )
             if source is None:
                 return
             replacement = simpledialog.askstring(
-                "Nova correção",
-                "Substituir por:",
+                tr("Nova correção"),
+                tr("Substituir por:"),
                 parent=dialog,
             )
             if replacement is None:
@@ -1040,8 +1057,8 @@ class Snipvoice:
             checked[source] = replacement
             if not validate_replacements(checked):
                 messagebox.showerror(
-                    "Correção inválida",
-                    "O texto não pode ser vazio ou muito longo.",
+                    tr("Correção inválida"),
+                    tr("O texto não pode ser vazio ou muito longo."),
                     parent=dialog,
                 )
                 return
@@ -1058,9 +1075,9 @@ class Snipvoice:
         actions = tk.Frame(container, bg=ui.surface)
         actions.pack(fill=tk.X, pady=(10, 0))
         for label, command in (
-            ("Adicionar", add_entry),
-            ("Editar", edit_selected),
-            ("Remover", remove_entry),
+            (tr("Adicionar"), add_entry),
+            (tr("Editar"), edit_selected),
+            (tr("Remover"), remove_entry),
         ):
             tk.Button(
                 actions,
@@ -1073,15 +1090,15 @@ class Snipvoice:
             checked = validate_replacements(replacements)
             if checked != replacements:
                 messagebox.showerror(
-                    "Correções inválidas",
-                    "Revise os termos informados.",
+                    tr("Correções inválidas"),
+                    tr("Revise os termos informados."),
                     parent=dialog,
                 )
                 return
             if not self._persist_voice_settings({"voice_replacements": checked}):
                 messagebox.showerror(
-                    "Falha ao salvar",
-                    "Não foi possível salvar as correções da transcrição.",
+                    tr("Falha ao salvar"),
+                    tr("Não foi possível salvar as correções da transcrição."),
                     parent=dialog,
                 )
                 return
@@ -1090,13 +1107,13 @@ class Snipvoice:
 
         tk.Button(
             actions,
-            text="Salvar",
+            text=tr("Salvar"),
             command=save_and_close,
             **ui.button_colors(accent=True),
         ).pack(side=tk.RIGHT)
         tk.Button(
             actions,
-            text="Cancelar",
+            text=tr("Cancelar"),
             command=dialog.destroy,
             **ui.button_colors(),
         ).pack(side=tk.RIGHT, padx=(0, 6))
@@ -1151,14 +1168,14 @@ class Snipvoice:
         models_card.pack(fill=tk.X, pady=(0, ui.space_md))
         tk.Label(
             models_card,
-            text="Modelos de transcrição",
+            text=tr("Modelos de transcrição"),
             font=ui.font(11, "bold"),
             bg=ui.card,
             fg=ui.text_strong,
         ).pack(anchor="w")
         tk.Label(
             models_card,
-            text="Baixe somente os modelos que quiser usar. O áudio permanece neste computador.",
+            text=tr("Baixe somente os modelos que quiser usar. O áudio permanece neste computador."),
             font=ui.font(9),
             bg=ui.card,
             fg=ui.text_muted,
@@ -1168,11 +1185,13 @@ class Snipvoice:
 
         def profile_label(entry):
             installed = voice_models.model_is_installed(entry, self.voice.cache_dir)
-            status = "instalado" if installed else "não baixado"
-            return (
-                f"{entry['purpose']}\n"
-                f"Download {format_size(entry['size_bytes'])} · "
-                f"{entry['license_id']} · {status}"
+            status = tr("instalado") if installed else tr("não baixado")
+            return tr(
+                "{purpose}\n"
+                "Download {size} · "
+                "{license} · {status}",
+                purpose=tr(entry["purpose"]), size=format_size(entry["size_bytes"]),
+                license=entry["license_id"], status=status,
             )
 
         def refresh_profile_labels():
@@ -1196,11 +1215,11 @@ class Snipvoice:
                     entry["profile"]
                 )
                 if installed:
-                    button.configure(text="Baixado", state=tk.DISABLED)
+                    button.configure(text=tr("Baixado"), state=tk.DISABLED)
                 elif downloading:
-                    button.configure(text="Baixando…", state=tk.DISABLED)
+                    button.configure(text=tr("Baixando…"), state=tk.DISABLED)
                 else:
-                    button.configure(text="Baixar", state=tk.NORMAL)
+                    button.configure(text=tr("Baixar"), state=tk.NORMAL)
 
         for entry in visible:
             row = tk.Frame(models_card, bg=ui.card)
@@ -1219,7 +1238,7 @@ class Snipvoice:
             profile_labels.append((label, entry))
             download_button = tk.Button(
                 row,
-                text="Baixar",
+                text=tr("Baixar"),
                 width=ui.button_width(10),
                 command=lambda item=entry: download_model(item),
                 font=ui.font(),
@@ -1247,15 +1266,15 @@ class Snipvoice:
         from meeting_gui import PROFILE_LABELS
 
         profile_display_labels = {
-            entry["profile"]: PROFILE_LABELS[entry["profile"]] for entry in visible
+            entry["profile"]: tr(PROFILE_LABELS[entry["profile"]]) for entry in visible
         }
         profile_display_to_id = {
             label: profile for profile, label in profile_display_labels.items()
         }
         language_display_labels = {
-            "auto": "Automático",
-            "pt-BR": "Português (Brasil)",
-            "en-US": "Inglês (Estados Unidos)",
+            "auto": tr("Automático"),
+            "pt-BR": tr("Português (Brasil)"),
+            "en-US": tr("Inglês (Estados Unidos)"),
         }
         language_display_to_id = {
             label: lang for lang, label in language_display_labels.items()
@@ -1272,14 +1291,14 @@ class Snipvoice:
         selector_frame.grid_columnconfigure(1, weight=1)
         tk.Label(
             selector_frame,
-            text="Modelo e idioma",
+            text=tr("Modelo e idioma"),
             bg=ui.card,
             fg=ui.text_strong,
             font=ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_sm))
         tk.Label(
             selector_frame,
-            text="Modelo de transcrição",
+            text=tr("Modelo de transcrição"),
             bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
@@ -1294,7 +1313,7 @@ class Snipvoice:
         model_combo.grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             selector_frame,
-            text="Idioma",
+            text=tr("Idioma"),
             bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
@@ -1331,14 +1350,14 @@ class Snipvoice:
         shortcut_frame.grid_columnconfigure(1, weight=1)
         tk.Label(
             shortcut_frame,
-            text="Atalhos",
+            text=tr("Atalhos"),
             bg=ui.card,
             fg=ui.text_strong,
             font=ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_sm))
         tk.Label(
             shortcut_frame,
-            text="Ditado (segure para falar):",
+            text=tr("Ditado (segure para falar):"),
             bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
@@ -1353,7 +1372,7 @@ class Snipvoice:
         ).grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
-            text="Comando por voz:",
+            text=tr("Comando por voz:"),
             bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
@@ -1368,7 +1387,7 @@ class Snipvoice:
         ).grid(row=2, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
-            text="Formato: ctrl+alt+space, ctrl+shift+f8, etc.",
+            text=tr("Formato: ctrl+alt+space, ctrl+shift+f8, etc."),
             bg=ui.card,
             fg=ui.text_muted,
             font=ui.font(8),
@@ -1397,9 +1416,9 @@ class Snipvoice:
                 dictation_chord = parse_chord(hotkey.get())
             except ValueError:
                 messagebox.showerror(
-                    "Atalho inválido",
-                    "O atalho de ditado precisa de um modificador e uma tecla.\n\n"
-                    "Exemplo: ctrl+alt+space",
+                    tr("Atalho inválido"),
+                    tr("O atalho de ditado precisa de um modificador e uma tecla.\n\n"
+                       "Exemplo: ctrl+alt+space"),
                     parent=owner,
                 )
                 return
@@ -1407,16 +1426,16 @@ class Snipvoice:
                 command_chord = parse_chord(command_hotkey.get())
             except ValueError:
                 messagebox.showerror(
-                    "Atalho inválido",
-                    "O atalho de comando precisa de um modificador e uma tecla.\n\n"
-                    "Exemplo: ctrl+alt+shift+space",
+                    tr("Atalho inválido"),
+                    tr("O atalho de comando precisa de um modificador e uma tecla.\n\n"
+                       "Exemplo: ctrl+alt+shift+space"),
                     parent=owner,
                 )
                 return
             if command_chord == dictation_chord:
                 messagebox.showerror(
-                    "Atalhos em conflito",
-                    "Escolha atalhos diferentes para ditado e comando por voz.",
+                    tr("Atalhos em conflito"),
+                    tr("Escolha atalhos diferentes para ditado e comando por voz."),
                     parent=owner,
                 )
                 return
@@ -1427,12 +1446,14 @@ class Snipvoice:
             if entry is not None and not voice_models.model_is_installed(
                 entry, self.voice.cache_dir
             ):
-                warning = (
-                    f"Isso vai baixar {format_size(entry['size_bytes'])} "
-                    f"({entry['license_id']}).\n\n{entry['attribution']}"
+                warning = tr(
+                    "Isso vai baixar {size} "
+                    "({license}).\n\n{attribution}",
+                    size=format_size(entry["size_bytes"]),
+                    license=entry["license_id"], attribution=entry["attribution"],
                 )
                 if not messagebox.askokcancel(
-                    "Baixar modelo de voz", warning, parent=owner
+                    tr("Baixar modelo de voz"), warning, parent=owner
                 ):
                     return
             with self._settings_lock:
@@ -1441,7 +1462,7 @@ class Snipvoice:
                 try:
                     validate_hotkey_conflicts(candidate)
                 except ValueError as exc:
-                    messagebox.showerror("Atalhos em conflito", str(exc), parent=owner)
+                    messagebox.showerror(tr("Atalhos em conflito"), str(exc), parent=owner)
                     return
                 self.voice.apply_options(
                     profile=profile,
@@ -1458,15 +1479,17 @@ class Snipvoice:
             if voice_models.model_is_installed(entry, self.voice.cache_dir):
                 refresh_profile_labels()
                 return
-            warning = (
-                f"Baixar {entry['purpose']} "
-                f"({format_size(entry['size_bytes'])})?\n\n"
-                f"Licença: {entry['license_id']}\n{entry['attribution']}\n\n"
+            warning = tr(
+                "Baixar {purpose} "
+                "({size})?\n\n"
+                "Licença: {license}\n{attribution}\n\n"
                 "O arquivo fica no cache local de modelos. A entrada por voz "
-                "não será ativada automaticamente."
+                "não será ativada automaticamente.",
+                purpose=tr(entry["purpose"]), size=format_size(entry["size_bytes"]),
+                license=entry["license_id"], attribution=entry["attribution"],
             )
             if not messagebox.askokcancel(
-                "Baixar modelo de voz", warning, parent=owner
+                tr("Baixar modelo de voz"), warning, parent=owner
             ):
                 return
             if not self.voice.download_profile(entry["profile"]):
@@ -1476,8 +1499,8 @@ class Snipvoice:
 
         def remove_model():
             if not messagebox.askokcancel(
-                "Remover modelo",
-                "A entrada por voz será desligada e só o modelo deste perfil será apagado.",
+                tr("Remover modelo"),
+                tr("A entrada por voz será desligada e só o modelo deste perfil será apagado."),
                 parent=owner,
             ):
                 return
@@ -1497,9 +1520,9 @@ class Snipvoice:
 
         buttons = tk.Frame(parent, bg=ui.surface)
         buttons.pack(fill=tk.X, pady=(ui.space_sm, 0))
-        action_button("Salvar e usar", apply_voice_settings, accent=True).pack(side=tk.LEFT)
+        action_button(tr("Salvar e usar"), apply_voice_settings, accent=True).pack(side=tk.LEFT)
         more_button = tk.Menubutton(
-            buttons, text="Mais opções ▾", direction="below", font=ui.font(),
+            buttons, text=tr("Mais opções ▾"), direction="below", font=ui.font(),
             **ui.button_colors(), **ui.button_chrome(),
         )
         menu_colors = {}
@@ -1511,17 +1534,17 @@ class Snipvoice:
             }
         more_menu = tk.Menu(more_button, tearoff=False, **menu_colors)
         tool_actions = (
-            ("Correções…", lambda: self._show_voice_replacements(owner)),
-            ("Recarregar comandos", self.reload_commands),
-            ("Licenças e atribuições…",
+            (tr("Correções…"), lambda: self._show_voice_replacements(owner)),
+            (tr("Recarregar comandos"), self.reload_commands),
+            (tr("Licenças e atribuições…"),
              lambda: self._show_voice_third_party_notices(owner, third_party_notices())),
-            ("Remover modelo", remove_model),
+            (tr("Remover modelo"), remove_model),
         )
         for label, command in tool_actions:
             more_menu.add_command(label=label, command=command)
         more_button.configure(menu=more_menu)
         more_button.pack(side=tk.RIGHT)
-        action_button("Histórico de voz…", lambda: self._open_voice_history(owner)).pack(
+        action_button(tr("Histórico de voz…"), lambda: self._open_voice_history(owner)).pack(
             side=tk.RIGHT, padx=(0, ui.space_sm),
         )
 
@@ -1537,14 +1560,14 @@ class Snipvoice:
 
         tk.Label(
             main,
-            text="Entrada por voz",
+            text=tr("Entrada por voz"),
             font=ui.font(16, "bold"),
             bg=ui.surface,
             fg=ui.text_strong,
         ).pack(anchor="w")
         tk.Label(
             main,
-            text="Ative a entrada por voz e escolha o modelo, o idioma e os atalhos.",
+            text=tr("Ative a entrada por voz e escolha o modelo, o idioma e os atalhos."),
             font=ui.font(9),
             bg=ui.surface,
             fg=ui.text_muted,
@@ -1554,7 +1577,7 @@ class Snipvoice:
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
         status_text = (
-            self.voice.status_label() if self.voice is not None else "Entrada por voz"
+            self.voice.status_label() if self.voice is not None else tr("Entrada por voz")
         )
 
         def refresh():
@@ -1590,7 +1613,7 @@ class Snipvoice:
         status_card.pack(fill=tk.X, pady=(0, ui.space_md))
         checkbox = tk.Checkbutton(
             status_card,
-            text="Ativar entrada por voz",
+            text=tr("Ativar entrada por voz"),
             command=on_toggle,
             font=ui.font(10, "bold"),
             **ui.checkbutton_colors(ui.card),
@@ -1625,7 +1648,7 @@ class Snipvoice:
         """Show recoverable recordings without replaying them into stale targets."""
         ui = ui_theme.theme()
         history_window = tk.Toplevel(root)
-        history_window.title("Histórico de Voz")
+        history_window.title(tr("Histórico de Voz"))
         history_window.geometry("760x400")
         history_window.minsize(620, 300)
         history_window.configure(bg=ui.surface)
@@ -1639,7 +1662,7 @@ class Snipvoice:
 
         tk.Label(
             outer,
-            text="Gravações recuperáveis",
+            text=tr("Gravações recuperáveis"),
             font=ui.font(11, "bold"),
             bg=ui.surface,
             fg=ui.text,
@@ -1657,10 +1680,10 @@ class Snipvoice:
 
         columns = ("time", "status", "provider", "transcript")
         tree = ttk.Treeview(frame, columns=columns, show="headings", height=12)
-        tree.heading("time", text="Data")
-        tree.heading("status", text="Estado")
-        tree.heading("provider", text="Provedor")
-        tree.heading("transcript", text="Transcrição / erro")
+        tree.heading("time", text=tr("Data"))
+        tree.heading("status", text=tr("Estado"))
+        tree.heading("provider", text=tr("Provedor"))
+        tree.heading("transcript", text=tr("Transcrição / erro"))
         tree.column("time", width=145, anchor="center", stretch=False)
         tree.column("status", width=95, anchor="center", stretch=False)
         tree.column("provider", width=80, anchor="center", stretch=False)
@@ -1676,7 +1699,7 @@ class Snipvoice:
             voice = self.voice
             entries = voice.history_entries() if voice is not None else []
             if not entries:
-                tree.insert("", tk.END, values=("—", "vazio", "—", "Nenhuma gravação."))
+                tree.insert("", tk.END, values=("—", tr("vazio"), "—", tr("Nenhuma gravação.")))
                 return
             for entry in entries:
                 summary = entry.get("transcript") or entry.get("error") or ""
@@ -1705,7 +1728,7 @@ class Snipvoice:
             record_id = selected_id()
             if record_id and not self.voice.copy_history_transcript(record_id):
                 self.notify_error(
-                    "Esta gravação ainda não tem uma transcrição para copiar.",
+                    tr("Esta gravação ainda não tem uma transcrição para copiar."),
                     key="voice-history-copy",
                 )
 
@@ -1713,13 +1736,13 @@ class Snipvoice:
         actions.grid(row=2, column=0, sticky="w")
         tk.Button(
             actions,
-            text="Tentar novamente",
+            text=tr("Tentar novamente"),
             command=retry_selected,
             **ui.button_colors(accent=True),
         ).pack(side=tk.LEFT)
         tk.Button(
             actions,
-            text="Copiar transcrição",
+            text=tr("Copiar transcrição"),
             command=copy_selected,
             **ui.button_colors(),
         ).pack(side=tk.LEFT, padx=(8, 0))
