@@ -1,6 +1,6 @@
 """Snipvoice - local push-to-talk dictation for Windows and macOS.
-Version: 3.4.0
-Channel: beta
+Version: 1.0.0
+Channel: stable
 
 Recording is explicit and local. Audio and transcripts are kept in recoverable
 history; model downloads are the only transcription-related network operation.
@@ -89,9 +89,9 @@ from meeting_library import MeetingLibrary
 from meeting_support import MeetingController
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
-APP_VERSION = "3.4.0"
-RELEASE_CHANNEL = "beta"
-BETA_NUMBER = 3
+APP_VERSION = "1.0.0"
+RELEASE_CHANNEL = "stable"
+BETA_NUMBER = 0
 APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
 if RELEASE_CHANNEL == "beta":
     APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} beta {BETA_NUMBER}"

@@ -371,7 +371,7 @@ class PackagingExcludeTests(unittest.TestCase):
             },
         )
 
-    def test_beta_release_metadata_is_synchronized(self):
+    def test_release_metadata_is_synchronized(self):
         paths = {
             "source": os.path.join(ROOT, "source", "snipvoice.pyw"),
             "installer": os.path.join(ROOT, "installer", "snipvoice.iss"),
@@ -385,15 +385,14 @@ class PackagingExcludeTests(unittest.TestCase):
         source_version = re.search(r'^APP_VERSION = "([^"]+)"$', texts["source"], re.M)
         installer_version = re.search(r'^#define MyAppVersion "([^"]+)"$', texts["installer"], re.M)
         workflow_version = re.search(r'^  SNIPVOICE_VERSION: "([^"]+)"$', texts["workflow"], re.M)
-        self.assertEqual(source_version.group(1), "3.4.0")
-        self.assertEqual(installer_version.group(1), "3.4.0")
-        self.assertEqual(workflow_version.group(1), "3.4.0")
-        self.assertIn('Version: 3.4.0\nChannel: beta', texts["source"])
-        self.assertIn('RELEASE_CHANNEL = "beta"', texts["source"])
-        self.assertIn('BETA_NUMBER = 3', texts["source"])
-        self.assertIn('#define MyAppChannel "beta"', texts["installer"])
-        self.assertIn('SNIPVOICE_CHANNEL: "beta"', texts["workflow"])
-        self.assertIn('SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.3"', texts["workflow"])
+        self.assertEqual(source_version.group(1), "1.0.0")
+        self.assertEqual(installer_version.group(1), "1.0.0")
+        self.assertEqual(workflow_version.group(1), "1.0.0")
+        self.assertIn('Version: 1.0.0\nChannel: stable', texts["source"])
+        self.assertIn('RELEASE_CHANNEL = "stable"', texts["source"])
+        self.assertIn('#define MyAppChannel "stable"', texts["installer"])
+        self.assertIn('SNIPVOICE_CHANNEL: "stable"', texts["workflow"])
+        self.assertIn('SNIPVOICE_RELEASE_LABEL: "1.0.0"', texts["workflow"])
         self.assertIn('#define MyAppDisplayVersion MyAppVersion + " beta 3"',
                       texts["installer"])
         self.assertIn('#define MyInstallerVersion MyAppVersion + "-beta.3"',

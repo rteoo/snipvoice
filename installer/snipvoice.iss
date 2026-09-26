@@ -8,8 +8,8 @@
 ; Snipvoice never migrates another application's user data.
 
 #define MyAppName "SnipVoice"
-#define MyAppVersion "3.4.0"
-#define MyAppChannel "beta"
+#define MyAppVersion "1.0.0"
+#define MyAppChannel "stable"
 #if MyAppChannel == "beta"
   #define MyAppDisplayVersion MyAppVersion + " beta 3"
   #define MyInstallerVersion MyAppVersion + "-beta.3"
