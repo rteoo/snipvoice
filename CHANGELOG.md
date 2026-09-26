@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.1.0 - 2026-09-26
+
+Redesign the manager so pages use the window's height instead of scrolling.
+
+- Move identity, navigation, and the 100% local badge into a left sidebar; the header, tab strip, and per-page titles are gone. Ctrl+1 through Ctrl+4 still switch pages.
+- Split Gravação into two columns: title and sources on the left; the waveform, level meters, a large clock, and the Iniciar/Pausar/Parar controls on the right.
+- Move the library's search and actions into the recording list column so the selected recording gets the full height, and put the player above the transcript in place of the separate Ouvir tab.
+- Show scrollbars only when a page overflows, and fit long device names in the source pickers on macOS.
+- Raise the manager's minimum width to 1040 px on Windows and 1100 px on macOS to make room for the sidebar.
+
 ## 1.0.0 - 2026-09-26
 
 First stable release. Earlier releases were renumbered, and the same commits
