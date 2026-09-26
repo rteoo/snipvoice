@@ -128,6 +128,42 @@ class MeetingChatFlowTests(unittest.TestCase):
         view.save_answer(1)
         view._submit.assert_not_called()
 
+    def test_save_completion_after_switch_does_not_change_current_chat(self):
+        view = self.view
+        view.ask_this_meeting()
+        self.answer()
+        view.save_answer(1)
+        callback = view._submit.call_args.args[2]
+        view.selected = "recording-2"
+        view.meeting_chat.render.reset_mock()
+        callback({"id": "saved-report"}, None)
+        self.assertTrue(view.ask_conversations["recording-1"][0]["saved"])
+        view.meeting_chat.render.assert_not_called()
+        view.refresh_reports.assert_not_called()
+
+    def test_citation_navigation_reads_and_shows_the_answer_revision(self):
+        view = self.view
+        view.citation_request = 0
+        view.transcript_style = Variable("Texto completo")
+        view._sync_transcript_style = Mock()
+        view.detail_sections = Mock()
+        view._update_transcript_paging_controls = Mock()
+        view._render_transcript = Mock()
+        view.transcript = Mock()
+        view.segments = {"row-1": {"id": "segment-1"}}
+        view.controller.get_transcript_page.return_value = {
+            "offset": 0, "has_more": False, "segments": [{"id": "segment-1"}],
+        }
+        view._jump_to_citation("segment-1", "original-revision")
+        operation, callback = view._submit.call_args.args[1:]
+        callback(operation(), None)
+        self.assertEqual(view.controller.get_transcript_page.call_args.kwargs["revision"],
+                         "original-revision")
+        self.assertEqual(view.transcript_revision, "original-revision")
+        self.assertEqual(view.transcript_style.get(), "Com horários")
+        view.detail_sections.select.assert_called_once_with("transcript")
+        view.transcript.selection_set.assert_called_once_with("row-1")
+
     def test_citation_uses_own_answer_revision_not_selected_report(self):
         view = self.view
         view.ask_this_meeting()

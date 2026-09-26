@@ -33,6 +33,7 @@ REQUIRED_DEMUXERS = {"aac", "flac", "matroska", "mov", "mp3", "ogg", "wav"}
 REQUIRED_CODECS = {"aac", "flac", "mp3", "opus", "pcm_s16le", "vorbis"}
 REQUIRED_ENCODERS = {"libmp3lame"}
 REQUIRED_MUXERS = {"mp3"}
+REQUIRED_FILTERS = {"abuffer", "abuffersink", "aformat", "aresample"}
 
 
 def verify_clean_ffmpeg_runtime(av_module=None) -> None:
@@ -68,6 +69,7 @@ def verify_clean_ffmpeg_runtime(av_module=None) -> None:
     enabled_demuxers = set()
     enabled_encoders = set()
     enabled_muxers = set()
+    enabled_filters = set()
     for token in shlex.split(configuration):
         if token.startswith("--enable-demuxer="):
             enabled_demuxers.update(token.split("=", 1)[1].split(","))
@@ -75,20 +77,28 @@ def verify_clean_ffmpeg_runtime(av_module=None) -> None:
             enabled_encoders.update(token.split("=", 1)[1].split(","))
         elif token.startswith("--enable-muxer="):
             enabled_muxers.update(token.split("=", 1)[1].split(","))
+        elif token.startswith("--enable-filter="):
+            enabled_filters.update(token.split("=", 1)[1].split(","))
     missing_demuxers = REQUIRED_DEMUXERS - enabled_demuxers
     missing_formats = REQUIRED_FORMATS - set(av_module.formats_available)
     missing_codecs = REQUIRED_CODECS - set(av_module.codecs_available)
     missing_encoders = REQUIRED_ENCODERS - enabled_encoders
     missing_muxers = REQUIRED_MUXERS - enabled_muxers
     missing_encoder_codecs = REQUIRED_ENCODERS - set(av_module.codecs_available)
+    filter_module = getattr(av_module, "filter", None)
+    available_filters = set(getattr(filter_module, "filters_available", ()))
+    missing_filters = REQUIRED_FILTERS - enabled_filters
+    unavailable_filters = REQUIRED_FILTERS - available_filters
     if (missing_demuxers or missing_formats or missing_codecs or missing_encoders
-            or missing_muxers or missing_encoder_codecs):
+            or missing_muxers or missing_encoder_codecs or missing_filters
+            or unavailable_filters):
         raise RuntimeError(
             "Clean FFmpeg runtime is missing required audio support: "
             f"demuxers={sorted(missing_demuxers)}, "
             f"formats={sorted(missing_formats)}, codecs={sorted(missing_codecs)}, "
             f"encoders={sorted(missing_encoders | missing_encoder_codecs)}, "
-            f"muxers={sorted(missing_muxers)}"
+            f"muxers={sorted(missing_muxers)}, "
+            f"filters={sorted(missing_filters | unavailable_filters)}"
         )
     codec_factory = getattr(av_module, "Codec", None)
     if not callable(codec_factory):

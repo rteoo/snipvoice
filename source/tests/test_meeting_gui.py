@@ -1,5 +1,6 @@
 """Workspace concurrency, selection, persistence, and shared-root smoke checks."""
 
+import gc
 import os
 import sys
 import threading
@@ -1453,6 +1454,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.root.destroy()
+        cls.root = None
+        # Collect closed window cycles on Tk's thread before worker tests.
+        gc.collect()
 
     def test_shared_root_build_and_background_settings_devices(self):
         controller = mock.Mock()
@@ -1688,6 +1692,47 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.controller.seek_playback.assert_called_once_with(
             "synthetic-session", "final", start=5.0,
         )
+
+    def test_chat_send_button_keeps_conversation_and_composer_visible(self):
+        callback_errors = []
+        previous_reporter = self.root.report_callback_exception
+        self.root.report_callback_exception = lambda *args: callback_errors.append(args)
+        self.addCleanup(setattr, self.root, "report_callback_exception", previous_reporter)
+        self.addCleanup(lambda: self.assertEqual(callback_errors, []))
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view._show_library_detail(True)
+        view.selected = "synthetic-session"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.summary_model.set("synthetic-model")
+        view.summary_model_installed = {"synthetic-model": True}
+        view.controller.ask_this_meeting.return_value = {
+            "answer": "A revisão será na sexta-feira.", "citations": ["microphone:0:1"],
+            "uncertainty": "low", "revision": "revision-1",
+        }
+        view.detail_sections.select("ask")
+        view._sync_qa_controls()
+        self.root.update()
+        view.meeting_chat.set_question("Qual foi a decisão?")
+        view.meeting_chat.send_button.invoke()
+        wait_for(lambda: (self.root.update(), view.ask_pending is None)[1])
+        turns = view.ask_conversations[view.selected]
+        self.assertEqual(turns[0]["status"], "complete")
+        self.assertEqual(turns[0]["answer"], "A revisão será na sexta-feira.")
+        view.controller.ask_this_meeting.assert_called_once_with(
+            "synthetic-session", "Qual foi a decisão?", "synthetic-model",
+            revision="revision-1", history=[],
+        )
+        self.assertEqual(view.detail_sections.buttons["ask"].cget("text"), "Chat")
+        composer = view.meeting_chat.composer
+        self.assertTrue(composer.winfo_ismapped())
+        self.assertLessEqual(composer.winfo_rooty() + composer.winfo_height(),
+                             view.detail_canvas.winfo_rooty() + view.detail_canvas.winfo_height())
+        self.assertLessEqual(view.meeting_chat.send_button.winfo_rootx()
+                             + view.meeting_chat.send_button.winfo_width(),
+                             view.detail_canvas.winfo_rootx() + view.detail_canvas.winfo_width())
 
     def test_every_index_state_has_a_portuguese_label(self):
         self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))

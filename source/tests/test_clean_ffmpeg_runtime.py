@@ -9,6 +9,7 @@ from clean_ffmpeg_runtime import (  # noqa: E402
     REQUIRED_CODECS,
     REQUIRED_DEMUXERS,
     REQUIRED_ENCODERS,
+    REQUIRED_FILTERS,
     REQUIRED_FLAGS,
     REQUIRED_FORMATS,
     REQUIRED_MUXERS,
@@ -23,6 +24,7 @@ def fake_av(*, configuration=None, license_name="LGPL version 2.1 or later"):
             f"--enable-demuxer='{','.join(sorted(REQUIRED_DEMUXERS))}'",
             f"--enable-encoder='{','.join(sorted(REQUIRED_ENCODERS))}'",
             f"--enable-muxer='{','.join(sorted(REQUIRED_MUXERS))}'",
+            f"--enable-filter='{','.join(sorted(REQUIRED_FILTERS))}'",
         )
     )
     metadata = {
@@ -57,6 +59,7 @@ def fake_av(*, configuration=None, license_name="LGPL version 2.1 or later"):
         codecs_available=REQUIRED_CODECS | REQUIRED_ENCODERS,
         Codec=FakeCodec,
         ContainerFormat=FakeContainerFormat,
+        filter=types.SimpleNamespace(filters_available=REQUIRED_FILTERS),
     )
 
 
@@ -113,6 +116,23 @@ class CleanFfmpegRuntimeTests(unittest.TestCase):
         runtime = fake_av()
         runtime.Codec = lambda *_args: (_ for _ in ()).throw(ValueError("missing"))
         with self.assertRaisesRegex(RuntimeError, "instantiate the MP3 encoder"):
+            verify_clean_ffmpeg_runtime(runtime)
+
+    def test_rejects_runtime_without_audio_resampler_filters(self):
+        runtime = fake_av()
+        runtime.filter.filters_available = REQUIRED_FILTERS - {"aformat"}
+        with self.assertRaisesRegex(RuntimeError, "filters"):
+            verify_clean_ffmpeg_runtime(runtime)
+
+    def test_rejects_recipe_without_audio_resampler_filters(self):
+        runtime = fake_av()
+        configuration = runtime._core.library_meta["libavcodec"]["configuration"]
+        configuration = configuration.replace(
+            "--enable-filter='abuffer,abuffersink,aformat,aresample'", ""
+        )
+        for metadata in runtime._core.library_meta.values():
+            metadata["configuration"] = configuration
+        with self.assertRaisesRegex(RuntimeError, "filters"):
             verify_clean_ffmpeg_runtime(runtime)
 
 

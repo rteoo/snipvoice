@@ -119,7 +119,7 @@ CONFIGURE_FLAGS = (
     "--enable-libmp3lame",
     "--enable-encoder=libmp3lame",
     "--enable-muxer=mp3",
-    "--enable-filter=anull,aresample",
+    "--enable-filter=abuffer,abuffersink,aformat,anull,aresample",
 )
 
 

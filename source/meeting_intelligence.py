@@ -701,7 +701,7 @@ class MeetingIntelligence:
         ).encode("utf-8"))
 
     @classmethod
-    def _bounded_history(cls, history, budget):
+    def _bounded_history(cls, history, budget, question):
         if history is None:
             return []
         if not isinstance(history, list):
@@ -710,16 +710,22 @@ class MeetingIntelligence:
         for turn in history:
             if not isinstance(turn, dict) or set(turn) != {"question", "answer"}:
                 raise ValueError("O histórico da conversa aceita somente pergunta e resposta.")
-            question, answer = turn["question"], turn["answer"]
-            if (not isinstance(question, str) or not question.strip()
-                    or len(question) > MAX_QUESTION_CHARS
+            prior_question, answer = turn["question"], turn["answer"]
+            if (not isinstance(prior_question, str) or not prior_question.strip()
+                    or len(prior_question) > MAX_QUESTION_CHARS
                     or not isinstance(answer, str) or len(answer) > MAX_ANSWER_CHARS):
                 raise ValueError("O histórico da conversa contém um turno inválido.")
-            normalized.append({"question": question.strip(), "answer": answer.strip()})
+            normalized.append({"question": prior_question.strip(), "answer": answer.strip()})
         if cls._history_bytes(normalized) > MAX_HISTORY_BYTES:
             raise ValueError("O histórico da conversa excede o limite permitido.")
         turns = normalized[-MAX_HISTORY_TURNS:]
-        limit = min(MAX_HISTORY_BYTES, max(256, budget // 4))
+        question_bytes = len(json.dumps(
+            cls._question_evidence(question), ensure_ascii=False,
+        ).encode("utf-8"))
+        available = budget - question_bytes - 256
+        if available < 256:
+            return []
+        limit = min(MAX_HISTORY_BYTES, available // 3)
         while turns and cls._history_bytes(turns) > limit:
             if len(turns) > 1:
                 turns.pop(0)
@@ -727,7 +733,7 @@ class MeetingIntelligence:
             turn = turns[0]
             if turn["answer"]:
                 turn["answer"] = turn["answer"][:max(0, len(turn["answer"]) // 2)]
-            elif turn["question"]:
+            elif len(turn["question"]) > 1:
                 turn["question"] = turn["question"][:max(1, len(turn["question"]) // 2)]
             else:
                 turns = []
@@ -1081,7 +1087,7 @@ class MeetingIntelligence:
             raise ValueError("A transcrição não contém texto para responder à pergunta.")
         entry, model_file, context, budget = self._model(model)
         payload_budget = budget
-        history = self._bounded_history(history, budget)
+        history = self._bounded_history(history, budget, question)
         evidence_budget = self._evidence_budget(
             budget, self._question_evidence(question, history)
         )

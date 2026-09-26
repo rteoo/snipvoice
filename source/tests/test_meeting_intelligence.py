@@ -298,7 +298,7 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
 
     def test_question_history_is_context_only_and_current_question_stays_separate(self):
         intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
-            "answer": "Friday.", "citations": [next(item["id"] for item in evidence if "id" in item)],
+            "answer": "Friday.", "citations": ["s1"],
             "uncertainty": "low",
         }))
         history = [{"question": "What was decided?", "answer": "The review was approved."}]
@@ -344,6 +344,22 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
                 self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL,
                 history=[{"question": "Q", "answer": "A" * (MAX_HISTORY_BYTES + 1)}],
             )
+
+    def test_long_current_question_reserves_transcript_budget_before_history(self):
+        intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Friday.", "citations": ["s1"],
+            "uncertainty": "low",
+        }))
+        question = "Follow up " + ("x" * 1_700)
+        intelligence.ask_this_meeting(
+            self.session_id, question, DEFAULT_SUMMARY_MODEL,
+            history=[{"question": "Earlier?", "answer": "A" * 900}],
+        )
+        self.assertEqual(runtime.calls[0][1][-1]["question"], question)
+        context = next((item for item in runtime.calls[0][1]
+                        if item.get("kind") == "conversation_context"), None)
+        if context is not None:
+            self.assertLessEqual(len(json.dumps(context).encode("utf-8")), MAX_HISTORY_BYTES)
 
     def test_action_owner_and_deadline_must_appear_in_each_item_citation(self):
         # The revision is already completed; use a fresh completed revision so

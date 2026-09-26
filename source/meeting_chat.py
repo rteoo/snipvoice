@@ -15,6 +15,12 @@ SUGGESTIONS = (
     "Liste as próximas ações",
 )
 
+UNCERTAINTY_LABELS = {
+    "low": "Incerteza baixa",
+    "medium": "Incerteza média",
+    "high": "Incerteza alta",
+}
+
 
 class MeetingChat(tk.Frame):
     """Scrollable conversation with a fixed multiline composer."""
@@ -31,6 +37,7 @@ class MeetingChat(tk.Frame):
         self._can_save = True
         self._can_send = True
         self._message_widgets = []
+        self._answer_controls = []
 
         super().__init__(parent, bg=theme.surface)
         self.grid_rowconfigure(0, weight=1)
@@ -64,46 +71,60 @@ class MeetingChat(tk.Frame):
         self._empty_title = tk.Label(
             self._empty, text="Pergunte sobre esta gravação",
             bg=theme.surface, fg=theme.text_strong,
-            font=theme.font(12, "bold"), anchor="w",
+            font=theme.font(12, "bold"), anchor="w", justify="left", wraplength=520,
         )
         self._empty_title.pack(anchor="w", pady=(theme.space_lg, theme.space_xs))
-        tk.Label(
+        self._empty_subtitle = tk.Label(
             self._empty, text="Use uma sugestão ou escreva sua própria pergunta.",
             bg=theme.surface, fg=theme.text_muted, font=theme.font(), anchor="w",
-        ).pack(anchor="w", pady=(0, theme.space_sm))
+            justify="left", wraplength=520,
+        )
+        self._empty_subtitle.pack(anchor="w", pady=(0, theme.space_sm))
         suggestions = tk.Frame(self._empty, bg=theme.surface)
         suggestions.pack(anchor="w", fill="x")
         for suggestion in SUGGESTIONS:
-            button = self._button(suggestions, suggestion, lambda value=suggestion: self.set_question(value))
+            button = self._button(suggestions, suggestion, lambda value=suggestion: self._use_suggestion(value))
             button.pack(anchor="w", pady=2)
 
         composer = tk.Frame(self, bg=theme.card, highlightthickness=1,
                             highlightbackground=theme.border)
+        self._composer = composer
         composer.grid(row=1, column=0, sticky="ew", pady=(theme.space_sm, 0))
         composer.grid_columnconfigure(0, weight=1)
         top = tk.Frame(composer, bg=theme.card)
         top.grid(row=0, column=0, sticky="ew", padx=theme.space_sm, pady=(theme.space_sm, 0))
         top.grid_columnconfigure(0, weight=1)
+        tk.Label(
+            top, text="Pergunte sobre esta gravação", bg=theme.card,
+            fg=theme.text_strong, font=theme.font(9, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self._keyboard_hint = tk.Label(
+            top, text="Enter envia · Shift+Enter quebra linha", bg=theme.card,
+            fg=theme.text_muted, font=theme.font(8), anchor="w",
+        )
+        self._keyboard_hint.grid(row=1, column=0, sticky="w", pady=(1, theme.space_xs))
         self.composer = tk.Text(
             top, height=3, wrap="word", undo=True, font=theme.font(),
             **theme.text_colors(),
         )
-        self.composer.grid(row=0, column=0, sticky="ew")
+        self.composer.grid(row=2, column=0, sticky="ew")
         self.composer.bind("<Return>", self._composer_return)
         self.composer.bind("<Control-Return>", self._send_event)
         self._bind_scroll(self.composer)
+        self._status_label = tk.Label(
+            composer, textvariable=self.status, bg=theme.card, fg=theme.text_muted,
+            font=theme.font(8), anchor="w", justify="left", wraplength=520,
+        )
+        self._status_label.grid(row=1, column=0, sticky="ew", padx=theme.space_sm,
+                                pady=(theme.space_xs, 0))
         actions = tk.Frame(composer, bg=theme.card)
-        actions.grid(row=1, column=0, sticky="ew", padx=theme.space_sm,
+        actions.grid(row=2, column=0, sticky="ew", padx=theme.space_sm,
                      pady=(theme.space_xs, theme.space_sm))
         self.new_button = self._button(actions, "Nova conversa", self._new)
         self.new_button.pack(side="left")
-        self._status_label = tk.Label(
-            actions, textvariable=self.status, bg=theme.card, fg=theme.text_muted,
-            font=theme.font(8), anchor="w",
-        )
-        self._status_label.pack(side="left", fill="x", expand=True, padx=theme.space_sm)
         self.send_button = self._button(actions, "Enviar", self._send, accent=True)
         self.send_button.pack(side="right")
+        composer.bind("<Configure>", self._composer_changed)
 
         self._empty.pack(fill="x", padx=theme.space_lg)
         self._set_empty(True)
@@ -144,7 +165,8 @@ class MeetingChat(tk.Frame):
             self._bind_history_scroll_tree(child)
 
     def _mousewheel(self, event):
-        self.canvas.yview_scroll(-int(event.delta / 120 or (-1 if event.delta > 0 else 1)), "units")
+        steps = max(1, abs(int(event.delta)) // 120)
+        self.canvas.yview_scroll(-steps if event.delta > 0 else steps, "units")
         return "break"
 
     def _history_changed(self, _event=None):
@@ -152,9 +174,46 @@ class MeetingChat(tk.Frame):
 
     def _canvas_changed(self, event):
         self.canvas.itemconfigure(self._history_window, width=max(1, event.width))
-        width = max(220, event.width - self.theme.space_lg * 2)
-        for message in self._message_widgets:
-            message.configure(width=width)
+        self._refresh_message_widths(event.width)
+        self._refresh_empty_width(event.width)
+
+    def _refresh_message_widths(self, canvas_width=None):
+        width = canvas_width if canvas_width is not None else self.canvas.winfo_width()
+        width = max(220, width - self.theme.space_lg * 2)
+        for message, inset in self._message_widgets:
+            try:
+                if message.winfo_exists():
+                    message.configure(width=max(
+                        140, width - inset - self.theme.space_sm * 2 - self.theme.space_xs,
+                    ))
+            except tk.TclError:
+                continue
+
+    def _message_width(self):
+        width = self.canvas.winfo_width()
+        if width <= 1:
+            return 520
+        return max(140, width - self.theme.space_lg * 2 - self.theme.space_sm * 2 - self.theme.space_xs)
+
+    def _composer_changed(self, event):
+        width = max(180, event.width - self.theme.space_sm * 2)
+        for widget in (self._status_label, self._keyboard_hint, self._empty_title):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(wraplength=width)
+            except tk.TclError:
+                # Tk may deliver a queued Configure event while a parent
+                # window is tearing down its child widgets.
+                continue
+
+    def _refresh_empty_width(self, canvas_width):
+        width = max(180, canvas_width - self.theme.space_lg * 2)
+        for widget in (self._empty_title, self._empty_subtitle):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(wraplength=width)
+            except tk.TclError:
+                continue
 
     def _set_empty(self, visible):
         if visible:
@@ -185,10 +244,21 @@ class MeetingChat(tk.Frame):
     def _new(self):
         self.on_new()
 
+    def _use_suggestion(self, value):
+        self.set_question(value)
+        self.focus_composer()
+
     def set_controls(self, *, busy=False, can_save=True, can_send=True):
         self._busy, self._can_save, self._can_send = bool(busy), bool(can_save), bool(can_send)
         self.send_button.configure(state="normal" if self._can_send and not self._busy else "disabled")
         self.new_button.configure(state="normal" if not self._busy else "disabled")
+        for status, copy_button, save_button, saving, saved in self._answer_controls:
+            complete = status == "complete"
+            copy_button.configure(state="normal" if complete else "disabled")
+            save_button.configure(
+                state="disabled" if self._busy or saving or saved or not complete or not self._can_save
+                else "normal",
+            )
 
     def set_height(self, px):
         self.configure(height=max(240, int(px)))
@@ -200,7 +270,6 @@ class MeetingChat(tk.Frame):
     def set_question(self, text):
         self.composer.delete("1.0", "end")
         self.composer.insert("1.0", str(text))
-        self.focus_composer()
 
     def focus_composer(self):
         self.composer.focus_set()
@@ -210,12 +279,14 @@ class MeetingChat(tk.Frame):
             if child is not self._empty:
                 child.destroy()
         self._message_widgets = []
+        self._answer_controls = []
         turns = list(turns or ())
         self._set_empty(not turns)
         for turn in turns:
             self._render_turn(turn)
         self._history.update_idletasks()
         self._history_changed()
+        self._refresh_message_widths()
         if turns:
             self.canvas.yview_moveto(1.0)
 
@@ -223,12 +294,14 @@ class MeetingChat(tk.Frame):
         turn_id = turn.get("id")
         outer = tk.Frame(self._history, bg=self.theme.surface)
         outer.pack(fill="x", padx=self.theme.space_lg, pady=(self.theme.space_sm, 0))
-        question = tk.Label(
+        question = tk.Message(
             outer, text=str(turn.get("question", "")), bg=self.theme.surface_alt,
             fg=self.theme.text_strong, font=self.theme.font(), justify="left", anchor="w",
-            wraplength=520, padx=self.theme.space_sm, pady=self.theme.space_xs,
+            width=max(180, self._message_width() - self.theme.space_xl),
+            padx=self.theme.space_sm, pady=self.theme.space_xs,
         )
         question.pack(anchor="e", padx=(self.theme.space_xl, 0))
+        self._message_widgets.append((question, self.theme.space_xl))
         tk.Label(outer, text="Você", bg=self.theme.surface, fg=self.theme.text_muted,
                  font=self.theme.font(8), anchor="e").pack(anchor="e")
 
@@ -243,30 +316,46 @@ class MeetingChat(tk.Frame):
             padx=self.theme.space_sm, pady=self.theme.space_sm,
         )
         message.pack(fill="x")
-        self._message_widgets.append(message)
+        self._message_widgets.append((message, 0))
         if turn.get("status") == "error":
-            tk.Label(answer_box, text=str(turn.get("error") or "Não foi possível responder."),
-                     bg=self.theme.surface, fg=self.theme.danger, font=self.theme.font(8),
-                     justify="left", anchor="w", wraplength=520).pack(fill="x", pady=(2, 0))
+            error_message = tk.Message(
+                answer_box, text=str(turn.get("error") or "Não foi possível responder."),
+                bg=self.theme.surface, fg=self.theme.danger, font=self.theme.font(8),
+                justify="left", anchor="w", width=self._message_width(),
+            )
+            error_message.pack(fill="x", pady=(2, 0))
+            self._message_widgets.append((error_message, 0))
         uncertainty = str(turn.get("uncertainty") or "").strip()
+        uncertainty = UNCERTAINTY_LABELS.get(uncertainty.casefold(), uncertainty)
         if uncertainty:
-            tk.Label(answer_box, text=uncertainty, bg=self.theme.surface,
-                     fg=self.theme.warning, font=self.theme.font(8),
-                     justify="left", anchor="w", wraplength=520).pack(fill="x", pady=(2, 0))
-        actions = tk.Frame(answer_box, bg=self.theme.surface)
-        actions.pack(fill="x", pady=(self.theme.space_xs, 0))
+            uncertainty_message = tk.Message(
+                answer_box, text=uncertainty, bg=self.theme.surface,
+                fg=self.theme.warning, font=self.theme.font(8),
+                justify="left", anchor="w", width=self._message_width(),
+            )
+            uncertainty_message.pack(fill="x", pady=(2, 0))
+            self._message_widgets.append((uncertainty_message, 0))
+        sources = tk.Frame(answer_box, bg=self.theme.surface)
+        sources.pack(fill="x", pady=(self.theme.space_xs, 0))
         for index, citation in enumerate(turn.get("citations") or (), 1):
-            self._button(actions, f"Fonte {index}", lambda value=citation: self.on_source(turn_id, value)).pack(
+            self._button(sources, f"Fonte {index}", lambda value=citation: self.on_source(turn_id, value)).pack(
                 anchor="w", pady=1,
             )
+        actions = tk.Frame(answer_box, bg=self.theme.surface)
+        actions.pack(fill="x", pady=(self.theme.space_xs, 0))
         copy = self._button(actions, "Copiar", lambda: self.on_copy(turn_id))
         copy.pack(side="left", pady=1)
         saving = bool(turn.get("saving"))
         saved = bool(turn.get("saved"))
         save = self._button(actions, "Salvando…" if saving else ("Salvo" if saved else "Salvar"),
                             lambda: self.on_save(turn_id))
-        save.configure(state="disabled" if saving or saved or not self._can_save else "normal")
+        status = str(turn.get("status") or "")
+        complete = status == "complete"
+        copy.configure(state="normal" if complete else "disabled")
+        save.configure(state=("disabled" if self._busy or saving or saved or not complete or not self._can_save
+                              else "normal"))
         save.pack(side="left", padx=(self.theme.space_xs, 0), pady=1)
+        self._answer_controls.append((status, copy, save, saving, saved))
         self._bind_history_scroll_tree(outer)
 
 

@@ -18,6 +18,9 @@ screen builders use those tokens instead of literal colors or fonts.
   unavailable models are skipped without downloads. Summaries are readable and
   saved automatically, with Copy and Regenerate actions. Advanced reports and
   cross-recording questions appear when requested.
+  **Chat** keeps a temporary conversation for each recent recording, with a
+  bottom composer and sources, Copy, and Save on each answer. Follow-ups receive
+  bounded context; transcript segments remain the source of factual evidence.
 - **Ditado:** choose the active model and language, then use the hotkey. Model
   downloads and privacy controls belong in settings. Keep history beside the
   primary save action; corrections, command reload, licenses, and model removal

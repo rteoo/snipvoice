@@ -311,6 +311,7 @@ class PackagingExcludeTests(unittest.TestCase):
             "--enable-libmp3lame",
             "--enable-encoder=libmp3lame",
             "--enable-muxer=mp3",
+            "--enable-filter=abuffer,abuffersink,aformat,anull,aresample",
         ):
             self.assertIn(flag, recipe_text)
         self.assertIn('LAME_VERSION = "3.100"', recipe_text)

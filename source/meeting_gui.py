@@ -238,29 +238,64 @@ def format_recording_status(snapshot):
     return " · ".join(parts)
 
 
+def _endpoint_name(device, track):
+    name = " ".join(str(device.get("name") or "").split())
+    if name and name != device.get("id"):
+        return name
+    return "Dispositivo de entrada" if track == "microphone" else "Dispositivo de saída"
+
+
 def endpoint_options(devices, track, selection):
     """Keep a missing manually selected endpoint explicit and pinned."""
-    options = [("Padrão do sistema · multimídia", EndpointSelection()),
-               ("Padrão do sistema · comunicações", EndpointSelection(default_role="communications"))]
+    devices = [device for device in devices if isinstance(device, dict)
+               and device.get("kind") == track
+               and isinstance(device.get("id"), str) and device["id"]]
+    options = []
+    for label, flag, role in (("Padrão do sistema", "default", "multimedia"),
+                              ("Padrão para chamadas", "communications_default", "communications")):
+        device = next((device for device in devices if device.get(flag) is True), None)
+        if device is not None:
+            label += " · " + _endpoint_name(device, track)
+        options.append((label, EndpointSelection(default_role=role)))
     used_labels = {label for label, _selection in options}
-    generic_label = "Dispositivo de entrada" if track == "microphone" else "Dispositivo de saída"
     for device in devices:
-        if (isinstance(device, dict) and device.get("kind") == track
-                and isinstance(device.get("id"), str) and device["id"]):
-            identifier = device["id"]
-            name = str(device.get("name") or "").strip()
-            base_label = name if name and name != identifier else generic_label
-            label = base_label
-            suffix = 2
-            while label in used_labels:
-                label = f"{base_label} ({suffix})"
-                suffix += 1
-            used_labels.add(label)
-            options.append((label, EndpointSelection("manual", identifier)))
+        base_label = _endpoint_name(device, track)
+        label = base_label
+        suffix = 2
+        while label in used_labels:
+            label = f"{base_label} ({suffix})"
+            suffix += 1
+        used_labels.add(label)
+        options.append((label, EndpointSelection("manual", device["id"])))
     if (selection.mode == "manual"
             and not any(item.endpoint_id == selection.endpoint_id for _, item in options)):
-        options.append(("Dispositivo selecionado indisponível", selection))
+        label = "Dispositivo selecionado indisponível"
+        while label in used_labels:
+            label += " · desconectado"
+        options.append((label, selection))
     return options
+
+
+def endpoint_hint(devices, track, selection, *, enabled=True, loaded=True):
+    """Explain automatic routing versus a pinned endpoint beside its selector."""
+    if not enabled:
+        return "Desativado · não será incluído na próxima gravação.", False
+    if not loaded:
+        return "Buscando dispositivos…", False
+    available = [device for device in devices if isinstance(device, dict)
+                 and device.get("kind") == track
+                 and isinstance(device.get("id"), str) and device["id"]]
+    if selection.mode == "manual":
+        if not any(device["id"] == selection.endpoint_id for device in available):
+            return "Dispositivo desconectado. Conecte-o ou escolha outro.", True
+        return "Usa sempre este dispositivo, mesmo se o padrão do sistema mudar.", False
+    flag = "communications_default" if selection.default_role == "communications" else "default"
+    if not available or (any(flag in device for device in available)
+                         and not any(device.get(flag) is True for device in available)):
+        return "Nenhum dispositivo padrão disponível. Conecte um ou escolha outro.", True
+    if selection.default_role == "communications":
+        return "Automático · acompanha o dispositivo padrão para chamadas.", False
+    return "Automático · acompanha o dispositivo padrão do sistema.", False
 
 
 def validated_settings(raw, dictation=DEFAULT_DICTATION_HOTKEY, command=DEFAULT_COMMAND_HOTKEY):
@@ -442,6 +477,7 @@ class MeetingWindow:
         self.raw_settings = {}
         self.settings = resolve_meeting_settings({})
         self.devices = []
+        self.devices_loaded = False
         self.options = {}
         self.offset = 0
         self.library_cursor = None
@@ -1037,26 +1073,46 @@ class MeetingWindow:
         sources.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, self.ui.space_sm))
         sources.columnconfigure(1, weight=1)
         self.source_checks = {}
+        self.endpoint_hints = {}
         for row, (track, label, variable) in enumerate((
                 ("microphone", "Microfone", self.input_enabled),
                 ("system", "Áudio do sistema", self.output_enabled))):
             control = tk.Checkbutton(
                 sources, text=label, variable=variable, command=self._source_toggled,
-                font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
+                font=self.ui.font(9, "bold"), **self.ui.checkbutton_colors(self.ui.card),
             )
-            control.grid(row=row, column=0, sticky="w", padx=(0, self.ui.space_md), pady=2)
+            line = row * 3
+            control.grid(row=line, column=0, sticky="w", padx=(0, self.ui.space_lg))
             combo = ttk.Combobox(
                 sources, textvariable=self.endpoint_vars[track], state="readonly",
+                style=f"{track}.Device.TCombobox", font=self.ui.font(10), width=42, height=8,
+                takefocus=True,
             )
-            combo.grid(row=row, column=1, sticky="ew", pady=2)
+            combo.configure(postcommand=lambda box=combo: ui_theme.configure_combobox_popdown(
+                box, self.ui, fit_values=True,
+            ))
+            combo.grid(row=line, column=1, sticky="ew", pady=(2, 0))
             combo.bind("<<ComboboxSelected>>", self._source_selection_changed)
+            self._label(
+                sources, "Sua voz" if track == "microphone" else "Sons dos aplicativos",
+                bg=self.ui.card, fg=self.ui.text_muted, anchor="w", font=self.ui.font(8),
+            ).grid(row=line + 1, column=0, sticky="nw", padx=(4, self.ui.space_lg), pady=(4, 0))
+            hint = self._wrap_label(
+                sources, "", bg=self.ui.card, fg=self.ui.text_muted, anchor="w",
+                justify="left", font=self.ui.font(8),
+            )
+            hint.grid(row=line + 1, column=1, sticky="ew", pady=(4, self.ui.space_sm))
+            self.endpoint_hints[track] = hint
+            if row == 0:
+                tk.Frame(sources, bg=self.ui.divider, height=1).grid(
+                    row=line + 2, column=0, columnspan=2, sticky="ew", pady=(0, self.ui.space_sm),
+                )
             self.source_checks[track] = control
             self.endpoint_boxes[track] = combo
-        self._button(sources, "Atualizar dispositivos", self.refresh_devices).grid(
-            row=2, column=0, sticky="w", pady=(4, 0),
-        )
+        self.device_refresh_button = self._button(sources, "Atualizar dispositivos", self.refresh_devices)
+        self.device_refresh_button.grid(row=6, column=0, sticky="w", pady=(4, 0))
         self.preview_button = self._button(sources, "Testar fontes", self.preview_sources)
-        self.preview_button.grid(row=2, column=1, sticky="e", pady=(4, 0))
+        self.preview_button.grid(row=6, column=1, sticky="e", pady=(4, 0))
         self.waveform = MeetingWaveform(
             activity, theme=self.ui, height=140,
             track_labels={"microphone": "Microfone", "system": "Áudio do sistema"},
@@ -1736,7 +1792,7 @@ class MeetingWindow:
         self._button(report_actions, "Ir à fonte", self.jump_to_report_citation).pack(side="left", padx=(6, 0))
 
         self.meeting_chat = MeetingChat(
-            ask_page, self.ui, on_send=self.ask_this_meeting, on_new=self.new_chat,
+            ask_page, self.ui, on_send=lambda _text: self.ask_this_meeting(), on_new=self.new_chat,
             on_save=self.save_answer, on_copy=self.copy_chat_answer,
             on_source=self.jump_to_ask_citation,
         )
@@ -2825,6 +2881,7 @@ class MeetingWindow:
         )
         if not submitted:
             self._answer_loaded(session_id, request, question, None, "Fila de operações ocupada.")
+        self.meeting_chat.focus_composer()
 
     def _answer_loaded(self, session_id, request, question, value, error):
         if self.closed or self.ask_pending != (session_id, request):
@@ -3072,7 +3129,20 @@ class MeetingWindow:
         self.settings_sections.select("recording")
 
     def _source_selection_changed(self, _event=None):
+        self._refresh_source_hints()
         self.preview_status.set("Fontes alteradas. Teste novamente antes de gravar.")
+
+    def _refresh_source_hints(self):
+        for track, hint in getattr(self, "endpoint_hints", {}).items():
+            variable = self.input_enabled if track == "microphone" else self.output_enabled
+            selection = dict(self.options.get(track, [])).get(
+                self.endpoint_vars[track].get(), getattr(self.settings, track),
+            )
+            text, unavailable = endpoint_hint(
+                self.devices, track, selection, enabled=bool(variable.get()),
+                loaded=getattr(self, "devices_loaded", False),
+            )
+            hint.configure(text=text, fg=self.ui.warning if unavailable else self.ui.text_muted)
 
     def _sync_source_controls(self):
         enabled = {"microphone": bool(self.input_enabled.get()),
@@ -3082,6 +3152,7 @@ class MeetingWindow:
         self.voice_boost_check.configure(state="normal" if enabled["microphone"] else "disabled")
         if not enabled["microphone"]:
             self.voice_boost.set(False)
+        self._refresh_source_hints()
 
 
     def choose_destination(self):
@@ -3156,8 +3227,11 @@ class MeetingWindow:
         self._submit("save_settings", save, self._saved_settings)
 
     def refresh_devices(self):
-        self.preview_status.set("Dispositivos atualizados. Teste as fontes antes de gravar.")
-        self._submit("devices", self.controller.devices, self._devices_loaded)
+        self.preview_status.set("Buscando dispositivos…")
+        self.device_refresh_button.configure(text="Atualizando…", state="disabled")
+        if not self._submit("devices", self.controller.devices, self._devices_loaded):
+            self.device_refresh_button.configure(text="Atualizar dispositivos", state="normal")
+            self.preview_status.set("Aguarde a operação atual e tente atualizar novamente.")
 
     @staticmethod
     def _source_signature(settings):
@@ -3200,12 +3274,16 @@ class MeetingWindow:
         self.preview_status.set(" · ".join(parts) + ".")
 
     def _devices_loaded(self, devices, error):
+        self.device_refresh_button.configure(text="Atualizar dispositivos", state="normal")
         if error:
             self._remember_operation_error(error)
             self.status.set("Não foi possível atualizar os dispositivos. Veja os detalhes na aba Gravação.")
+            self.preview_status.set("Não foi possível atualizar os dispositivos. Tente novamente.")
             return
         self.devices = list(islice(devices or [], 256))
+        self.devices_loaded = True
         self._render_devices()
+        self.preview_status.set("Dispositivos atualizados. Teste as fontes antes de gravar.")
 
     def _render_devices(self):
         for track in ("microphone", "system"):
