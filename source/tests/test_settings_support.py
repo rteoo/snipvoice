@@ -117,6 +117,15 @@ class RuntimeSettingsNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["stock_cache_seconds"], 3600)
         self.assertEqual(normalized["sync_export_dir"], "C:/sync")
 
+    def test_language_accepts_supported_codes_only(self):
+        for value in ("pt-BR", "en-US"):
+            with self.subTest(value=value):
+                normalized, invalid = normalize_runtime_settings({"language": value})
+                self.assertEqual((normalized["language"], invalid), (value, {}))
+        normalized, invalid = normalize_runtime_settings({"language": "fr"})
+        self.assertEqual(normalized["language"], "pt-BR")
+        self.assertEqual(invalid, {"language": "pt-BR"})
+
 
 if __name__ == "__main__":
     unittest.main()

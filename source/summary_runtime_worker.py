@@ -5,6 +5,7 @@ import io
 import os
 import sys
 
+from i18n import N_
 from summary_runtime import (
     MAX_OUTPUT_BYTES, MAX_WIRE_BYTES, NativeSummaryRuntime, SummaryOutputLimitError,
 )
@@ -13,7 +14,7 @@ from summary_runtime import (
 def _send(stream, response):
     line = json.dumps(response, ensure_ascii=False, allow_nan=False)
     if len(line.encode("utf-8")) > MAX_WIRE_BYTES:
-        line = json.dumps({"ok": False, "error": "A resposta do runtime local excedeu o limite seguro."})
+        line = json.dumps({"ok": False, "error": N_("A resposta do runtime local excedeu o limite seguro.")})
     stream.write(line + "\n")
     stream.flush()
 
@@ -26,15 +27,15 @@ def serve(input_stream, output_stream):
             if not line:
                 return
             if len(line.encode("utf-8")) > MAX_OUTPUT_BYTES or not line.endswith("\n"):
-                _send(output_stream, {"ok": False, "error": "A solicitação de resumo excedeu o limite seguro."})
+                _send(output_stream, {"ok": False, "error": N_("A solicitação de resumo excedeu o limite seguro.")})
                 return
             try:
                 request = json.loads(line)
             except ValueError:
-                _send(output_stream, {"ok": False, "error": "A solicitação de resumo é inválida."})
+                _send(output_stream, {"ok": False, "error": N_("A solicitação de resumo é inválida.")})
                 return
             if not isinstance(request, dict):
-                _send(output_stream, {"ok": False, "error": "A solicitação de resumo é inválida."})
+                _send(output_stream, {"ok": False, "error": N_("A solicitação de resumo é inválida.")})
                 return
             kind = request.get("type")
             if kind == "close":
@@ -45,7 +46,7 @@ def serve(input_stream, output_stream):
                     if not callable(Llama):
                         raise ImportError("Llama is unavailable")
                 except (ImportError, OSError):
-                    _send(output_stream, {"ok": False, "error": "O runtime local de resumo não está disponível."})
+                    _send(output_stream, {"ok": False, "error": N_("O runtime local de resumo não está disponível.")})
                     return
                 _send(output_stream, {"ok": True})
                 continue
@@ -55,12 +56,12 @@ def serve(input_stream, output_stream):
                 if (not isinstance(path, str) or not 0 < len(path) <= 4096
                         or isinstance(context, bool) or not isinstance(context, int)
                         or not 1 <= context <= 131072):
-                    _send(output_stream, {"ok": False, "error": "O modelo local de resumo é inválido."})
+                    _send(output_stream, {"ok": False, "error": N_("O modelo local de resumo é inválido.")})
                     return
                 try:
                     runtime = NativeSummaryRuntime(path, context)
                 except Exception:
-                    _send(output_stream, {"ok": False, "error": "Não foi possível abrir o modelo local de resumo."})
+                    _send(output_stream, {"ok": False, "error": N_("Não foi possível abrir o modelo local de resumo.")})
                     return
                 _send(output_stream, {"ok": True})
                 continue
@@ -69,7 +70,7 @@ def serve(input_stream, output_stream):
                 evidence = request.get("evidence")
                 disable = request.get("disable_thinking")
                 if not isinstance(prompt, str) or not isinstance(evidence, list) or not isinstance(disable, bool):
-                    _send(output_stream, {"ok": False, "error": "A solicitação de resumo é inválida."})
+                    _send(output_stream, {"ok": False, "error": N_("A solicitação de resumo é inválida.")})
                     return
                 try:
                     result = runtime.generate(prompt, evidence, disable_thinking=disable)
@@ -79,11 +80,11 @@ def serve(input_stream, output_stream):
                     _send(output_stream, {"ok": False, "error": str(exc)})
                     return
                 except Exception:
-                    _send(output_stream, {"ok": False, "error": "O runtime local não conseguiu gerar o resumo."})
+                    _send(output_stream, {"ok": False, "error": N_("O runtime local não conseguiu gerar o resumo.")})
                     return
                 _send(output_stream, {"ok": True, "text": result})
                 continue
-            _send(output_stream, {"ok": False, "error": "A solicitação de resumo é inválida."})
+            _send(output_stream, {"ok": False, "error": N_("A solicitação de resumo é inválida.")})
             return
     finally:
         if runtime is not None:

@@ -50,16 +50,22 @@ AppMutex=SnipvoiceSingleton
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[CustomMessages]
+brazilianportuguese.StartupTask=Iniciar o %1 automaticamente com o Windows
+english.StartupTask=Start %1 automatically with Windows
+brazilianportuguese.StartupGroup=Inicialização:
+english.StartupGroup=Startup:
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
-Name: "startup"; Description: "Iniciar o {#MyAppName} automaticamente com o Windows"; GroupDescription: "Inicialização:"; Flags: unchecked
+Name: "startup"; Description: "{cm:StartupTask,{#MyAppName}}"; GroupDescription: "{cm:StartupGroup}"; Flags: unchecked
 
 [Files]
 Source: "{#MyDistDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
 

@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 
+from i18n import N_, tr
 from voice_catalog import DEFAULT_PROFILE, LANGUAGE_AUTO, is_selectable_profile, is_known_language
 from voice_hotkey import parse_chord
 from summary_catalog import DEFAULT_SUMMARY_MODEL, is_known_summary_model
@@ -44,7 +45,7 @@ def resolve_selection(value):
     endpoint = value.get("endpoint_id")
     if (not isinstance(endpoint, str) or not endpoint.strip()
             or len(endpoint) > 1024 or any(ord(c) < 32 for c in endpoint)):
-        raise ValueError("Selecione novamente o dispositivo de áudio manual.")
+        raise ValueError(tr("Selecione novamente o dispositivo de áudio manual."))
     return EndpointSelection("manual", endpoint, role)
 
 
@@ -53,7 +54,7 @@ def _resolve_bool(value, name, default=False):
     if value is _MISSING:
         return default
     if not isinstance(value, bool):
-        raise ValueError(f"A opção {name} deve ser verdadeira ou falsa.")
+        raise ValueError(tr("A opção {name} deve ser verdadeira ou falsa.", name=tr(name)))
     return value
 
 
@@ -62,20 +63,20 @@ def _resolve_destination(value):
     if value is _MISSING:
         return ""
     if not isinstance(value, str):
-        raise ValueError("A pasta de gravações é inválida.")
+        raise ValueError(tr("A pasta de gravações é inválida."))
     destination = value.strip()
     if not destination:
         return ""
     if (len(destination) > MAX_DESTINATION_LENGTH
             or any(ord(char) < 32 for char in destination)
             or not os.path.isabs(destination)):
-        raise ValueError("A pasta de gravações é inválida.")
+        raise ValueError(tr("A pasta de gravações é inválida."))
     try:
         # normpath is deliberately lexical: the caller is responsible for
         # deciding whether the destination exists and for creating it later.
         return os.path.normpath(destination)
     except (OSError, ValueError):
-        raise ValueError("A pasta de gravações é inválida.")
+        raise ValueError(tr("A pasta de gravações é inválida."))
 
 
 @dataclass(frozen=True)
@@ -112,17 +113,17 @@ def resolve_meeting_settings(value):
     data = value if isinstance(value, dict) else {}
     sources = data.get("meeting_sources", "both")
     if sources not in SOURCES:
-        raise ValueError("Escolha microfone, áudio do sistema ou ambos.")
+        raise ValueError(tr("Escolha microfone, áudio do sistema ou ambos."))
     hotkey = data.get("meeting_hotkey", "")
     if not isinstance(hotkey, str):
-        raise ValueError("O atalho de gravação é inválido.")
+        raise ValueError(tr("O atalho de gravação é inválido."))
     hotkey = parse_chord(hotkey).spec if hotkey.strip() else ""
     profile = data.get("meeting_profile", DEFAULT_PROFILE)
     if not is_selectable_profile(profile):
-        raise ValueError("Selecione um modelo local disponível para gravações.")
+        raise ValueError(tr("Selecione um modelo local disponível para gravações."))
     language = data.get("meeting_language", LANGUAGE_AUTO)
     if not is_known_language(language):
-        raise ValueError("Selecione um idioma de transcrição válido.")
+        raise ValueError(tr("Selecione um idioma de transcrição válido."))
     model = data.get("meeting_summary_model", DEFAULT_SUMMARY_MODEL)
     # Migrate previous built-in IDs and former free-form Ollama settings.
     if isinstance(model, str):
@@ -141,28 +142,28 @@ def resolve_meeting_settings(value):
     default_input, default_output = source_toggles[sources]
     input_value = data.get("meeting_input_enabled", _MISSING)
     output_value = data.get("meeting_output_enabled", _MISSING)
-    input_enabled = _resolve_bool(input_value, "de entrada", default_input)
-    output_enabled = _resolve_bool(output_value, "de saída", default_output)
+    input_enabled = _resolve_bool(input_value, N_("de entrada"), default_input)
+    output_enabled = _resolve_bool(output_value, N_("de saída"), default_output)
     # Accept the track-oriented spelling used by early local recorder builds.
     if "meeting_microphone_enabled" in data and "meeting_input_enabled" not in data:
         input_enabled = _resolve_bool(data["meeting_microphone_enabled"],
-                                      "de entrada", default_input)
+                                      N_("de entrada"), default_input)
     if "meeting_system_enabled" in data and "meeting_output_enabled" not in data:
         output_enabled = _resolve_bool(data["meeting_system_enabled"],
-                                       "de saída", default_output)
+                                       N_("de saída"), default_output)
     if not input_enabled and not output_enabled:
-        raise ValueError("Ative o microfone, o áudio do sistema ou ambos.")
+        raise ValueError(tr("Ative o microfone, o áudio do sistema ou ambos."))
     sources = ("both" if input_enabled and output_enabled else
                "microphone" if input_enabled else "system")
 
     auto_transcribe = _resolve_bool(data.get("meeting_auto_transcribe", _MISSING),
-                                    "de transcrição automática")
+                                    N_("de transcrição automática"))
     auto_summary = _resolve_bool(data.get("meeting_auto_summary", _MISSING),
-                                 "de resumo automático")
+                                 N_("de resumo automático"))
     if auto_summary and not auto_transcribe:
-        raise ValueError("O resumo automático depende da transcrição automática.")
+        raise ValueError(tr("O resumo automático depende da transcrição automática."))
     voice_boost = _resolve_bool(data.get("meeting_voice_boost", _MISSING),
-                                "de reforço do microfone", default=True)
+                                N_("de reforço do microfone"), default=True)
     return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),
                            resolve_selection(data.get("meeting_system")), hotkey,
                            profile, language, model, destination, input_enabled,
@@ -181,4 +182,4 @@ def validate_hotkey_conflicts(settings):
         other = parse_chord(settings.get(name, default))
         if chord.key == other.key and (chord.modifiers <= other.modifiers
                                        or other.modifiers <= chord.modifiers):
-            raise ValueError("O atalho de gravação se sobrepõe a um atalho de ditado ou comando.")
+            raise ValueError(tr("O atalho de gravação se sobrepõe a um atalho de ditado ou comando."))

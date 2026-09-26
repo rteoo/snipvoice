@@ -1,5 +1,6 @@
 """Pinned llama.cpp models for local meeting summaries."""
 
+from i18n import N_
 
 DEFAULT_SUMMARY_MODEL = "qwen3.5-2b-q4"
 
@@ -8,7 +9,7 @@ SUMMARY_CATALOG = (
         "id": "qwen3.5-0.8b-q4",
         "profile": "qwen3.5-0.8b-q4",
         "name": "Qwen3.5 0.8B",
-        "description": "Economia máxima · para hardware limitado, com menor qualidade",
+        "description": N_("Economia máxima · para hardware limitado, com menor qualidade"),
         "filename": "Qwen3.5-0.8B-Q4_K_M.gguf",
         "url": (
             "https://huggingface.co/lmstudio-community/Qwen3.5-0.8B-GGUF/resolve/"
@@ -29,7 +30,7 @@ SUMMARY_CATALOG = (
         "id": DEFAULT_SUMMARY_MODEL,
         "profile": DEFAULT_SUMMARY_MODEL,
         "name": "Qwen3.5 2B",
-        "description": "Recomendado · melhor equilíbrio para português, inglês e uso local",
+        "description": N_("Recomendado · melhor equilíbrio para português, inglês e uso local"),
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "url": (
             "https://huggingface.co/lmstudio-community/Qwen3.5-2B-GGUF/resolve/"
@@ -50,7 +51,7 @@ SUMMARY_CATALOG = (
         "id": "qwen3.5-4b-q4",
         "profile": "qwen3.5-4b-q4",
         "name": "Qwen3.5 4B",
-        "description": "Mais qualidade · maior uso de memória e processamento",
+        "description": N_("Mais qualidade · maior uso de memória e processamento"),
         "filename": "Qwen3.5-4B-Q4_K_M.gguf",
         "url": (
             "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/"
@@ -71,7 +72,7 @@ SUMMARY_CATALOG = (
         "id": "lfm2.5-2.6b-q4",
         "profile": "lfm2.5-2.6b-q4",
         "name": "LiquidAI LFM2.5-2.6B",
-        "description": "Alternativa eficiente · modelo oficial para português e uso local",
+        "description": N_("Alternativa eficiente · modelo oficial para português e uso local"),
         "filename": "LFM2.5-2.6B-Q4_K_M.gguf",
         "url": (
             "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/"
@@ -87,9 +88,9 @@ SUMMARY_CATALOG = (
             "84022ce711b28455e8c4fc364ce68c00cf995875/LICENSE"
         ),
         "license_notice": (
-            "Esta licença não é MIT nem Apache-2.0. O uso comercial por pessoa jurídica "
-            "com receita anual de US$ 10 milhões ou mais não é licenciado. Cópias "
-            "redistribuídas devem incluir a licença."
+            N_("Esta licença não é MIT nem Apache-2.0. O uso comercial por pessoa jurídica "
+               "com receita anual de US$ 10 milhões ou mais não é licenciado. Cópias "
+               "redistribuídas devem incluir a licença.")
         ),
         "upstream_model": "LiquidAI/LFM2.5-2.6B",
         "quant_source": "LiquidAI/LFM2.5-2.6B-GGUF",
@@ -100,7 +101,7 @@ SUMMARY_CATALOG = (
         "id": "gemma-4-e2b-q4",
         "profile": "gemma-4-e2b-q4",
         "name": "Gemma 4 E2B",
-        "description": "2B efetivos / 5B totais · modelo oficial do Google, download maior",
+        "description": N_("2B efetivos / 5B totais · modelo oficial do Google, download maior"),
         "filename": "gemma-4-E2B_q4_0-it.gguf",
         "url": (
             "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/"
@@ -123,7 +124,7 @@ SUMMARY_CATALOG = (
         "id": "gemma-4-e4b-q4",
         "profile": "gemma-4-e4b-q4",
         "name": "Gemma 4 E4B",
-        "description": "4,5B efetivos / 8B totais · mais qualidade e maior uso de memória",
+        "description": N_("4,5B efetivos / 8B totais · mais qualidade e maior uso de memória"),
         "filename": "gemma-4-E4B_q4_0-it.gguf",
         "url": (
             "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/resolve/"

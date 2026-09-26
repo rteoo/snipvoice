@@ -4,6 +4,7 @@ import math
 import struct
 import threading
 
+from i18n import N_, tr
 from voice_provider import LocalVoiceProvider
 from voice_resampler import StreamingResampler
 
@@ -24,9 +25,9 @@ class MeetingTranscriptionError(RuntimeError):
 
 def _pcm_to_mono(payload, channels):
     if not isinstance(channels, int) or channels < 1:
-        raise MeetingTranscriptionError("O formato do canal de áudio é inválido.")
+        raise MeetingTranscriptionError(tr("O formato do canal de áudio é inválido."))
     if len(payload) % (_FLOAT.size * channels):
-        raise MeetingTranscriptionError("O bloco de áudio está incompleto.")
+        raise MeetingTranscriptionError(tr("O bloco de áudio está incompleto."))
     values = []
     for offset in range(0, len(payload), _FLOAT.size * channels):
         total = 0.0
@@ -49,7 +50,7 @@ class MeetingTranscriber:
         self.provider = provider
         self.resampler_factory = resampler_factory
         if not isinstance(chunk_seconds, (int, float)) or not 0.1 <= chunk_seconds <= 30.0:
-            raise ValueError("O tamanho do bloco de transcrição é inválido.")
+            raise ValueError(tr("O tamanho do bloco de transcrição é inválido."))
         self.chunk_seconds = float(chunk_seconds)
         self._max_chunk_samples = min(MAX_CHUNK_SAMPLES, int(TARGET_RATE * self.chunk_seconds))
         self._lock = threading.Lock()
@@ -58,7 +59,7 @@ class MeetingTranscriber:
         """Transcribe all saved tracks, returning the processing revision ID."""
         cancel_event = cancel_event or threading.Event()
         if not self._lock.acquire(blocking=False):
-            raise MeetingTranscriptionError("Já existe uma transcrição em andamento.")
+            raise MeetingTranscriptionError(tr("Já existe uma transcrição em andamento."))
         if revision is None:
             try:
                 revision = self.store.begin_revision(session_id, profile, language)
@@ -75,13 +76,13 @@ class MeetingTranscriber:
             revision_item = next((item for item in metadata.get("revisions", []) if item.get("id") == revision), None)
             if revision_item is None:
                 self._lock.release()
-                raise ValueError("A revisão de transcrição não foi encontrada.")
+                raise ValueError(tr("A revisão de transcrição não foi encontrada."))
             if revision_item.get("status") not in {"processing", "pending", "failed", "cancelled"}:
                 self._lock.release()
-                raise ValueError("A revisão de transcrição já foi encerrada.")
+                raise ValueError(tr("A revisão de transcrição já foi encerrada."))
             if revision_item.get("profile") != profile or revision_item.get("language") != language:
                 self._lock.release()
-                raise ValueError("Retome com o mesmo modelo e idioma ou crie uma nova revisão.")
+                raise ValueError(tr("Retome com o mesmo modelo e idioma ou crie uma nova revisão."))
             # An interrupted JSONL may end in an incomplete line. Preserve its bytes
             # and copy only the valid prefix into a fresh revision before appending.
             previous = revision
@@ -94,7 +95,7 @@ class MeetingTranscriber:
                         self.store.add_transcript(session_id, revision, segment)
                         completed_ids.add(segment["id"])
                 self.store.finish_revision(session_id, previous, "superseded",
-                                           "Retomada em uma nova revisão; os resultados originais foram preservados.")
+                                           N_("Retomada em uma nova revisão; os resultados originais foram preservados."))
             except Exception:
                 self._lock.release()
                 raise
@@ -124,7 +125,7 @@ class MeetingTranscriber:
                 self.store.finish_revision(session_id, revision, "completed")
                 return revision
             except _Cancelled:
-                self.store.finish_revision(session_id, revision, "cancelled", "A transcrição foi cancelada.")
+                self.store.finish_revision(session_id, revision, "cancelled", N_("A transcrição foi cancelada."))
                 self.provider.cancel()
                 return revision
             except Exception as exc:
@@ -135,7 +136,7 @@ class MeetingTranscriber:
                 self.provider.unload()
             except Exception as exc:
                 raise MeetingTranscriptionError(
-                    "A transcrição terminou, mas o modelo local não foi liberado; feche a reunião antes de tentar outra.",
+                    tr("A transcrição terminou, mas o modelo local não foi liberado; feche a reunião antes de tentar outra."),
                     resource_live=True,
                 ) from exc
             finally:

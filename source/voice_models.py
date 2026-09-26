@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 
 import app_paths
+from i18n import tr
 from voice_catalog import catalog_entry, catalog_entry_by_id
 
 
@@ -152,17 +153,17 @@ def _free_bytes(path):
 
 def _safe_entry_id(model_id):
     if not isinstance(model_id, str) or not model_id:
-        raise VoiceModelError("Identificador de modelo inválido.")
+        raise VoiceModelError(tr("Identificador de modelo inválido."))
     if model_id in (".", "..") or "/" in model_id or "\\" in model_id or os.path.sep in model_id:
-        raise VoiceModelError("Identificador de modelo inválido.")
+        raise VoiceModelError(tr("Identificador de modelo inválido."))
     return model_id
 
 
 def _safe_url(url):
     if not isinstance(url, str):
-        raise VoiceModelError("URL do modelo inválida.")
+        raise VoiceModelError(tr("URL do modelo inválida."))
     if not url.lower().startswith("https://"):
-        raise VoiceModelError("O download do modelo só aceita HTTPS.")
+        raise VoiceModelError(tr("O download do modelo só aceita HTTPS."))
     return url
 
 
@@ -171,7 +172,7 @@ class _LimitedRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not newurl.lower().startswith("https://"):
-            raise VoiceModelError("Redirecionamento inseguro recusado.")
+            raise VoiceModelError(tr("Redirecionamento inseguro recusado."))
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -237,10 +238,10 @@ def _rehash_partial(path, expected_size):
     except FileNotFoundError:
         return hashlib.sha256(), 0
     except OSError as exc:
-        raise VoiceModelError(f"Falha ao ler o download parcial: {exc}") from exc
+        raise VoiceModelError(tr("Falha ao ler o download parcial: {error}", error=exc)) from exc
     if oversized:
         _remove_file(path)
-        raise VoiceModelError("O arquivo parcial é maior que o tamanho pinado.")
+        raise VoiceModelError(tr("O arquivo parcial é maior que o tamanho pinado."))
     return hasher, written
 
 
@@ -264,7 +265,7 @@ def _hash_file(path):
                     break
                 hasher.update(chunk)
     except OSError as exc:
-        raise VoiceModelError(f"Falha ao verificar o modelo: {exc}") from exc
+        raise VoiceModelError(tr("Falha ao verificar o modelo: {error}", error=exc)) from exc
     return hasher.hexdigest()
 
 
@@ -291,12 +292,12 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
     free = _free_bytes(dest_dir)
     if free < needed:
         raise VoiceModelError(
-            "Espaço em disco insuficiente para baixar o modelo."
+            tr("Espaço em disco insuficiente para baixar o modelo.")
         )
     if written == expected_size:
         if hasher.hexdigest() != entry["sha256"]:
             _remove_file(retained_path)
-            raise VoiceModelError("A verificação SHA-256 do modelo falhou.")
+            raise VoiceModelError(tr("A verificação SHA-256 do modelo falhou."))
         os.replace(retained_path, dest_file)
         _write_manifest(entry, cache_dir, entry["sha256"])
         return dest_file
@@ -326,7 +327,7 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
                 raise
             with response_context as response:
                 if not _response_url_is_https(response):
-                    raise VoiceModelError("Redirecionamento inseguro recusado.")
+                    raise VoiceModelError(tr("Redirecionamento inseguro recusado."))
                 status = _response_status(response)
                 if resume:
                     content_range = response.headers.get("Content-Range")
@@ -352,14 +353,14 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
                     mode = "wb"
                 else:
                     raise VoiceModelError(
-                        "Resposta de download parcial inesperada do servidor."
+                        tr("Resposta de download parcial inesperada do servidor.")
                     )
 
                 if not restart_without_range:
                     with open(retained_path, mode) as handle:
                         while True:
                             if cancel_event is not None and cancel_event.is_set():
-                                raise VoiceModelError("Download do modelo cancelado.")
+                                raise VoiceModelError(tr("Download do modelo cancelado."))
                             chunk = response.read(CHUNK_SIZE)
                             if not chunk:
                                 break
@@ -376,17 +377,17 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
             break
         if oversized:
             _remove_file(retained_path)
-            raise VoiceModelError("O arquivo baixado é maior que o tamanho pinado.")
+            raise VoiceModelError(tr("O arquivo baixado é maior que o tamanho pinado."))
         digest = hasher.hexdigest()
         if written != expected_size:
             _remove_file(retained_path)
             raise VoiceModelError(
-                "Tamanho do modelo baixado não confere com o catálogo."
+                tr("Tamanho do modelo baixado não confere com o catálogo.")
             )
         if digest != entry["sha256"]:
             _remove_file(retained_path)
             raise VoiceModelError(
-                "A verificação SHA-256 do modelo falhou."
+                tr("A verificação SHA-256 do modelo falhou.")
             )
         os.replace(retained_path, dest_file)
         _write_manifest(entry, cache_dir, digest)
@@ -394,7 +395,7 @@ def download_model(entry, cache_dir, progress=None, cancel_event=None, opener=No
     except VoiceModelError:
         raise
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise VoiceModelError(f"Falha ao baixar o modelo: {exc}") from exc
+        raise VoiceModelError(tr("Falha ao baixar o modelo: {error}", error=exc)) from exc
 
 
 def _write_manifest(entry, cache_dir, digest, verified_stat=None):
@@ -432,13 +433,13 @@ def import_local_model(profile_or_id, source, cache_dir, cancel_event=None, prog
     """Import only exact catalog bytes without network access or another app's cache."""
     entry = resolve_entry(profile_or_id)
     if entry is None:
-        raise VoiceModelError("Modelo não pertence ao catálogo do SnipVoice.")
+        raise VoiceModelError(tr("Modelo não pertence ao catálogo do SnipVoice."))
     if not os.path.isfile(source) or os.path.getsize(source) != entry["size_bytes"]:
-        raise VoiceModelError("O arquivo não tem o tamanho esperado para este modelo.")
+        raise VoiceModelError(tr("O arquivo não tem o tamanho esperado para este modelo."))
     destination = model_path(cache_dir, entry)
     _ensure_parent(destination)
     if _free_bytes(os.path.dirname(destination)) < entry["size_bytes"]:
-        raise VoiceModelError("Não há espaço para importar o modelo com segurança.")
+        raise VoiceModelError(tr("Não há espaço para importar o modelo com segurança."))
     fd, temporary = tempfile.mkstemp(prefix="model-import-", suffix=".partial",
                                      dir=os.path.dirname(destination))
     try:
@@ -447,13 +448,13 @@ def import_local_model(profile_or_id, source, cache_dir, cancel_event=None, prog
         with os.fdopen(fd, "wb") as output, open(source, "rb") as input_file:
             while True:
                 if cancel_event is not None and cancel_event.is_set():
-                    raise VoiceModelError("Importação do modelo cancelada.")
+                    raise VoiceModelError(tr("Importação do modelo cancelada."))
                 chunk = input_file.read(CHUNK_SIZE)
                 if not chunk:
                     break
                 count += len(chunk)
                 if count > entry["size_bytes"]:
-                    raise VoiceModelError("O arquivo do modelo mudou durante a importação.")
+                    raise VoiceModelError(tr("O arquivo do modelo mudou durante a importação."))
                 output.write(chunk)
                 digest.update(chunk)
                 if progress is not None:
@@ -461,9 +462,9 @@ def import_local_model(profile_or_id, source, cache_dir, cancel_event=None, prog
             output.flush()
             os.fsync(output.fileno())
         if count != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
-            raise VoiceModelError("A assinatura SHA-256 do modelo não corresponde ao catálogo.")
+            raise VoiceModelError(tr("A assinatura SHA-256 do modelo não corresponde ao catálogo."))
         if cancel_event is not None and cancel_event.is_set():
-            raise VoiceModelError("Importação do modelo cancelada.")
+            raise VoiceModelError(tr("Importação do modelo cancelada."))
         os.replace(temporary, destination)
         _write_manifest(entry, cache_dir, digest.hexdigest())
         return destination
@@ -481,9 +482,9 @@ def delete_model(entry, cache_dir):
     except ValueError:
         inside = False
     if not inside:
-        raise VoiceModelError("Recusa em apagar fora do cache de modelos.")
+        raise VoiceModelError(tr("Recusa em apagar fora do cache de modelos."))
     if os.path.basename(target) != entry["id"]:
-        raise VoiceModelError("Recusa em apagar um diretório que não é do catálogo.")
+        raise VoiceModelError(tr("Recusa em apagar um diretório que não é do catálogo."))
     if not os.path.exists(target):
         return True
     shutil.rmtree(target)
@@ -493,7 +494,7 @@ def delete_model(entry, cache_dir):
 def delete_profile_model(profile, cache_dir):
     entry = catalog_entry(profile)
     if entry is None:
-        raise VoiceModelError("Perfil de voz desconhecido.")
+        raise VoiceModelError(tr("Perfil de voz desconhecido."))
     return delete_model(entry, cache_dir)
 
 
@@ -502,5 +503,5 @@ def resolve_entry(profile_or_id):
     if entry is None:
         entry = catalog_entry_by_id(profile_or_id)
     if entry is None:
-        raise VoiceModelError("Perfil de voz desconhecido.")
+        raise VoiceModelError(tr("Perfil de voz desconhecido."))
     return entry

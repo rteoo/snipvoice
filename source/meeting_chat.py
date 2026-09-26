@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from i18n import N_, tr
+
 
 SUGGESTIONS = (
-    "Resuma os pontos principais",
-    "Quais decisões foram tomadas?",
-    "Liste as próximas ações",
+    N_("Resuma os pontos principais"),
+    N_("Quais decisões foram tomadas?"),
+    N_("Liste as próximas ações"),
 )
 
 UNCERTAINTY_LABELS = {
-    "low": "Incerteza baixa",
-    "medium": "Incerteza média",
-    "high": "Incerteza alta",
+    "low": N_("Incerteza baixa"),
+    "medium": N_("Incerteza média"),
+    "high": N_("Incerteza alta"),
 }
 
 
@@ -69,13 +71,13 @@ class MeetingChat(tk.Frame):
 
         self._empty = tk.Frame(self._history, bg=theme.surface)
         self._empty_title = tk.Label(
-            self._empty, text="Pergunte sobre esta gravação",
+            self._empty, text=tr("Pergunte sobre esta gravação"),
             bg=theme.surface, fg=theme.text_strong,
             font=theme.font(12, "bold"), anchor="w", justify="left", wraplength=520,
         )
         self._empty_title.pack(anchor="w", pady=(theme.space_lg, theme.space_xs))
         self._empty_subtitle = tk.Label(
-            self._empty, text="Use uma sugestão ou escreva sua própria pergunta.",
+            self._empty, text=tr("Use uma sugestão ou escreva sua própria pergunta."),
             bg=theme.surface, fg=theme.text_muted, font=theme.font(), anchor="w",
             justify="left", wraplength=520,
         )
@@ -83,7 +85,7 @@ class MeetingChat(tk.Frame):
         suggestions = tk.Frame(self._empty, bg=theme.surface)
         suggestions.pack(anchor="w", fill="x")
         for suggestion in SUGGESTIONS:
-            button = self._button(suggestions, suggestion, lambda value=suggestion: self._use_suggestion(value))
+            button = self._button(suggestions, tr(suggestion), lambda value=tr(suggestion): self._use_suggestion(value))
             button.pack(anchor="w", pady=2)
 
         composer = tk.Frame(self, bg=theme.card, highlightthickness=1,
@@ -95,11 +97,11 @@ class MeetingChat(tk.Frame):
         top.grid(row=0, column=0, sticky="ew", padx=theme.space_sm, pady=(theme.space_sm, 0))
         top.grid_columnconfigure(0, weight=1)
         tk.Label(
-            top, text="Pergunte sobre esta gravação", bg=theme.card,
+            top, text=tr("Pergunte sobre esta gravação"), bg=theme.card,
             fg=theme.text_strong, font=theme.font(9, "bold"), anchor="w",
         ).grid(row=0, column=0, sticky="w")
         self._keyboard_hint = tk.Label(
-            top, text="Enter envia · Shift+Enter quebra linha", bg=theme.card,
+            top, text=tr("Enter envia · Shift+Enter quebra linha"), bg=theme.card,
             fg=theme.text_muted, font=theme.font(8), anchor="w",
         )
         self._keyboard_hint.grid(row=1, column=0, sticky="w", pady=(1, theme.space_xs))
@@ -120,9 +122,9 @@ class MeetingChat(tk.Frame):
         actions = tk.Frame(composer, bg=theme.card)
         actions.grid(row=2, column=0, sticky="ew", padx=theme.space_sm,
                      pady=(theme.space_xs, theme.space_sm))
-        self.new_button = self._button(actions, "Nova conversa", self._new)
+        self.new_button = self._button(actions, tr("Nova conversa"), self._new)
         self.new_button.pack(side="left")
-        self.send_button = self._button(actions, "Enviar", self._send, accent=True)
+        self.send_button = self._button(actions, tr("Enviar"), self._send, accent=True)
         self.send_button.pack(side="right")
         composer.bind("<Configure>", self._composer_changed)
 
@@ -236,7 +238,7 @@ class MeetingChat(tk.Frame):
             return
         question = self.get_question().strip()
         if not question:
-            self.status.set("Escreva uma pergunta primeiro.")
+            self.status.set(tr("Escreva uma pergunta primeiro."))
             self.focus_composer()
             return
         self.on_send(question)
@@ -302,14 +304,14 @@ class MeetingChat(tk.Frame):
         )
         question.pack(anchor="e", padx=(self.theme.space_xl, 0))
         self._message_widgets.append((question, self.theme.space_xl))
-        tk.Label(outer, text="Você", bg=self.theme.surface, fg=self.theme.text_muted,
+        tk.Label(outer, text=tr("Você"), bg=self.theme.surface, fg=self.theme.text_muted,
                  font=self.theme.font(8), anchor="e").pack(anchor="e")
 
         answer_box = tk.Frame(outer, bg=self.theme.surface)
         answer_box.pack(fill="x", pady=(self.theme.space_sm, 0))
         tk.Label(answer_box, text="Snipvoice", bg=self.theme.surface,
                  fg=self.theme.text_muted, font=self.theme.font(8), anchor="w").pack(anchor="w")
-        answer_text = turn.get("answer") or ("Pensando…" if turn.get("status") == "pending" else "")
+        answer_text = turn.get("answer") or (tr("Pensando…") if turn.get("status") == "pending" else "")
         message = tk.Message(
             answer_box, text=str(answer_text), bg=self.theme.card, fg=self.theme.text,
             font=self.theme.font(), justify="left", anchor="nw", width=520,
@@ -319,14 +321,15 @@ class MeetingChat(tk.Frame):
         self._message_widgets.append((message, 0))
         if turn.get("status") == "error":
             error_message = tk.Message(
-                answer_box, text=str(turn.get("error") or "Não foi possível responder."),
+                answer_box, text=str(turn.get("error") or tr("Não foi possível responder.")),
                 bg=self.theme.surface, fg=self.theme.danger, font=self.theme.font(8),
                 justify="left", anchor="w", width=self._message_width(),
             )
             error_message.pack(fill="x", pady=(2, 0))
             self._message_widgets.append((error_message, 0))
         uncertainty = str(turn.get("uncertainty") or "").strip()
-        uncertainty = UNCERTAINTY_LABELS.get(uncertainty.casefold(), uncertainty)
+        label = UNCERTAINTY_LABELS.get(uncertainty.casefold())
+        uncertainty = tr(label) if label else uncertainty
         if uncertainty:
             uncertainty_message = tk.Message(
                 answer_box, text=uncertainty, bg=self.theme.surface,
@@ -338,16 +341,16 @@ class MeetingChat(tk.Frame):
         sources = tk.Frame(answer_box, bg=self.theme.surface)
         sources.pack(fill="x", pady=(self.theme.space_xs, 0))
         for index, citation in enumerate(turn.get("citations") or (), 1):
-            self._button(sources, f"Fonte {index}", lambda value=citation: self.on_source(turn_id, value)).pack(
+            self._button(sources, tr("Fonte {index}", index=index), lambda value=citation: self.on_source(turn_id, value)).pack(
                 anchor="w", pady=1,
             )
         actions = tk.Frame(answer_box, bg=self.theme.surface)
         actions.pack(fill="x", pady=(self.theme.space_xs, 0))
-        copy = self._button(actions, "Copiar", lambda: self.on_copy(turn_id))
+        copy = self._button(actions, tr("Copiar"), lambda: self.on_copy(turn_id))
         copy.pack(side="left", pady=1)
         saving = bool(turn.get("saving"))
         saved = bool(turn.get("saved"))
-        save = self._button(actions, "Salvando…" if saving else ("Salvo" if saved else "Salvar"),
+        save = self._button(actions, tr("Salvando…") if saving else (tr("Salvo") if saved else tr("Salvar")),
                             lambda: self.on_save(turn_id))
         status = str(turn.get("status") or "")
         complete = status == "complete"

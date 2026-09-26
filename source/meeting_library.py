@@ -21,6 +21,7 @@ import time
 import unicodedata
 import uuid
 
+from i18n import N_, tr
 from meeting_store import MeetingStore
 from snippet_utils import write_json_atomic
 
@@ -77,9 +78,9 @@ def _library_cursor_encode(value):
         payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
     except (TypeError, ValueError, UnicodeError) as error:
-        raise ValueError("O cursor da biblioteca é inválido.") from error
+        raise ValueError(tr("O cursor da biblioteca é inválido.")) from error
     if not encoded or len(encoded) > MAX_LIBRARY_CURSOR_CHARS:
-        raise ValueError("O cursor da biblioteca é grande demais.")
+        raise ValueError(tr("O cursor da biblioteca é grande demais."))
     return "c1." + encoded
 
 
@@ -90,18 +91,18 @@ def _library_cursor_decode(value):
         return None
     encoded = value[3:]
     if not encoded or len(encoded) > MAX_LIBRARY_CURSOR_CHARS:
-        raise ValueError("O cursor da biblioteca é inválido.")
+        raise ValueError(tr("O cursor da biblioteca é inválido."))
     try:
         padded = encoded + "=" * (-len(encoded) % 4)
         result = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError, base64.binascii.Error) as error:
-        raise ValueError("O cursor da biblioteca é inválido.") from error
+        raise ValueError(tr("O cursor da biblioteca é inválido.")) from error
     if not isinstance(result, dict) or result.get("kind") != "canonical" or result.get("v") != 1:
-        raise ValueError("O cursor da biblioteca é incompatível.")
+        raise ValueError(tr("O cursor da biblioteca é incompatível."))
     position = result.get("position")
     if (not isinstance(position, list) or len(position) != 2
             or any(not isinstance(item, str) for item in position)):
-        raise ValueError("O cursor da biblioteca é inválido.")
+        raise ValueError(tr("O cursor da biblioteca é inválido."))
     return result
 
 
@@ -112,10 +113,10 @@ class BatchOrganizationRollbackError(RuntimeError):
         self.original_error = original_error
         self.result = copy.deepcopy(result)
         failures = ", ".join(item["session_id"] for item in result["rollback_failures"])
-        super().__init__(
+        super().__init__(tr(
             "A atribuição em lote falhou e não foi possível desfazer todas as alterações: "
-            f"{failures}."
-        )
+            "{failures}.", failures=failures,
+        ))
 
 
 class MeetingLibraryError(ValueError):
@@ -138,10 +139,10 @@ class AnnotationConflict(MeetingLibraryError):
     """A compare-and-swap annotation update observed a newer generation."""
 
     def __init__(self, expected, actual):
-        super().__init__(
+        super().__init__(tr(
             "A anotação mudou em outra janela; recarregue antes de salvar "
-            f"(esperado {expected}, atual {actual})."
-        )
+            "(esperado {expected}, atual {actual}).", expected=expected, actual=actual,
+        ))
         self.expected = expected
         self.actual = actual
 
@@ -150,10 +151,10 @@ class WorkspaceConflict(MeetingLibraryError):
     """A compare-and-swap workspace update observed a newer generation."""
 
     def __init__(self, expected, actual):
-        super().__init__(
+        super().__init__(tr(
             "O espaço de reuniões mudou em outra janela; recarregue antes de salvar "
-            f"(esperado {expected}, atual {actual})."
-        )
+            "(esperado {expected}, atual {actual}).", expected=expected, actual=actual,
+        ))
         self.expected = expected
         self.actual = actual
 
@@ -219,15 +220,15 @@ def _copy_json(value, label):
     try:
         encoded = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (TypeError, ValueError) as error:
-        raise MeetingLibraryError(f"{label} contém valores que não podem ser salvos.") from error
+        raise MeetingLibraryError(tr("{label} contém valores que não podem ser salvos.", label=label)) from error
     return copy.deepcopy(value), len(encoded.encode("utf-8"))
 
 
 def _valid_generation(value, label="generation"):
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise SchemaError(f"A geração {label} é inválida.")
+        raise SchemaError(tr("A geração {label} é inválida.", label=label))
     if value > 2**63 - 1:
-        raise SchemaError(f"A geração {label} excede o limite permitido.")
+        raise SchemaError(tr("A geração {label} excede o limite permitido.", label=label))
     return value
 
 
@@ -283,7 +284,7 @@ def _cross_process_lock(path):
     if _has_link_component(os.path.dirname(lock_path)) or (
         os.path.lexists(lock_path) and _is_link_or_junction(lock_path)
     ):
-        raise PathSafetyError("O bloqueio canônico aponta para um link ou junction.")
+        raise PathSafetyError(tr("O bloqueio canônico aponta para um link ou junction."))
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     handle = open(lock_path, "a+b")
     locked = False
@@ -305,8 +306,8 @@ def _cross_process_lock(path):
                 except OSError as error:
                     if time.monotonic() >= deadline:
                         raise MeetingLibraryError(
-                            "O bloqueio canônico está ocupado há muito tempo; "
-                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                            tr("O bloqueio canônico está ocupado há muito tempo; "
+                            "feche a outra instância ou remova o bloqueio após verificar o processo.")
                         ) from error
                     time.sleep(LOCK_POLL_SECONDS)
         else:
@@ -320,8 +321,8 @@ def _cross_process_lock(path):
                 except (BlockingIOError, OSError) as error:
                     if time.monotonic() >= deadline:
                         raise MeetingLibraryError(
-                            "O bloqueio canônico está ocupado há muito tempo; "
-                            "feche a outra instância ou remova o bloqueio após verificar o processo."
+                            tr("O bloqueio canônico está ocupado há muito tempo; "
+                            "feche a outra instância ou remova o bloqueio após verificar o processo.")
                         ) from error
                     time.sleep(LOCK_POLL_SECONDS)
         locked = True
@@ -363,7 +364,7 @@ class MeetingLibrary:
             root = None
         if store is not None:
             if not hasattr(store, "root"):
-                raise ValueError("O armazenamento de reuniões é inválido.")
+                raise ValueError(tr("O armazenamento de reuniões é inválido."))
             meetings_root = os.path.abspath(os.fspath(store.root))
             if root is None:
                 root = workspace_root
@@ -371,7 +372,7 @@ class MeetingLibrary:
                 root = os.path.dirname(meetings_root) if os.path.basename(meetings_root).casefold() == "meetings" else meetings_root
         else:
             if root is None:
-                raise ValueError("A pasta da biblioteca é obrigatória.")
+                raise ValueError(tr("A pasta da biblioteca é obrigatória."))
             root = os.path.abspath(os.fspath(root))
             candidate = os.path.join(root, "meetings")
             if os.path.isdir(candidate):
@@ -394,7 +395,7 @@ class MeetingLibrary:
         self._index_stale = False
         self._catalog_lock = threading.RLock()
         if _has_link_component(self.home_root) or _has_link_component(self.meetings_root):
-            raise PathSafetyError("As raízes da biblioteca não podem conter links ou junctions.")
+            raise PathSafetyError(tr("As raízes da biblioteca não podem conter links ou junctions."))
         os.makedirs(self.home_root, exist_ok=True)
         os.makedirs(self.meetings_root, exist_ok=True)
 
@@ -427,13 +428,13 @@ class MeetingLibrary:
 
     def _session_dir(self, session_id):
         if not _valid_id(session_id):
-            raise ValueError("Identificador de reunião inválido.")
+            raise ValueError(tr("Identificador de reunião inválido."))
         root = os.path.realpath(self.meetings_root)
         result = os.path.abspath(os.path.join(self.meetings_root, session_id))
         if not _commonpath_is(root, os.path.realpath(result)):
-            raise PathSafetyError("A pasta da reunião aponta para fora da biblioteca.")
+            raise PathSafetyError(tr("A pasta da reunião aponta para fora da biblioteca."))
         if os.path.lexists(result) and _is_link_or_junction(result):
-            raise PathSafetyError("A pasta da reunião não pode ser um link ou junction.")
+            raise PathSafetyError(tr("A pasta da reunião não pode ser um link ou junction."))
         # Check every existing component beneath the meetings root.  This also
         # catches a nested link if a future bundle path gains subdirectories.
         relative = os.path.relpath(result, self.meetings_root)
@@ -443,22 +444,22 @@ class MeetingLibrary:
                 continue
             current = os.path.join(current, part)
             if os.path.lexists(current) and _is_link_or_junction(current):
-                raise PathSafetyError("A pasta da reunião contém um link ou junction.")
+                raise PathSafetyError(tr("A pasta da reunião contém um link ou junction."))
         return result
 
     def _canonical_path(self, session_id, name):
         session_dir = self._session_dir(session_id)
         path = os.path.join(session_dir, name)
         if os.path.lexists(path) and _is_link_or_junction(path):
-            raise PathSafetyError("O arquivo canônico não pode ser um link ou junction.")
+            raise PathSafetyError(tr("O arquivo canônico não pode ser um link ou junction."))
         if not _commonpath_is(os.path.realpath(self.meetings_root), os.path.realpath(path)):
-            raise PathSafetyError("O arquivo canônico aponta para fora da biblioteca.")
+            raise PathSafetyError(tr("O arquivo canônico aponta para fora da biblioteca."))
         return path
 
     def _workspace_path(self):
         path = os.path.join(self.home_root, WORKSPACE_FILENAME)
         if os.path.lexists(path) and _is_link_or_junction(path):
-            raise PathSafetyError("O workspace não pode ser um link ou junction.")
+            raise PathSafetyError(tr("O workspace não pode ser um link ou junction."))
         return path
 
     @staticmethod
@@ -468,30 +469,30 @@ class MeetingLibrary:
         if not os.path.lexists(path):
             return None
         if _is_link_or_junction(path):
-            raise PathSafetyError(f"O arquivo {label} não pode ser um link ou junction.")
+            raise PathSafetyError(tr("O arquivo {label} não pode ser um link ou junction.", label=label))
         try:
             size = os.path.getsize(path)
             if size > max_bytes:
-                raise SchemaError(f"O arquivo {label} excede o limite permitido.")
+                raise SchemaError(tr("O arquivo {label} excede o limite permitido.", label=label))
             with open(path, "r", encoding="utf-8") as handle:
                 value = json.load(handle)
         except SchemaError:
             raise
         except (OSError, UnicodeError, ValueError, TypeError) as error:
             raise SchemaError(
-                f"O arquivo {label} está corrompido; ele foi preservado e precisa de reparo manual."
+                tr("O arquivo {label} está corrompido; ele foi preservado e precisa de reparo manual.", label=label)
             ) from error
         if not isinstance(value, dict):
-            raise SchemaError(f"O arquivo {label} deve conter um objeto; ele foi preservado.")
+            raise SchemaError(tr("O arquivo {label} deve conter um objeto; ele foi preservado.", label=label))
         version = value.get("schema_version")
         if isinstance(version, bool) or not isinstance(version, int):
-            raise SchemaError(f"O schema de {label} é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O schema de {label} é inválido; o arquivo foi preservado.", label=label))
         if version > expected:
             raise UnsupportedSchemaError(
-                f"O schema de {label} é mais novo que esta versão; abra em uma versão compatível."
+                tr("O schema de {label} é mais novo que esta versão; abra em uma versão compatível.", label=label)
             )
         if version < expected:
-            raise SchemaError(f"O schema antigo de {label} não é gravável; atualize/reimporte o arquivo.")
+            raise SchemaError(tr("O schema antigo de {label} não é gravável; atualize/reimporte o arquivo.", label=label))
         return value
 
     # -- Workspace --------------------------------------------------------
@@ -532,20 +533,20 @@ class MeetingLibrary:
 
     def _validate_workspace(self, value):
         if not isinstance(value, dict) or value.get("schema_version") != WORKSPACE_SCHEMA_VERSION:
-            raise SchemaError("O workspace tem um schema inválido; o arquivo foi preservado.")
-        _valid_generation(value.get("generation"), "do workspace")
+            raise SchemaError(tr("O workspace tem um schema inválido; o arquivo foi preservado."))
+        _valid_generation(value.get("generation"), tr("do workspace"))
         if not _valid_timestamp(value.get("updated_at")):
-            raise SchemaError("A data de atualização do workspace é inválida; o arquivo foi preservado.")
+            raise SchemaError(tr("A data de atualização do workspace é inválida; o arquivo foi preservado."))
         for key in ("collections", "series", "profiles"):
             if not isinstance(value.get(key), list) or len(value[key]) > MAX_COLLECTIONS:
-                raise SchemaError(f"A lista {key} do workspace é inválida; o arquivo foi preservado.")
+                raise SchemaError(tr("A lista {key} do workspace é inválida; o arquivo foi preservado.", key=key))
             seen = set()
             seen_names = set()
             for item in value[key]:
                 if not isinstance(item, dict) or not _valid_id(item.get("id")):
-                    raise SchemaError(f"A definição {key} do workspace é inválida; o arquivo foi preservado.")
+                    raise SchemaError(tr("A definição {key} do workspace é inválida; o arquivo foi preservado.", key=key))
                 if item["id"] in seen:
-                    raise SchemaError(f"A definição {key} do workspace é duplicada; o arquivo foi preservado.")
+                    raise SchemaError(tr("A definição {key} do workspace é duplicada; o arquivo foi preservado.", key=key))
                 seen.add(item["id"])
                 name = item.get("name", "")
                 if (
@@ -554,15 +555,15 @@ class MeetingLibrary:
                     or len(name) > MAX_LABEL_CHARS
                     or name != unicodedata.normalize("NFC", name.strip())
                 ):
-                    raise SchemaError(f"O nome de {key} do workspace é inválido; o arquivo foi preservado.")
+                    raise SchemaError(tr("O nome de {key} do workspace é inválido; o arquivo foi preservado.", key=key))
                 folded_name = name.casefold()
                 if folded_name in seen_names:
-                    raise SchemaError(f"O nome de {key} do workspace é duplicado; o arquivo foi preservado.")
+                    raise SchemaError(tr("O nome de {key} do workspace é duplicado; o arquivo foi preservado.", key=key))
                 seen_names.add(folded_name)
                 if key == "collections" and item.get("kind", "folder") not in {"folder", "project"}:
-                    raise SchemaError("O tipo da coleção é inválido; o arquivo foi preservado.")
+                    raise SchemaError(tr("O tipo da coleção é inválido; o arquivo foi preservado."))
                 if "archived" in item and not isinstance(item["archived"], bool):
-                    raise SchemaError(f"O estado arquivado de {key} é inválido; o arquivo foi preservado.")
+                    raise SchemaError(tr("O estado arquivado de {key} é inválido; o arquivo foi preservado.", key=key))
         # These sections were added after the first workspace schema.  Their
         # absence is a valid legacy state; malformed present sections remain
         # read-only errors.
@@ -570,7 +571,7 @@ class MeetingLibrary:
         self._validate_retention_defaults(value.get("retention_defaults", {}))
         _, size = _copy_json(value, "workspace.json")
         if size > MAX_WORKSPACE_BYTES:
-            raise SchemaError("O workspace excede o limite permitido; o arquivo foi preservado.")
+            raise SchemaError(tr("O workspace excede o limite permitido; o arquivo foi preservado."))
 
     @staticmethod
     def _validate_privacy_defaults(value):
@@ -583,24 +584,24 @@ class MeetingLibrary:
         """
         if not isinstance(value, dict):
             raise SchemaError(
-                "As configurações privacy_defaults do workspace são inválidas; o arquivo foi preservado."
+                tr("As configurações privacy_defaults do workspace são inválidas; o arquivo foi preservado.")
             )
         notice = value.get("recording_notice")
         if notice is not None:
             if not isinstance(notice, dict):
-                raise SchemaError("A configuração de aviso de gravação é inválida; o arquivo foi preservado.")
+                raise SchemaError(tr("A configuração de aviso de gravação é inválida; o arquivo foi preservado."))
             if "enabled" in notice and not isinstance(notice["enabled"], bool):
-                raise SchemaError("O estado do aviso de gravação é inválido; o arquivo foi preservado.")
+                raise SchemaError(tr("O estado do aviso de gravação é inválido; o arquivo foi preservado."))
             language = notice.get("language")
             if language is not None and language not in SUPPORTED_NOTICE_LANGUAGES:
-                raise SchemaError("O idioma do aviso de gravação é inválido; o arquivo foi preservado.")
+                raise SchemaError(tr("O idioma do aviso de gravação é inválido; o arquivo foi preservado."))
         if "recording_notice_enabled" in value and not isinstance(value["recording_notice_enabled"], bool):
-            raise SchemaError("O estado do aviso de gravação é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O estado do aviso de gravação é inválido; o arquivo foi preservado."))
         if "recording_notice_language" in value and value["recording_notice_language"] not in SUPPORTED_NOTICE_LANGUAGES:
-            raise SchemaError("O idioma do aviso de gravação é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O idioma do aviso de gravação é inválido; o arquivo foi preservado."))
         qa_mode = value.get("qa_mode")
         if qa_mode is not None and qa_mode not in SUPPORTED_QA_MODES:
-            raise SchemaError("O modo de Q&A do workspace é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O modo de Q&A do workspace é inválido; o arquivo foi preservado."))
 
     @staticmethod
     def _retention_policy_value(value, default_mode):
@@ -622,18 +623,18 @@ class MeetingLibrary:
         try:
             policy = RetentionPolicy.from_value(candidate)
         except (TypeError, ValueError) as error:
-            raise SchemaError("A política de retenção do workspace é inválida; o arquivo foi preservado.") from error
+            raise SchemaError(tr("A política de retenção do workspace é inválida; o arquivo foi preservado.")) from error
         if default_mode == "whole_meeting" and policy.mode not in {"keep", "whole_meeting"}:
-            raise SchemaError("A política de retenção de reuniões é incompatível; o arquivo foi preservado.")
+            raise SchemaError(tr("A política de retenção de reuniões é incompatível; o arquivo foi preservado."))
         if default_mode == "raw_tracks" and policy.mode not in {"keep", "raw_tracks"}:
-            raise SchemaError("A política de retenção de áudio é incompatível; o arquivo foi preservado.")
+            raise SchemaError(tr("A política de retenção de áudio é incompatível; o arquivo foi preservado."))
         return policy
 
     @classmethod
     def _validate_retention_defaults(cls, value):
         if not isinstance(value, dict):
             raise SchemaError(
-                "As configurações retention_defaults do workspace são inválidas; o arquivo foi preservado."
+                tr("As configurações retention_defaults do workspace são inválidas; o arquivo foi preservado.")
             )
         if "whole_meeting" in value:
             cls._retention_policy_value(value["whole_meeting"], "whole_meeting")
@@ -642,11 +643,11 @@ class MeetingLibrary:
         if "raw_audio" in value:
             policy = cls._retention_policy_value(value["raw_audio"], "raw_tracks")
             if policy.mode == "raw_tracks" and any(track not in {"microphone", "system"} for track in policy.tracks):
-                raise SchemaError("As fontes da política de áudio são inválidas; o arquivo foi preservado.")
+                raise SchemaError(tr("As fontes da política de áudio são inválidas; o arquivo foi preservado."))
         if "raw_audio_policy" in value:
             policy = cls._retention_policy_value(value["raw_audio_policy"], "raw_tracks")
             if policy.mode == "raw_tracks" and any(track not in {"microphone", "system"} for track in policy.tracks):
-                raise SchemaError("As fontes da política de áudio são inválidas; o arquivo foi preservado.")
+                raise SchemaError(tr("As fontes da política de áudio são inválidas; o arquivo foi preservado."))
         for key in ("raw_audio_tracks",):
             tracks = value.get(key)
             if tracks is not None and (
@@ -655,7 +656,7 @@ class MeetingLibrary:
                 or any(track not in {"microphone", "system"} for track in tracks)
                 or len(set(tracks)) != len(tracks)
             ):
-                raise SchemaError("As fontes da política de áudio são inválidas; o arquivo foi preservado.")
+                raise SchemaError(tr("As fontes da política de áudio são inválidas; o arquivo foi preservado."))
         # ``raw_tracks`` was used by one pre-release build; keep it readable
         # while the canonical user-facing key remains ``raw_audio``.
         if "raw_tracks" in value:
@@ -678,23 +679,23 @@ class MeetingLibrary:
         if "trash_days" in value:
             days = value["trash_days"]
             if not _finite_number(days) or float(days) < 0 or float(days) > 36500:
-                raise SchemaError("O prazo da lixeira é inválido; o arquivo foi preservado.")
+                raise SchemaError(tr("O prazo da lixeira é inválido; o arquivo foi preservado."))
 
     def update_workspace(self, patch, *, expected_generation=_UNSET):
         if not isinstance(patch, dict):
-            raise ValueError("A alteração do workspace deve ser um objeto.")
+            raise ValueError(tr("A alteração do workspace deve ser um objeto."))
         path = self._workspace_path()
         with _writer_lock(path):
             current = self.read_workspace()
-            actual = _valid_generation(current["generation"], "do workspace")
+            actual = _valid_generation(current["generation"], tr("do workspace"))
             if expected_generation is not _UNSET:
-                expected = _valid_generation(expected_generation, "esperada")
+                expected = _valid_generation(expected_generation, tr("esperada"))
                 if expected != actual:
                     raise WorkspaceConflict(expected, actual)
             merged = copy.deepcopy(current)
             for key, value in patch.items():
                 if key in {"schema_version", "generation", "updated_at"}:
-                    raise ValueError("Campos de versão do workspace são controlados pela biblioteca.")
+                    raise ValueError(tr("Campos de versão do workspace são controlados pela biblioteca."))
                 if key in {"privacy_defaults", "retention_defaults"} and isinstance(value, dict):
                     # Configuration sections are extensible.  A partial known
                     # settings update must not erase keys introduced by a
@@ -726,7 +727,7 @@ class MeetingLibrary:
             self._validate_workspace(merged)
             _, size = _copy_json(merged, "workspace.json")
             if size > MAX_WORKSPACE_BYTES:
-                raise ValueError("O workspace excede o limite permitido.")
+                raise ValueError(tr("O workspace excede o limite permitido."))
             os.makedirs(self.home_root, exist_ok=True)
             write_json_atomic(path, merged)
             return copy.deepcopy(merged)
@@ -770,13 +771,13 @@ class MeetingLibrary:
     @staticmethod
     def _workspace_definition(value, *, kind):
         if not isinstance(value, dict) or not _valid_id(value.get("id")):
-            raise ValueError(f"A definição de {kind} é inválida.")
+            raise ValueError(tr("A definição de {kind} é inválida.", kind=tr(kind)))
         name = value.get("name")
         if not isinstance(name, str):
-            raise ValueError(f"O nome de {kind} é inválido.")
+            raise ValueError(tr("O nome de {kind} é inválido.", kind=tr(kind)))
         name = unicodedata.normalize("NFC", name.strip())
         if not name or len(name) > MAX_LABEL_CHARS:
-            raise ValueError(f"O nome de {kind} é inválido.")
+            raise ValueError(tr("O nome de {kind} é inválido.", kind=tr(kind)))
         result = {
             "id": value["id"],
             "name": name,
@@ -785,7 +786,7 @@ class MeetingLibrary:
         if kind == "coleção":
             collection_kind = value.get("kind", "folder")
             if collection_kind not in {"folder", "project"}:
-                raise ValueError("O tipo da coleção é inválido.")
+                raise ValueError(tr("O tipo da coleção é inválido."))
             result["kind"] = collection_kind
         return result
 
@@ -808,13 +809,13 @@ class MeetingLibrary:
         return next(copy.deepcopy(item) for item in updated[key] if item["id"] == definition["id"])
 
     def save_collection(self, value, *, expected_generation):
-        definition = self._workspace_definition(value, kind="coleção")
+        definition = self._workspace_definition(value, kind=N_("coleção"))
         return self._save_workspace_definition(
             "collections", definition, expected_generation=expected_generation,
         )
 
     def save_series(self, value, *, expected_generation):
-        definition = self._workspace_definition(value, kind="série")
+        definition = self._workspace_definition(value, kind=N_("série"))
         return self._save_workspace_definition(
             "series", definition, expected_generation=expected_generation,
         )
@@ -844,11 +845,11 @@ class MeetingLibrary:
 
     def _preview_definition_delete(self, key, identifier):
         if not _valid_id(identifier):
-            raise ValueError("A definição de organização é inválida.")
+            raise ValueError(tr("A definição de organização é inválida."))
         workspace = self.read_workspace()
         definitions = workspace.get(key, [])
         if not any(item.get("id") == identifier for item in definitions):
-            raise KeyError("A definição de organização não existe.")
+            raise KeyError(tr("A definição de organização não existe."))
         affected = []
         for session_id in self._canonical_session_ids():
             annotations = self.read_annotations(session_id)
@@ -874,7 +875,7 @@ class MeetingLibrary:
         if preview["workspace_generation"] != expected_generation:
             raise WorkspaceConflict(expected_generation, preview["workspace_generation"])
         if sorted(set(confirmed_session_ids)) != preview["session_ids"]:
-            raise ValueError("A confirmação não corresponde à prévia atual da série.")
+            raise ValueError(tr("A confirmação não corresponde à prévia atual da série."))
         originals, updated = {}, []
         try:
             for session_id in preview["session_ids"]:
@@ -909,7 +910,7 @@ class MeetingLibrary:
         workspace = self.read_workspace()
         definition = next((item for item in workspace["collections"] if item.get("id") == collection_id), None)
         if definition is None:
-            raise KeyError("A coleção não existe.")
+            raise KeyError(tr("A coleção não existe."))
         updated = copy.deepcopy(definition)
         updated["archived"] = bool(archived)
         return self.save_collection(updated, expected_generation=expected_generation)
@@ -918,7 +919,7 @@ class MeetingLibrary:
         workspace = self.read_workspace()
         definition = next((item for item in workspace["series"] if item.get("id") == series_id), None)
         if definition is None:
-            raise KeyError("A série não existe.")
+            raise KeyError(tr("A série não existe."))
         updated = copy.deepcopy(definition)
         updated["archived"] = bool(archived)
         return self.save_series(updated, expected_generation=expected_generation)
@@ -975,7 +976,7 @@ class MeetingLibrary:
             revision = revision or self._active_revision_id(metadata)
         if revision is not None:
             if not isinstance(revision, str) or not _valid_id(revision, reference=True):
-                raise ValueError("A revisão de transcrição é inválida.")
+                raise ValueError(tr("A revisão de transcrição é inválida."))
             result = self._filter_annotation_revision(result, revision)
         return result
 
@@ -1040,21 +1041,21 @@ class MeetingLibrary:
     @staticmethod
     def _validate_highlight_record(highlight, metadata, transcript_segments, seen_ids):
         if highlight["id"] in seen_ids:
-            raise SchemaError("Há destaques duplicados; o arquivo foi preservado.")
+            raise SchemaError(tr("Há destaques duplicados; o arquivo foi preservado."))
         revision = highlight.get("revision") or highlight.get("transcript_revision")
         if revision not in transcript_segments:
-            raise SchemaError("Um destaque referencia uma revisão inexistente; o arquivo foi preservado.")
+            raise SchemaError(tr("Um destaque referencia uma revisão inexistente; o arquivo foi preservado."))
         start, end = highlight.get("start"), highlight.get("end")
         if (
             not _finite_number(start) or not _finite_number(end)
             or float(start) < 0 or float(end) <= float(start)
             or float(end) > MeetingLibrary._session_duration(metadata, highlight.get("track"))
         ):
-            raise SchemaError("O intervalo de um destaque é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O intervalo de um destaque é inválido; o arquivo foi preservado."))
         track = highlight.get("track")
         tracks = metadata.get("tracks", {})
         if track not in {"microphone", "system"} or not isinstance(tracks, dict) or track not in tracks:
-            raise SchemaError("A fonte de um destaque é inválida; o arquivo foi preservado.")
+            raise SchemaError(tr("A fonte de um destaque é inválida; o arquivo foi preservado."))
         segment_ids = highlight.get("segment_ids", highlight.get("segments", []))
         if (
             not isinstance(segment_ids, list) or not segment_ids
@@ -1062,19 +1063,19 @@ class MeetingLibrary:
             or len(set(segment_ids)) != len(segment_ids)
             or any(not _valid_id(item, reference=True) for item in segment_ids)
         ):
-            raise SchemaError("Os segmentos de um destaque são inválidos; o arquivo foi preservado.")
+            raise SchemaError(tr("Os segmentos de um destaque são inválidos; o arquivo foi preservado."))
         for segment_id in segment_ids:
             segment = transcript_segments[revision].get(segment_id)
             if segment is None:
-                raise SchemaError("Um destaque referencia segmento inexistente; o arquivo foi preservado.")
+                raise SchemaError(tr("Um destaque referencia segmento inexistente; o arquivo foi preservado."))
             if segment.get("track") not in {None, track}:
-                raise SchemaError("A fonte de um destaque não corresponde aos segmentos citados; o arquivo foi preservado.")
+                raise SchemaError(tr("A fonte de um destaque não corresponde aos segmentos citados; o arquivo foi preservado."))
         label = highlight.get("label", "")
         note = highlight.get("note", "")
         if not isinstance(label, str) or len(label) > MAX_LABEL_CHARS:
-            raise SchemaError("O rótulo de um destaque é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O rótulo de um destaque é inválido; o arquivo foi preservado."))
         if not isinstance(note, str) or len(note.encode("utf-8")) > MAX_NOTES_BYTES:
-            raise SchemaError("A nota de um destaque é inválida; o arquivo foi preservado.")
+            raise SchemaError(tr("A nota de um destaque é inválida; o arquivo foi preservado."))
 
     def _transcript_segments(self, session_id, revision):
         metadata = self.store.get(session_id, include_events=False)
@@ -1083,40 +1084,40 @@ class MeetingLibrary:
             if isinstance(item, dict)
         }
         if revision not in revisions:
-            raise ValueError("A revisão de transcrição não existe.")
+            raise ValueError(tr("A revisão de transcrição não existe."))
         segments = list(self.store.get_transcript(session_id, revision))
         by_id = {}
         for segment in segments:
             segment_id = segment.get("id") if isinstance(segment, dict) else None
             if not _valid_id(segment_id, reference=True):
-                raise SchemaError("A identidade de um segmento de transcrição é inválida.")
+                raise SchemaError(tr("A identidade de um segmento de transcrição é inválida."))
             if segment_id in by_id:
-                raise SchemaError("Há segmentos de transcrição duplicados.")
+                raise SchemaError(tr("Há segmentos de transcrição duplicados."))
             by_id[segment_id] = segment
         return metadata, by_id
 
     def _validate_annotations(self, value, metadata, *, from_disk):
         if not isinstance(value, dict) or value.get("schema_version") != ANNOTATIONS_SCHEMA_VERSION:
-            raise SchemaError("O schema de annotations.json é inválido; o arquivo foi preservado.")
-        _valid_generation(value.get("generation"), "das anotações")
+            raise SchemaError(tr("O schema de annotations.json é inválido; o arquivo foi preservado."))
+        _valid_generation(value.get("generation"), tr("das anotações"))
         title = value.get("title")
         notes = value.get("notes")
         if not isinstance(title, str) or len(title) > MAX_TITLE_CHARS:
-            raise SchemaError("O título da anotação é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O título da anotação é inválido; o arquivo foi preservado."))
         if not isinstance(notes, str) or len(notes.encode("utf-8")) > MAX_NOTES_BYTES:
-            raise SchemaError("As notas da anotação são inválidas; o arquivo foi preservado.")
+            raise SchemaError(tr("As notas da anotação são inválidas; o arquivo foi preservado."))
         bookmarks = value.get("bookmarks")
         if not isinstance(bookmarks, list) or len(bookmarks) > MAX_BOOKMARKS:
-            raise SchemaError("Os marcadores da anotação são inválidos; o arquivo foi preservado.")
+            raise SchemaError(tr("Os marcadores da anotação são inválidos; o arquivo foi preservado."))
         for bookmark in bookmarks:
             if not isinstance(bookmark, dict):
-                raise SchemaError("Os marcadores da anotação são inválidos; o arquivo foi preservado.")
+                raise SchemaError(tr("Os marcadores da anotação são inválidos; o arquivo foi preservado."))
             for key in ("time", "timestamp"):
                 if key in bookmark and (not _finite_number(bookmark[key]) or float(bookmark[key]) < 0):
-                    raise SchemaError("O instante de um marcador é inválido; o arquivo foi preservado.")
+                    raise SchemaError(tr("O instante de um marcador é inválido; o arquivo foi preservado."))
             if "label" in bookmark and (not isinstance(bookmark["label"], str)
                                          or len(bookmark["label"]) > MAX_LABEL_CHARS):
-                raise SchemaError("O rótulo de um marcador é inválido; o arquivo foi preservado.")
+                raise SchemaError(tr("O rótulo de um marcador é inválido; o arquivo foi preservado."))
         revisions = {
             item.get("id"): item for item in metadata.get("revisions", [])
             if isinstance(item, dict) and isinstance(item.get("id"), str)
@@ -1132,63 +1133,63 @@ class MeetingLibrary:
         transcript_segments = {}
         for revision_id in referenced_revisions:
             if revision_id not in revisions:
-                raise SchemaError("Uma anotação referencia uma revisão inexistente; o arquivo foi preservado.")
+                raise SchemaError(tr("Uma anotação referencia uma revisão inexistente; o arquivo foi preservado."))
             try:
                 segments = list(self.store.get_transcript(metadata["id"], revision_id))
             except (OSError, ValueError, KeyError) as error:
-                raise SchemaError("A transcrição referenciada pelas anotações não pôde ser lida.") from error
+                raise SchemaError(tr("A transcrição referenciada pelas anotações não pôde ser lida.")) from error
             by_id = {}
             for segment in segments:
                 if not isinstance(segment, dict) or not _valid_id(segment.get("id"), reference=True):
-                    raise SchemaError("A identidade de um segmento de transcrição é inválida.")
+                    raise SchemaError(tr("A identidade de um segmento de transcrição é inválida."))
                 if segment["id"] in by_id:
-                    raise SchemaError("Há segmentos de transcrição duplicados.")
+                    raise SchemaError(tr("Há segmentos de transcrição duplicados."))
                 by_id[segment["id"]] = segment
             transcript_segments[revision_id] = by_id
 
         highlights = value.get("highlights")
         if not isinstance(highlights, list) or len(highlights) > MAX_HIGHLIGHTS:
-            raise SchemaError("Os destaques da anotação são inválidos; o arquivo foi preservado.")
+            raise SchemaError(tr("Os destaques da anotação são inválidos; o arquivo foi preservado."))
         seen_ids = set()
         for highlight in highlights:
             if not isinstance(highlight, dict) or not _valid_id(highlight.get("id"), reference=True):
-                raise SchemaError("Um destaque tem identificador inválido; o arquivo foi preservado.")
+                raise SchemaError(tr("Um destaque tem identificador inválido; o arquivo foi preservado."))
             self._validate_highlight_record(highlight, metadata, transcript_segments, seen_ids)
             seen_ids.add(highlight["id"])
 
         speaker_labels = value.get("speaker_labels")
         if not isinstance(speaker_labels, dict) or len(speaker_labels) > MAX_SPEAKER_LABELS:
-            raise SchemaError("Os rótulos de locutor são inválidos; o arquivo foi preservado.")
+            raise SchemaError(tr("Os rótulos de locutor são inválidos; o arquivo foi preservado."))
         for key, record in speaker_labels.items():
             if not _valid_id(key, reference=True) or not isinstance(record, dict):
                 # Empty legacy maps are retained for sidecar compatibility;
                 # non-empty unscoped maps cannot be safely projected forward.
                 if isinstance(record, str):
-                    raise SchemaError("Os rótulos de locutor precisam de revisão e segmento; o arquivo foi preservado.")
-                raise SchemaError("Os rótulos de locutor são inválidos; o arquivo foi preservado.")
+                    raise SchemaError(tr("Os rótulos de locutor precisam de revisão e segmento; o arquivo foi preservado."))
+                raise SchemaError(tr("Os rótulos de locutor são inválidos; o arquivo foi preservado."))
             if record.get("id", key) != key:
-                raise SchemaError("O identificador de um rótulo de locutor é inconsistente; o arquivo foi preservado.")
+                raise SchemaError(tr("O identificador de um rótulo de locutor é inconsistente; o arquivo foi preservado."))
             revision = record.get("revision") or record.get("transcript_revision")
             segment_id = record.get("segment_id")
             if revision not in transcript_segments or not _valid_id(segment_id, reference=True):
-                raise SchemaError("Um rótulo de locutor referencia revisão/segmento inválido; o arquivo foi preservado.")
+                raise SchemaError(tr("Um rótulo de locutor referencia revisão/segmento inválido; o arquivo foi preservado."))
             segment = transcript_segments[revision].get(segment_id)
             if segment is None:
-                raise SchemaError("Um rótulo de locutor referencia segmento inexistente; o arquivo foi preservado.")
+                raise SchemaError(tr("Um rótulo de locutor referencia segmento inexistente; o arquivo foi preservado."))
             label = record.get("label")
             if not isinstance(label, str) or not label.strip() or len(label) > MAX_LABEL_CHARS:
-                raise SchemaError("Os rótulos de locutor são inválidos; o arquivo foi preservado.")
+                raise SchemaError(tr("Os rótulos de locutor são inválidos; o arquivo foi preservado."))
             note = record.get("note", "")
             if not isinstance(note, str) or len(note.encode("utf-8")) > MAX_NOTES_BYTES:
-                raise SchemaError("A nota do rótulo de locutor é inválida; o arquivo foi preservado.")
+                raise SchemaError(tr("A nota do rótulo de locutor é inválida; o arquivo foi preservado."))
             if "track" in record:
                 track = record["track"]
                 if track not in {"microphone", "system"} or (
                     segment.get("track") not in {None, track}
                 ):
-                    raise SchemaError("A fonte do rótulo de locutor é inválida; o arquivo foi preservado.")
+                    raise SchemaError(tr("A fonte do rótulo de locutor é inválida; o arquivo foi preservado."))
             if key in seen_ids:
-                raise SchemaError("Há identificadores de anotação duplicados; o arquivo foi preservado.")
+                raise SchemaError(tr("Há identificadores de anotação duplicados; o arquivo foi preservado."))
             seen_ids.add(key)
         for key in ("collection_ids", "tags", "people"):
             limit = MAX_COLLECTIONS if key == "collection_ids" else MAX_TAGS if key == "tags" else MAX_PEOPLE
@@ -1197,45 +1198,45 @@ class MeetingLibrary:
                 not isinstance(item, str) or not _valid_id(item, reference=True) or len(item) > MAX_ID_CHARS
                 for item in values
             ) or len(set(values)) != len(values):
-                raise SchemaError(f"A lista {key} da anotação é inválida; o arquivo foi preservado.")
+                raise SchemaError(tr("A lista {key} da anotação é inválida; o arquivo foi preservado.", key=key))
             if key in {"tags", "people"} and any(
                 item != unicodedata.normalize("NFC", item.strip()) for item in values
             ):
-                raise SchemaError(f"A lista {key} não está normalizada; o arquivo foi preservado.")
+                raise SchemaError(tr("A lista {key} não está normalizada; o arquivo foi preservado.", key=key))
         series_id = value.get("series_id")
         if series_id is not None and not _valid_id(series_id, reference=True):
-            raise SchemaError("A série da anotação é inválida; o arquivo foi preservado.")
+            raise SchemaError(tr("A série da anotação é inválida; o arquivo foi preservado."))
         reviewed_summary = value.get("reviewed_summary", "")
         if not isinstance(reviewed_summary, str) or len(reviewed_summary.encode("utf-8")) > MAX_NOTES_BYTES:
-            raise SchemaError("O resumo revisado é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O resumo revisado é inválido; o arquivo foi preservado."))
         if not isinstance(value.get("reviewed_artifacts"), dict):
-            raise SchemaError("Os artefatos revisados são inválidos; o arquivo foi preservado.")
+            raise SchemaError(tr("Os artefatos revisados são inválidos; o arquivo foi preservado."))
         reviewed_artifacts = value["reviewed_artifacts"]
         if len(reviewed_artifacts) > MAX_REPORTS:
-            raise SchemaError("Há artefatos revisados demais; o arquivo foi preservado.")
+            raise SchemaError(tr("Há artefatos revisados demais; o arquivo foi preservado."))
         for report_id, artifact in reviewed_artifacts.items():
             if not _valid_id(report_id) or not isinstance(artifact, dict):
-                raise SchemaError("Um artefato revisado é inválido; o arquivo foi preservado.")
-            _valid_generation(artifact.get("generation"), "do artefato revisado")
+                raise SchemaError(tr("Um artefato revisado é inválido; o arquivo foi preservado."))
+            _valid_generation(artifact.get("generation"), tr("do artefato revisado"))
             sections = artifact.get("sections")
             if not isinstance(sections, dict) or not sections or any(
                 key not in REPORT_SECTIONS or not isinstance(text, str)
                 for key, text in sections.items()
             ):
-                raise SchemaError("As seções revisadas são inválidas; o arquivo foi preservado.")
+                raise SchemaError(tr("As seções revisadas são inválidas; o arquivo foi preservado."))
             if not _valid_timestamp(artifact.get("updated_at")):
-                raise SchemaError("A data do artefato revisado é inválida; o arquivo foi preservado.")
+                raise SchemaError(tr("A data do artefato revisado é inválida; o arquivo foi preservado."))
         active_report_id = value.get("active_report_id")
         if active_report_id is not None and not _valid_id(active_report_id):
-            raise SchemaError("O relatório ativo é inválido; o arquivo foi preservado.")
+            raise SchemaError(tr("O relatório ativo é inválido; o arquivo foi preservado."))
         override = value.get("retention_override")
         if override is not None and not isinstance(override, dict):
-            raise SchemaError("A política de retenção é inválida; o arquivo foi preservado.")
+            raise SchemaError(tr("A política de retenção é inválida; o arquivo foi preservado."))
         if not _valid_timestamp(value.get("updated_at")):
-            raise SchemaError("A data de atualização da anotação é inválida; o arquivo foi preservado.")
+            raise SchemaError(tr("A data de atualização da anotação é inválida; o arquivo foi preservado."))
         _, size = _copy_json(value, "annotations.json")
         if size > MAX_ANNOTATIONS_BYTES:
-            raise SchemaError("As anotações excedem o limite permitido; o arquivo foi preservado.")
+            raise SchemaError(tr("As anotações excedem o limite permitido; o arquivo foi preservado."))
         # Sidecars and newly-created projections must not silently refer to
         # unknown workspace IDs.  Legacy virtual annotations have empty
         # membership by construction, so this is safe for old bundles too.
@@ -1244,10 +1245,10 @@ class MeetingLibrary:
             item.get("id") for item in workspace.get("collections", []) if isinstance(item, dict)
         }
         if any(item not in collection_ids for item in value.get("collection_ids", [])):
-            raise SchemaError("A anotação referencia uma coleção ausente; o arquivo foi preservado.")
+            raise SchemaError(tr("A anotação referencia uma coleção ausente; o arquivo foi preservado."))
         series_ids = {item.get("id") for item in workspace.get("series", []) if isinstance(item, dict)}
         if value.get("series_id") is not None and value["series_id"] not in series_ids:
-            raise SchemaError("A anotação referencia uma série ausente; o arquivo foi preservado.")
+            raise SchemaError(tr("A anotação referencia uma série ausente; o arquivo foi preservado."))
 
     def _merge_session(self, metadata, annotations, *, has_sidecar):
         if not has_sidecar:
@@ -1274,7 +1275,7 @@ class MeetingLibrary:
         if patch is None:
             patch = {}
         if not isinstance(patch, dict):
-            raise ValueError("A alteração das anotações deve ser um objeto.")
+            raise ValueError(tr("A alteração das anotações deve ser um objeto."))
         if fields:
             patch = {**patch, **fields}
         path = self._annotations_path(session_id)
@@ -1287,22 +1288,22 @@ class MeetingLibrary:
                     )
                     current = current_file or self._default_annotations(metadata)
                     self._validate_annotations(current, metadata, from_disk=bool(current_file))
-                    actual = _valid_generation(current["generation"], "atual")
+                    actual = _valid_generation(current["generation"], tr("atual"))
                     if expected_generation is not _UNSET:
-                        expected = _valid_generation(expected_generation, "esperada")
+                        expected = _valid_generation(expected_generation, tr("esperada"))
                         if expected != actual:
                             raise AnnotationConflict(expected, actual)
                     merged = copy.deepcopy(current)
                     for key, value in patch.items():
                         if key in {"schema_version", "generation", "updated_at"}:
-                            raise ValueError("Campos de versão das anotações são controlados pela biblioteca.")
+                            raise ValueError(tr("Campos de versão das anotações são controlados pela biblioteca."))
                         merged[key] = copy.deepcopy(value)
                     merged["generation"] = actual + 1
                     merged["updated_at"] = _utc_timestamp()
                     self._validate_annotations(merged, metadata, from_disk=False)
                     _, size = _copy_json(merged, "annotations.json")
                     if size > MAX_ANNOTATIONS_BYTES:
-                        raise ValueError("As anotações excedem o limite permitido.")
+                        raise ValueError(tr("As anotações excedem o limite permitido."))
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     write_json_atomic(path, merged)
                     self._mirror_legacy_fields(session_id, merged)
@@ -1321,7 +1322,7 @@ class MeetingLibrary:
             raise AnnotationConflict(expected_generation, current["generation"])
         updated = transform(copy.deepcopy(current))
         if not isinstance(updated, dict):
-            raise ValueError("A transformação da anotação deve produzir um objeto.")
+            raise ValueError(tr("A transformação da anotação deve produzir um objeto."))
         patch = {
             key: value for key, value in updated.items()
             if key not in {"schema_version", "generation", "updated_at"}
@@ -1349,10 +1350,10 @@ class MeetingLibrary:
         revision = payload.get("revision") or payload.get("transcript_revision")
         segment_id = payload.get("segment_id")
         if not isinstance(revision, str) or not isinstance(segment_id, str):
-            raise ValueError("O rótulo exige revisão e segmento de transcrição.")
+            raise ValueError(tr("O rótulo exige revisão e segmento de transcrição."))
         metadata, segments = self._transcript_segments(session_id, revision)
         if segment_id not in segments:
-            raise ValueError("O segmento de transcrição não existe nessa revisão.")
+            raise ValueError(tr("O segmento de transcrição não existe nessa revisão."))
         record = {
             "id": record_id,
             "revision": revision,
@@ -1367,14 +1368,14 @@ class MeetingLibrary:
         def add(current):
             labels = current.setdefault("speaker_labels", {})
             if record_id in labels:
-                raise ValueError("Já existe um rótulo de locutor com esse identificador.")
+                raise ValueError(tr("Já existe um rótulo de locutor com esse identificador."))
             if any(
                 item.get("revision") == revision and item.get("segment_id") == segment_id
                 for item in labels.values() if isinstance(item, dict)
             ):
-                raise ValueError("O segmento já possui um rótulo de locutor nessa revisão.")
+                raise ValueError(tr("O segmento já possui um rótulo de locutor nessa revisão."))
             if record_id in {item.get("id") for item in current.get("highlights", [])}:
-                raise ValueError("O identificador da anotação já está em uso.")
+                raise ValueError(tr("O identificador da anotação já está em uso."))
             labels[record_id] = copy.deepcopy(record)
             return current
 
@@ -1386,18 +1387,18 @@ class MeetingLibrary:
         if patch is None:
             patch = {}
         if not isinstance(patch, dict):
-            raise ValueError("A alteração do rótulo de locutor deve ser um objeto.")
+            raise ValueError(tr("A alteração do rótulo de locutor deve ser um objeto."))
         patch = {**patch, **fields}
         if "id" in patch or "label_id" in patch:
-            raise ValueError("O identificador do rótulo não pode ser alterado.")
+            raise ValueError(tr("O identificador do rótulo não pode ser alterado."))
         allowed = {"revision", "transcript_revision", "segment_id", "label", "note", "track"}
         if set(patch) - allowed:
-            raise ValueError("Há campos de rótulo de locutor não reconhecidos.")
+            raise ValueError(tr("Há campos de rótulo de locutor não reconhecidos."))
 
         def edit(current):
             labels = current.get("speaker_labels", {})
             if label_id not in labels:
-                raise KeyError("O rótulo de locutor não existe.")
+                raise KeyError(tr("O rótulo de locutor não existe."))
             record = copy.deepcopy(labels[label_id])
             record.update(copy.deepcopy(patch))
             if "transcript_revision" in record:
@@ -1406,13 +1407,13 @@ class MeetingLibrary:
             segment_id = record.get("segment_id")
             metadata, segments = self._transcript_segments(session_id, revision)
             if segment_id not in segments:
-                raise ValueError("O segmento de transcrição não existe nessa revisão.")
+                raise ValueError(tr("O segmento de transcrição não existe nessa revisão."))
             if any(
                 key != label_id and isinstance(item, dict)
                 and item.get("revision") == revision and item.get("segment_id") == segment_id
                 for key, item in labels.items()
             ):
-                raise ValueError("O segmento já possui um rótulo de locutor nessa revisão.")
+                raise ValueError(tr("O segmento já possui um rótulo de locutor nessa revisão."))
             labels[label_id] = record
             return current
 
@@ -1424,7 +1425,7 @@ class MeetingLibrary:
         def remove(current):
             labels = current.get("speaker_labels", {})
             if label_id not in labels:
-                raise KeyError("O rótulo de locutor não existe.")
+                raise KeyError(tr("O rótulo de locutor não existe."))
             del labels[label_id]
             return current
 
@@ -1488,7 +1489,7 @@ class MeetingLibrary:
         payload["id"] = record_id
         revision = payload.get("revision") or payload.get("transcript_revision")
         if not isinstance(revision, str):
-            raise ValueError("O destaque exige uma revisão de transcrição.")
+            raise ValueError(tr("O destaque exige uma revisão de transcrição."))
         metadata, segments = self._transcript_segments(session_id, revision)
         record = {
             "id": record_id,
@@ -1508,9 +1509,9 @@ class MeetingLibrary:
 
         def add(current):
             if any(item.get("id") == record_id for item in current.get("highlights", [])):
-                raise ValueError("Já existe um destaque com esse identificador.")
+                raise ValueError(tr("Já existe um destaque com esse identificador."))
             if record_id in current.get("speaker_labels", {}):
-                raise ValueError("O identificador da anotação já está em uso.")
+                raise ValueError(tr("O identificador da anotação já está em uso."))
             current.setdefault("highlights", []).append(copy.deepcopy(record))
             return current
 
@@ -1522,14 +1523,14 @@ class MeetingLibrary:
         if patch is None:
             patch = {}
         if not isinstance(patch, dict):
-            raise ValueError("A alteração do destaque deve ser um objeto.")
+            raise ValueError(tr("A alteração do destaque deve ser um objeto."))
         patch = {**patch, **fields}
         if "id" in patch or "highlight_id" in patch:
-            raise ValueError("O identificador do destaque não pode ser alterado.")
+            raise ValueError(tr("O identificador do destaque não pode ser alterado."))
         allowed = {"revision", "transcript_revision", "start", "end", "track",
                    "segment_ids", "segments", "label", "note"}
         if set(patch) - allowed:
-            raise ValueError("Há campos de destaque não reconhecidos.")
+            raise ValueError(tr("Há campos de destaque não reconhecidos."))
 
         def edit(current):
             highlights = current.get("highlights", [])
@@ -1545,7 +1546,7 @@ class MeetingLibrary:
                 self._validate_highlight_record(record, metadata, {revision: segments}, set())
                 highlights[index] = record
                 return current
-            raise KeyError("O destaque não existe.")
+            raise KeyError(tr("O destaque não existe."))
 
         return self._annotation_with_generation(session_id, expected_generation, edit)
 
@@ -1558,7 +1559,7 @@ class MeetingLibrary:
                 if item.get("id") == highlight_id:
                     del highlights[index]
                     return current
-            raise KeyError("O destaque não existe.")
+            raise KeyError(tr("O destaque não existe."))
 
         return self._annotation_with_generation(session_id, expected_generation, remove)
 
@@ -1618,22 +1619,22 @@ class MeetingLibrary:
                    "reviewed_artifacts", "active_report_id", "retention_override"}
         unknown = set(fields) - allowed
         if unknown:
-            raise ValueError("Há campos de reunião não reconhecidos.")
+            raise ValueError(tr("Há campos de reunião não reconhecidos."))
         self.update_annotations(session_id, fields, expected_generation=expected)
         return True
 
     @staticmethod
     def _normalized_labels(values, label, limit):
         if not isinstance(values, list) or len(values) > limit:
-            raise ValueError(f"A lista {label} é inválida.")
+            raise ValueError(tr("A lista {label} é inválida.", label=label))
         result = []
         seen = set()
         for value in values:
             if not isinstance(value, str):
-                raise ValueError(f"A lista {label} é inválida.")
+                raise ValueError(tr("A lista {label} é inválida.", label=label))
             normalized = unicodedata.normalize("NFC", value.strip())
             if not normalized or len(normalized) > MAX_ID_CHARS or not _valid_id(normalized, reference=True):
-                raise ValueError(f"A lista {label} é inválida.")
+                raise ValueError(tr("A lista {label} é inválida.", label=label))
             folded = normalized.casefold()
             if folded in seen:
                 continue
@@ -1648,18 +1649,18 @@ class MeetingLibrary:
         patch = {}
         if collection_ids is not None:
             patch["collection_ids"] = self._normalized_labels(
-                collection_ids, "de coleções", MAX_COLLECTIONS,
+                collection_ids, tr("de coleções"), MAX_COLLECTIONS,
             )
         if tags is not None:
-            patch["tags"] = self._normalized_labels(tags, "de tags", MAX_TAGS)
+            patch["tags"] = self._normalized_labels(tags, tr("de tags"), MAX_TAGS)
         if people is not None:
-            patch["people"] = self._normalized_labels(people, "de pessoas", MAX_PEOPLE)
+            patch["people"] = self._normalized_labels(people, tr("de pessoas"), MAX_PEOPLE)
         if series_id is not _UNSET:
             if series_id is not None and not _valid_id(series_id):
-                raise ValueError("A série é inválida.")
+                raise ValueError(tr("A série é inválida."))
             patch["series_id"] = series_id
         if not patch:
-            raise ValueError("Nenhuma organização foi alterada.")
+            raise ValueError(tr("Nenhuma organização foi alterada."))
         return self.update_annotations(
             session_id, patch, expected_generation=expected_generation,
         )
@@ -1668,24 +1669,24 @@ class MeetingLibrary:
                                    tags=None, people=None, series_id=_UNSET):
         """Validate a bounded batch before any sidecar is changed."""
         if not isinstance(session_ids, (list, tuple)) or not session_ids:
-            raise ValueError("A seleção de reuniões é inválida.")
+            raise ValueError(tr("A seleção de reuniões é inválida."))
         if (len(session_ids) > MAX_BATCH_ASSIGNMENTS
                 or any(not isinstance(item, str) for item in session_ids)
                 or len(set(session_ids)) != len(session_ids)):
-            raise ValueError("A seleção de reuniões excede o limite ou contém duplicatas.")
+            raise ValueError(tr("A seleção de reuniões excede o limite ou contém duplicatas."))
         patch = {}
         if collection_ids is not None:
-            patch["collection_ids"] = self._normalized_labels(collection_ids, "de coleções", MAX_COLLECTIONS)
+            patch["collection_ids"] = self._normalized_labels(collection_ids, tr("de coleções"), MAX_COLLECTIONS)
         if tags is not None:
-            patch["tags"] = self._normalized_labels(tags, "de tags", MAX_TAGS)
+            patch["tags"] = self._normalized_labels(tags, tr("de tags"), MAX_TAGS)
         if people is not None:
-            patch["people"] = self._normalized_labels(people, "de pessoas", MAX_PEOPLE)
+            patch["people"] = self._normalized_labels(people, tr("de pessoas"), MAX_PEOPLE)
         if series_id is not _UNSET:
             if series_id is not None and not _valid_id(series_id):
-                raise ValueError("A série é inválida.")
+                raise ValueError(tr("A série é inválida."))
             patch["series_id"] = series_id
         if not patch:
-            raise ValueError("Nenhuma organização foi alterada.")
+            raise ValueError(tr("Nenhuma organização foi alterada."))
         items = []
         for session_id in session_ids:
             annotations = self.read_annotations(session_id)
@@ -1703,7 +1704,7 @@ class MeetingLibrary:
         if not isinstance(expected_generations, dict) or {
             item["id"] for item in preview["items"]
         } != set(expected_generations):
-            raise ValueError("A confirmação de gerações não corresponde à prévia.")
+            raise ValueError(tr("A confirmação de gerações não corresponde à prévia."))
         for item in preview["items"]:
             if expected_generations[item["id"]] != item["generation"]:
                 raise AnnotationConflict(expected_generations[item["id"]], item["generation"])
@@ -1711,7 +1712,7 @@ class MeetingLibrary:
         try:
             for item in preview["items"]:
                 if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("A atribuição em lote foi cancelada antes da conclusão.")
+                    raise RuntimeError(tr("A atribuição em lote foi cancelada antes da conclusão."))
                 session_id = item["id"]
                 originals[session_id] = self.read_annotations(session_id)
                 self.update_annotations(
@@ -1761,15 +1762,15 @@ class MeetingLibrary:
                     and not _is_link_or_junction(os.path.join(self.meetings_root, entry.name))
                 ]
         except OSError as error:
-            raise SchemaError("A biblioteca não pôde ser enumerada.") from error
+            raise SchemaError(tr("A biblioteca não pôde ser enumerada.")) from error
         return sorted(values)
 
     def preview_collection_delete(self, collection_id):
         if not _valid_id(collection_id):
-            raise ValueError("A coleção é inválida.")
+            raise ValueError(tr("A coleção é inválida."))
         workspace = self.read_workspace()
         if not any(item.get("id") == collection_id for item in workspace["collections"]):
-            raise KeyError("A coleção não existe.")
+            raise KeyError(tr("A coleção não existe."))
         affected = []
         for session_id in self._canonical_session_ids():
             annotations = self.read_annotations(session_id)
@@ -1786,7 +1787,7 @@ class MeetingLibrary:
         if preview["workspace_generation"] != expected_generation:
             raise WorkspaceConflict(expected_generation, preview["workspace_generation"])
         if sorted(set(confirmed_session_ids)) != preview["session_ids"]:
-            raise ValueError("A confirmação não corresponde à prévia atual da coleção.")
+            raise ValueError(tr("A confirmação não corresponde à prévia atual da coleção."))
         originals = {}
         updated = []
         try:
@@ -1836,14 +1837,14 @@ class MeetingLibrary:
                 return (value,)
             if isinstance(value, (list, tuple, set, frozenset)):
                 if any(not isinstance(item, str) or not item for item in value):
-                    raise ValueError("O filtro da biblioteca é inválido.")
+                    raise ValueError(tr("O filtro da biblioteca é inválido."))
                 return tuple(value)
-            raise ValueError("O filtro da biblioteca é inválido.")
-        for value, label in ((date_from, "data inicial"), (date_to, "data final")):
+            raise ValueError(tr("O filtro da biblioteca é inválido."))
+        for value, label in ((date_from, tr("data inicial")), (date_to, tr("data final"))):
             if value is not None and (not isinstance(value, str) or len(value) > 64):
-                raise ValueError(f"O filtro {label} é inválido.")
+                raise ValueError(tr("O filtro {label} é inválido.", label=label))
         if date_from and date_to and date_from > date_to:
-            raise ValueError("O intervalo de datas da biblioteca é inválido.")
+            raise ValueError(tr("O intervalo de datas da biblioteca é inválido."))
         return {
             "collection": values(collection), "tag": values(tag), "person": values(person),
             "series": values(series), "status": values(status),
@@ -1891,9 +1892,9 @@ class MeetingLibrary:
         if series is None:
             series = series_id
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento da biblioteca é inválido.")
+            raise ValueError(tr("O deslocamento da biblioteca é inválido."))
         if cursor is not None and offset:
-            raise ValueError("O cursor não pode ser combinado com deslocamento.")
+            raise ValueError(tr("O cursor não pode ser combinado com deslocamento."))
         try:
             if self.index_state == "ready" and not self._index_stale:
                 if hasattr(self.index, "list_sessions_page"):
@@ -1919,13 +1920,13 @@ class MeetingLibrary:
         except Exception:
             self._mark_index_stale()
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
-            raise ValueError("O limite da biblioteca é inválido.")
+            raise ValueError(tr("O limite da biblioteca é inválido."))
         filters = self._catalog_filters(
             collection=collection, tag=tag, person=person, series=series,
             status=status, date_from=date_from, date_to=date_to,
         )
         if not isinstance(query, str) or len(query) > 512:
-            raise ValueError("A busca da biblioteca é inválida.")
+            raise ValueError(tr("A busca da biblioteca é inválida."))
         needle = query.casefold()
         filter_digest = self._catalog_filter_digest(query, filters)
         decoded = _library_cursor_decode(cursor)
@@ -1989,9 +1990,9 @@ class MeetingLibrary:
 
     def list_sessions(self, offset=0, limit=50, query="", status="", **filters):
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento da biblioteca é inválido.")
+            raise ValueError(tr("O deslocamento da biblioteca é inválido."))
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
-            raise ValueError("O limite da biblioteca é inválido.")
+            raise ValueError(tr("O limite da biblioteca é inválido."))
         page = self.list_sessions_page(
             limit=limit, offset=offset, query=query, status=status, **filters,
         )
@@ -2013,13 +2014,13 @@ class MeetingLibrary:
         except Exception:
             self._mark_index_stale()
         if not isinstance(query, str) or len(query) > 512:
-            raise ValueError("A busca da biblioteca é inválida.")
+            raise ValueError(tr("A busca da biblioteca é inválida."))
         if not query.strip():
             return []
         if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
-            raise ValueError("O limite da busca é inválido.")
+            raise ValueError(tr("O limite da busca é inválido."))
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento da busca é inválido.")
+            raise ValueError(tr("O deslocamento da busca é inválido."))
         from meeting_index import _bounded_text, _EVIDENCE_WEIGHTS, _query_parts
 
         query_parts = _query_parts(query)
@@ -2120,34 +2121,34 @@ class MeetingLibrary:
         existed in the disposable index.
         """
         if not isinstance(result, dict):
-            raise ValueError("O resultado de busca é inválido.")
+            raise ValueError(tr("O resultado de busca é inválido."))
         session_id = result.get("session_id")
         kind = result.get("source_kind")
         if not _valid_id(session_id):
-            raise ValueError("A reunião da busca é inválida.")
+            raise ValueError(tr("A reunião da busca é inválida."))
         metadata = self.store.get(session_id, include_events=False)
         title = metadata.get("title", "")
         if kind == "transcript":
             revision_id = result.get("revision_id")
             segment_id = result.get("segment_id")
             if not isinstance(revision_id, str) or not isinstance(segment_id, str):
-                raise ValueError("A fonte de transcrição é incompleta.")
+                raise ValueError(tr("A fonte de transcrição é incompleta."))
             revision = next(
                 (item for item in metadata.get("revisions", ())
                  if isinstance(item, dict) and item.get("id") == revision_id),
                 None,
             )
             if revision is None:
-                raise ValueError("A revisão citada não existe mais.")
+                raise ValueError(tr("A revisão citada não existe mais."))
             if revision.get("status") != "completed":
-                raise ValueError("A revisão citada não está concluída.")
+                raise ValueError(tr("A revisão citada não está concluída."))
             segment = next(
                 (item for item in self.store.get_transcript(session_id, revision_id)
                  if isinstance(item, dict) and item.get("id") == segment_id),
                 None,
             )
             if segment is None:
-                raise ValueError("O trecho citado não existe mais na revisão selecionada.")
+                raise ValueError(tr("O trecho citado não existe mais na revisão selecionada."))
             start, end = segment.get("start"), segment.get("end")
             return {
                 "source_kind": kind, "session_id": session_id, "title": title,
@@ -2159,11 +2160,11 @@ class MeetingLibrary:
         if kind in {"report", "reviewed_artifact"}:
             report_id = result.get("report_id")
             if not isinstance(report_id, str):
-                raise ValueError("A fonte de relatório é incompleta.")
+                raise ValueError(tr("A fonte de relatório é incompleta."))
             report = self.get_report(session_id, report_id)
             reviewed = report.get("reviewed_artifact")
             if kind == "reviewed_artifact" and not isinstance(reviewed, dict):
-                raise ValueError("O artefato revisado atual não está disponível.")
+                raise ValueError(tr("O artefato revisado atual não está disponível."))
             resolved = self._report_history_projection(
                 report, reviewed if kind == "reviewed_artifact" else None,
             )
@@ -2178,7 +2179,7 @@ class MeetingLibrary:
                 "source_kind": kind, "session_id": session_id, "title": title,
                 "revision_id": result.get("revision_id"),
             }
-        raise ValueError("A fonte de busca não é suportada.")
+        raise ValueError(tr("A fonte de busca não é suportada."))
 
     resolve_search_hit = resolve_search_result
 
@@ -2199,22 +2200,22 @@ class MeetingLibrary:
         session_dir = self._session_dir(session_id)
         result = os.path.join(session_dir, REPORTS_DIRECTORY)
         if os.path.lexists(result) and _is_link_or_junction(result):
-            raise PathSafetyError("A pasta de relatórios não pode ser um link ou junction.")
+            raise PathSafetyError(tr("A pasta de relatórios não pode ser um link ou junction."))
         if not _commonpath_is(os.path.realpath(session_dir), os.path.realpath(result)):
-            raise PathSafetyError("A pasta de relatórios aponta para fora da reunião.")
+            raise PathSafetyError(tr("A pasta de relatórios aponta para fora da reunião."))
         if create:
             os.makedirs(result, exist_ok=True)
         return result
 
     def _report_path(self, session_id, report_id, *, create_directory=False):
         if not _valid_id(report_id):
-            raise ValueError("O identificador do relatório é inválido.")
+            raise ValueError(tr("O identificador do relatório é inválido."))
         directory = self._reports_dir(session_id, create=create_directory)
         path = os.path.join(directory, f"{report_id}.json")
         if os.path.lexists(path) and _is_link_or_junction(path):
-            raise PathSafetyError("O relatório não pode ser um link ou junction.")
+            raise PathSafetyError(tr("O relatório não pode ser um link ou junction."))
         if not _commonpath_is(os.path.realpath(directory), os.path.realpath(path)):
-            raise PathSafetyError("O relatório aponta para fora da reunião.")
+            raise PathSafetyError(tr("O relatório aponta para fora da reunião."))
         return path
 
     @staticmethod
@@ -2225,7 +2226,7 @@ class MeetingLibrary:
             if key in {"citations", "segment_ids"}:
                 if (not isinstance(value, list) or len(value) > MAX_REPORT_CITATIONS
                         or any(not isinstance(item, str) for item in value)):
-                    raise SchemaError("As citações do relatório são inválidas.")
+                    raise SchemaError(tr("As citações do relatório são inválidas."))
                 citations.extend(value)
                 return
             if isinstance(value, dict):
@@ -2237,72 +2238,72 @@ class MeetingLibrary:
 
         visit(generated)
         if len(set(citations)) > MAX_REPORT_CITATIONS:
-            raise SchemaError("O relatório excede o limite de citações únicas.")
+            raise SchemaError(tr("O relatório excede o limite de citações únicas."))
         return citations
 
     def _validate_report(self, session_id, envelope):
         if not isinstance(envelope, dict):
-            raise SchemaError("O relatório deve ser um objeto.")
+            raise SchemaError(tr("O relatório deve ser um objeto."))
         allowed = {
             "schema_version", "id", "report_id", "kind", "profile_id",
             "profile_version", "session_id", "transcript_revision", "model",
             "generated", "payload", "status", "created_at", "completed_at",
         }
         if set(envelope) - allowed:
-            raise SchemaError("O relatório contém campos não reconhecidos.")
+            raise SchemaError(tr("O relatório contém campos não reconhecidos."))
         if envelope.get("schema_version") != REPORT_SCHEMA_VERSION:
-            raise SchemaError("A versão do relatório é incompatível.")
+            raise SchemaError(tr("A versão do relatório é incompatível."))
         report_id = envelope.get("id", envelope.get("report_id"))
         if not _valid_id(report_id):
-            raise SchemaError("O identificador do relatório é inválido.")
+            raise SchemaError(tr("O identificador do relatório é inválido."))
         if envelope.get("session_id") != session_id:
-            raise SchemaError("O relatório referencia outra reunião.")
+            raise SchemaError(tr("O relatório referencia outra reunião."))
         kind = envelope.get("kind")
         if kind not in {"report", "qa"}:
-            raise SchemaError("O tipo do relatório é inválido.")
+            raise SchemaError(tr("O tipo do relatório é inválido."))
         if not _valid_id(envelope.get("profile_id")):
-            raise SchemaError("O perfil do relatório é inválido.")
+            raise SchemaError(tr("O perfil do relatório é inválido."))
         profile_version = envelope.get("profile_version")
         if isinstance(profile_version, bool) or not isinstance(profile_version, int) or profile_version < 1:
-            raise SchemaError("A versão do perfil é inválida.")
+            raise SchemaError(tr("A versão do perfil é inválida."))
         metadata = self.store.get(session_id, include_events=False)
         revisions = {
             item.get("id") for item in metadata.get("revisions", []) if isinstance(item, dict)
         }
         revision_id = envelope.get("transcript_revision")
         if not isinstance(revision_id, str) or revision_id not in revisions:
-            raise SchemaError("O relatório referencia uma revisão inexistente.")
+            raise SchemaError(tr("O relatório referencia uma revisão inexistente."))
         model = envelope.get("model")
         if not isinstance(model, dict) or set(model) - {"id", "sha256", "runtime", "context_limit"}:
-            raise SchemaError("A proveniência do modelo é inválida.")
+            raise SchemaError(tr("A proveniência do modelo é inválida."))
         if not _valid_id(model.get("id"), reference=True):
-            raise SchemaError("O modelo do relatório é inválido.")
+            raise SchemaError(tr("O modelo do relatório é inválido."))
         digest = model.get("sha256")
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
-            raise SchemaError("O hash do modelo é inválido.")
+            raise SchemaError(tr("O hash do modelo é inválido."))
         if not isinstance(model.get("runtime"), str) or not model["runtime"]:
-            raise SchemaError("O runtime do relatório é inválido.")
+            raise SchemaError(tr("O runtime do relatório é inválido."))
         generated = envelope.get("generated", envelope.get("payload"))
         if not isinstance(generated, dict) or not generated or any(
             key not in REPORT_SECTIONS for key in generated
         ):
-            raise SchemaError("As seções geradas são inválidas.")
+            raise SchemaError(tr("As seções geradas são inválidas."))
         if not _valid_timestamp(envelope.get("created_at")):
-            raise SchemaError("A data do relatório é inválida.")
+            raise SchemaError(tr("A data do relatório é inválida."))
         segments = {
             item.get("id")
             for item in self.store.get_transcript(session_id, revision_id)
             if isinstance(item, dict)
         }
         if any(item not in segments for item in self._report_citations(generated)):
-            raise SchemaError("O relatório contém citações que não existem na revisão.")
+            raise SchemaError(tr("O relatório contém citações que não existem na revisão."))
         normalized = copy.deepcopy(envelope)
         normalized["id"] = report_id
         normalized.pop("report_id", None)
         normalized["generated"] = normalized.pop("payload", generated)
-        _, size = _copy_json(normalized, "relatório")
+        _, size = _copy_json(normalized, tr("relatório"))
         if size > MAX_REPORT_BYTES:
-            raise SchemaError("O relatório excede o limite permitido.")
+            raise SchemaError(tr("O relatório excede o limite permitido."))
         return normalized
 
     def save_report(self, session_id, envelope):
@@ -2318,11 +2319,11 @@ class MeetingLibrary:
                 "qa_mode", "explicit_save",
             ) == "memory_only":
                 raise ValueError(
-                    "O modo de Q&A memory_only não permite salvar respostas."
+                    tr("O modo de Q&A memory_only não permite salvar respostas.")
                 )
             with _writer_lock(path):
                 if os.path.lexists(path):
-                    raise FileExistsError("Uma revisão de relatório com este identificador já existe.")
+                    raise FileExistsError(tr("Uma revisão de relatório com este identificador já existe."))
                 write_json_atomic(path, normalized)
         self._project_after_canonical_write(session_id)
         return copy.deepcopy(normalized)
@@ -2338,7 +2339,7 @@ class MeetingLibrary:
                 if entry.is_file(follow_symlinks=False) and entry.name.endswith(".json")
             )
         if len(names) > MAX_REPORTS:
-            raise SchemaError("Há relatórios demais nesta reunião.")
+            raise SchemaError(tr("Há relatórios demais nesta reunião."))
         for name in names:
             report_id = name[:-5]
             path = self._report_path(session_id, report_id)
@@ -2384,10 +2385,10 @@ class MeetingLibrary:
         ``get_report`` explicitly.
         """
         if not isinstance(report, dict):
-            raise SchemaError("O relatório não tem metadados utilizáveis.")
+            raise SchemaError(tr("O relatório não tem metadados utilizáveis."))
         identifier = report.get("id", report.get("report_id"))
         if not _valid_id(identifier, reference=True):
-            raise SchemaError("O identificador do relatório é inválido.")
+            raise SchemaError(tr("O identificador do relatório é inválido."))
         result = {"id": identifier}
         for key in (
             "schema_version", "kind", "profile_id", "profile_version",
@@ -2423,28 +2424,28 @@ class MeetingLibrary:
         This path intentionally avoids transcript and generated-payload work.
         """
         if not isinstance(value, dict):
-            raise SchemaError("O relatório deve ser um objeto.")
+            raise SchemaError(tr("O relatório deve ser um objeto."))
         if value.get("schema_version") != REPORT_SCHEMA_VERSION:
-            raise SchemaError("A versão do relatório é incompatível.")
+            raise SchemaError(tr("A versão do relatório é incompatível."))
         if value.get("id", value.get("report_id")) != report_id:
-            raise SchemaError("O identificador do relatório não corresponde ao arquivo.")
+            raise SchemaError(tr("O identificador do relatório não corresponde ao arquivo."))
         if value.get("session_id") != session_id:
-            raise SchemaError("O relatório referencia outra reunião.")
+            raise SchemaError(tr("O relatório referencia outra reunião."))
         if value.get("kind") not in {"report", "qa"}:
-            raise SchemaError("O tipo do relatório é inválido.")
+            raise SchemaError(tr("O tipo do relatório é inválido."))
         if not _valid_id(value.get("profile_id")):
-            raise SchemaError("O perfil do relatório é inválido.")
+            raise SchemaError(tr("O perfil do relatório é inválido."))
         profile_version = value.get("profile_version")
         if (isinstance(profile_version, bool) or not isinstance(profile_version, int)
                 or profile_version < 1):
-            raise SchemaError("A versão do perfil é inválida.")
+            raise SchemaError(tr("A versão do perfil é inválida."))
         if not isinstance(value.get("transcript_revision"), str):
-            raise SchemaError("A revisão do relatório é inválida.")
+            raise SchemaError(tr("A revisão do relatório é inválida."))
         model = value.get("model")
         if not isinstance(model, dict) or not _valid_id(model.get("id"), reference=True):
-            raise SchemaError("A proveniência do modelo é inválida.")
+            raise SchemaError(tr("A proveniência do modelo é inválida."))
         if not _valid_timestamp(value.get("created_at")):
-            raise SchemaError("A data do relatório é inválida.")
+            raise SchemaError(tr("A data do relatório é inválida."))
 
     def list_report_metadata(self, session_id, *, include_legacy=True,
                              limit=REPORT_HISTORY_LIMIT, cancel_event=None):
@@ -2489,13 +2490,13 @@ class MeetingLibrary:
                     if entry.is_file(follow_symlinks=False) and entry.name.endswith(".json")
                 )
             if len(names) > MAX_REPORTS:
-                raise SchemaError("Há relatórios demais nesta reunião.")
+                raise SchemaError(tr("Há relatórios demais nesta reunião."))
             # ceiling: exact created_at ordering currently requires reading at
             # most MAX_REPORTS canonical envelopes; a manifest would be needed
             # before reducing this I/O bound without changing ordering.
             for name in names:
                 if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("A leitura do histórico de relatórios foi cancelada.")
+                    raise RuntimeError(tr("A leitura do histórico de relatórios foi cancelada."))
                 report_id = name[:-5]
                 path = self._report_path(session_id, report_id)
                 value = self._load_versioned(
@@ -2529,13 +2530,13 @@ class MeetingLibrary:
             for report in self.list_reports(session_id):
                 if report["id"] == report_id:
                     return report
-            raise FileNotFoundError("O resumo legado não existe.")
+            raise FileNotFoundError(tr("O resumo legado não existe."))
         path = self._report_path(session_id, report_id)
         value = self._load_versioned(
             path, REPORT_SCHEMA_VERSION, f"reports/{report_id}.json", MAX_REPORT_BYTES,
         )
         if value is None:
-            raise FileNotFoundError("O relatório não existe.")
+            raise FileNotFoundError(tr("O relatório não existe."))
         report = self._validate_report(session_id, value)
         reviewed = self.read_annotations(session_id).get("reviewed_artifacts", {})
         if report_id in reviewed:
@@ -2545,17 +2546,17 @@ class MeetingLibrary:
     def review_report(self, session_id, report_id, sections, *, expected_generation):
         self.get_report(session_id, report_id)
         if report_id == "legacy-summary":
-            raise ValueError("Regenere o resumo legado antes de revisar seções estruturadas.")
+            raise ValueError(tr("Regenere o resumo legado antes de revisar seções estruturadas."))
         if not isinstance(sections, dict) or not sections or any(
             key not in REPORT_SECTIONS or not isinstance(text, str)
             for key, text in sections.items()
         ):
-            raise ValueError("As seções revisadas são inválidas.")
+            raise ValueError(tr("As seções revisadas são inválidas."))
         annotations = self.read_annotations(session_id)
         reviewed = copy.deepcopy(annotations.get("reviewed_artifacts", {}))
         current = reviewed.get(report_id)
         actual = current.get("generation", 0) if isinstance(current, dict) else 0
-        expected = _valid_generation(expected_generation, "esperada do artefato")
+        expected = _valid_generation(expected_generation, tr("esperada do artefato"))
         if expected != actual:
             raise AnnotationConflict(expected, actual)
         artifact = {
@@ -2582,8 +2583,8 @@ class MeetingLibrary:
         """
         self._session_dir(session_id)  # validate without reading or mutating
         raise RuntimeError(
-            "A exclusão direta foi desativada. Use MeetingController.delete_session "
-            "para mover a reunião à lixeira recuperável."
+            tr("A exclusão direta foi desativada. Use MeetingController.delete_session "
+            "para mover a reunião à lixeira recuperável.")
         )
 
     delete_session = delete
@@ -2777,7 +2778,7 @@ class MeetingLibrary:
                 except OSError as error:
                     self._mark_index_stale_with_reason("meeting directory scan failed")
                     raise SchemaError(
-                        "A biblioteca não pôde ser lida completamente; o índice não foi publicado."
+                        tr("A biblioteca não pôde ser lida completamente; o índice não foi publicado.")
                     ) from error
                 with entries:
                     for entry in entries:
@@ -2792,7 +2793,7 @@ class MeetingLibrary:
                         except (OSError, ValueError) as error:
                             self._mark_index_stale_with_reason("meeting metadata is unreadable")
                             raise SchemaError(
-                                "Os metadados da reunião não puderam ser lidos; o índice não foi publicado."
+                                tr("Os metadados da reunião não puderam ser lidos; o índice não foi publicado.")
                             ) from error
                         annotations_path = self._annotations_path(session_id)
                         # A malformed/future sidecar is actionable corruption,
@@ -2805,14 +2806,14 @@ class MeetingLibrary:
                         if not isinstance(revisions, list):
                             self._mark_index_stale_with_reason("meeting revisions are malformed")
                             raise SchemaError(
-                                "As revisões da reunião são inválidas; o índice não foi publicado."
+                                tr("As revisões da reunião são inválidas; o índice não foi publicado.")
                             )
                         transcripts = {}
                         for revision in revisions:
                             if not isinstance(revision, dict) or not isinstance(revision.get("id"), str):
                                 self._mark_index_stale_with_reason("meeting revision identity is malformed")
                                 raise SchemaError(
-                                    "A identidade da revisão é inválida; o índice não foi publicado."
+                                    tr("A identidade da revisão é inválida; o índice não foi publicado.")
                                 )
                             revision_id = revision["id"]
                             expected = revision.get("segments")
@@ -2832,7 +2833,7 @@ class MeetingLibrary:
                                         "transcript corruption prevents a complete rebuild"
                                     )
                                     raise SchemaError(
-                                        "A transcrição não pôde ser lida; o índice não foi marcado como íntegro."
+                                        tr("A transcrição não pôde ser lida; o índice não foi marcado como íntegro.")
                                     ) from error
                                 if (isinstance(expected, int) and not isinstance(expected, bool)
                                         and expected != count):
@@ -2840,7 +2841,7 @@ class MeetingLibrary:
                                         "transcript corruption prevents a complete rebuild"
                                     )
                                     raise SchemaError(
-                                        "A transcrição está incompleta; o índice não foi marcado como íntegro."
+                                        tr("A transcrição está incompleta; o índice não foi marcado como íntegro.")
                                     )
 
                             transcripts[revision_id] = checked_values()
@@ -2865,7 +2866,7 @@ class MeetingLibrary:
                 continue
             worker.join(timeout)
             if worker.is_alive():
-                raise RuntimeError("Uma projeção do índice de reuniões ainda está encerrando.")
+                raise RuntimeError(tr("Uma projeção do índice de reuniões ainda está encerrando."))
 
 
 __all__ = [

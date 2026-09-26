@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 
+from i18n import N_, tr
 from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
 from summary_runtime import SummaryRuntime
@@ -225,10 +226,10 @@ def _language(value):
     if value is None:
         return "pt-BR"
     if not isinstance(value, str):
-        raise ValueError("O idioma do perfil é inválido.")
+        raise ValueError(tr("O idioma do perfil é inválido."))
     normalized = _LANGUAGE_ALIASES.get(value, value)
     if normalized not in {"pt-BR", "en-US"}:
-        raise ValueError("O idioma do perfil não é suportado.")
+        raise ValueError(tr("O idioma do perfil não é suportado."))
     return normalized
 
 
@@ -248,7 +249,7 @@ def _profile_hash_payload(profile):
 def profile_hash(profile):
     """Return a stable content hash for a validated profile definition."""
     if not isinstance(profile, dict):
-        raise ValueError("O perfil de relatório deve ser um objeto.")
+        raise ValueError(tr("O perfil de relatório deve ser um objeto."))
     payload = _profile_hash_payload(profile)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
@@ -262,12 +263,12 @@ def validate_profile(profile, *, language=None, builtin=False):
     content-addressed and excludes its mutable display version.
     """
     if not isinstance(profile, dict):
-        raise ValueError("O perfil de relatório deve ser um objeto.")
+        raise ValueError(tr("O perfil de relatório deve ser um objeto."))
     candidate = copy.deepcopy(profile)
     schema_version = candidate.get("schema_version", MAX_PROFILE_SCHEMA_VERSION)
     if (isinstance(schema_version, bool) or not isinstance(schema_version, int)
             or schema_version != MAX_PROFILE_SCHEMA_VERSION):
-        raise ValueError("A versão do perfil de relatório não é suportada.")
+        raise ValueError(tr("A versão do perfil de relatório não é suportada."))
     allowed = {
         "schema_version", "id", "name", "instructions", "sections", "version",
         "profile_hash", "language", "max_items", "max_section_chars", "builtin",
@@ -275,46 +276,46 @@ def validate_profile(profile, *, language=None, builtin=False):
     }
     unknown = set(candidate) - allowed
     if unknown:
-        raise ValueError("O perfil contém campos não reconhecidos.")
+        raise ValueError(tr("O perfil contém campos não reconhecidos."))
     if "builtin" in candidate and not isinstance(candidate["builtin"], bool):
-        raise ValueError("A marca interna do perfil é inválida.")
+        raise ValueError(tr("A marca interna do perfil é inválida."))
     if "disabled" in candidate and not isinstance(candidate["disabled"], bool):
-        raise ValueError("O estado do perfil é inválido.")
+        raise ValueError(tr("O estado do perfil é inválido."))
     identifier = candidate.get("id")
     if (not isinstance(identifier, str) or not identifier or len(identifier) > MAX_PROFILE_ID_CHARS
             or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in identifier)):
-        raise ValueError("O identificador do perfil é inválido.")
+        raise ValueError(tr("O identificador do perfil é inválido."))
     if identifier in _BUILTIN_ID_ALIASES:
-        raise ValueError("O identificador do perfil é reservado.")
+        raise ValueError(tr("O identificador do perfil é reservado."))
     if identifier in BUILTIN_PROFILE_IDS and not (builtin or candidate.get("builtin") is True):
-        raise ValueError("O identificador do perfil é reservado.")
+        raise ValueError(tr("O identificador do perfil é reservado."))
     if candidate.get("builtin") is True and identifier not in BUILTIN_PROFILE_IDS:
-        raise ValueError("A marca interna do perfil é inválida.")
+        raise ValueError(tr("A marca interna do perfil é inválida."))
     name = candidate.get("name")
     if not isinstance(name, str) or not name.strip() or len(name) > MAX_PROFILE_NAME_CHARS:
-        raise ValueError("O nome do perfil é inválido.")
+        raise ValueError(tr("O nome do perfil é inválido."))
     instructions = candidate.get("instructions", "")
     if not isinstance(instructions, str) or len(instructions) > MAX_PROFILE_INSTRUCTIONS_CHARS:
-        raise ValueError("As instruções do perfil excedem o limite permitido.")
+        raise ValueError(tr("As instruções do perfil excedem o limite permitido."))
     sections = candidate.get("sections")
     if (not isinstance(sections, list) or not sections or len(sections) > MAX_PROFILE_SECTIONS
             or any(not isinstance(item, str) or item not in SUPPORTED_SECTIONS for item in sections)
             or len(set(sections)) != len(sections)):
-        raise ValueError("O perfil contém seções duplicadas, desconhecidas ou inválidas.")
+        raise ValueError(tr("O perfil contém seções duplicadas, desconhecidas ou inválidas."))
     profile_language = _language(candidate.get("language", language))
     if language is not None and profile_language != _language(language):
-        raise ValueError("O idioma do perfil não corresponde à configuração solicitada.")
+        raise ValueError(tr("O idioma do perfil não corresponde à configuração solicitada."))
     max_items = candidate.get("max_items", MAX_PROFILE_ITEMS)
     if (isinstance(max_items, bool) or not isinstance(max_items, int)
             or not 1 <= max_items <= MAX_PROFILE_ITEMS):
-        raise ValueError("O limite de itens do perfil é inválido.")
+        raise ValueError(tr("O limite de itens do perfil é inválido."))
     max_chars = candidate.get("max_section_chars", MAX_PROFILE_SECTION_CHARS)
     if (isinstance(max_chars, bool) or not isinstance(max_chars, int)
             or not 64 <= max_chars <= MAX_PROFILE_SECTION_CHARS):
-        raise ValueError("O limite de texto do perfil é inválido.")
+        raise ValueError(tr("O limite de texto do perfil é inválido."))
     version = candidate.get("version", 1)
     if isinstance(version, bool) or not isinstance(version, int) or not 1 <= version <= 2**31 - 1:
-        raise ValueError("A versão do perfil é inválida.")
+        raise ValueError(tr("A versão do perfil é inválida."))
     clean = {
         "schema_version": MAX_PROFILE_SCHEMA_VERSION,
         "id": identifier,
@@ -329,12 +330,12 @@ def validate_profile(profile, *, language=None, builtin=False):
     }
     if builtin:
         if identifier not in BUILTIN_PROFILE_IDS:
-            raise ValueError("O perfil interno é desconhecido.")
+            raise ValueError(tr("O perfil interno é desconhecido."))
         clean["builtin"] = True
     digest = profile_hash(clean)
     supplied_hash = candidate.get("profile_hash")
     if supplied_hash is not None and supplied_hash != digest:
-        raise ValueError("O hash do perfil não corresponde ao conteúdo.")
+        raise ValueError(tr("O hash do perfil não corresponde ao conteúdo."))
     clean["profile_hash"] = digest
     return clean
 
@@ -365,7 +366,7 @@ def builtin_profile_description(profile_id, language="pt-BR"):
     language = _language(language)
     identifier = _BUILTIN_ID_ALIASES.get(profile_id, profile_id) if isinstance(profile_id, str) else profile_id
     if identifier not in BUILTIN_PROFILE_IDS:
-        raise ValueError("O perfil interno é desconhecido.")
+        raise ValueError(tr("O perfil interno é desconhecido."))
     return _BUILTIN_DESCRIPTIONS[language][identifier]
 
 
@@ -381,10 +382,10 @@ class MeetingIntelligence:
     def __init__(self, store, *, library=None, runtime_factory=None,
                  model_path_resolver=None, runtime=None, max_context=MAX_CONTEXT):
         if store is None:
-            raise ValueError("O armazenamento da reunião é obrigatório.")
+            raise ValueError(tr("O armazenamento da reunião é obrigatório."))
         if (isinstance(max_context, bool) or not isinstance(max_context, int)
                 or max_context < 2048):
-            raise ValueError("O contexto do modelo local é inválido.")
+            raise ValueError(tr("O contexto do modelo local é inválido."))
         self.store = store
         # ``MeetingStore`` remains a useful compatibility seam for callers that
         # predate the library.  New structured reports are persisted only when
@@ -392,7 +393,7 @@ class MeetingIntelligence:
         # is supplied; the legacy wrapper keeps its old summary projection.
         self.library = library
         if runtime is not None and runtime_factory is not None:
-            raise ValueError("Escolha runtime ou runtime_factory, não ambos.")
+            raise ValueError(tr("Escolha runtime ou runtime_factory, não ambos."))
         self.runtime_factory = runtime_factory or (
             (lambda _path, _context: runtime) if runtime is not None else SummaryRuntime
         )
@@ -418,10 +419,10 @@ class MeetingIntelligence:
                 selected_language = _language(language) if language is not None else "pt-BR"
                 return next(item for item in builtin_profiles(selected_language)
                             if item["id"] == identifier)
-            raise ValueError("O perfil de relatório selecionado não existe.")
+            raise ValueError(tr("O perfil de relatório selecionado não existe."))
         selected = validate_profile(profile, language=language)
         if selected.get("disabled"):
-            raise ValueError("O perfil de relatório selecionado está desativado.")
+            raise ValueError(tr("O perfil de relatório selecionado está desativado."))
         return selected
 
     def read_profiles(self, library=None, *, language=None):
@@ -429,11 +430,11 @@ class MeetingIntelligence:
         owner = library or self.store
         reader = getattr(owner, "read_workspace", None)
         if not callable(reader):
-            raise ValueError("O armazenamento não oferece um workspace de reuniões.")
+            raise ValueError(tr("O armazenamento não oferece um workspace de reuniões."))
         workspace = reader()
         custom = workspace.get("profiles", [])
         if not isinstance(custom, list):
-            raise ValueError("Os perfis personalizados do workspace são inválidos.")
+            raise ValueError(tr("Os perfis personalizados do workspace são inválidos."))
         requested_language = _language(language) if language is not None else None
         result = builtin_profiles(requested_language or "pt-BR")
         seen = set(BUILTIN_PROFILE_IDS)
@@ -443,7 +444,7 @@ class MeetingIntelligence:
             # selector then filters to the requested UI language.
             profile = validate_profile(item)
             if profile["id"] in seen:
-                raise ValueError("O workspace contém um perfil duplicado ou reservado.")
+                raise ValueError(tr("O workspace contém um perfil duplicado ou reservado."))
             seen.add(profile["id"])
             if requested_language is None or profile["language"] == requested_language:
                 result.append(profile)
@@ -457,16 +458,16 @@ class MeetingIntelligence:
         updater = getattr(owner, "update_workspace", None)
         reader = getattr(owner, "read_workspace", None)
         if not callable(updater) or not callable(reader):
-            raise ValueError("O armazenamento não oferece escrita segura do workspace.")
+            raise ValueError(tr("O armazenamento não oferece escrita segura do workspace."))
         if isinstance(profile, dict) and profile.get("builtin") is True:
-            raise ValueError("Um perfil interno não pode ser salvo como personalizado.")
+            raise ValueError(tr("Um perfil interno não pode ser salvo como personalizado."))
         candidate = validate_profile(profile)
         if candidate["id"] in BUILTIN_PROFILE_IDS:
-            raise ValueError("Um perfil interno não pode ser substituído.")
+            raise ValueError(tr("Um perfil interno não pode ser substituído."))
         workspace = reader()
         current = workspace.get("profiles", [])
         if not isinstance(current, list):
-            raise ValueError("Os perfis personalizados do workspace são inválidos.")
+            raise ValueError(tr("Os perfis personalizados do workspace são inválidos."))
         next_version = 1
         replacement = []
         for stored in current:
@@ -494,16 +495,16 @@ class MeetingIntelligence:
         reader = getattr(owner, "read_workspace", None)
         updater = getattr(owner, "update_workspace", None)
         if not callable(reader) or not callable(updater):
-            raise ValueError("O armazenamento não oferece escrita segura do workspace.")
+            raise ValueError(tr("O armazenamento não oferece escrita segura do workspace."))
         if (not isinstance(profile_id, str) or not profile_id
                 or profile_id in BUILTIN_PROFILE_IDS):
-            raise ValueError("Somente perfis personalizados podem ser desativados.")
+            raise ValueError(tr("Somente perfis personalizados podem ser desativados."))
         if not isinstance(enabled, bool):
-            raise ValueError("O estado do perfil é inválido.")
+            raise ValueError(tr("O estado do perfil é inválido."))
         workspace = reader()
         profiles = workspace.get("profiles", [])
         if not isinstance(profiles, list):
-            raise ValueError("Os perfis personalizados do workspace são inválidos.")
+            raise ValueError(tr("Os perfis personalizados do workspace são inválidos."))
         found = False
         replacement = []
         for item in profiles:
@@ -514,7 +515,7 @@ class MeetingIntelligence:
                 found = True
             replacement.append(clean)
         if not found:
-            raise ValueError("O perfil personalizado selecionado não existe.")
+            raise ValueError(tr("O perfil personalizado selecionado não existe."))
         if expected_generation is None:
             expected_generation = workspace.get("generation")
         updated = updater({"profiles": replacement}, expected_generation=expected_generation)
@@ -528,14 +529,14 @@ class MeetingIntelligence:
         reader = getattr(owner, "read_workspace", None)
         updater = getattr(owner, "update_workspace", None)
         if not callable(reader) or not callable(updater):
-            raise ValueError("O armazenamento não oferece escrita segura do workspace.")
+            raise ValueError(tr("O armazenamento não oferece escrita segura do workspace."))
         if (not isinstance(profile_id, str) or not profile_id
                 or profile_id in BUILTIN_PROFILE_IDS):
-            raise ValueError("Somente perfis personalizados podem ser excluídos.")
+            raise ValueError(tr("Somente perfis personalizados podem ser excluídos."))
         workspace = reader()
         profiles = workspace.get("profiles", [])
         if not isinstance(profiles, list):
-            raise ValueError("Os perfis personalizados do workspace são inválidos.")
+            raise ValueError(tr("Os perfis personalizados do workspace são inválidos."))
         replacement = []
         found = False
         for item in profiles:
@@ -545,7 +546,7 @@ class MeetingIntelligence:
                 continue
             replacement.append(clean)
         if not found:
-            raise ValueError("O perfil personalizado selecionado não existe.")
+            raise ValueError(tr("O perfil personalizado selecionado não existe."))
         if expected_generation is None:
             expected_generation = workspace.get("generation")
         updater({"profiles": replacement}, expected_generation=expected_generation)
@@ -558,7 +559,7 @@ class MeetingIntelligence:
         if getter is None:
             getter = getattr(self.store, "get_session", None)
         if getter is None:
-            raise ValueError("O armazenamento da reunião não oferece leitura de metadados.")
+            raise ValueError(tr("O armazenamento da reunião não oferece leitura de metadados."))
         try:
             return getter(session_id, include_events=False)
         except TypeError:
@@ -567,23 +568,23 @@ class MeetingIntelligence:
     def _revision(self, session_id, metadata, revision=None):
         revisions = metadata.get("revisions", [])
         if not isinstance(revisions, list) or not revisions:
-            raise ValueError("Transcreva a reunião com um modelo local antes de gerar o resumo.")
+            raise ValueError(tr("Transcreva a reunião com um modelo local antes de gerar o resumo."))
         selected = revisions[-1] if revision is None else None
         if revision is not None:
             if not isinstance(revision, str) or not revision:
-                raise ValueError("A revisão de transcrição selecionada é inválida.")
+                raise ValueError(tr("A revisão de transcrição selecionada é inválida."))
             selected = next((item for item in revisions
                              if isinstance(item, dict) and item.get("id") == revision), None)
         if not isinstance(selected, dict) or not isinstance(selected.get("id"), str):
-            raise ValueError("A revisão de transcrição selecionada não existe.")
+            raise ValueError(tr("A revisão de transcrição selecionada não existe."))
         if selected.get("status") != "completed":
-            raise ValueError("A revisão de transcrição ainda não está concluída.")
+            raise ValueError(tr("A revisão de transcrição ainda não está concluída."))
         return selected
 
     def _segments(self, session_id, revision):
         getter = getattr(self.store, "get_transcript", None)
         if getter is None:
-            raise ValueError("O armazenamento da reunião não oferece transcrição.")
+            raise ValueError(tr("O armazenamento da reunião não oferece transcrição."))
         try:
             source = getter(session_id, revision["id"])
         except TypeError:
@@ -593,7 +594,7 @@ class MeetingIntelligence:
         seen = set()
         for segment in source:
             if not isinstance(segment, dict):
-                raise ValueError("A transcrição contém segmentos inválidos. Reprocesse antes de continuar.")
+                raise ValueError(tr("A transcrição contém segmentos inválidos. Reprocesse antes de continuar."))
             identifier = segment.get("id")
             track = segment.get("track")
             text = segment.get("text")
@@ -602,14 +603,14 @@ class MeetingIntelligence:
                     or len(identifier) > MAX_SEGMENT_ID_CHARS
                     or any(ord(character) < 32 for character in identifier)
                     or identifier in seen):
-                raise ValueError("A transcrição contém identificadores de segmento inválidos.")
+                raise ValueError(tr("A transcrição contém identificadores de segmento inválidos."))
             if track not in {"microphone", "system"}:
-                raise ValueError("A transcrição contém uma fonte de áudio inválida.")
+                raise ValueError(tr("A transcrição contém uma fonte de áudio inválida."))
             if (not isinstance(text, str) or len(text) > MAX_SEGMENT_TEXT_CHARS
                     or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
                                and math.isfinite(value) and value >= 0 for value in (start, end))
                     or end < start):
-                raise ValueError("A transcrição contém segmentos inválidos. Reprocesse antes de continuar.")
+                raise ValueError(tr("A transcrição contém segmentos inválidos. Reprocesse antes de continuar."))
             seen.add(identifier)
             yield {
                 "id": identifier,
@@ -638,12 +639,12 @@ class MeetingIntelligence:
                     "text": text[offset:offset + piece_chars],
                 }
                 if len(json.dumps([item], ensure_ascii=False).encode("utf-8")) > budget:
-                    raise ValueError("Um segmento excede o contexto do modelo local.")
+                    raise ValueError(tr("Um segmento excede o contexto do modelo local."))
                 candidate = pending + [item]
                 if (len(candidate) > 16
                         or len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > budget):
                     if not pending:
-                        raise ValueError("Um segmento excede o contexto do modelo local.")
+                        raise ValueError(tr("Um segmento excede o contexto do modelo local."))
                     yield pending
                     pending = [item]
                 else:
@@ -701,43 +702,43 @@ class MeetingIntelligence:
         }
 
     @staticmethod
-    def _cancel(cancel_event, message="O processamento local foi cancelado; o resultado anterior foi preservado."):
+    def _cancel(cancel_event, message=None):
         if cancel_event is not None and cancel_event.is_set():
-            raise RuntimeError(message)
+            raise RuntimeError(message or tr("O processamento local foi cancelado; o resultado anterior foi preservado."))
 
     def _model(self, model):
         entry = summary_catalog_entry(model)
         if entry is None:
-            raise ValueError("Selecione um modelo de resumo do catálogo do SnipVoice.")
+            raise ValueError(tr("Selecione um modelo de resumo do catálogo do SnipVoice."))
         model_file = self.model_path_resolver(model)
         if model_file is None:
-            raise ValueError("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo.")
+            raise ValueError(tr("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo."))
         context = min(self.max_context, entry.get("context_length", self.max_context))
         budget = context - 1536
         if budget < 512:
-            raise ValueError("O contexto do modelo local é pequeno demais para gerar um resultado seguro.")
+            raise ValueError(tr("O contexto do modelo local é pequeno demais para gerar um resultado seguro."))
         return entry, model_file, context, budget
 
     def _provenance_model(self, provenance):
         """Validate an ask-time model snapshot without reopening its file."""
         if not isinstance(provenance, dict) or set(provenance) != {"revision", "model"}:
-            raise ValueError("A proveniência da resposta é inválida.")
+            raise ValueError(tr("A proveniência da resposta é inválida."))
         revision = provenance.get("revision")
         if not isinstance(revision, str) or not revision or len(revision) > MAX_SEGMENT_ID_CHARS:
-            raise ValueError("A revisão da resposta é inválida.")
+            raise ValueError(tr("A revisão da resposta é inválida."))
         snapshot = provenance.get("model")
         if (not isinstance(snapshot, dict)
                 or set(snapshot) != {"id", "sha256", "runtime", "context_limit"}):
-            raise ValueError("A proveniência do modelo é inválida.")
+            raise ValueError(tr("A proveniência do modelo é inválida."))
         model_id = snapshot.get("id")
         entry = summary_catalog_entry(model_id)
         if entry is None or snapshot.get("sha256") != entry.get("sha256"):
-            raise ValueError("A proveniência do modelo não corresponde ao catálogo local.")
+            raise ValueError(tr("A proveniência do modelo não corresponde ao catálogo local."))
         if snapshot.get("runtime") != "llama.cpp":
-            raise ValueError("O runtime da resposta não é suportado.")
+            raise ValueError(tr("O runtime da resposta não é suportado."))
         context = min(self.max_context, entry.get("context_length", self.max_context))
         if snapshot.get("context_limit") != context:
-            raise ValueError("O limite de contexto da resposta não corresponde ao catálogo local.")
+            raise ValueError(tr("O limite de contexto da resposta não corresponde ao catálogo local."))
         return revision, model_id, entry, context
 
     @staticmethod
@@ -776,7 +777,7 @@ class MeetingIntelligence:
         if focus is None:
             return None
         if not isinstance(focus, str) or len(focus) > MAX_FOCUS_CHARS:
-            raise ValueError("O foco do resumo excede o limite permitido.")
+            raise ValueError(tr("O foco do resumo excede o limite permitido."))
         focus = focus.strip()
         return {"kind": "focus", "text": focus} if focus else None
 
@@ -803,19 +804,19 @@ class MeetingIntelligence:
         if history is None:
             return []
         if not isinstance(history, list):
-            raise ValueError("O histórico da conversa é inválido.")
+            raise ValueError(tr("O histórico da conversa é inválido."))
         normalized = []
         for turn in history:
             if not isinstance(turn, dict) or set(turn) != {"question", "answer"}:
-                raise ValueError("O histórico da conversa aceita somente pergunta e resposta.")
+                raise ValueError(tr("O histórico da conversa aceita somente pergunta e resposta."))
             prior_question, answer = turn["question"], turn["answer"]
             if (not isinstance(prior_question, str) or not prior_question.strip()
                     or len(prior_question) > MAX_QUESTION_CHARS
                     or not isinstance(answer, str) or len(answer) > MAX_ANSWER_CHARS):
-                raise ValueError("O histórico da conversa contém um turno inválido.")
+                raise ValueError(tr("O histórico da conversa contém um turno inválido."))
             normalized.append({"question": prior_question.strip(), "answer": answer.strip()})
         if cls._history_bytes(normalized) > MAX_HISTORY_BYTES:
-            raise ValueError("O histórico da conversa excede o limite permitido.")
+            raise ValueError(tr("O histórico da conversa excede o limite permitido."))
         turns = normalized[-MAX_HISTORY_TURNS:]
         question_bytes = len(json.dumps(
             cls._question_evidence(question), ensure_ascii=False,
@@ -842,7 +843,7 @@ class MeetingIntelligence:
         payload = list(evidence)
         payload.extend(extra if isinstance(extra, list) else [extra])
         if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) > budget:
-            raise ValueError("A evidência e as instruções excedem o contexto local permitido.")
+            raise ValueError(tr("A evidência e as instruções excedem o contexto local permitido."))
         return payload
 
     @staticmethod
@@ -854,7 +855,7 @@ class MeetingIntelligence:
         ).encode("utf-8"))
         available = budget - extra_bytes
         if available < 256:
-            raise ValueError("O contexto local não comporta a evidência e os dados da solicitação.")
+            raise ValueError(tr("O contexto local não comporta a evidência e os dados da solicitação."))
         return available
 
     @staticmethod
@@ -862,9 +863,9 @@ class MeetingIntelligence:
         try:
             document = json.loads(raw)
         except (TypeError, ValueError) as error:
-            raise ValueError(f"O modelo retornou JSON inválido; o {label} anterior foi preservado.") from error
+            raise ValueError(tr("O modelo retornou JSON inválido; o {label} anterior foi preservado.", label=tr(label))) from error
         if not isinstance(document, dict):
-            raise ValueError(f"O modelo retornou um {label} sem objeto JSON; o resultado anterior foi preservado.")
+            raise ValueError(tr("O modelo retornou um {label} sem objeto JSON; o resultado anterior foi preservado.", label=tr(label)))
         return document
 
     @staticmethod
@@ -873,7 +874,7 @@ class MeetingIntelligence:
                 or (required and not value)
                 or any(not isinstance(item, str) or item not in allowed for item in value)
                 or len(set(value)) != len(value)):
-            raise ValueError("O modelo citou segmentos ausentes ou inválidos; o resultado anterior foi preservado.")
+            raise ValueError(tr("O modelo citou segmentos ausentes ou inválidos; o resultado anterior foi preservado."))
         return list(value)
 
     @staticmethod
@@ -887,14 +888,14 @@ class MeetingIntelligence:
                          source_text_by_id=None, output_limit=None):
         expected = {"segment_ids", *profile["sections"]}
         if set(document) != expected:
-            raise ValueError("O modelo retornou um relatório sem a estrutura exigida; o resultado anterior foi preservado.")
+            raise ValueError(tr("O modelo retornou um relatório sem a estrutura exigida; o resultado anterior foi preservado."))
         citations = self._references(document["segment_ids"], allowed)
         normalized = {"segment_ids": citations}
         for section in profile["sections"]:
             value = document[section]
             if section == "summary":
                 if not isinstance(value, str) or not value.strip() or len(value) > profile["max_section_chars"]:
-                    raise ValueError("O modelo retornou um texto de resumo inválido.")
+                    raise ValueError(tr("O modelo retornou um texto de resumo inválido."))
                 normalized[section] = value.strip()
                 continue
             if section == "follow_up_email":
@@ -907,7 +908,7 @@ class MeetingIntelligence:
                         or not value["body"].strip()
                         or len(value["subject"]) > profile["max_section_chars"]
                         or len(value["body"]) > profile["max_section_chars"] * 2):
-                    raise ValueError("O modelo retornou um follow-up inválido.")
+                    raise ValueError(tr("O modelo retornou um follow-up inválido."))
                 normalized[section] = {
                     "subject": value["subject"].strip(),
                     "body": value["body"].strip(),
@@ -915,17 +916,17 @@ class MeetingIntelligence:
                 }
                 continue
             if not isinstance(value, list) or len(value) > profile["max_items"]:
-                raise ValueError("O modelo retornou uma seção de relatório inválida.")
+                raise ValueError(tr("O modelo retornou uma seção de relatório inválida."))
             items = []
             for item in value:
                 keys = {"text", "segment_ids"}
                 if section == "action_items":
                     keys |= {"owner", "deadline"}
                 if not isinstance(item, dict) or set(item) != keys:
-                    raise ValueError("O modelo retornou um item de relatório incompleto.")
+                    raise ValueError(tr("O modelo retornou um item de relatório incompleto."))
                 text = item.get("text")
                 if not isinstance(text, str) or not text.strip() or len(text) > profile["max_section_chars"]:
-                    raise ValueError("O modelo retornou um item de relatório inválido.")
+                    raise ValueError(tr("O modelo retornou um item de relatório inválido."))
                 item_value = {"text": text.strip(),
                               "segment_ids": self._references(item["segment_ids"], allowed)}
                 if section == "action_items":
@@ -939,8 +940,8 @@ class MeetingIntelligence:
                                     item["segment_ids"], source_text_by_id, evidence
                                 ).casefold()):
                             raise ValueError(
-                                "O modelo atribuiu responsável ou prazo ausente na evidência; "
-                                "valores desconhecidos devem ser nulos."
+                                tr("O modelo atribuiu responsável ou prazo ausente na evidência; "
+                                   "valores desconhecidos devem ser nulos.")
                             )
                         item_value[key] = (owner_or_deadline.strip()
                                            if isinstance(owner_or_deadline, str) else None)
@@ -949,32 +950,32 @@ class MeetingIntelligence:
         size = len(json.dumps(normalized, ensure_ascii=False).encode("utf-8"))
         limit = self._output_limit(budget) if output_limit is None else output_limit
         if size > limit:
-            raise ValueError("O modelo retornou um relatório grande demais para a redução local.")
+            raise ValueError(tr("O modelo retornou um relatório grande demais para a redução local."))
         return normalized
 
     def _validate_answer(self, document, allowed, budget):
         if set(document) != {"answer", "citations", "uncertainty"}:
-            raise ValueError("O modelo retornou uma resposta sem a estrutura exigida.")
+            raise ValueError(tr("O modelo retornou uma resposta sem a estrutura exigida."))
         answer = document["answer"]
         uncertainty = document["uncertainty"]
         if not isinstance(answer, str) or len(answer) > MAX_ANSWER_CHARS:
-            raise ValueError("O modelo retornou uma resposta inválida.")
+            raise ValueError(tr("O modelo retornou uma resposta inválida."))
         if uncertainty not in {"low", "medium", "high"}:
-            raise ValueError("O modelo retornou um grau de incerteza inválido.")
+            raise ValueError(tr("O modelo retornou um grau de incerteza inválido."))
         citations = self._references(document["citations"], allowed, required=False)
         if not answer.strip() and uncertainty != "high":
-            raise ValueError("Uma resposta vazia deve indicar alta incerteza.")
+            raise ValueError(tr("Uma resposta vazia deve indicar alta incerteza."))
         if answer.strip() and not citations and uncertainty != "high":
-            raise ValueError("A resposta factual não tem evidência suficiente.")
+            raise ValueError(tr("A resposta factual não tem evidência suficiente."))
         result = {"answer": answer.strip(), "citations": citations, "uncertainty": uncertainty}
         if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > self._output_limit(budget):
-            raise ValueError("O modelo retornou uma resposta grande demais para a redução local.")
+            raise ValueError(tr("O modelo retornou uma resposta grande demais para a redução local."))
         return result
 
     def _generate_report_document(self, runtime, entry, profile, evidence, allowed, budget,
                                   cancel_event, source_text_by_id=None, payload_budget=None,
                                   focus_evidence=None, output_limit=None):
-        self._cancel(cancel_event, "O resumo foi cancelado; o resumo anterior foi preservado.")
+        self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         limit = self._output_limit(budget) if output_limit is None else output_limit
         guidance = [self._profile_evidence(profile, limit)]
         if focus_evidence is not None:
@@ -985,13 +986,13 @@ class MeetingIntelligence:
         )
         raw = runtime.generate(self._prompt(profile), payload, cancel_event=cancel_event,
                                disable_thinking=entry.get("disable_thinking", False))
-        document = self._json_response(raw, "relatório")
+        document = self._json_response(raw, N_("relatório"))
         return self._validate_report(document, profile, allowed, evidence, budget,
                                      source_text_by_id, limit)
 
     def _generate_answer(self, runtime, entry, question, evidence, allowed, budget, cancel_event,
                          payload_budget=None, question_evidence=None):
-        self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
         payload = self._payload(
             evidence, question_evidence or self._question_evidence(question),
             budget if payload_budget is None else payload_budget,
@@ -999,7 +1000,7 @@ class MeetingIntelligence:
         raw = runtime.generate(self._question_prompt(question), payload,
                                cancel_event=cancel_event,
                                disable_thinking=entry.get("disable_thinking", False))
-        return self._validate_answer(self._json_response(raw, "resposta"), allowed, budget)
+        return self._validate_answer(self._json_response(raw, N_("resposta")), allowed, budget)
 
     @staticmethod
     def _reduce(levels, current, reducer):
@@ -1028,7 +1029,7 @@ class MeetingIntelligence:
     def _library_report_sections(generated):
         """Adapt the model schema to the library's section envelope schema."""
         if not isinstance(generated, dict):
-            raise ValueError("O relatório gerado é inválido.")
+            raise ValueError(tr("O relatório gerado é inválido."))
         citations = list(generated.get("segment_ids", ()))
         result = {}
         for key, value in generated.items():
@@ -1043,7 +1044,7 @@ class MeetingIntelligence:
     def _report_envelope(self, session_id, selected, profile, model, entry, context,
                          generated, *, kind="report", question=None):
         if kind not in {"report", "qa"}:
-            raise ValueError("O tipo do relatório é inválido.")
+            raise ValueError(tr("O tipo do relatório é inválido."))
         value = (self._library_report_sections(generated)
                  if kind == "report" else copy.deepcopy(generated))
         if question is not None and kind == "qa":
@@ -1074,14 +1075,14 @@ class MeetingIntelligence:
     def generate_report(self, session_id, model, *, profile=None, revision=None,
                         language=None, cancel_event=None, legacy=False, focus=None):
         """Generate and atomically save one structured report revision."""
-        self._cancel(cancel_event, "O resumo foi cancelado; o resumo anterior foi preservado.")
+        self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         metadata = self._metadata(session_id)
         selected = self._revision(session_id, metadata, revision)
         selected_profile = self._profile(profile, language)
         segments = self._segments(session_id, selected)
         first = next((candidate for candidate in segments if candidate["text"].strip()), None)
         if first is None:
-            raise ValueError("A transcrição não contém texto para resumir.")
+            raise ValueError(tr("A transcrição não contém texto para resumir."))
         entry, model_file, context, budget = self._model(model)
         payload_budget = budget
         focus_evidence = self._focus_evidence(focus)
@@ -1101,7 +1102,7 @@ class MeetingIntelligence:
                 right_document, right_sources = right
                 evidence = [left_document, right_document]
                 if len(json.dumps(evidence, ensure_ascii=False).encode("utf-8")) > evidence_budget:
-                    raise ValueError("A redução local excedeu o contexto de evidência permitido.")
+                    raise ValueError(tr("A redução local excedeu o contexto de evidência permitido."))
                 sources = dict(left_sources)
                 for identifier, texts in right_sources.items():
                     sources.setdefault(identifier, []).extend(texts)
@@ -1115,7 +1116,7 @@ class MeetingIntelligence:
 
             def process_chunk(chunk, *, output_limit=None):
                 nonlocal chunks_processed
-                self._cancel(cancel_event, "O resumo foi cancelado; o resumo anterior foi preservado.")
+                self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
                 source_text_by_id = {}
                 for item in chunk:
                     source_text_by_id.setdefault(item["id"], []).append(item["text"])
@@ -1131,12 +1132,12 @@ class MeetingIntelligence:
             chunks = iter(self._chunks(segments, evidence_budget))
             first_chunk = next(chunks, None)
             if first_chunk is None:
-                raise ValueError("A transcrição não contém texto para resumir.")
+                raise ValueError(tr("A transcrição não contém texto para resumir."))
             second_chunk = next(chunks, None)
             if second_chunk is None:
                 # A single chunk never enters pairwise reduction, so it can
                 # use the larger final-report bound directly.
-                self._cancel(cancel_event, "O resumo foi cancelado; o resumo anterior foi preservado.")
+                self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
                 source_text_by_id = {}
                 for item in first_chunk:
                     source_text_by_id.setdefault(item["id"], []).append(item["text"])
@@ -1154,7 +1155,7 @@ class MeetingIntelligence:
                 for chunk in chunks:
                     process_chunk(chunk)
             if not chunks_processed:
-                raise ValueError("A transcrição não contém texto para resumir.")
+                raise ValueError(tr("A transcrição não contém texto para resumir."))
             if chunks_processed > 1:
                 final = None
                 for item in reversed(levels):
@@ -1172,11 +1173,11 @@ class MeetingIntelligence:
                     ),
                     final_sources,
                 )
-            self._cancel(cancel_event, "O resumo foi cancelado; o resumo anterior foi preservado.")
+            self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         finally:
             runtime.close()
         final = final[0]
-        self._cancel(cancel_event, "O resumo foi cancelado; o resultado anterior foi preservado.")
+        self._cancel(cancel_event, tr("O resumo foi cancelado; o resultado anterior foi preservado."))
         result = dict(final,
                       model=model,
                       model_sha256=entry["sha256"],
@@ -1206,12 +1207,12 @@ class MeetingIntelligence:
                 # summary projection until they opt into MeetingLibrary.
                 saver = getattr(self.store, "save_summary", None)
                 if not callable(saver):
-                    raise ValueError("O armazenamento da reunião não oferece gravação de relatórios.")
+                    raise ValueError(tr("O armazenamento da reunião não oferece gravação de relatórios."))
                 saver(session_id, result)
         else:
             saver = getattr(self.store, "save_summary", None)
             if not callable(saver):
-                raise ValueError("O armazenamento da reunião não oferece gravação de relatórios.")
+                raise ValueError(tr("O armazenamento da reunião não oferece gravação de relatórios."))
             saver(session_id, result)
         return result
 
@@ -1220,19 +1221,19 @@ class MeetingIntelligence:
                          include_provenance=False, history=None):
         """Answer one question from one transcript revision without writing it."""
         if not isinstance(question, str) or not question.strip():
-            raise ValueError("A pergunta não pode ficar vazia.")
+            raise ValueError(tr("A pergunta não pode ficar vazia."))
         if len(question) > MAX_QUESTION_CHARS:
             raise ValueError("A pergunta excede o limite permitido.")
         if revision is not None and revision_id is not None and revision != revision_id:
-            raise ValueError("A revisão de transcrição foi informada duas vezes.")
+            raise ValueError(tr("A revisão de transcrição foi informada duas vezes."))
         selected_revision = revision if revision is not None else revision_id
-        self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
         metadata = self._metadata(session_id)
         selected = self._revision(session_id, metadata, selected_revision)
         segments = self._segments(session_id, selected)
         first = next((candidate for candidate in segments if candidate["text"].strip()), None)
         if first is None:
-            raise ValueError("A transcrição não contém texto para responder à pergunta.")
+            raise ValueError(tr("A transcrição não contém texto para responder à pergunta."))
         entry, model_file, context, budget = self._model(model)
         payload_budget = budget
         history = self._bounded_history(history, budget, question)
@@ -1247,7 +1248,7 @@ class MeetingIntelligence:
                 allowed = self._ids(left) | self._ids(right)
                 evidence = [left, right]
                 if len(json.dumps(evidence, ensure_ascii=False).encode("utf-8")) > evidence_budget:
-                    raise ValueError("A redução local excedeu o contexto de evidência permitido.")
+                    raise ValueError(tr("A redução local excedeu o contexto de evidência permitido."))
                 return self._generate_answer(
                     runtime, entry, question, evidence, allowed, evidence_budget,
                     cancel_event, payload_budget,
@@ -1255,7 +1256,7 @@ class MeetingIntelligence:
                 )
 
             for chunk in self._chunks(segments, evidence_budget):
-                self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+                self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
                 current = self._generate_answer(
                     runtime, entry, question, chunk,
                     {item["id"] for item in chunk}, evidence_budget, cancel_event,
@@ -1263,12 +1264,12 @@ class MeetingIntelligence:
                 )
                 self._reduce(levels, current, reduce_pair)
             if not levels:
-                raise ValueError("A transcrição não contém texto para responder à pergunta.")
+                raise ValueError(tr("A transcrição não contém texto para responder à pergunta."))
             final = None
             for item in reversed(levels):
                 if item is not None:
                     final = item if final is None else reduce_pair(final, item)
-            self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+            self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
             if include_provenance:
                 final = dict(final)
                 final["_provenance"] = {
@@ -1321,10 +1322,10 @@ class MeetingIntelligence:
         a meeting; canonical transcript segments are re-read before they can
         enter model context.
         """
-        self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
         owner = self.library
         if owner is None or not callable(getattr(owner, "search", None)):
-            raise ValueError("A biblioteca de reuniões é necessária para perguntas cruzadas.")
+            raise ValueError(tr("A biblioteca de reuniões é necessária para perguntas cruzadas."))
         selected_filters = dict(filters or {})
         allowed_filters = {
             "collection", "collection_id", "tag", "person", "series", "series_id",
@@ -1332,7 +1333,7 @@ class MeetingIntelligence:
         }
         unknown = set(selected_filters) - allowed_filters
         if unknown:
-            raise ValueError("Há filtros de reunião não reconhecidos.")
+            raise ValueError(tr("Há filtros de reunião não reconhecidos."))
         # A natural-language question often contains stop words that do not
         # occur in any transcript.  Keep the canonical search as the primary
         # route, then use a small bounded set of lexical terms for candidate
@@ -1382,7 +1383,7 @@ class MeetingIntelligence:
         total_bytes = 0
         selected_sessions = []
         for session_id, first_hit in ordered:
-            self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+            self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
             try:
                 metadata = self._metadata(session_id)
                 revision_id = first_hit.get("revision_id")
@@ -1405,7 +1406,7 @@ class MeetingIntelligence:
                 found_ids = set()
                 scanned = 0
                 for segment in itertools.islice(source or (), MAX_CROSS_CANONICAL_SCAN):
-                    self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+                    self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
                     scanned += 1
                     if not isinstance(segment, dict):
                         continue
@@ -1481,7 +1482,7 @@ class MeetingIntelligence:
         ``session + revision + segment + timestamp`` before showing them.
         """
         if not isinstance(question, str) or not question.strip():
-            raise ValueError("A pergunta não pode ficar vazia.")
+            raise ValueError(tr("A pergunta não pode ficar vazia."))
         if len(question) > MAX_QUESTION_CHARS:
             raise ValueError("A pergunta excede o limite permitido.")
         merged_filters = dict(filters or {})
@@ -1493,15 +1494,15 @@ class MeetingIntelligence:
         }.items():
             if value not in (None, ""):
                 if key in merged_filters and merged_filters[key] != value:
-                    raise ValueError(f"O filtro {key} foi informado duas vezes.")
+                    raise ValueError(tr("O filtro {key} foi informado duas vezes.", key=key))
                 merged_filters[key] = value
-        self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+        self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
         evidence, selected_sessions, retrieval = self._cross_retrieve(
             question, filters=merged_filters, cancel_event=cancel_event,
         )
         if not evidence:
             result = {
-                "answer": "Não encontrei evidência de transcrição suficiente nas reuniões selecionadas.",
+                "answer": tr("Não encontrei evidência de transcrição suficiente nas reuniões selecionadas."),
                 "citations": [], "uncertainty": "high",
             }
             if include_provenance:
@@ -1523,7 +1524,7 @@ class MeetingIntelligence:
             if (len(candidate) > 16
                     or len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > evidence_budget):
                 if not pending:
-                    raise ValueError("A evidência cruzada excede o contexto do modelo local.")
+                    raise ValueError(tr("A evidência cruzada excede o contexto do modelo local."))
                 chunks.append(pending)
                 pending = [item]
             else:
@@ -1531,7 +1532,7 @@ class MeetingIntelligence:
         if pending:
             chunks.append(pending)
         if not _CROSS_QA_GATE.acquire(blocking=False):
-            raise RuntimeError("Outra pergunta cruzada local já está em andamento.")
+            raise RuntimeError(tr("Outra pergunta cruzada local já está em andamento."))
         runtime = None
         levels = []
         try:
@@ -1543,7 +1544,7 @@ class MeetingIntelligence:
                     cancel_event, budget, question_evidence=question_evidence,
                 )
             for chunk in chunks:
-                self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+                self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
                 current = self._generate_answer(
                     runtime, entry, question, chunk,
                     {item["id"] for item in chunk}, evidence_budget, cancel_event,
@@ -1554,7 +1555,7 @@ class MeetingIntelligence:
             for item in reversed(levels):
                 if item is not None:
                     final = item if final is None else reduce_pair(final, item)
-            self._cancel(cancel_event, "Processamento cancelado; nenhuma resposta foi salva.")
+            self._cancel(cancel_event, tr("Processamento cancelado; nenhuma resposta foi salva."))
         finally:
             if runtime is not None:
                 runtime.close()
@@ -1564,7 +1565,7 @@ class MeetingIntelligence:
         for identifier in final.get("citations", []):
             source = by_id.get(identifier)
             if source is None:
-                raise ValueError("A resposta citou evidência cruzada que não pôde ser resolvida.")
+                raise ValueError(tr("A resposta citou evidência cruzada que não pôde ser resolvida."))
             # Re-read the cited canonical segment after inference as well.  A
             # concurrent delete/reprocess must fail closed instead of allowing
             # a late model result to display stale provenance.
@@ -1582,9 +1583,9 @@ class MeetingIntelligence:
                 None,
             )
             if current_segment is None:
-                raise ValueError("A evidência citada foi alterada ou removida antes da exibição.")
+                raise ValueError(tr("A evidência citada foi alterada ou removida antes da exibição."))
             if any(current_segment.get(key) != source.get(key) for key in ("start", "end", "text")):
-                raise ValueError("A evidência citada mudou durante a resposta; tente novamente.")
+                raise ValueError(tr("A evidência citada mudou durante a resposta; tente novamente."))
             citations.append({
                 "session_id": source["session_id"],
                 "revision_id": source["revision_id"],
@@ -1614,17 +1615,17 @@ class MeetingIntelligence:
                     revision_id=None, provenance=None):
         """Persist a previously displayed answer only after explicit user action."""
         if not isinstance(answer, dict) or set(answer) != {"answer", "citations", "uncertainty"}:
-            raise ValueError("A resposta a salvar é inválida.")
+            raise ValueError(tr("A resposta a salvar é inválida."))
         normalized_question = question.strip() if isinstance(question, str) else ""
         if len(normalized_question) > MAX_QUESTION_CHARS:
             raise ValueError("A pergunta excede o limite permitido.")
         if revision is not None and revision_id is not None and revision != revision_id:
-            raise ValueError("A revisão de transcrição foi informada duas vezes.")
+            raise ValueError(tr("A revisão de transcrição foi informada duas vezes."))
         selected_revision = revision if revision is not None else revision_id
         if isinstance(provenance, dict):
             provenance_revision = provenance.get("revision")
             if selected_revision is not None and selected_revision != provenance_revision:
-                raise ValueError("A revisão de transcrição foi informada duas vezes.")
+                raise ValueError(tr("A revisão de transcrição foi informada duas vezes."))
             if selected_revision is None:
                 selected_revision = provenance_revision
         metadata = self._metadata(session_id)
@@ -1633,7 +1634,7 @@ class MeetingIntelligence:
         if (not isinstance(raw_citations, list) or len(raw_citations) > MAX_CITATIONS
                 or any(not isinstance(item, str) for item in raw_citations)
                 or len(set(raw_citations)) != len(raw_citations)):
-            raise ValueError("As citações da resposta são inválidas.")
+            raise ValueError(tr("As citações da resposta são inválidas."))
         needed = set(raw_citations)
         found = set()
         if needed:
@@ -1645,7 +1646,7 @@ class MeetingIntelligence:
         citations = self._references(raw_citations, found, required=False)
         answer_text = answer.get("answer")
         if not isinstance(answer_text, str):
-            raise ValueError("A resposta a salvar é inválida.")
+            raise ValueError(tr("A resposta a salvar é inválida."))
         value = {
             "answer": {
                 "answer": answer_text.strip(),
@@ -1654,13 +1655,13 @@ class MeetingIntelligence:
             }
         }
         if not isinstance(value["answer"]["answer"], str) or len(value["answer"]["answer"]) > MAX_ANSWER_CHARS:
-            raise ValueError("A resposta a salvar é inválida.")
+            raise ValueError(tr("A resposta a salvar é inválida."))
         if value["answer"]["uncertainty"] not in {"low", "medium", "high"}:
-            raise ValueError("O grau de incerteza da resposta é inválido.")
+            raise ValueError(tr("O grau de incerteza da resposta é inválido."))
         if (not value["answer"]["answer"] and value["answer"]["uncertainty"] != "high") or (
                 value["answer"]["answer"] and not citations
                 and value["answer"]["uncertainty"] != "high"):
-            raise ValueError("A resposta a salvar não tem evidência suficiente.")
+            raise ValueError(tr("A resposta a salvar não tem evidência suficiente."))
         if normalized_question:
             value["answer"]["question"] = normalized_question
         if provenance is None:
@@ -1676,7 +1677,7 @@ class MeetingIntelligence:
         })
         owner = self._report_owner()
         if owner is None:
-            raise ValueError("A biblioteca de reuniões é necessária para salvar respostas.")
+            raise ValueError(tr("A biblioteca de reuniões é necessária para salvar respostas."))
         return owner.save_report(
             session_id,
             self._report_envelope(
@@ -1726,10 +1727,10 @@ def report_section_projection(report, section=None, *, reviewed=True, limit=MAX_
     data only; saving it never mutates the generated report envelope.
     """
     if not isinstance(report, dict):
-        raise ValueError("O relatório deve ser um objeto.")
+        raise ValueError(tr("O relatório deve ser um objeto."))
     generated = report.get("generated", report.get("payload"))
     if not isinstance(generated, dict):
-        raise ValueError("As seções geradas são inválidas.")
+        raise ValueError(tr("As seções geradas são inválidas."))
     reviewed_artifact = report.get("reviewed_artifact") if reviewed else None
     reviewed_sections = reviewed_artifact.get("sections") if isinstance(reviewed_artifact, dict) else {}
     selected = copy.deepcopy(generated)
@@ -1737,11 +1738,11 @@ def report_section_projection(report, section=None, *, reviewed=True, limit=MAX_
         selected.update(copy.deepcopy(reviewed_sections))
     if section is not None:
         if not isinstance(section, str) or section not in selected:
-            raise ValueError("A seção selecionada não existe neste relatório.")
+            raise ValueError(tr("A seção selecionada não existe neste relatório."))
         selected = {section: selected[section]}
     serialized = json.dumps(selected, ensure_ascii=False, indent=2)
     if len(serialized.encode("utf-8")) > limit:
-        raise ValueError("A seção do relatório excede o limite de cópia/exportação.")
+        raise ValueError(tr("A seção do relatório excede o limite de cópia/exportação."))
     return serialized
 
 

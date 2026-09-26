@@ -16,6 +16,8 @@ from pathlib import Path
 import struct
 import tempfile
 
+from i18n import tr
+
 
 OUTPUT_CHUNK_FRAMES = 4096
 MAX_OUTPUT_BYTES = 0xFFFFFFFF
@@ -31,7 +33,7 @@ class MixdownCancelled(RuntimeError):
 def _cancel(cancel_event):
     if cancel_event is not None and cancel_event.is_set():
         raise MixdownCancelled(
-            "A mixagem foi cancelada; as gravações originais e a saída existente foram preservadas."
+            tr("A mixagem foi cancelada; as gravações originais e a saída existente foram preservadas.")
         )
 
 
@@ -44,9 +46,9 @@ def _float_to_pcm16(value):
 
 def _validate_event(event, payload, track):
     if not isinstance(event, dict) or event.get("type") != "audio":
-        raise ValueError(f"A fonte {track} contém um evento que não é áudio.")
+        raise ValueError(tr("A fonte {track} contém um evento que não é áudio.", track=track))
     if event.get("track") != track:
-        raise ValueError(f"A fonte {track} contém um rótulo de faixa inesperado.")
+        raise ValueError(tr("A fonte {track} contém um rótulo de faixa inesperado.", track=track))
     rate = event.get("rate")
     channels = event.get("channels")
     frames = event.get("frames")
@@ -56,14 +58,15 @@ def _validate_event(event, payload, track):
             or not isinstance(frames, int) or isinstance(frames, bool) or frames <= 0
             or not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool)
             or not math.isfinite(float(timestamp)) or timestamp < 0):
-        raise ValueError(f"A fonte {track} tem formato de áudio ou instante incompatível.")
+        raise ValueError(tr("A fonte {track} tem formato de áudio ou instante incompatível.", track=track))
     try:
         raw = memoryview(payload)
     except TypeError as exc:
-        raise ValueError(f"O bloco da fonte {track} não é compatível com bytes.") from exc
+        raise ValueError(tr("O bloco da fonte {track} não é compatível com bytes.", track=track)) from exc
     expected = frames * channels * _FLOAT_BYTES
     if raw.nbytes != expected:
-        raise ValueError(f"O bloco da fonte {track} está incompleto para a quantidade de frames informada.")
+        raise ValueError(
+            tr("O bloco da fonte {track} está incompleto para a quantidade de frames informada.", track=track))
     return rate, channels, frames, float(timestamp), raw
 
 
@@ -94,8 +97,10 @@ class _Track:
             self.rate, self.channels = rate, channels
         elif (rate, channels) != (self.rate, self.channels):
             raise ValueError(
-                f"A fonte {self.name} altera o formato ({self.rate} Hz/{self.channels} canais "
-                f"para {rate} Hz/{channels} canais); converta-a antes da mixagem."
+                tr("A fonte {track} altera o formato ({old_rate} Hz/{old_channels} canais "
+                   "para {rate} Hz/{channels} canais); converta-a antes da mixagem.",
+                   track=self.name, old_rate=self.rate, old_channels=self.channels,
+                   rate=rate, channels=channels)
             )
         start = timestamp
         end = start + frames / rate
@@ -105,7 +110,7 @@ class _Track:
             # timestamps are serialized. Snap ordinary clock jitter to the
             # prior block boundary, but reject a material overlap.
             if overlap > max(0.02, 2.0 / rate):
-                raise ValueError(f"A fonte {self.name} contém blocos sobrepostos ou fora de ordem.")
+                raise ValueError(tr("A fonte {track} contém blocos sobrepostos ou fora de ordem.", track=self.name))
             start = self._last_end
             end = start + frames / rate
         self._last_end = end
@@ -196,7 +201,7 @@ def _adaptive_microphone_gain(source, cancel_event):
         _cancel(cancel_event)
         rate, channels, _, _, _ = _validate_event(event, payload, "microphone")
         if native_format is not None and native_format != (rate, channels):
-            raise ValueError("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume.")
+            raise ValueError(tr("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume."))
         native_format = (rate, channels)
         window_values = max(1, event["rate"] // 10) * event["channels"]
         for (value,) in struct.iter_unpack("<f", payload):
@@ -235,7 +240,7 @@ def _write_header(handle, rate, channels):
 
 def _finish_header(handle, data_bytes):
     if data_bytes > MAX_OUTPUT_BYTES - 36:
-        raise ValueError("A mixagem excede o limite de 4 GiB do WAV PCM.")
+        raise ValueError(tr("A mixagem excede o limite de 4 GiB do WAV PCM."))
     end = handle.tell()
     handle.seek(4)
     handle.write(struct.pack("<I", 36 + data_bytes))
@@ -254,7 +259,7 @@ def _encoded_output(handle, rate, channels, format, cancel_event):
         def write_pcm(payload):
             nonlocal data_bytes
             if data_bytes + len(payload) > MAX_OUTPUT_BYTES - 36:
-                raise ValueError("A mixagem excede o limite de 4 GiB do WAV PCM.")
+                raise ValueError(tr("A mixagem excede o limite de 4 GiB do WAV PCM."))
             handle.write(payload)
             data_bytes += len(payload)
 
@@ -268,8 +273,8 @@ def _encoded_output(handle, rate, channels, format, cancel_event):
         av.codec.Codec("libmp3lame", "w")
     except (ImportError, ValueError) as exc:
         raise RuntimeError(
-            "A gravação MP3 exige o codificador incluído na instalação completa do Snipvoice. "
-            "O áudio original foi preservado; atualize o aplicativo ou exporte como WAV."
+            tr("A gravação MP3 exige o codificador incluído na instalação completa do Snipvoice. "
+               "O áudio original foi preservado; atualize o aplicativo ou exporte como WAV.")
         ) from exc
     output_rate = min(MP3_RATES, key=lambda candidate: abs(candidate - rate))
     layout = "mono" if channels == 1 else "stereo"
@@ -324,17 +329,17 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
         raise TypeError("track_sources deve ser um mapa de faixas para iteráveis.")
     unknown = set(track_sources) - {"microphone", "system"}
     if unknown:
-        raise ValueError("Somente as fontes microfone e sistema são suportadas.")
+        raise ValueError(tr("Somente as fontes microfone e sistema são suportadas."))
     if not isinstance(chunk_frames, int) or isinstance(chunk_frames, bool) or not 1 <= chunk_frames <= 65536:
         raise ValueError("chunk_frames deve ser um inteiro entre 1 e 65536.")
     if (isinstance(microphone_gain, bool) or not isinstance(microphone_gain, (int, float))
             or not math.isfinite(microphone_gain) or not 1 <= microphone_gain <= 8):
-        raise ValueError("O ganho do microfone deve estar entre 1 e 8.")
+        raise ValueError(tr("O ganho do microfone deve estar entre 1 e 8."))
     _cancel(cancel_event)
     tracks = [_Track(name, source) for name, source in track_sources.items() if source is not None]
     tracks = [track for track in tracks if not track.done]
     if not tracks:
-        raise ValueError("Pelo menos uma fonte deve conter áudio.")
+        raise ValueError(tr("Pelo menos uma fonte deve conter áudio."))
     # A common highest-rate clock preserves the native timing and lets lower
     # rate sources use bounded linear interpolation during rendering.
     rate = max(track.rate for track in tracks)
@@ -342,9 +347,9 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
     destination = Path(destination).absolute()
     format = destination.suffix.lower().lstrip(".")
     if format not in {"mp3", "wav"}:
-        raise ValueError("Escolha um arquivo MP3 ou WAV para salvar o áudio final.")
+        raise ValueError(tr("Escolha um arquivo MP3 ou WAV para salvar o áudio final."))
     if not destination.parent.is_dir() or destination.is_dir():
-        raise ValueError("A pasta destino deve existir e o destino deve ser um arquivo.")
+        raise ValueError(tr("A pasta destino deve existir e o destino deve ser um arquivo."))
 
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent
@@ -409,7 +414,7 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
     except ValueError:
         inside_library = False
     if inside_library:
-        raise ValueError("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais.")
+        raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
     microphone_gain = (
         _adaptive_microphone_gain(store.iter_audio(session_id, "microphone"), cancel_event)
         if enhance_microphone else 1.5

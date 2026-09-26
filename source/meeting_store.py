@@ -18,6 +18,7 @@ import time
 import uuid
 import zlib
 
+from i18n import N_, tr
 from snippet_utils import write_json_atomic
 
 
@@ -54,13 +55,15 @@ class TrackUnavailableError(ValueError):
         self.track = track
         self.unavailable_tracks = tuple(unavailable_tracks or ((track,) if track else ()))
         if track:
-            selected = "a fonte " + str(track)
+            message = tr(
+                "a fonte {track} foi removida pela retenção; restaure a reunião ou a fonte "
+                "antes de reproduzir, transcrever ou exportar áudio.", track=str(track))
         else:
-            selected = "as fontes " + ", ".join(str(item) for item in self.unavailable_tracks)
-        super().__init__(
-            f"{selected} foi removida pela retenção; restaure a reunião ou a fonte "
-            "antes de reproduzir, transcrever ou exportar áudio."
-        )
+            message = tr(
+                "as fontes {tracks} foi removida pela retenção; restaure a reunião ou a fonte "
+                "antes de reproduzir, transcrever ou exportar áudio.",
+                tracks=", ".join(str(item) for item in self.unavailable_tracks))
+        super().__init__(message)
 
 
 # Compatibility names for callers that describe this loss as a purged source.
@@ -80,7 +83,7 @@ def _write_all(handle, data):
     while offset < len(data):
         written = handle.write(data[offset:])
         if not isinstance(written, int) or written <= 0:
-            raise OSError("Não foi possível avançar a gravação no disco.")
+            raise OSError(tr("Não foi possível avançar a gravação no disco."))
         offset += written
 
 
@@ -89,7 +92,7 @@ class MeetingStore:
 
     def __init__(self, root):
         if not isinstance(root, (str, os.PathLike)):
-            raise ValueError("A pasta das reuniões é inválida.")
+            raise ValueError(tr("A pasta das reuniões é inválida."))
         self.root = os.path.abspath(os.fspath(root))
         self.root_dir = self.root
         self._lock = threading.RLock()
@@ -103,18 +106,18 @@ class MeetingStore:
 
     def begin(self, settings, title=""):
         if not isinstance(settings, dict):
-            raise ValueError("As configurações da reunião devem ser um objeto.")
+            raise ValueError(tr("As configurações da reunião devem ser um objeto."))
         if not isinstance(title, str):
-            raise ValueError("O título da reunião deve ser texto.")
+            raise ValueError(tr("O título da reunião deve ser texto."))
         if len(title) > 400:
-            raise ValueError("O título da reunião é muito longo.")
+            raise ValueError(tr("O título da reunião é muito longo."))
         # Validate JSON before creating a directory, so a bad snapshot cannot
         # leave an unopenable session behind.
         try:
             snapshot = copy.deepcopy(settings)
             json.dumps(snapshot, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
-            raise ValueError("As configurações da reunião não são válidas.") from exc
+            raise ValueError(tr("As configurações da reunião não são válidas.")) from exc
 
         with self._lock:
             session_id = time.strftime("%Y%m%d-%H%M%S", time.localtime()) + "-" + uuid.uuid4().hex[:10]
@@ -154,12 +157,12 @@ class MeetingStore:
         try:
             raw = bytes(payload)
         except (TypeError, ValueError) as exc:
-            raise ValueError("O bloco de áudio é inválido.") from exc
+            raise ValueError(tr("O bloco de áudio é inválido.")) from exc
         expected = event["frames"] * event["channels"] * _AUDIO_BYTES_PER_SAMPLE
         if len(raw) != expected:
-            raise ValueError("O tamanho do bloco de áudio não corresponde aos frames informados.")
+            raise ValueError(tr("O tamanho do bloco de áudio não corresponde aos frames informados."))
         if len(raw) > MAX_EVENT_BYTES:
-            raise ValueError("O bloco de áudio excede o limite permitido.")
+            raise ValueError(tr("O bloco de áudio excede o limite permitido."))
 
         with self._lock:
             metadata = self._active_metadata(session_id)
@@ -194,11 +197,11 @@ class MeetingStore:
         """Append a non-audio event such as a source gap or device change."""
         if (not isinstance(event, dict) or event.get("type") == "audio"
                 or not isinstance(event.get("type"), str) or not event.get("type")):
-            raise ValueError("O evento da reunião é inválido.")
+            raise ValueError(tr("O evento da reunião é inválido."))
         clean = copy.deepcopy(event)
         self._validate_event_common(clean)
         if "track" in clean and clean["track"] not in _TRACKS:
-            raise ValueError("A fonte do evento é inválida.")
+            raise ValueError(tr("A fonte do evento é inválida."))
         with self._lock:
             metadata = self._active_metadata(session_id)
             self._ensure_writable(metadata)
@@ -214,7 +217,7 @@ class MeetingStore:
     def finish(self, session_id, status="completed", error=None):
         allowed = {"completed", "partial", "failed", "interrupted", "cancelled"}
         if status not in allowed:
-            raise ValueError("O estado final da reunião é inválido.")
+            raise ValueError(tr("O estado final da reunião é inválido."))
         if error is not None and not isinstance(error, str):
             error = str(error)
         with self._lock:
@@ -238,13 +241,13 @@ class MeetingStore:
 
     def list_sessions(self, offset=0, limit=50, query="", status=""):
         if not isinstance(offset, int) or isinstance(offset, bool) or not 0 <= offset <= MAX_LIST_OFFSET:
-            raise ValueError("O deslocamento da lista é inválido.")
+            raise ValueError(tr("O deslocamento da lista é inválido."))
         if not isinstance(limit, int) or limit < 0 or limit > MAX_LIST_LIMIT:
-            raise ValueError("O limite da lista é inválido.")
+            raise ValueError(tr("O limite da lista é inválido."))
         if not isinstance(query, str) or len(query) > 512:
-            raise ValueError("A busca deve ser texto.")
+            raise ValueError(tr("A busca deve ser texto."))
         if not isinstance(status, str):
-            raise ValueError("O filtro de estado é inválido.")
+            raise ValueError(tr("O filtro de estado é inválido."))
         if limit == 0:
             return []
         try:
@@ -291,21 +294,21 @@ class MeetingStore:
         allowed = {"title", "notes", "bookmarks", "reviewed_summary"}
         unknown = set(fields) - allowed
         if unknown:
-            raise ValueError("Há campos de reunião não reconhecidos.")
+            raise ValueError(tr("Há campos de reunião não reconhecidos."))
         if "title" in fields and (not isinstance(fields["title"], str) or len(fields["title"]) > 400):
-            raise ValueError("O título da reunião é inválido.")
+            raise ValueError(tr("O título da reunião é inválido."))
         if "notes" in fields and not isinstance(fields["notes"], str):
-            raise ValueError("As notas da reunião devem ser texto.")
+            raise ValueError(tr("As notas da reunião devem ser texto."))
         if "reviewed_summary" in fields and (not isinstance(fields["reviewed_summary"], str)
                                               or len(fields["reviewed_summary"]) > 65536):
-            raise ValueError("O resumo revisado deve ter até 65536 caracteres.")
+            raise ValueError(tr("O resumo revisado deve ter até 65536 caracteres."))
         if "bookmarks" in fields:
             if not isinstance(fields["bookmarks"], list):
-                raise ValueError("Os marcadores da reunião devem ser uma lista.")
+                raise ValueError(tr("Os marcadores da reunião devem ser uma lista."))
             try:
                 json.dumps(fields["bookmarks"], ensure_ascii=False)
             except (TypeError, ValueError) as exc:
-                raise ValueError("Os marcadores da reunião são inválidos.") from exc
+                raise ValueError(tr("Os marcadores da reunião são inválidos.")) from exc
         with self._lock:
             metadata = copy.deepcopy(self._active_metadata(session_id))
             metadata.update(copy.deepcopy(fields))
@@ -319,13 +322,13 @@ class MeetingStore:
         """Remove one finished, app-owned session without touching exported files."""
         with self._lock:
             if session_id in self._active:
-                raise ValueError("Não é possível excluir uma gravação em andamento.")
+                raise ValueError(tr("Não é possível excluir uma gravação em andamento."))
             session_dir = self._session_dir(session_id)
             metadata = self._load_metadata(session_id)
             if metadata.get("status") == "recording":
-                raise ValueError("Não é possível excluir uma gravação em andamento.")
+                raise ValueError(tr("Não é possível excluir uma gravação em andamento."))
             if os.path.islink(session_dir) or getattr(os.path, "isjunction", lambda _path: False)(session_dir):
-                raise ValueError("A pasta da gravação não pode ser excluída com segurança.")
+                raise ValueError(tr("A pasta da gravação não pode ser excluída com segurança."))
             shutil.rmtree(session_dir)
             self._sequence_cache.pop(session_id, None)
             self._last_checkpoint.pop(session_id, None)
@@ -335,13 +338,13 @@ class MeetingStore:
 
     def iter_audio(self, session_id, track=None, start=0.0):
         if track is not None and track not in _TRACKS:
-            raise ValueError("A fonte de áudio é inválida.")
+            raise ValueError(tr("A fonte de áudio é inválida."))
         try:
             start = float(start)
         except (TypeError, ValueError) as exc:
-            raise ValueError("O início da leitura é inválido.") from exc
+            raise ValueError(tr("O início da leitura é inválido.")) from exc
         if not math.isfinite(start) or start < 0:
-            raise ValueError("O início da leitura é inválido.")
+            raise ValueError(tr("O início da leitura é inválido."))
         self._session_dir(session_id)
         metadata = self.get(session_id, include_events=False)
         tracks = metadata.get("tracks", {})
@@ -411,14 +414,14 @@ class MeetingStore:
     def save_summary(self, session_id, summary):
         """Atomically save an injected local summary while preserving prior data."""
         if not isinstance(summary, dict):
-            raise ValueError("O resumo da reunião deve ser um objeto.")
+            raise ValueError(tr("O resumo da reunião deve ser um objeto."))
         try:
             value = copy.deepcopy(summary)
             json.dumps(value, ensure_ascii=False)
         except (TypeError, ValueError) as exc:
-            raise ValueError("O resumo da reunião não é válido.") from exc
+            raise ValueError(tr("O resumo da reunião não é válido.")) from exc
         if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > 1024 * 1024:
-            raise ValueError("O resumo da reunião excede o limite permitido.")
+            raise ValueError(tr("O resumo da reunião excede o limite permitido."))
         with self._lock:
             current = self._active_metadata(session_id)
             metadata = copy.deepcopy(current)
@@ -432,12 +435,12 @@ class MeetingStore:
     def save_final_audio(self, session_id, path, voice_boost=False):
         """Record the derived playback file without changing the source tracks."""
         if not isinstance(path, (str, os.PathLike)):
-            raise ValueError("O caminho do áudio final é inválido.")
+            raise ValueError(tr("O caminho do áudio final é inválido."))
         destination = os.path.abspath(os.fspath(path))
         if len(destination) > 4096 or not os.path.isfile(destination):
-            raise ValueError("O arquivo de áudio final não foi encontrado.")
+            raise ValueError(tr("O arquivo de áudio final não foi encontrado."))
         if not isinstance(voice_boost, bool):
-            raise ValueError("A configuração de realce de voz é inválida.")
+            raise ValueError(tr("A configuração de realce de voz é inválida."))
         value = {
             "path": destination,
             "voice_boost": voice_boost,
@@ -455,9 +458,9 @@ class MeetingStore:
 
     def begin_revision(self, session_id, profile, language, status="processing"):
         if not isinstance(profile, str) or not isinstance(language, str):
-            raise ValueError("O perfil e o idioma da revisão são obrigatórios.")
+            raise ValueError(tr("O perfil e o idioma da revisão são obrigatórios."))
         if status not in {"processing", "pending"}:
-            raise ValueError("O estado inicial da revisão é inválido.")
+            raise ValueError(tr("O estado inicial da revisão é inválido."))
         with self._lock:
             metadata = self._active_metadata(session_id)
             revision_id = time.strftime("%Y%m%d-%H%M%S", time.localtime()) + "-" + uuid.uuid4().hex[:8]
@@ -480,19 +483,19 @@ class MeetingStore:
 
     def add_transcript(self, session_id, revision, segment):
         if not isinstance(segment, dict):
-            raise ValueError("O segmento de transcrição é inválido.")
+            raise ValueError(tr("O segmento de transcrição é inválido."))
         clean = copy.deepcopy(segment)
         try:
             encoded = json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError) as exc:
-            raise ValueError("O segmento de transcrição não é serializável.") from exc
+            raise ValueError(tr("O segmento de transcrição não é serializável.")) from exc
         if len(encoded) > MAX_EVENT_BYTES:
-            raise ValueError("O segmento de transcrição excede o limite permitido.")
+            raise ValueError(tr("O segmento de transcrição excede o limite permitido."))
         with self._lock:
             metadata = self._active_metadata(session_id)
             item = self._revision(metadata, revision)
             if item["status"] not in {"processing", "pending"}:
-                raise ValueError("A revisão de transcrição já foi encerrada.")
+                raise ValueError(tr("A revisão de transcrição já foi encerrada."))
             path = self._revision_path(session_id, revision)
             with open(path, "ab", buffering=0) as handle:
                 _write_all(handle, encoded + b"\n")
@@ -503,7 +506,7 @@ class MeetingStore:
 
     def finish_revision(self, session_id, revision, status="completed", error=None):
         if status not in {"completed", "failed", "cancelled", "superseded"}:
-            raise ValueError("O estado da revisão é inválido.")
+            raise ValueError(tr("O estado da revisão é inválido."))
         with self._lock:
             metadata = self._active_metadata(session_id)
             item = self._revision(metadata, revision)
@@ -559,7 +562,7 @@ class MeetingStore:
             if metadata.get("status") == "recording":
                 metadata = self._rebuild_unfinished(name, metadata)
                 metadata["status"] = "interrupted"
-                metadata["error"] = "A reunião foi interrompida antes de terminar."
+                metadata["error"] = N_("A reunião foi interrompida antes de terminar.")
             else:
                 continue
             try:
@@ -732,7 +735,7 @@ class MeetingStore:
 
     def _active_metadata(self, session_id):
         if not self._valid_id(session_id):
-            raise ValueError("Identificador de reunião inválido.")
+            raise ValueError(tr("Identificador de reunião inválido."))
         metadata = self._active.get(session_id)
         if metadata is not None:
             return metadata
@@ -761,10 +764,10 @@ class MeetingStore:
 
     def _session_dir(self, session_id):
         if not self._valid_id(session_id):
-            raise ValueError("Identificador de reunião inválido.")
+            raise ValueError(tr("Identificador de reunião inválido."))
         result = os.path.join(self.root, str(session_id))
         if os.path.commonpath((os.path.realpath(self.root), os.path.realpath(result))) != os.path.realpath(self.root):
-            raise ValueError("A pasta da reunião aponta para fora da biblioteca.")
+            raise ValueError(tr("A pasta da reunião aponta para fora da biblioteca."))
         return result
 
     @staticmethod
@@ -783,7 +786,7 @@ class MeetingStore:
         with open(path, "r", encoding="utf-8") as handle:
             metadata = json.load(handle)
         if not isinstance(metadata, dict) or metadata.get("schema_version") != SCHEMA_VERSION:
-            raise ValueError("O formato da reunião não é reconhecido.")
+            raise ValueError(tr("O formato da reunião não é reconhecido."))
         return metadata
 
     def _write_metadata(self, session_id, metadata):
@@ -792,24 +795,24 @@ class MeetingStore:
     @staticmethod
     def _ensure_writable(metadata):
         if metadata.get("status") not in {"recording", "interrupted"}:
-            raise ValueError("A reunião já foi encerrada.")
+            raise ValueError(tr("A reunião já foi encerrada."))
 
     def _validate_audio_event(self, event):
         if not isinstance(event, dict) or event.get("type") != "audio":
-            raise ValueError("O evento de áudio é inválido.")
+            raise ValueError(tr("O evento de áudio é inválido."))
         clean = copy.deepcopy(event)
         self._validate_event_common(clean)
         if clean.get("track") not in _TRACKS:
-            raise ValueError("A fonte de áudio é inválida.")
+            raise ValueError(tr("A fonte de áudio é inválida."))
         if not isinstance(clean.get("generation"), int) or clean["generation"] < 0:
-            raise ValueError("A geração do evento de áudio é inválida.")
+            raise ValueError(tr("A geração do evento de áudio é inválida."))
         for key in ("rate", "channels", "frames"):
             if not isinstance(clean.get(key), int) or clean[key] <= 0:
-                raise ValueError("O formato do evento de áudio é inválido.")
+                raise ValueError(tr("O formato do evento de áudio é inválido."))
         if not isinstance(clean.get("sequence"), int) or clean["sequence"] < 0:
-            raise ValueError("O formato do evento de áudio é inválido.")
+            raise ValueError(tr("O formato do evento de áudio é inválido."))
         if clean["channels"] > 32 or clean["rate"] > 384000:
-            raise ValueError("O formato do evento de áudio não é suportado.")
+            raise ValueError(tr("O formato do evento de áudio não é suportado."))
         return clean
 
     @staticmethod
@@ -821,9 +824,9 @@ class MeetingStore:
             or not math.isfinite(float(timestamp))
             or timestamp < 0
         ):
-            raise ValueError("O instante do evento é inválido.")
+            raise ValueError(tr("O instante do evento é inválido."))
         if "sequence" in event and (not isinstance(event["sequence"], int) or event["sequence"] < 0):
-            raise ValueError("A sequência do evento é inválida.")
+            raise ValueError(tr("A sequência do evento é inválida."))
 
     def _check_sequence(self, session_id, metadata, event):
         if "sequence" not in event:
@@ -837,7 +840,7 @@ class MeetingStore:
                 if item.get("track") == track and item.get("generation") == generation and "sequence" in item:
                     prior = item["sequence"]
         if prior is not None and event["sequence"] <= prior:
-            raise ValueError("A sequência do evento não é crescente.")
+            raise ValueError(tr("A sequência do evento não é crescente."))
 
     def _remember_sequence(self, session_id, event):
         if "sequence" in event:
@@ -922,15 +925,15 @@ class MeetingStore:
     @staticmethod
     def _revision(metadata, revision_id):
         if not isinstance(revision_id, str):
-            raise ValueError("Identificador de revisão inválido.")
+            raise ValueError(tr("Identificador de revisão inválido."))
         for item in metadata.get("revisions", []):
             if isinstance(item, dict) and item.get("id") == revision_id:
                 return item
-        raise ValueError("A revisão de transcrição não foi encontrada.")
+        raise ValueError(tr("A revisão de transcrição não foi encontrada."))
 
     def _revision_path(self, session_id, revision):
         if not self._valid_id(revision):
-            raise ValueError("Identificador de revisão inválido.")
+            raise ValueError(tr("Identificador de revisão inválido."))
         return os.path.join(self._session_dir(session_id), "transcripts", revision + ".jsonl")
 
 

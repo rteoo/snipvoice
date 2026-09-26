@@ -8,6 +8,7 @@ survive the move it describes. ``SNIPVOICE_HOME`` still wins over the pointer.
 import json
 import os
 
+from i18n import tr
 from snippet_utils import write_json_atomic
 
 ENV_HOME = "SNIPVOICE_HOME"
@@ -113,9 +114,10 @@ def resolve_data_dir():
             raise
     fallback = default_data_dir()
     os.makedirs(fallback, exist_ok=True)
-    return fallback, (
-        f"A pasta de dados {path} está indisponível. O SnipVoice está usando "
-        f"{fallback} nesta sessão."
+    return fallback, tr(
+        "A pasta de dados {path} está indisponível. O SnipVoice está usando "
+        "{fallback} nesta sessão.",
+        path=path, fallback=fallback,
     )
 
 

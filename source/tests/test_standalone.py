@@ -357,10 +357,14 @@ class StandaloneTests(unittest.TestCase):
                 mock.patch.object(app.Image, "open", return_value=image):
             self.instance.run()
 
-        self.assertEqual(items[0][0], "Abrir Gravação…")
+        # Labels are callables so a language change re-renders the menu.
+        labels = [text(None) if callable(text) else text for text, _action, _options in items]
+        self.assertEqual(labels[0], "Abrir Gravação…")
         self.assertEqual(items[0][1], self.instance.open_meetings)
         self.assertTrue(items[0][2]["default"])
-        self.assertNotIn("Recarregar comandos", [text for text, _action, _options in items])
+        self.assertNotIn("Recarregar comandos", labels)
+        with mock.patch.object(app.i18n, "_language", "en-US"):
+            self.assertEqual(items[0][0](None), "Open Recording…")
 
 
 if __name__ == "__main__":

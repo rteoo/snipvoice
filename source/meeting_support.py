@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 
+from i18n import tr
 from meeting_audio import NativeCapture
 from meeting_mixdown import export_mixdown
 from meeting_library import MeetingLibrary, REPORT_HISTORY_LIMIT as LIBRARY_REPORT_HISTORY_LIMIT
@@ -75,13 +76,13 @@ def _normalize_saved_answer(answer, question="", revision=None, revision_id=None
     embedded_revision_id = clean.pop("revision_id", None)
     if (embedded_revision is not None and embedded_revision_id is not None
             and embedded_revision != embedded_revision_id):
-        raise ValueError("A revisão de transcrição foi informada duas vezes.")
+        raise ValueError(tr("A revisão de transcrição foi informada duas vezes."))
     embedded_revision = (embedded_revision if embedded_revision is not None
                          else embedded_revision_id)
     provenance_revision = provenance.get("revision") if isinstance(provenance, dict) else None
     selected_revision = revision if revision is not None else revision_id
     if selected_revision is not None and embedded_revision is not None and selected_revision != embedded_revision:
-        raise ValueError("A revisão de transcrição foi informada duas vezes.")
+        raise ValueError(tr("A revisão de transcrição foi informada duas vezes."))
     if selected_revision is None:
         selected_revision = embedded_revision if embedded_revision is not None else provenance_revision
     selected_question = question
@@ -135,7 +136,7 @@ def _final_audio_path(root, settings, session_id, title=""):
     if settings.destination:
         destination = Path(settings.destination).expanduser()
         if not destination.is_absolute() or not destination.is_dir():
-            raise ValueError("A pasta padrão de gravações não existe ou não é absoluta.")
+            raise ValueError(tr("A pasta padrão de gravações não existe ou não é absoluta."))
     else:
         destination = Path(root).resolve().parent / "recordings"
         destination.mkdir(parents=True, exist_ok=True)
@@ -147,7 +148,7 @@ def _final_audio_path(root, settings, session_id, title=""):
         if not candidate.exists():
             return candidate
         candidate = destination / f"{stem} ({suffix}).mp3"
-    raise RuntimeError("A pasta de gravações contém muitas cópias com o mesmo nome.")
+    raise RuntimeError(tr("A pasta de gravações contém muitas cópias com o mesmo nome."))
 
 
 class MeetingController:
@@ -230,7 +231,7 @@ class MeetingController:
             workspace = self.library.read_workspace()
             value = workspace.get("privacy_defaults", {})
         if not isinstance(value, dict):
-            raise ValueError("As configurações de privacidade são inválidas.")
+            raise ValueError(tr("As configurações de privacidade são inválidas."))
         with self._lock:
             self._privacy_defaults = value
         return copy.deepcopy(value)
@@ -252,10 +253,10 @@ class MeetingController:
             kwargs["expected_generation"] = expected_generation
         result = self.library.update_workspace(patch, **kwargs)
         if not isinstance(result, dict):
-            raise ValueError("A atualização do workspace retornou um estado inválido.")
+            raise ValueError(tr("A atualização do workspace retornou um estado inválido."))
         privacy = result.get("privacy_defaults", {})
         if not isinstance(privacy, dict):
-            raise ValueError("As configurações de privacidade retornadas são inválidas.")
+            raise ValueError(tr("As configurações de privacidade retornadas são inválidas."))
         with self._lock:
             self._privacy_defaults = copy.deepcopy(privacy)
         # The retention service captures its trash deadline at construction;
@@ -293,7 +294,7 @@ class MeetingController:
                 "Please confirm that everyone has been informed and consents before recording."
             )
         if language != "pt-BR":
-            raise ValueError("O idioma do aviso de gravação é inválido.")
+            raise ValueError(tr("O idioma do aviso de gravação é inválido."))
         return (
             "Esta reunião está sendo gravada localmente pelo SnipVoice. "
             "O áudio e as transcrições ficam neste dispositivo e não são enviados pelo app. "
@@ -370,15 +371,15 @@ class MeetingController:
     def _begin_retention(self):
         with self._lock:
             if self._closed:
-                raise RuntimeError("O controlador de reuniões está encerrado.")
+                raise RuntimeError(tr("O controlador de reuniões está encerrado."))
             if self._retention_active:
-                raise RuntimeError("Uma operação de retenção já está em andamento.")
+                raise RuntimeError(tr("Uma operação de retenção já está em andamento."))
             if self._state != "idle":
-                raise RuntimeError("Aguarde a gravação terminar antes da retenção.")
+                raise RuntimeError(tr("Aguarde a gravação terminar antes da retenção."))
             if self._processing:
-                raise RuntimeError("Aguarde o processamento terminar antes da retenção.")
+                raise RuntimeError(tr("Aguarde o processamento terminar antes da retenção."))
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
-                raise RuntimeError("Aguarde a reprodução terminar antes da retenção.")
+                raise RuntimeError(tr("Aguarde a reprodução terminar antes da retenção."))
             self._retention_active = True
 
     def _run_retention(self, operation):
@@ -457,7 +458,7 @@ class MeetingController:
             settings = resolve_meeting_settings(settings)
         if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) \
                 or not math.isfinite(seconds) or not 0 < seconds <= 10:
-            raise ValueError("A duração do teste de áudio é inválida.")
+            raise ValueError(tr("A duração do teste de áudio é inválida."))
         enabled = ("microphone", "system") if settings.sources == "both" else (settings.sources,)
 
         def work():
@@ -482,7 +483,7 @@ class MeetingController:
                         capture.command("stop")
                         stop_deadline = time.monotonic() + 5
                     if stop_deadline is not None and time.monotonic() >= stop_deadline:
-                        raise RuntimeError("O capturador não confirmou o fim do teste de áudio.")
+                        raise RuntimeError(tr("O capturador não confirmou o fim do teste de áudio."))
                     item = capture.read_event(timeout=0.1)
                     if item is None:
                         continue
@@ -540,7 +541,7 @@ class MeetingController:
                 defaults.get("recording_notice_enabled", False) if isinstance(defaults, dict) else False
             )
             if notice_enabled and not self._recording_consent_granted:
-                self._error = "Confirme o aviso de gravação antes de iniciar."
+                self._error = tr("Confirme o aviso de gravação antes de iniciar.")
                 return False
             # Consent is one explicit acknowledgement for one recording start.
             self._recording_consent_granted = False
@@ -599,7 +600,7 @@ class MeetingController:
         try:
             if settings.destination and (not os.path.isabs(settings.destination)
                                          or not os.path.isdir(settings.destination)):
-                raise ValueError("A pasta padrão de gravações não existe ou não é absoluta.")
+                raise ValueError(tr("A pasta padrão de gravações não existe ou não é absoluta."))
             token = self.voice.reserve_for_meeting()
             session_settings = settings.payload()
             # The output directory can contain a user name or client folder.
@@ -621,7 +622,7 @@ class MeetingController:
                     capture.command("stop")
                     sent_stop, deadline = True, time.monotonic() + 8
                 if deadline is not None and time.monotonic() > deadline:
-                    raise RuntimeError("O capturador não confirmou a parada; o áudio parcial foi preservado.")
+                    raise RuntimeError(tr("O capturador não confirmou a parada; o áudio parcial foi preservado."))
                 try:
                     command = self._commands.get_nowait()
                 except queue.Empty:
@@ -654,8 +655,8 @@ class MeetingController:
                         with self._lock:
                             first_loss = event.get("track", "unknown") not in self._source_errors
                             self._source_errors.add(event.get("track", "unknown"))
-                            detail = str(event.get("message") or event.get("reason") or "Uma fonte foi interrompida.")[:1024]
-                            self._error = "Captura parcial: " + detail
+                            detail = str(event.get("message") or event.get("reason") or tr("Uma fonte foi interrompida."))[:1024]
+                            self._error = tr("Captura parcial: {detail}", detail=detail)
                         if first_loss:
                             self.notify(self._error)
         except Exception as exc:
@@ -677,7 +678,7 @@ class MeetingController:
                     if not error:
                         self._queue_projection(session)
                 except Exception:
-                    error = error or "Não foi possível finalizar os metadados; a recuperação ocorrerá ao reabrir."
+                    error = error or tr("Não foi possível finalizar os metadados; a recuperação ocorrerá ao reabrir.")
             if session is not None and not error and clean_stop and not self._closed:
                 with self._lock:
                     self._state = "postprocessing"
@@ -688,7 +689,7 @@ class MeetingController:
                 if postprocess_resource_live:
                     clean_stop = False
                 if postprocess_errors:
-                    error = "A gravação foi preservada, mas " + "; ".join(postprocess_errors)
+                    error = tr("A gravação foi preservada, mas {errors}", errors="; ".join(postprocess_errors))
             if token is not None and clean_stop:
                 self.voice.release_meeting(token)
             with self._lock:
@@ -714,7 +715,7 @@ class MeetingController:
         resource_live = False
         try:
             with self._lock:
-                self._postprocess = "Gerando o áudio final"
+                self._postprocess = tr("Gerando o áudio final")
             destination = _final_audio_path(self.root, settings, session_id, title)
             output = export_mixdown(
                 self.store, session_id, destination,
@@ -725,14 +726,14 @@ class MeetingController:
             with self._lock:
                 self._output_path = output
         except Exception as exc:
-            errors.append("não foi possível gerar o áudio final: " + str(exc))
+            errors.append(tr("não foi possível gerar o áudio final: {error}", error=exc))
 
         transcription_profile = self._installed_voice_profile(settings.profile)
         transcription_ready = False
         if transcription_profile and not self._cancel.is_set():
             try:
                 with self._lock:
-                    self._postprocess = "Transcrevendo localmente"
+                    self._postprocess = tr("Transcrevendo localmente")
                 from meeting_transcription import transcribe_meeting
                 from voice_catalog import default_language_for_profile
                 transcribe_meeting(
@@ -741,13 +742,13 @@ class MeetingController:
                     self.voice.cache_dir, cancel_event=self._cancel,
                 )
                 if self._cancel.is_set():
-                    errors.append("o processamento automático foi cancelado")
+                    errors.append(tr("o processamento automático foi cancelado"))
                 else:
                     self._refine_automatic_title(session_id)
                     transcription_ready = True
                     self._queue_projection(session_id)
             except Exception as exc:
-                errors.append("a transcrição automática falhou: " + str(exc))
+                errors.append(tr("a transcrição automática falhou: {error}", error=exc))
                 if getattr(exc, "resource_live", False):
                     resource_live = True
 
@@ -755,15 +756,15 @@ class MeetingController:
         if summary_model and transcription_ready and not self._cancel.is_set():
             try:
                 with self._lock:
-                    self._postprocess = "Gerando o resumo local"
+                    self._postprocess = tr("Gerando o resumo local")
                 from meeting_summary import summarize_meeting
                 summarize_meeting(self.store, session_id, summary_model,
                                   cancel_event=self._cancel)
                 self._queue_projection(session_id)
             except Exception as exc:
-                errors.append("o resumo automático falhou: " + str(exc))
+                errors.append(tr("o resumo automático falhou: {error}", error=exc))
         with self._lock:
-            self._postprocess = "Pós-processamento concluído" if not errors else "Pós-processamento parcial"
+            self._postprocess = tr("Pós-processamento concluído") if not errors else tr("Pós-processamento parcial")
         return errors, resource_live
 
     def _installed_voice_profile(self, preferred):
@@ -877,7 +878,7 @@ class MeetingController:
     def rebuild_index(self, *, cancel_event=None, progress=None):
         """Rebuild the disposable catalog without blocking canonical reads."""
         if not self._index_rebuild_lock.acquire(blocking=False):
-            raise RuntimeError("A reconstrução do índice já está em andamento.")
+            raise RuntimeError(tr("A reconstrução do índice já está em andamento."))
         event = cancel_event or self._index_rebuild_cancel
         if cancel_event is None:
             event.clear()
@@ -998,7 +999,7 @@ class MeetingController:
                     purge_after_days=policy.purge_after_days,
                 )
             elif policy.mode != "raw_tracks":
-                raise ValueError("A política selecionada não é de remoção de áudio raw.")
+                raise ValueError(tr("A política selecionada não é de remoção de áudio raw."))
         if tracks is not None:
             policy = RetentionPolicy.raw_tracks(
                 after_days=0 if policy.after_days is None else policy.after_days,
@@ -1023,11 +1024,11 @@ class MeetingController:
     def get_transcript(self, session_id, revision=None, offset=0, limit=TRANSCRIPT_LIMIT):
         """Return one bounded transcript window without retaining the full JSONL file."""
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento da transcrição é inválido.")
+            raise ValueError(tr("O deslocamento da transcrição é inválido."))
         if limit is None:
             limit = TRANSCRIPT_LIMIT
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise ValueError("O limite da transcrição é inválido.")
+            raise ValueError(tr("O limite da transcrição é inválido."))
         limit = min(limit, TRANSCRIPT_LIMIT)
         return list(itertools.islice(self.library.get_transcript(session_id, revision), offset, offset + limit))
 
@@ -1043,9 +1044,9 @@ class MeetingController:
     def get_transcript_page(self, session_id, revision=None, offset=0, limit=TRANSCRIPT_PAGE_SIZE):
         """Return a bounded page plus navigation metadata for the transcript workspace."""
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-            raise ValueError("O deslocamento da transcrição é inválido.")
+            raise ValueError(tr("O deslocamento da transcrição é inválido."))
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise ValueError("O limite da transcrição é inválido.")
+            raise ValueError(tr("O limite da transcrição é inválido."))
         limit = min(limit, TRANSCRIPT_LIMIT)
         values = list(itertools.islice(
             self.library.get_transcript(session_id, revision), offset, offset + limit + 1,
@@ -1344,11 +1345,11 @@ class MeetingController:
             microphone = metadata.get("tracks", {}).get("microphone")
             if (not isinstance(microphone, dict) or microphone.get("available") is False
                     or microphone.get("raw_removed")):
-                raise ValueError("O áudio original do microfone não está disponível para ajustar o volume.")
+                raise ValueError(tr("O áudio original do microfone não está disponível para ajustar o volume."))
             if metadata.get("status") == "recording":
-                raise ValueError("Finalize a gravação antes de ajustar o volume.")
+                raise ValueError(tr("Finalize a gravação antes de ajustar o volume."))
             with self._lock:
-                self._postprocess = "Ajustando o volume do microfone"
+                self._postprocess = tr("Ajustando o volume do microfone")
             # Capture omits private destination settings from session metadata;
             # the previous final file still identifies the user's output folder.
             previous = metadata.get("final_audio") or {}
@@ -1368,7 +1369,7 @@ class MeetingController:
             self.store.save_final_audio(session_id, output, voice_boost=True)
             self._queue_projection(session_id)
             with self._lock:
-                self._postprocess = "Áudio final ajustado; originais preservados"
+                self._postprocess = tr("Áudio final ajustado; originais preservados")
 
         with self._lock:
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
@@ -1380,7 +1381,7 @@ class MeetingController:
         with self._lock:
             if (self._closed or self._retention_active or self._processing or self._state != "idle"
                     or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
-                raise RuntimeError("Aguarde a gravação, reprodução ou processamento terminar.")
+                raise RuntimeError(tr("Aguarde a gravação, reprodução ou processamento terminar."))
             self._processing = True
             self._processing_session = session_id
             self._cancel.clear()
@@ -1398,7 +1399,7 @@ class MeetingController:
             token = self.voice.reserve_for_meeting()
             try:
                 if not self._run_installed_summary(session_id, model):
-                    raise ValueError("Nenhum modelo de resumo instalado; instale um modelo local antes de gerar o resumo.")
+                    raise ValueError(tr("Nenhum modelo de resumo instalado; instale um modelo local antes de gerar o resumo."))
             finally:
                 self.voice.release_meeting(token)
         return self._launch_processing(work, session_id=session_id)
@@ -1469,7 +1470,7 @@ class MeetingController:
         result = []
         for report in reports or ():
             if event is not None and event.is_set():
-                raise RuntimeError("A leitura do histórico de relatórios foi cancelada.")
+                raise RuntimeError(tr("A leitura do histórico de relatórios foi cancelada."))
             if len(result) >= limit:
                 break
             projection = _report_history_projection(report)
@@ -1548,15 +1549,15 @@ class MeetingController:
         defaults = self.privacy_defaults()
         mode = defaults.get("qa_mode", "explicit_save")
         if mode not in {"memory_only", "explicit_save"}:
-            raise ValueError("O modo de Q&A do workspace é inválido.")
+            raise ValueError(tr("O modo de Q&A do workspace é inválido."))
         return mode
 
     def save_answer(self, session_id, answer, model, *, question="", revision=None,
                     revision_id=None):
         if self.qa_mode() == "memory_only":
             raise ValueError(
-                "O modo de Q&A memory_only não permite salvar respostas; "
-                "altere explicitamente a política do workspace para explicit_save."
+                tr("O modo de Q&A memory_only não permite salvar respostas; "
+                   "altere explicitamente a política do workspace para explicit_save.")
             )
         normalized, selected_question, selected_revision, provenance = _normalize_saved_answer(
             answer, question=question, revision=revision, revision_id=revision_id,
@@ -1577,7 +1578,7 @@ class MeetingController:
         except ValueError:
             inside_library = False
         if inside_library:
-            raise ValueError("Escolha uma pasta fora da biblioteca de reuniões para exportar o relatório.")
+            raise ValueError(tr("Escolha uma pasta fora da biblioteca de reuniões para exportar o relatório."))
         return self._file_work(lambda: export_report(
             self.library.get_report(session_id, report_id), path, format=format, section=section,
             cancel_event=self._cancel,
@@ -1657,7 +1658,7 @@ class MeetingController:
         """Replace playback from a new point after the old audio stream exits."""
         if (track not in {"microphone", "system", "final"} or isinstance(start, bool)
                 or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0):
-            raise ValueError("Escolha uma fonte e um instante de reprodução válido.")
+            raise ValueError(tr("Escolha uma fonte e um instante de reprodução válido."))
         with self._lock:
             if self._closed or self._retention_active or self._state != "idle" or self._processing:
                 return False
@@ -1666,7 +1667,7 @@ class MeetingController:
         if worker and worker is not threading.current_thread():
             worker.join(12)
             if worker.is_alive():
-                raise RuntimeError("A reprodução anterior ainda está encerrando.")
+                raise RuntimeError(tr("A reprodução anterior ainda está encerrando."))
         return self.play(session_id, track, start=start)
 
     def shutdown(self):
@@ -1676,11 +1677,11 @@ class MeetingController:
         self.cancel_processing()
         self.stop_playback()
         if not self._file_done.wait(12):
-            raise RuntimeError("Uma operação de arquivo de reunião ainda está encerrando.")
+            raise RuntimeError(tr("Uma operação de arquivo de reunião ainda está encerrando."))
         for worker in (self._thread, self._processing_thread, self._play_thread):
             if worker and worker is not threading.current_thread():
                 worker.join(12)
                 if worker.is_alive():
-                    raise RuntimeError("Uma tarefa de reunião ainda está encerrando.")
+                    raise RuntimeError(tr("Uma tarefa de reunião ainda está encerrando."))
         if self._library is not None:
             self._library.shutdown()

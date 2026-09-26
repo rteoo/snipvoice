@@ -6,6 +6,7 @@ fake backend. Missing native code leaves voice unavailable instead of crashing.
 
 import threading
 
+from i18n import tr
 from voice_catalog import (
     LANGUAGE_AUTO,
     LANGUAGE_EN_US,
@@ -32,7 +33,7 @@ class AsrBackend:
         return False
 
     def load(self, model_path, profile, language):
-        raise VoiceRuntimeError("Backend de voz indisponível.")
+        raise VoiceRuntimeError(tr("Backend de voz indisponível."))
 
     def unload(self):
         return None
@@ -41,14 +42,14 @@ class AsrBackend:
         return False
 
     def transcribe(self, pcm, cancel_event=None):
-        raise VoiceRuntimeError("Backend de voz indisponível.")
+        raise VoiceRuntimeError(tr("Backend de voz indisponível."))
 
     def cancel(self):
         """Interrupt an in-flight ``transcribe`` from another thread."""
         return None
 
     def start_stream(self):
-        raise VoiceRuntimeError("Este perfil não faz transcrição contínua.")
+        raise VoiceRuntimeError(tr("Este perfil não faz transcrição contínua."))
 
     def feed(self, pcm_chunk):
         return ""
@@ -93,7 +94,7 @@ class FakeAsrBackend(AsrBackend):
 
     def transcribe(self, pcm, cancel_event=None):
         if self._cancelled(cancel_event):
-            raise VoiceRuntimeError("Transcrição cancelada.")
+            raise VoiceRuntimeError(tr("Transcrição cancelada."))
         self.transcribe_calls.append(list(pcm) if pcm is not None else None)
         return self.transcript
 
@@ -159,7 +160,7 @@ class TranscribeCppBackend(AsrBackend):
         module = self._import()
         if module is None:
             raise VoiceRuntimeError(
-                "O runtime transcribe.cpp não está instalado neste aplicativo."
+                tr("O runtime transcribe.cpp não está instalado neste aplicativo.")
             )
         self.unload()
         with self._state:
@@ -174,7 +175,7 @@ class TranscribeCppBackend(AsrBackend):
         except Exception as exc:
             self._close_resource(session)
             self._close_resource(model)
-            raise VoiceRuntimeError(f"Falha ao carregar o modelo de voz: {exc}") from exc
+            raise VoiceRuntimeError(tr("Falha ao carregar o modelo de voz: {error}", error=exc)) from exc
         else:
             entry = catalog_entry(profile)
             model_language = (
@@ -256,12 +257,12 @@ class TranscribeCppBackend(AsrBackend):
         with self._state:
             session = self._session
             if session is None or self._unloading:
-                raise VoiceRuntimeError("Nenhum modelo de voz está carregado.")
+                raise VoiceRuntimeError(tr("Nenhum modelo de voz está carregado."))
             self._begin_operation_locked()
         if cancel_event is not None and cancel_event.is_set():
             try:
                 self.cancel()
-                raise VoiceRuntimeError("Transcrição cancelada.")
+                raise VoiceRuntimeError(tr("Transcrição cancelada."))
             finally:
                 self._end_operation()
         done = threading.Event()
@@ -284,7 +285,7 @@ class TranscribeCppBackend(AsrBackend):
             except TypeError:
                 result = session.run(pcm)
         except Exception as exc:
-            raise VoiceRuntimeError(f"Falha na transcrição: {exc}") from exc
+            raise VoiceRuntimeError(tr("Falha na transcrição: {error}", error=exc)) from exc
         finally:
             done.set()
             if watcher is not None:
@@ -292,7 +293,7 @@ class TranscribeCppBackend(AsrBackend):
             streams = self._end_operation()
             self._close_streams(streams)
         if cancel_event is not None and cancel_event.is_set():
-            raise VoiceRuntimeError("Transcrição cancelada.")
+            raise VoiceRuntimeError(tr("Transcrição cancelada."))
         return _result_text(result)
 
     @staticmethod
@@ -409,14 +410,14 @@ class TranscribeCppBackend(AsrBackend):
                 or session is None
                 or not hasattr(session, "stream")
             ):
-                raise VoiceRuntimeError("Este perfil não faz transcrição contínua.")
+                raise VoiceRuntimeError(tr("Este perfil não faz transcrição contínua."))
             if (
                 self._active_operations
                 or self._stream is not None
                 or self._stream_starting
                 or self._starting_streams
             ):
-                raise VoiceRuntimeError("A transcrição contínua já está ativa.")
+                raise VoiceRuntimeError(tr("A transcrição contínua já está ativa."))
             self._stream_starting = True
             epoch = self._stream_epoch
             self._begin_operation_locked()

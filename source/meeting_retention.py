@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 
+from i18n import tr
 from snippet_utils import write_json_atomic
 
 
@@ -97,20 +98,20 @@ class RetentionPolicy:
         }
         mode = aliases.get(mode, mode)
         if mode not in {"keep", "whole_meeting", "raw_tracks"}:
-            raise ValueError("A política de retenção não é reconhecida.")
+            raise ValueError(tr("A política de retenção não é reconhecida."))
         object.__setattr__(self, "mode", mode)
         if self.after_days is not None:
             value = float(self.after_days)
             if not math.isfinite(value) or value < 0:
-                raise ValueError("A idade da política de retenção é inválida.")
+                raise ValueError(tr("A idade da política de retenção é inválida."))
             object.__setattr__(self, "after_days", value)
         purge = float(self.purge_after_days)
         if not math.isfinite(purge) or purge < 0:
-            raise ValueError("O prazo da lixeira é inválido.")
+            raise ValueError(tr("O prazo da lixeira é inválido."))
         object.__setattr__(self, "purge_after_days", purge)
         values = (self.tracks,) if isinstance(self.tracks, str) else tuple(self.tracks or ())
         if any(track not in _TRACKS for track in values) or len(set(values)) != len(values):
-            raise ValueError("As fontes da política de retenção são inválidas.")
+            raise ValueError(tr("As fontes da política de retenção são inválidas."))
         object.__setattr__(self, "tracks", values)
 
     @classmethod
@@ -135,7 +136,7 @@ class RetentionPolicy:
         if isinstance(value, str):
             return cls(mode=value)
         if not isinstance(value, dict):
-            raise ValueError("A política de retenção deve ser um objeto.")
+            raise ValueError(tr("A política de retenção deve ser um objeto."))
         data = dict(value)
         mode = data.pop("mode", data.pop("action", data.pop("kind", data.pop("policy", None))))
         whole_age = data.pop("whole_meeting_after_days", data.pop("whole_after_days", None))
@@ -160,7 +161,7 @@ class RetentionPolicy:
             # silently ignoring one here would make a destructive rule look
             # active when it is not.  Keep the accepted compatibility fields
             # narrow and fail closed.
-            raise ValueError("A política de retenção contém campos desconhecidos.")
+            raise ValueError(tr("A política de retenção contém campos desconhecidos."))
         return cls(**normalized)
 
     def as_dict(self):
@@ -299,22 +300,28 @@ class TrashEntry:
         }
 
 
+def _recording_reason():
+    # Plan callers classify reasons by text; this one names no lease, so it is
+    # matched exactly in whichever language produced it.
+    return tr("A reunião está em gravação e não pode entrar na retenção.")
+
+
 def _utc(value):
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("O relógio da retenção deve informar o fuso horário.")
+            raise ValueError(tr("O relógio da retenção deve informar o fuso horário."))
         return value.astimezone(timezone.utc)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if not math.isfinite(float(value)):
-            raise ValueError("O relógio da retenção é inválido.")
+            raise ValueError(tr("O relógio da retenção é inválido."))
         return datetime.fromtimestamp(float(value), timezone.utc)
     if isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as error:
-            raise ValueError("O relógio da retenção é inválido.") from error
+            raise ValueError(tr("O relógio da retenção é inválido.")) from error
         return _utc(parsed)
-    raise ValueError("O relógio da retenção é inválido.")
+    raise ValueError(tr("O relógio da retenção é inválido."))
 
 
 def _stamp(value):
@@ -359,7 +366,7 @@ def _cross_process_lock(path, timeout):
     """Acquire one app-owned byte with a bounded cross-process wait."""
     path = os.path.abspath(os.fspath(path))
     if _has_link_component(path):
-        raise RetentionSafetyError("A trava de retenção contém um link ou junction.")
+        raise RetentionSafetyError(tr("A trava de retenção contém um link ou junction."))
     flags = os.O_CREAT | os.O_RDWR
     no_follow = getattr(os, "O_NOFOLLOW", 0)
     deadline = time.monotonic() + float(timeout)
@@ -369,7 +376,7 @@ def _cross_process_lock(path, timeout):
     try:
         fd = os.open(path, flags | no_follow, 0o600)
         if _is_link(path) or not os.path.isfile(path):
-            raise RetentionSafetyError("A trava de retenção não é um arquivo regular.")
+            raise RetentionSafetyError(tr("A trava de retenção não é um arquivo regular."))
         handle = os.fdopen(fd, "a+b", buffering=0)
         fd = None
         if os.name == "nt":
@@ -383,7 +390,7 @@ def _cross_process_lock(path, timeout):
             lock = getattr(msvcrt, "LK_NBLCK", None)
             unlock = msvcrt.LK_UNLCK
             if lock is None:
-                raise RetentionError("O runtime Windows não oferece uma trava não bloqueante segura.")
+                raise RetentionError(tr("O runtime Windows não oferece uma trava não bloqueante segura."))
             while True:
                 try:
                     msvcrt.locking(handle.fileno(), lock, 1)
@@ -391,7 +398,7 @@ def _cross_process_lock(path, timeout):
                     break
                 except OSError:
                     if time.monotonic() >= deadline:
-                        raise RetentionLockTimeout("A operação de retenção está ocupada por outro processo.")
+                        raise RetentionLockTimeout(tr("A operação de retenção está ocupada por outro processo."))
                     time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
             try:
                 yield
@@ -413,7 +420,7 @@ def _cross_process_lock(path, timeout):
                     if isinstance(error, OSError) and getattr(error, "errno", None) not in {11, 13, 35}:
                         raise
                     if time.monotonic() >= deadline:
-                        raise RetentionLockTimeout("A operação de retenção está ocupada por outro processo.")
+                        raise RetentionLockTimeout(tr("A operação de retenção está ocupada por outro processo."))
                     time.sleep(min(0.05, max(0.001, deadline - time.monotonic())))
             try:
                 yield
@@ -461,7 +468,7 @@ def _json_fingerprint(value):
             separators=(",", ":"),
         ).encode("utf-8")
     except (TypeError, ValueError) as error:
-        raise RetentionError("O estado canônico contém valores que não podem ser validados.") from error
+        raise RetentionError(tr("O estado canônico contém valores que não podem ser validados.")) from error
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -484,12 +491,12 @@ class MeetingRetention:
         failure_injector=None,
     ):
         if store is None and library is None:
-            raise ValueError("MeetingRetention precisa de um MeetingStore ou MeetingLibrary.")
+            raise ValueError(tr("MeetingRetention precisa de um MeetingStore ou MeetingLibrary."))
         self.store = store or getattr(library, "store", None)
         self.library = library
         raw_meetings = meetings_root or getattr(library, "meetings_root", None) or getattr(self.store, "root", None)
         if raw_meetings is None:
-            raise ValueError("A raiz de reuniões é obrigatória.")
+            raise ValueError(tr("A raiz de reuniões é obrigatória."))
         self.meetings_root = os.path.abspath(os.fspath(raw_meetings))
         raw_home = workspace_root or getattr(library, "home_root", None)
         if raw_home is None:
@@ -508,10 +515,10 @@ class MeetingRetention:
         self.lease_checker = lease_checker
         self.trash_retention_days = float(trash_retention_days)
         if not math.isfinite(self.trash_retention_days) or self.trash_retention_days < 0:
-            raise ValueError("O prazo padrão da lixeira é inválido.")
+            raise ValueError(tr("O prazo padrão da lixeira é inválido."))
         self.lock_timeout = float(lock_timeout)
         if not math.isfinite(self.lock_timeout) or self.lock_timeout < 0:
-            raise ValueError("O prazo da trava de retenção é inválido.")
+            raise ValueError(tr("O prazo da trava de retenção é inválido."))
         self.failure_injector = failure_injector
         self._lock = threading.RLock()
         self._validate_roots()
@@ -526,18 +533,18 @@ class MeetingRetention:
             (self.retention_ops_root, "retention operations"),
         ):
             if _has_link_component(root):
-                raise RetentionSafetyError(f"A raiz {label} contém um link ou junction.")
+                raise RetentionSafetyError(tr("A raiz {label} contém um link ou junction.", label=label))
         if not _common(self.home_root, self.meetings_root):
-            raise RetentionSafetyError("A raiz de reuniões está fora do workspace.")
+            raise RetentionSafetyError(tr("A raiz de reuniões está fora do workspace."))
         if not _common(self.home_root, self.trash_root) or not _common(self.home_root, self.retention_ops_root):
-            raise RetentionSafetyError("As raízes de retenção devem permanecer no workspace.")
+            raise RetentionSafetyError(tr("As raízes de retenção devem permanecer no workspace."))
         if os.path.lexists(self.lock_path) and (_is_link(self.lock_path) or not os.path.isfile(self.lock_path)):
-            raise RetentionSafetyError("A trava de retenção não é um arquivo app-owned regular.")
+            raise RetentionSafetyError(tr("A trava de retenção não é um arquivo app-owned regular."))
         # A same-root move must not cross to another volume.  Missing roots
         # are created only by an approved mutating operation.
         existing = [path for path in (self.home_root, self.meetings_root) if os.path.isdir(path)]
         if existing and os.path.abspath(self.home_root) != os.path.commonpath(existing):
-            raise RetentionSafetyError("As raízes de retenção não compartilham uma raiz segura.")
+            raise RetentionSafetyError(tr("As raízes de retenção não compartilham uma raiz segura."))
 
     def _now(self):
         try:
@@ -551,23 +558,23 @@ class MeetingRetention:
         if not os.path.lexists(self.home_root):
             os.makedirs(self.home_root, exist_ok=True)
         if _has_link_component(self.home_root) or not os.path.isdir(self.home_root):
-            raise RetentionSafetyError("O workspace da retenção não é uma pasta segura.")
+            raise RetentionSafetyError(tr("O workspace da retenção não é uma pasta segura."))
         lock_path = self._owned_path(self.lock_path, self.home_root, "retention lock")
         with _cross_process_lock(lock_path, self.lock_timeout):
             yield
 
     def _session_path(self, session_id):
         if not _valid_id(session_id):
-            raise ValueError("Identificador de reunião inválido.")
+            raise ValueError(tr("Identificador de reunião inválido."))
         path = os.path.abspath(os.path.join(self.meetings_root, session_id))
         if not _common(self.meetings_root, path) or _has_link_component(path):
-            raise RetentionSafetyError("A pasta da reunião aponta para um link ou junction.")
+            raise RetentionSafetyError(tr("A pasta da reunião aponta para um link ou junction."))
         return path
 
     def _owned_path(self, path, root, label, *, must_exist=False):
         absolute = os.path.abspath(os.fspath(path))
         if not _common(root, absolute) or _has_link_component(absolute):
-            raise RetentionSafetyError(f"O alvo {label} não é app-owned ou contém um link.")
+            raise RetentionSafetyError(tr("O alvo {label} não é app-owned ou contém um link.", label=label))
         if must_exist and not os.path.lexists(absolute):
             raise FileNotFoundError(absolute)
         return absolute
@@ -580,7 +587,7 @@ class MeetingRetention:
         if getter is None:
             getter = getattr(self.store, "get", None)
         if getter is None:
-            raise ValueError("O colaborador de reuniões não oferece leitura de metadados.")
+            raise ValueError(tr("O colaborador de reuniões não oferece leitura de metadados."))
         try:
             return copy.deepcopy(getter(session_id, include_events=False))
         except TypeError:
@@ -643,7 +650,7 @@ class MeetingRetention:
                 annotations = self._annotations(session_id, metadata)
                 override = annotations.get("retention_override")
             except Exception as error:
-                raise RetentionError(f"Não foi possível ler a substituição de retenção: {error}") from error
+                raise RetentionError(tr("Não foi possível ler a substituição de retenção: {error}", error=error)) from error
         if override is not None:
             policy = override
         if policy is None:
@@ -656,24 +663,24 @@ class MeetingRetention:
             raw_stamp = metadata.get("created_at")
         stamp = _parse_stamp(raw_stamp)
         if stamp is None:
-            return None, "A reunião não tem um horário UTC válido."
+            return None, tr("A reunião não tem um horário UTC válido.")
         age = (now - stamp).total_seconds() / 86400.0
         if age < 0:
-            return age, "O relógio voltou antes da reunião; a política foi mantida."
+            return age, tr("O relógio voltou antes da reunião; a política foi mantida.")
         return age, ""
 
     def _active_lease(self, session_id, metadata):
         if metadata.get("status") == "recording":
-            return True, "A reunião está em gravação; há um lease de captura ativo."
+            return True, tr("A reunião está em gravação; há um lease de captura ativo.")
         active = getattr(self.store, "_active", None)
         if isinstance(active, dict) and session_id in active:
-            return True, "A reunião mantém um lease de captura ativo."
+            return True, tr("A reunião mantém um lease de captura ativo.")
         if not isinstance(active, (str, bytes, dict)):
             try:
                 if active is not None and session_id in active:
-                    return True, "A reunião mantém um lease de captura ativo."
+                    return True, tr("A reunião mantém um lease de captura ativo.")
             except TypeError:
-                return True, "Não foi possível provar que os leases de captura terminaram."
+                return True, tr("Não foi possível provar que os leases de captura terminaram.")
         checker = self.lease_checker
         if checker is None:
             for owner in (self.library, self.store):
@@ -700,19 +707,19 @@ class MeetingRetention:
                     try:
                         value = checker()
                     except Exception as error:
-                        return True, f"Não foi possível provar que os leases terminaram: {error}"
+                        return True, tr("Não foi possível provar que os leases terminaram: {error}", error=error)
                 except Exception as error:
-                    return True, f"Não foi possível provar que os leases terminaram: {error}"
+                    return True, tr("Não foi possível provar que os leases terminaram: {error}", error=error)
             else:
                 try:
                     value = session_id in checker
                 except TypeError as error:
-                    return True, f"Não foi possível provar que os leases terminaram: {error}"
+                    return True, tr("Não foi possível provar que os leases terminaram: {error}", error=error)
             if isinstance(value, dict):
                 recognized = ("active", "processing", "playing", "capturing", "recording")
                 value = bool(value.get(session_id)) or any(bool(value.get(key)) for key in recognized)
             if value:
-                return True, "A reunião tem um lease ativo de captura, processamento ou reprodução."
+                return True, tr("A reunião tem um lease ativo de captura, processamento ou reprodução.")
         return False, ""
 
     def _external_exports(self, metadata):
@@ -738,11 +745,11 @@ class MeetingRetention:
     def _tree_inventory(self, root, *, kind, track=None):
         root = os.path.abspath(root)
         if _has_link_component(root):
-            raise RetentionSafetyError("O inventário contém um link ou junction.")
+            raise RetentionSafetyError(tr("O inventário contém um link ou junction."))
         if not os.path.lexists(root):
             return (), 0
         if _is_link(root) or not os.path.isdir(root):
-            raise RetentionSafetyError("O alvo de retenção não é uma pasta app-owned.")
+            raise RetentionSafetyError(tr("O alvo de retenção não é uma pasta app-owned."))
         values = [RetentionTarget(root, kind, 0, "", track)]
         total = 0
         stack = [root]
@@ -751,27 +758,27 @@ class MeetingRetention:
             try:
                 entries = sorted(os.scandir(current), key=lambda item: item.name.casefold())
             except OSError as error:
-                raise RetentionError(f"Não foi possível ler o inventário de retenção: {error}") from error
+                raise RetentionError(tr("Não foi possível ler o inventário de retenção: {error}", error=error)) from error
             for entry in entries:
                 path = os.path.abspath(entry.path)
                 if _is_link(path):
-                    raise RetentionSafetyError("O inventário contém um link ou junction.")
+                    raise RetentionSafetyError(tr("O inventário contém um link ou junction."))
                 relative = os.path.relpath(path, root).replace(os.sep, "/")
                 if entry.is_dir(follow_symlinks=False):
                     values.append(RetentionTarget(path, "directory", 0, relative, track))
                     stack.append(path)
                     continue
                 if not entry.is_file(follow_symlinks=False):
-                    raise RetentionSafetyError("O inventário contém um arquivo especial não suportado.")
+                    raise RetentionSafetyError(tr("O inventário contém um arquivo especial não suportado."))
                 try:
                     file_stat = entry.stat(follow_symlinks=False)
                     if getattr(file_stat, "st_nlink", 1) > 1:
-                        raise RetentionSafetyError("O inventário contém um hard link sem ownership comprovada.")
+                        raise RetentionSafetyError(tr("O inventário contém um hard link sem ownership comprovada."))
                     size = int(file_stat.st_size)
                 except OSError as error:
-                    raise RetentionError(f"Não foi possível estimar o alvo de retenção: {error}") from error
+                    raise RetentionError(tr("Não foi possível estimar o alvo de retenção: {error}", error=error)) from error
                 if size < 0:
-                    raise RetentionSafetyError("O inventário contém um tamanho inválido.")
+                    raise RetentionSafetyError(tr("O inventário contém um tamanho inválido."))
                 values.append(RetentionTarget(path, "file", size, relative, track))
                 total += size
         values.sort(key=lambda value: (value.path.count(os.sep), value.path.casefold()))
@@ -791,39 +798,39 @@ class MeetingRetention:
     def _transcript_state(self, session_id, metadata):
         revisions = metadata.get("revisions")
         if not isinstance(revisions, list):
-            return False, False, {}, {}, "As revisões de transcrição são inválidas."
+            return False, False, {}, {}, tr("As revisões de transcrição são inválidas.")
         completed = [item for item in revisions if isinstance(item, dict) and item.get("status") == "completed"]
         pending = [item for item in revisions if isinstance(item, dict) and item.get("status") in {"pending", "processing"}]
         if pending:
-            return False, bool(completed), {}, {}, "Há uma revisão de transcrição ainda em processamento."
+            return False, bool(completed), {}, {}, tr("Há uma revisão de transcrição ainda em processamento.")
         if not completed:
-            return False, False, {}, {}, "A reunião ainda não tem uma revisão de transcrição concluída."
+            return False, False, {}, {}, tr("A reunião ainda não tem uma revisão de transcrição concluída.")
         revision_ids = {}
         revision_ranges = {}
         total_bytes = 0
         for revision in completed:
             revision_id = revision.get("id")
             if not _valid_id(revision_id):
-                return False, True, {}, {}, "Uma revisão concluída tem um identificador inválido."
+                return False, True, {}, {}, tr("Uma revisão concluída tem um identificador inválido.")
             reader = getattr(self.library, "get_transcript", None) if self.library is not None else None
             if reader is None:
                 reader = getattr(self.store, "get_transcript", None)
             if reader is None:
-                return False, True, {}, {}, "O colaborador não oferece leitura de transcrições."
+                return False, True, {}, {}, tr("O colaborador não oferece leitura de transcrições.")
             try:
                 segments = list(reader(session_id, revision_id))
             except Exception as error:
-                return False, True, {}, {}, f"A revisão de transcrição não pôde ser lida: {error}"
+                return False, True, {}, {}, tr("A revisão de transcrição não pôde ser lida: {error}", error=error)
             if len(segments) > MAX_TRANSCRIPT_SEGMENTS:
-                return False, True, {}, {}, "A revisão de transcrição excede o limite de retenção."
+                return False, True, {}, {}, tr("A revisão de transcrição excede o limite de retenção.")
             expected = revision.get("segments")
             if isinstance(expected, int) and not isinstance(expected, bool) and expected != len(segments):
-                return False, True, {}, {}, "A revisão de transcrição está incompleta."
+                return False, True, {}, {}, tr("A revisão de transcrição está incompleta.")
             ids = set()
             ranges = []
             for segment in segments:
                 if not isinstance(segment, dict) or not _valid_segment_id(segment.get("id")):
-                    return False, True, {}, {}, "A revisão de transcrição contém um segmento inválido."
+                    return False, True, {}, {}, tr("A revisão de transcrição contém um segmento inválido.")
                 ids.add(segment["id"])
                 track = segment.get("track")
                 start, end = segment.get("start"), segment.get("end")
@@ -837,7 +844,7 @@ class MeetingRetention:
                     ranges.append((track, float(start), float(end)))
                 total_bytes += _json_size(segment)
                 if total_bytes > MAX_TRANSCRIPT_BYTES:
-                    return False, True, {}, {}, "As transcrições excedem o limite de retenção."
+                    return False, True, {}, {}, tr("As transcrições excedem o limite de retenção.")
             # Keep every revision's citation scope separate.  Segment IDs and
             # timestamps are only stable within their transcript revision.
             revision_ids[revision_id] = ids
@@ -848,23 +855,23 @@ class MeetingRetention:
         """Read the completed revisions used by the raw-retention gate."""
         revisions = metadata.get("revisions")
         if not isinstance(revisions, list):
-            raise RetentionError("As revisões de transcrição são inválidas.")
+            raise RetentionError(tr("As revisões de transcrição são inválidas."))
         reader = getattr(self.library, "get_transcript", None) if self.library is not None else None
         if reader is None:
             reader = getattr(self.store, "get_transcript", None)
         if reader is None:
-            raise RetentionError("O colaborador não oferece leitura de transcrições.")
+            raise RetentionError(tr("O colaborador não oferece leitura de transcrições."))
         snapshot = []
         for revision in revisions:
             if not isinstance(revision, dict) or revision.get("status") != "completed":
                 continue
             revision_id = revision.get("id")
             if not _valid_id(revision_id):
-                raise RetentionError("Uma revisão concluída tem um identificador inválido.")
+                raise RetentionError(tr("Uma revisão concluída tem um identificador inválido."))
             try:
                 segments = list(reader(session_id, revision_id))
             except Exception as error:
-                raise RetentionError(f"A revisão de transcrição não pôde ser lida: {error}") from error
+                raise RetentionError(tr("A revisão de transcrição não pôde ser lida: {error}", error=error)) from error
             snapshot.append({"id": revision_id, "segments": segments})
         return snapshot
 
@@ -957,60 +964,60 @@ class MeetingRetention:
         if isinstance(reviewed_artifacts, dict):
             for report_id, artifact in reviewed_artifacts.items():
                 if report_id not in report_ids and any(self._iter_citations(artifact)):
-                    return False, "Uma citação revisada não tem uma revisão de transcrição resolvível."
+                    return False, tr("Uma citação revisada não tem uma revisão de transcrição resolvível.")
 
         if not revision_ids:
-            return False, "Não há segmentos para resolver as citações preservadas."
+            return False, tr("Não há segmentos para resolver as citações preservadas.")
         for source, source_kind in sources:
             citations = list(self._iter_citations(source))
             if not citations:
                 continue
             if source_kind == "legacy":
                 if not isinstance(source, dict):
-                    return False, "Uma citação legada não tem uma revisão de transcrição resolvível."
+                    return False, tr("Uma citação legada não tem uma revisão de transcrição resolvível.")
                 revision_id = source.get("transcript_revision", source.get("revision"))
                 if revision_id is None:
                     # A legacy summary can be safely inferred only while the
                     # meeting has exactly one completed transcript revision.
                     if len(revision_ids) != 1:
-                        return False, "Uma citação legada não informa a revisão de transcrição."
+                        return False, tr("Uma citação legada não informa a revisão de transcrição.")
                     revision_id = next(iter(revision_ids))
             else:
                 revision_id = source.get("transcript_revision") if isinstance(source, dict) else None
                 if revision_id not in revision_ids:
-                    return False, "Uma citação do relatório não informa uma revisão de transcrição concluída."
+                    return False, tr("Uma citação do relatório não informa uma revisão de transcrição concluída.")
             segment_ids = revision_ids.get(revision_id)
             segment_ranges = revision_ranges.get(revision_id)
             if segment_ids is None or segment_ranges is None:
-                return False, "Uma citação referencia uma revisão de transcrição inexistente ou não concluída."
+                return False, tr("Uma citação referencia uma revisão de transcrição inexistente ou não concluída.")
             for citation in citations:
                 values = citation if isinstance(citation, list) else [citation]
                 for item in values:
                     if isinstance(item, dict):
                         cited_revision = item.get("transcript_revision", item.get("revision"))
                         if cited_revision is not None and cited_revision != revision_id:
-                            return False, "Uma citação do relatório referencia outra revisão de transcrição."
+                            return False, tr("Uma citação do relatório referencia outra revisão de transcrição.")
                         candidate = item.get("segment_id", item.get("id"))
                         if candidate is None or candidate not in segment_ids:
-                            return False, "Uma citação do relatório não pode mais ser resolvida."
+                            return False, tr("Uma citação do relatório não pode mais ser resolvida.")
                     elif isinstance(item, str) and item and item not in segment_ids:
                         # Existing v1 summaries used track:start:end citations.
                         # They remain resolvable as provenance while the
                         # transcript revision survives, even if raw audio does not.
                         pieces = item.split(":")
                         if len(pieces) != 3 or pieces[0] not in _TRACK_ORDER:
-                            return False, "Uma citação do relatório não pode mais ser resolvida."
+                            return False, tr("Uma citação do relatório não pode mais ser resolvida.")
                         try:
                             start, end = float(pieces[1]), float(pieces[2])
                         except ValueError:
-                            return False, "Uma citação do relatório não pode mais ser resolvida."
+                            return False, tr("Uma citação do relatório não pode mais ser resolvida.")
                         if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
-                            return False, "Uma citação do relatório não pode mais ser resolvida."
+                            return False, tr("Uma citação do relatório não pode mais ser resolvida.")
                         if not any(
                             track == pieces[0] and start <= segment_end and end >= segment_start
                             for track, segment_start, segment_end in segment_ranges
                         ):
-                            return False, "Uma citação do relatório não pode mais ser resolvida."
+                            return False, tr("Uma citação do relatório não pode mais ser resolvida.")
         return True, ""
 
     def plan(self, session_id, policy=None, *, tracks=None, override=None):
@@ -1049,11 +1056,11 @@ class MeetingRetention:
         if resolved.mode == "keep":
             operation = "keep"
         elif metadata.get("status") == "recording":
-            reasons.append("A reunião está em gravação e não pode entrar na retenção.")
+            reasons.append(_recording_reason())
             eligible = False
         elif age is None or resolved.after_days is None or age < resolved.after_days:
             if not age_reason:
-                reasons.append("A idade da reunião ainda não atingiu a política de retenção.")
+                reasons.append(tr("A idade da reunião ainda não atingiu a política de retenção."))
             eligible = False
         elif resolved.mode == "whole_meeting":
             targets, byte_estimate = self._tree_inventory(source, kind="meeting")
@@ -1093,7 +1100,7 @@ class MeetingRetention:
             requested = tuple(resolved.tracks) or tuple(track for track in _TRACK_ORDER if track in metadata.get("tracks", {}))
             requested = tuple(dict.fromkeys(requested))
             if not requested:
-                reasons.append("A reunião não contém nenhuma fonte raw selecionável.")
+                reasons.append(tr("A reunião não contém nenhuma fonte raw selecionável."))
                 eligible = False
             present_tracks = []
             for track in requested:
@@ -1103,13 +1110,13 @@ class MeetingRetention:
                     continue
                 track_targets, track_bytes = self._tree_inventory(track_dir, kind="raw_track", track=track)
                 if metadata.get("tracks", {}).get(track, {}).get("available") is False:
-                    reasons.append(f"A fonte {track} já está indisponível.")
+                    reasons.append(tr("A fonte {track} já está indisponível.", track=track))
                     continue
                 targets.extend(track_targets)
                 present_tracks.append(track)
             raw_tracks = tuple(present_tracks)
             if not targets:
-                reasons.append("Nenhum alvo raw existente foi encontrado.")
+                reasons.append(tr("Nenhum alvo raw existente foi encontrado."))
                 eligible = False
             byte_estimate = sum(target.bytes for target in targets)
         if missing:
@@ -1117,15 +1124,15 @@ class MeetingRetention:
             # track is present, but never claim that its bytes were removed.
             if not targets:
                 eligible = False
-            reasons.append("Alguns alvos raw já não existem; eles foram excluídos do inventário.")
+            reasons.append(tr("Alguns alvos raw já não existem; eles foram excluídos do inventário."))
         else:
             byte_estimate = sum(target.bytes for target in targets)
         if operation == "whole_meeting" and not targets:
             eligible = False
-            reasons.append("O inventário da reunião não contém um alvo seguro.")
+            reasons.append(tr("O inventário da reunião não contém um alvo seguro."))
         if operation == "whole_meeting" and metadata.get("status") not in _TERMINAL_STATUSES:
             eligible = False
-            reasons.append("A reunião não está em um estado final.")
+            reasons.append(tr("A reunião não está em um estado final."))
         external = self._external_exports(metadata)
         if operation == "keep":
             eligible = True
@@ -1160,7 +1167,7 @@ class MeetingRetention:
 
     def _journal_path(self, operation_id):
         if not _valid_id(operation_id):
-            raise RetentionSafetyError("O identificador da operação é inválido.")
+            raise RetentionSafetyError(tr("O identificador da operação é inválido."))
         return self._owned_path(
             os.path.join(self.retention_ops_root, operation_id + OPERATION_JOURNAL_SUFFIX),
             self.retention_ops_root,
@@ -1171,10 +1178,10 @@ class MeetingRetention:
         path = self._owned_path(path, self.retention_ops_root, "journal")
         os.makedirs(self.retention_ops_root, exist_ok=True)
         if _has_link_component(self.retention_ops_root) or (_is_link(path) if os.path.lexists(path) else False):
-            raise RetentionSafetyError("O journal aponta para um link ou junction.")
+            raise RetentionSafetyError(tr("O journal aponta para um link ou junction."))
         encoded = json.dumps(record, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") + b"\n"
         if len(encoded) > MAX_JOURNAL_LINE_BYTES:
-            raise RetentionError("O journal de retenção excede o limite permitido.")
+            raise RetentionError(tr("O journal de retenção excede o limite permitido."))
         with open(path, "ab", buffering=0) as handle:
             handle.write(encoded)
             handle.flush()
@@ -1205,25 +1212,25 @@ class MeetingRetention:
         path = self._owned_path(path, root, "directory")
         os.makedirs(path, exist_ok=True)
         if _has_link_component(path) or not os.path.isdir(path):
-            raise RetentionSafetyError("A pasta de retenção não é segura.")
+            raise RetentionSafetyError(tr("A pasta de retenção não é segura."))
         return path
 
     def _ensure_plan(self, plan):
         if not isinstance(plan, RetentionPlan):
-            raise TypeError("A operação de retenção exige um RetentionPlan.")
+            raise TypeError(tr("A operação de retenção exige um RetentionPlan."))
         if not plan.dry_run or plan.meetings_root != self.meetings_root or plan.trash_root != self.trash_root:
-            raise PlanConflict("O plano não pertence a esta biblioteca.")
+            raise PlanConflict(tr("O plano não pertence a esta biblioteca."))
         if not plan.eligible:
             joined = " ".join(plan.reasons)
-            if "lease" in joined.casefold() or "gravação" in joined.casefold():
+            if "lease" in joined.casefold() or "gravação" in joined.casefold() or _recording_reason() in joined:
                 raise ActiveLeaseError(joined)
             if "link" in joined.casefold() or "app-owned" in joined.casefold():
                 raise RetentionSafetyError(joined)
-            raise RetentionError(joined or "O plano de retenção não é elegível.")
+            raise RetentionError(joined or tr("O plano de retenção não é elegível."))
         source = self._session_path(plan.session_id)
         current_targets, _ = self._reinventory_plan(plan, source)
         if self._fingerprint(current_targets) != plan.inventory_fingerprint:
-            raise PlanConflict("O inventário mudou depois da prévia de retenção.")
+            raise PlanConflict(tr("O inventário mudou depois da prévia de retenção."))
         current_metadata = self._metadata(plan.session_id)
         active, reason = self._active_lease(plan.session_id, current_metadata)
         if active:
@@ -1242,9 +1249,9 @@ class MeetingRetention:
             or (plan.operation == "whole_meeting" and current.policy != plan.policy)
         ):
             joined = " ".join(current.reasons)
-            if "lease" in joined.casefold() or "gravação" in joined.casefold():
+            if "lease" in joined.casefold() or "gravação" in joined.casefold() or _recording_reason() in joined:
                 raise ActiveLeaseError(joined)
-            raise PlanConflict("A elegibilidade mudou depois da prévia de retenção.")
+            raise PlanConflict(tr("A elegibilidade mudou depois da prévia de retenção."))
         if plan.operation == "raw_tracks":
             # Eligibility is a compound promise over annotations, completed
             # transcript revisions, reviewed report provenance, and citations.
@@ -1256,7 +1263,7 @@ class MeetingRetention:
                 or not plan.eligibility_fingerprint
                 or current.eligibility_fingerprint != plan.eligibility_fingerprint
             ):
-                raise PlanConflict("A revisão, a proveniência ou as citações mudaram depois da prévia de retenção.")
+                raise PlanConflict(tr("A revisão, a proveniência ou as citações mudaram depois da prévia de retenção."))
         return source
 
     def _reinventory_plan(self, plan, source):
@@ -1275,9 +1282,9 @@ class MeetingRetention:
     @staticmethod
     def _confirmation(confirm, *, permanent=False):
         if not confirm:
-            raise ConfirmationRequired("Confirme explicitamente a operação de retenção.")
+            raise ConfirmationRequired(tr("Confirme explicitamente a operação de retenção."))
         if permanent and confirm not in {True, "permanent", "purge", "permanente"}:
-            raise ConfirmationRequired("A exclusão permanente exige uma segunda confirmação explícita.")
+            raise ConfirmationRequired(tr("A exclusão permanente exige uma segunda confirmação explícita."))
 
     def _mark_index_stale(self, reason="retention projection failed"):
         """Leave a durable stale/rebuild signal after a projection failure."""
@@ -1387,44 +1394,44 @@ class MeetingRetention:
 
     def _validate_tombstone(self, value, path):
         if not isinstance(value, dict) or value.get("schema_version") != RETENTION_SCHEMA_VERSION or value.get("kind") != "whole_meeting_trash":
-            raise RetentionError("O tombstone da lixeira não é reconhecido.")
+            raise RetentionError(tr("O tombstone da lixeira não é reconhecido."))
         session_id = value.get("session_id")
         operation_id = value.get("operation_id")
         if not _valid_id(session_id) or not _valid_id(operation_id):
-            raise RetentionSafetyError("O tombstone tem identificadores inválidos.")
+            raise RetentionSafetyError(tr("O tombstone tem identificadores inválidos."))
         relative = value.get("trash_relative")
         if not _valid_relative(relative):
-            raise RetentionSafetyError("O tombstone não tem um caminho relativo seguro.")
+            raise RetentionSafetyError(tr("O tombstone não tem um caminho relativo seguro."))
         expected = os.path.abspath(os.path.join(self.trash_root, relative))
         if expected != os.path.abspath(path) or not _common(self.trash_root, expected):
-            raise RetentionSafetyError("O tombstone aponta para fora da lixeira.")
+            raise RetentionSafetyError(tr("O tombstone aponta para fora da lixeira."))
         if _has_link_component(expected):
-            raise RetentionSafetyError("O alvo da lixeira contém um link ou junction.")
+            raise RetentionSafetyError(tr("O alvo da lixeira contém um link ou junction."))
         original_relative = value.get("original_relative")
         if not _valid_relative(original_relative):
-            raise RetentionSafetyError("O tombstone não identifica uma origem relativa segura.")
+            raise RetentionSafetyError(tr("O tombstone não identifica uma origem relativa segura."))
         expected_original = os.path.relpath(self._session_path(session_id), self.home_root).replace(os.sep, "/")
         if original_relative != expected_original:
-            raise RetentionSafetyError("O tombstone aponta para uma origem inesperada.")
+            raise RetentionSafetyError(tr("O tombstone aponta para uma origem inesperada."))
         if _parse_stamp(value.get("deleted_at")) is None or _parse_stamp(value.get("purge_after")) is None:
-            raise RetentionError("O tombstone não contém prazos UTC válidos.")
+            raise RetentionError(tr("O tombstone não contém prazos UTC válidos."))
         byte_estimate = value.get("byte_estimate")
         if isinstance(byte_estimate, bool) or not isinstance(byte_estimate, int) or byte_estimate < 0:
-            raise RetentionError("O tombstone contém um tamanho inválido.")
+            raise RetentionError(tr("O tombstone contém um tamanho inválido."))
         return value
 
     def _entry_from_tombstone(self, tombstone_path):
         tombstone_path = self._owned_path(tombstone_path, self.trash_root, "tombstone", must_exist=True)
         if not tombstone_path.endswith(TRASH_TOMBSTONE_SUFFIX):
-            raise RetentionSafetyError("O tombstone tem um nome inválido.")
+            raise RetentionSafetyError(tr("O tombstone tem um nome inválido."))
         with open(tombstone_path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         entry_path = tombstone_path[: -len(TRASH_TOMBSTONE_SUFFIX)]
         self._validate_tombstone(value, entry_path)
         if not os.path.lexists(entry_path):
-            raise RetentionError("O tombstone não tem um alvo de lixeira correspondente.")
+            raise RetentionError(tr("O tombstone não tem um alvo de lixeira correspondente."))
         if _is_link(entry_path):
-            raise RetentionSafetyError("O alvo da lixeira é um link ou junction.")
+            raise RetentionSafetyError(tr("O alvo da lixeira é um link ou junction."))
         return TrashEntry(
             value["session_id"], value["operation_id"], entry_path, tombstone_path,
             value.get("deleted_at", ""), value.get("purge_after", ""), int(value.get("byte_estimate", 0)),
@@ -1434,40 +1441,40 @@ class MeetingRetention:
         if not os.path.lexists(self.trash_root):
             return ()
         if _has_link_component(self.trash_root):
-            raise RetentionSafetyError("A lixeira contém um link ou junction.")
+            raise RetentionSafetyError(tr("A lixeira contém um link ou junction."))
         entries = []
         try:
             values = sorted(os.scandir(self.trash_root), key=lambda item: item.name.casefold())
         except OSError as error:
-            raise RetentionError(f"Não foi possível listar a lixeira: {error}") from error
+            raise RetentionError(tr("Não foi possível listar a lixeira: {error}", error=error)) from error
         for item in values:
             if item.name == ".retention-ops":
                 if _is_link(item.path) or not item.is_dir(follow_symlinks=False):
-                    raise RetentionSafetyError("A área de staging raw da lixeira não é uma pasta segura.")
+                    raise RetentionSafetyError(tr("A área de staging raw da lixeira não é uma pasta segura."))
                 continue
             if not item.name.endswith(TRASH_TOMBSTONE_SUFFIX):
                 paired_tombstone = item.path + TRASH_TOMBSTONE_SUFFIX
                 if item.is_dir(follow_symlinks=False) and os.path.lexists(paired_tombstone):
                     if _is_link(paired_tombstone) or not os.path.isfile(paired_tombstone):
-                        raise RetentionSafetyError("O tombstone da lixeira não é um arquivo regular.")
+                        raise RetentionSafetyError(tr("O tombstone da lixeira não é um arquivo regular."))
                     self._entry_from_tombstone(paired_tombstone)
                     continue
                 raise RetentionError(
-                    "A lixeira contém um alvo sem tombstone; execute a reconciliação antes de continuar."
+                    tr("A lixeira contém um alvo sem tombstone; execute a reconciliação antes de continuar.")
                 )
             if not item.is_file(follow_symlinks=False):
-                raise RetentionSafetyError("O tombstone da lixeira não é um arquivo regular.")
+                raise RetentionSafetyError(tr("O tombstone da lixeira não é um arquivo regular."))
             if _is_link(item.path):
-                raise RetentionSafetyError("A lixeira contém um tombstone linkado.")
+                raise RetentionSafetyError(tr("A lixeira contém um tombstone linkado."))
             entries.append(self._entry_from_tombstone(item.path))
         return tuple(entries)
 
     def _find_trash(self, session_id):
         matches = [entry for entry in self.list_trash() if entry.session_id == session_id]
         if not matches:
-            raise FileNotFoundError(f"A reunião {session_id} não está na lixeira.")
+            raise FileNotFoundError(tr("A reunião {session_id} não está na lixeira.", session_id=session_id))
         if len(matches) > 1:
-            raise RetentionError("Há mais de um tombstone para a mesma reunião; reconcilie a lixeira.")
+            raise RetentionError(tr("Há mais de um tombstone para a mesma reunião; reconcilie a lixeira."))
         return matches[0]
 
     def _safe_tree(self, root):
@@ -1480,12 +1487,12 @@ class MeetingRetention:
             for name in files:
                 path = self._owned_path(os.path.join(current, name), self.trash_root, "trash file", must_exist=True)
                 if _is_link(path) or not stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
-                    raise RetentionSafetyError("A lixeira contém um arquivo especial ou link.")
+                    raise RetentionSafetyError(tr("A lixeira contém um arquivo especial ou link."))
                 os.unlink(path)
             for name in directories:
                 path = self._owned_path(os.path.join(current, name), self.trash_root, "trash directory", must_exist=True)
                 if _is_link(path):
-                    raise RetentionSafetyError("A lixeira contém um link ou junction.")
+                    raise RetentionSafetyError(tr("A lixeira contém um link ou junction."))
                 os.rmdir(path)
         os.rmdir(root)
 
@@ -1496,7 +1503,7 @@ class MeetingRetention:
         tombstone_path = self._tombstone_path(entry_path)
         self._mkdir_owned(self.trash_root, self.home_root)
         if os.path.lexists(entry_path) or os.path.lexists(tombstone_path):
-            raise PlanConflict("O destino da lixeira já existe; gere uma nova prévia.")
+            raise PlanConflict(tr("O destino da lixeira já existe; gere uma nova prévia."))
         journal_path = self._journal_path(operation_id)
         now = self._now()
         purge_after = now + timedelta(days=plan.policy.purge_after_days)
@@ -1540,14 +1547,14 @@ class MeetingRetention:
 
     def _restore_locked(self, session_id):
         if not _valid_id(session_id):
-            raise ValueError("Identificador de reunião inválido.")
+            raise ValueError(tr("Identificador de reunião inválido."))
         entry = self._find_trash(session_id)
         active, reason = self._active_lease(session_id, {"status": "trashed"})
         if active:
             raise ActiveLeaseError(reason)
         source = self._session_path(session_id)
         if os.path.lexists(source):
-            raise PlanConflict("A pasta original da reunião já existe; restauração não sobrescreve arquivos.")
+            raise PlanConflict(tr("A pasta original da reunião já existe; restauração não sobrescreve arquivos."))
         self._safe_tree(entry.path)
         journal_base = {
             "operation": "whole_meeting",
@@ -1598,7 +1605,7 @@ class MeetingRetention:
         self._fail("whole.purged")
         if os.path.lexists(entry.tombstone_path):
             if _is_link(entry.tombstone_path):
-                raise RetentionSafetyError("O tombstone da lixeira está linkado.")
+                raise RetentionSafetyError(tr("O tombstone da lixeira está linkado."))
             os.unlink(entry.tombstone_path)
         self._append_journal(journal_path, {**journal_base, "state": "purged", "updated_at": _stamp(self._now())})
         return RetentionResult(entry.operation_id, session_id, "purged", entry.byte_estimate, (), ("permanent deletion; restore is no longer available",), None)
@@ -1626,11 +1633,11 @@ class MeetingRetention:
     def _read_canonical_metadata(self, session_id):
         path = self._canonical_metadata_path(session_id)
         if _is_link(path) or not os.path.isfile(path):
-            raise RetentionSafetyError("Os metadados canônicos não estão seguros.")
+            raise RetentionSafetyError(tr("Os metadados canônicos não estão seguros."))
         with open(path, "r", encoding="utf-8") as handle:
             value = json.load(handle)
         if not isinstance(value, dict) or value.get("id") != session_id:
-            raise RetentionError("Os metadados canônicos não correspondem à reunião.")
+            raise RetentionError(tr("Os metadados canônicos não correspondem à reunião."))
         return value
 
     def _raw_journal_payload(self, plan, operation_id, staged_root):
@@ -1722,7 +1729,7 @@ class MeetingRetention:
             removed.update(tracks)
             metadata["raw_tracks_removed"] = sorted(removed)
             if not _valid_id(operation_id):
-                raise OperationRecoveryError("A marca da operação raw não tem um identificador seguro.")
+                raise OperationRecoveryError(tr("A marca da operação raw não tem um identificador seguro."))
             metadata["raw_retention_operation"] = {
                 "operation_id": operation_id,
                 "tracks": sorted(set(tracks)),
@@ -1755,9 +1762,9 @@ class MeetingRetention:
         journal_path = self._journal_path(operation_id)
         metadata = self._read_canonical_metadata(session_id)
         if self._raw_commit_matches(metadata, latest):
-            raise OperationRecoveryError("O commit raw já foi provado; finalize a operação em vez de desfazê-la.")
+            raise OperationRecoveryError(tr("O commit raw já foi provado; finalize a operação em vez de desfazê-la."))
         if _json_fingerprint(metadata) != latest.get("metadata_before_fingerprint"):
-            raise OperationRecoveryError("O metadata mudou antes do commit raw; rollback automático bloqueado.")
+            raise OperationRecoveryError(tr("O metadata mudou antes do commit raw; rollback automático bloqueado."))
         tracks = tuple(latest.get("tracks", ()))
         restored = []
         for track in tracks:
@@ -1765,7 +1772,7 @@ class MeetingRetention:
             staged = self._path_from_relative(latest["staged_relative"][track], self.home_root)
             if os.path.lexists(staged):
                 if os.path.lexists(source):
-                    raise OperationRecoveryError("Não é seguro desfazer o raw purge: o alvo original reapareceu.")
+                    raise OperationRecoveryError(tr("Não é seguro desfazer o raw purge: o alvo original reapareceu."))
                 self._safe_tree(staged)
                 self._mkdir_owned(os.path.dirname(source), self.meetings_root)
                 os.replace(staged, source)
@@ -1776,7 +1783,7 @@ class MeetingRetention:
                 # whether bytes were externally removed or only hidden from
                 # the journal; never silently declare that operation safe.
                 raise OperationRecoveryError(
-                    "Não é seguro desfazer o raw purge: falta o alvo original e o staging."
+                    tr("Não é seguro desfazer o raw purge: falta o alvo original e o staging.")
                 )
         if restored:
             self._mark_raw_unavailable(
@@ -1881,16 +1888,16 @@ class MeetingRetention:
         if not os.path.lexists(self.retention_ops_root):
             return ()
         if _has_link_component(self.retention_ops_root):
-            raise RetentionSafetyError("A raiz de journals contém um link ou junction.")
+            raise RetentionSafetyError(tr("A raiz de journals contém um link ou junction."))
         results = []
         try:
             paths = sorted(Path(self.retention_ops_root).glob("*" + OPERATION_JOURNAL_SUFFIX), key=lambda item: item.name)
         except OSError as error:
-            raise RetentionError(f"Não foi possível enumerar os journals de retenção: {error}") from error
+            raise RetentionError(tr("Não foi possível enumerar os journals de retenção: {error}", error=error)) from error
         for path_obj in paths:
             path = self._owned_path(path_obj, self.retention_ops_root, "journal", must_exist=True)
             if _is_link(path):
-                raise RetentionSafetyError("Um journal de retenção é um link.")
+                raise RetentionSafetyError(tr("Um journal de retenção é um link."))
             records = self._read_journal(path)
             if not records:
                 continue
@@ -1915,13 +1922,13 @@ class MeetingRetention:
     def _recover_whole(self, latest, journal_path):
         session_id = latest.get("session_id")
         if not _valid_id(session_id):
-            raise OperationRecoveryError("Um journal de lixeira tem uma reunião inválida.")
+            raise OperationRecoveryError(tr("Um journal de lixeira tem uma reunião inválida."))
         try:
             source_relative = latest["source_relative"]
             trash_relative = latest["trash_relative"]
             tombstone_relative = latest["tombstone_relative"]
         except KeyError as error:
-            raise OperationRecoveryError("Um journal de lixeira não contém todos os alvos resolvidos.") from error
+            raise OperationRecoveryError(tr("Um journal de lixeira não contém todos os alvos resolvidos.")) from error
         source = self._path_from_relative(source_relative, self.home_root)
         entry = self._path_from_relative(trash_relative, self.trash_root)
         tombstone = self._path_from_relative(tombstone_relative, self.trash_root)
@@ -1929,12 +1936,12 @@ class MeetingRetention:
         entry_exists = os.path.lexists(entry)
         if latest.get("state") == "purge_prepared":
             if source_exists:
-                raise OperationRecoveryError("A purga encontrou a reunião canônica e o alvo da lixeira.")
+                raise OperationRecoveryError(tr("A purga encontrou a reunião canônica e o alvo da lixeira."))
             if entry_exists:
                 self._remove_tree(entry)
             if os.path.lexists(tombstone):
                 if _is_link(tombstone):
-                    raise RetentionSafetyError("O tombstone da lixeira está linkado.")
+                    raise RetentionSafetyError(tr("O tombstone da lixeira está linkado."))
                 os.unlink(tombstone)
             self._append_journal(journal_path, {**latest, "state": "purged", "updated_at": _stamp(self._now())})
             return RetentionResult(latest["operation_id"], session_id, "purged", latest.get("byte_estimate", 0), (), ("permanent deletion; restore is no longer available",), None)
@@ -1942,7 +1949,7 @@ class MeetingRetention:
             if source_exists and not entry_exists:
                 if os.path.lexists(tombstone):
                     if _is_link(tombstone):
-                        raise RetentionSafetyError("O tombstone restaurado está linkado.")
+                        raise RetentionSafetyError(tr("O tombstone restaurado está linkado."))
                     os.unlink(tombstone)
                 index_updated = self._project(session_id, restored=True)
                 self._append_journal(journal_path, {**latest, "state": "restored", "index_updated": index_updated, "updated_at": _stamp(self._now())})
@@ -1953,7 +1960,7 @@ class MeetingRetention:
                 os.replace(entry, source)
                 if os.path.lexists(tombstone):
                     if _is_link(tombstone):
-                        raise RetentionSafetyError("O tombstone restaurado está linkado.")
+                        raise RetentionSafetyError(tr("O tombstone restaurado está linkado."))
                     os.unlink(tombstone)
                 index_updated = self._project(session_id, restored=True)
                 self._append_journal(journal_path, {**latest, "state": "restored", "index_updated": index_updated, "updated_at": _stamp(self._now())})
@@ -1966,7 +1973,7 @@ class MeetingRetention:
                         {**latest, "state": "ambiguous", "manual_reconciliation": True, "updated_at": _stamp(self._now())},
                     )
                 finally:
-                    raise OperationRecoveryError("A lixeira perdeu o alvo movido e a origem reapareceu; reconciliação manual necessária.")
+                    raise OperationRecoveryError(tr("A lixeira perdeu o alvo movido e a origem reapareceu; reconciliação manual necessária."))
             self._append_journal(journal_path, {**latest, "state": "aborted", "updated_at": _stamp(self._now())})
             return RetentionResult(latest["operation_id"], session_id, "aborted", latest.get("byte_estimate", 0), (), (), None)
         if entry_exists and not source_exists:
@@ -1998,15 +2005,15 @@ class MeetingRetention:
                     {**latest, "state": "ambiguous", "manual_reconciliation": True, "updated_at": _stamp(self._now())},
                 )
             finally:
-                raise OperationRecoveryError("A lixeira perdeu a origem e o alvo movido; reconciliação manual necessária.")
-        raise OperationRecoveryError("O journal da lixeira encontrou dois alvos ao mesmo tempo.")
+                raise OperationRecoveryError(tr("A lixeira perdeu a origem e o alvo movido; reconciliação manual necessária."))
+        raise OperationRecoveryError(tr("O journal da lixeira encontrou dois alvos ao mesmo tempo."))
 
     def _recover_raw(self, latest, journal_path):
         state = latest.get("state")
         if state in {"metadata_committed", "projected"}:
             metadata = self._read_canonical_metadata(latest.get("session_id"))
             if not self._raw_commit_matches(metadata, latest):
-                raise OperationRecoveryError("O commit raw não tem uma marca canônica correspondente.")
+                raise OperationRecoveryError(tr("O commit raw não tem uma marca canônica correspondente."))
             if state == "metadata_committed":
                 index_updated = self._project(latest["session_id"], removed=False)
                 projection_state = "projected" if index_updated is not False else "metadata_committed"
@@ -2039,7 +2046,7 @@ class MeetingRetention:
             self._append_journal(journal_path, committed_latest)
             return self._recover_raw(committed_latest, journal_path)
         if _json_fingerprint(metadata) != latest.get("metadata_before_fingerprint"):
-            raise OperationRecoveryError("O metadata mudou antes do commit raw; recuperação manual necessária.")
+            raise OperationRecoveryError(tr("O metadata mudou antes do commit raw; recuperação manual necessária."))
         return self._rollback_raw(latest)
 
     # -- Public mutation aliases ---------------------------------------
@@ -2048,7 +2055,7 @@ class MeetingRetention:
         with self._lock:
             with self._writer_lock():
                 if not isinstance(plan, RetentionPlan):
-                    raise TypeError("A operação de retenção exige um RetentionPlan.")
+                    raise TypeError(tr("A operação de retenção exige um RetentionPlan."))
                 if plan.operation == "keep":
                     return RetentionResult("", plan.session_id, "kept", 0, (), (), None)
                 # Revalidate eligibility before asking for confirmation.  A lease
@@ -2063,7 +2070,7 @@ class MeetingRetention:
                     return result
                 if plan.operation == "raw_tracks":
                     return self._remove_raw(plan)
-                raise RetentionError("A operação do plano não é reconhecida.")
+                raise RetentionError(tr("A operação do plano não é reconhecida."))
 
     def trash_meeting(self, session_id, *, confirm=False, purge_after_days=None):
         policy = RetentionPolicy.whole_meeting(after_days=0, purge_after_days=self.trash_retention_days if purge_after_days is None else purge_after_days)

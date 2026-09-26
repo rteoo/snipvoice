@@ -11,6 +11,7 @@ import math
 import queue
 import threading
 
+from i18n import tr
 from voice_resampler import StreamingResampler, VoiceResamplerError
 
 
@@ -139,7 +140,7 @@ class AudioCapture:
     def set_journal(self, journal):
         """Attach an append-only recording journal before ``start()``."""
         if self._started:
-            raise VoiceAudioError("A gravação já começou.")
+            raise VoiceAudioError(tr("A gravação já começou."))
         self._journal = journal
 
     def start(self):
@@ -148,14 +149,14 @@ class AudioCapture:
         if self._worker is not None:
             if self._worker.is_alive():
                 raise VoiceAudioError(
-                    "A gravação anterior ainda está encerrando. Tente novamente."
+                    tr("A gravação anterior ainda está encerrando. Tente novamente.")
                 )
             self._worker = None
         try:
             import sounddevice as sd
         except Exception as exc:
             raise VoiceAudioError(
-                "A captura de áudio não está disponível neste aplicativo."
+                tr("A captura de áudio não está disponível neste aplicativo.")
             ) from exc
 
         self._claim_normalizer_slot()
@@ -179,7 +180,7 @@ class AudioCapture:
             self._record_issue(CaptureIssue.NORMALIZATION, str(exc))
             self._release_normalizer_slot()
             raise VoiceAudioError(
-                f"Não foi possível preparar o áudio do microfone: {exc}"
+                tr("Não foi possível preparar o áudio do microfone: {error}", error=exc)
             ) from exc
 
         raw_queue = self._raw_queue
@@ -209,7 +210,7 @@ class AudioCapture:
                 self._record_issue_to(
                     session_issues,
                     CaptureIssue.DURATION_LIMIT,
-                    "A captura de áudio excedeu o limite configurado.",
+                    tr("A captura de áudio excedeu o limite configurado."),
                 )
                 self._overflow = True
                 return
@@ -226,7 +227,7 @@ class AudioCapture:
                 self._record_issue_to(
                     session_issues,
                     CaptureIssue.RAW_QUEUE,
-                    "A fila de captura de áudio ficou cheia.",
+                    tr("A fila de captura de áudio ficou cheia."),
                 )
 
         def finished_callback():
@@ -234,7 +235,7 @@ class AudioCapture:
                 self._record_issue_to(
                     session_issues,
                     CaptureIssue.INPUT_STATUS,
-                    "O fluxo do microfone terminou inesperadamente.",
+                    tr("O fluxo do microfone terminou inesperadamente."),
                 )
 
         try:
@@ -279,7 +280,7 @@ class AudioCapture:
             self._signal_worker()
             self._join_worker()
             self._release_normalizer_slot()
-            raise VoiceAudioError(f"Não foi possível abrir o microfone: {exc}") from exc
+            raise VoiceAudioError(tr("Não foi possível abrir o microfone: {error}", error=exc)) from exc
 
     def read_chunk(self, timeout=0.1):
         """Read a normalized 16 kHz mono chunk for optional streaming ASR."""
@@ -312,7 +313,7 @@ class AudioCapture:
         if self._worker is not None and self._worker.is_alive():
             self._record_issue(
                 CaptureIssue.NORMALIZATION,
-                "A normalização do áudio não terminou a tempo.",
+                tr("A normalização do áudio não terminou a tempo."),
             )
         else:
             self._worker = None
@@ -345,8 +346,8 @@ class AudioCapture:
                 worker = owner._worker
                 if worker is None or worker.is_alive():
                     raise VoiceAudioError(
-                        "Uma gravação anterior ainda está encerrando. "
-                        "Reinicie o aplicativo se o problema continuar."
+                        tr("Uma gravação anterior ainda está encerrando. "
+                           "Reinicie o aplicativo se o problema continuar.")
                     )
             self.__class__._normalizer_slot_owner = self
 
@@ -390,7 +391,7 @@ class AudioCapture:
         except queue.Full:
             self._record_issue(
                 CaptureIssue.RAW_QUEUE,
-                "A fila de captura não pôde ser encerrada.",
+                tr("A fila de captura não pôde ser encerrada."),
             )
 
     def _join_worker(self):
@@ -461,7 +462,7 @@ class AudioCapture:
             self._record_issue_to(
                 session_issues,
                 CaptureIssue.NORMALIZED_QUEUE,
-                "A fila de áudio normalizado ficou cheia.",
+                tr("A fila de áudio normalizado ficou cheia."),
             )
         if journal is not None:
             try:
@@ -521,7 +522,7 @@ def _negotiate_input(sd, device=None):
                 last_error = exc
                 continue
         return rate, channels
-    raise VoiceAudioError(f"O microfone não aceita o formato nativo: {last_error}")
+    raise VoiceAudioError(tr("O microfone não aceita o formato nativo: {error}", error=last_error))
 
 
 def _copy_block(chunk):

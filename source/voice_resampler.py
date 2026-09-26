@@ -9,6 +9,8 @@ startup remains usable when the optional voice dependency is absent.
 
 import math
 
+from i18n import tr
+
 
 TARGET_SAMPLE_RATE = 16000
 
@@ -34,7 +36,7 @@ class StreamingResampler:
         source_rate = _valid_rate(source_rate)
         target_rate = _valid_rate(target_rate)
         if source_rate is None or target_rate is None:
-            raise VoiceResamplerError("A taxa de amostragem do microfone é inválida.")
+            raise VoiceResamplerError(tr("A taxa de amostragem do microfone é inválida."))
         self.source_rate = source_rate
         self.target_rate = target_rate
         self._finished = False
@@ -47,8 +49,8 @@ class StreamingResampler:
                 import numpy as np
             except Exception as exc:
                 raise VoiceResamplerError(
-                    "O conversor de áudio não está instalado. "
-                    "Reinstale o pacote de voz para habilitar este microfone."
+                    tr("O conversor de áudio não está instalado. "
+                       "Reinstale o pacote de voz para habilitar este microfone.")
                 ) from exc
             try:
                 self._numpy = np
@@ -61,13 +63,13 @@ class StreamingResampler:
                 )
             except Exception as exc:
                 raise VoiceResamplerError(
-                    f"Não foi possível preparar o conversor de áudio: {exc}"
+                    tr("Não foi possível preparar o conversor de áudio: {error}", error=exc)
                 ) from exc
 
     def push(self, samples):
         """Convert one chunk, retaining state for the next chunk."""
         if self._finished:
-            raise VoiceResamplerError("O conversor de áudio já foi encerrado.")
+            raise VoiceResamplerError(tr("O conversor de áudio já foi encerrado."))
         values = _as_float_list(samples)
         if self._passthrough:
             return values
@@ -79,7 +81,7 @@ class StreamingResampler:
             return _as_float_list(output)
         except Exception as exc:
             raise VoiceResamplerError(
-                f"Falha ao normalizar o áudio do microfone: {exc}"
+                tr("Falha ao normalizar o áudio do microfone: {error}", error=exc)
             ) from exc
 
     def finish(self):
@@ -95,7 +97,7 @@ class StreamingResampler:
             return _as_float_list(output)
         except Exception as exc:
             raise VoiceResamplerError(
-                f"Falha ao finalizar a normalização do áudio: {exc}"
+                tr("Falha ao finalizar a normalização do áudio: {error}", error=exc)
             ) from exc
 
 

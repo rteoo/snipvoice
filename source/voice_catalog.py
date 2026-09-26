@@ -7,6 +7,8 @@ F32 Parakeet is a benchmark fixture, not a user-facing profile.
 Cloud post-processing is intentionally absent. Capture stays local.
 """
 
+from i18n import N_
+
 PROFILE_BALANCED = "balanced"
 PROFILE_COMPACT = "compact"
 PROFILE_ACCURACY = "accuracy"
@@ -60,7 +62,7 @@ _PARAKEET_Q8 = {
         "for transcribe.cpp."
     ),
     "source_url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
-    "purpose": "Parakeet TDT 0.6B v3 (padrão): ditado após soltar o atalho.",
+    "purpose": N_("Parakeet TDT 0.6B v3 (padrão): ditado após soltar o atalho."),
     "user_selectable": True,
 }
 
@@ -94,8 +96,8 @@ _QWEN_06_Q8 = {
     ),
     "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
     "purpose": (
-        "Qwen3-ASR 0.6B: menor e mais rápido que o Qwen3-ASR 1.7B; usa "
-        "detecção automática de idioma."
+        N_("Qwen3-ASR 0.6B: menor e mais rápido que o Qwen3-ASR 1.7B; usa "
+           "detecção automática de idioma.")
     ),
     "user_selectable": True,
 }
@@ -129,8 +131,8 @@ _QWEN_Q8 = {
     ),
     "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
     "purpose": (
-        "Qwen3-ASR 1.7B (opcional): modelo maior, mais lento e com maior uso "
-        "de memória; nunca é selecionado automaticamente."
+        N_("Qwen3-ASR 1.7B (opcional): modelo maior, mais lento e com maior uso "
+           "de memória; nunca é selecionado automaticamente.")
     ),
     "user_selectable": True,
 }
@@ -163,7 +165,7 @@ _NEMOTRON_Q8 = {
         "weights is subject to OpenMDW-1.1."
     ),
     "source_url": "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
-    "purpose": "Transcrição ao vivo (opcional): parciais só na interface.",
+    "purpose": N_("Transcrição ao vivo (opcional): parciais só na interface."),
     "user_selectable": False,
 }
 
@@ -197,8 +199,8 @@ _WHISPER_SMALL_Q8 = {
     ),
     "source_url": "https://huggingface.co/openai/whisper-small",
     "purpose": (
-        "Whisper Small: download menor e pouca memória; menos preciso que o "
-        "Parakeet em português."
+        N_("Whisper Small: download menor e pouca memória; menos preciso que o "
+           "Parakeet em português.")
     ),
     "user_selectable": True,
 }
@@ -232,8 +234,8 @@ _WHISPER_TURBO_Q8 = {
     ),
     "source_url": "https://huggingface.co/openai/whisper-large-v3-turbo",
     "purpose": (
-        "Whisper Large v3 Turbo (opcional): multilíngue e preciso, porém bem "
-        "mais lento na CPU; nunca é selecionado automaticamente."
+        N_("Whisper Large v3 Turbo (opcional): multilíngue e preciso, porém bem "
+           "mais lento na CPU; nunca é selecionado automaticamente.")
     ),
     "user_selectable": True,
 }
@@ -267,9 +269,9 @@ _WHISPER_LARGE_Q8 = {
     ),
     "source_url": "https://huggingface.co/openai/whisper-large-v3",
     "purpose": (
-        "Whisper Large v3 (opcional): o mais preciso em português, porém "
-        "mais lento que o tempo real na CPU e com maior uso de memória; nunca "
-        "é selecionado automaticamente."
+        N_("Whisper Large v3 (opcional): o mais preciso em português, porém "
+           "mais lento que o tempo real na CPU e com maior uso de memória; nunca "
+           "é selecionado automaticamente.")
     ),
     "user_selectable": True,
 }
