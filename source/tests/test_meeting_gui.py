@@ -1652,7 +1652,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertFalse(view.detail_placeholder.winfo_ismapped())
         self.assertEqual(view.detail_sections.current, "transcript")
         self.assertTrue(view.transcript_document.winfo_ismapped())
-        self.assertFalse(view.play_button.winfo_ismapped())
+        # The player sits above the transcript instead of on its own tab.
+        self.assertNotIn("audio", view.detail_sections.frames)
+        self.assertTrue(view.play_button.winfo_ismapped())
+        self.assertLess(view.playback_seek.winfo_rooty(), view.transcript_document.winfo_rooty())
         self.assertNotIn("notes", view.detail_sections.frames)
         self.assertFalse(hasattr(view, "notes"))
         self.assertFalse(hasattr(view, "bookmark_picker"))

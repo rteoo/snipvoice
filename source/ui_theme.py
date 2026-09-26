@@ -279,11 +279,13 @@ class Theme:
         """``(geometry, min_width, min_height)`` for the manager window.
 
         macOS needs a wider default because Aqua's native buttons and controls
-        have larger minimum metrics than their Win32 counterparts.
+        have larger minimum metrics than their Win32 counterparts. The minimum
+        width includes the navigation sidebar, which trades horizontal room
+        for the height a header and tab strip used to take.
         """
         if self.system == "darwin":
-            return ("1160x840", 980, 700)
-        return ("1120x820", 920, 700)
+            return ("1160x840", 1100, 700)
+        return ("1120x820", 1040, 700)
 
     @property
     def stacked_toolbar_status(self):
@@ -584,28 +586,30 @@ def configure_combobox_popdown(combo, resolved=None, *, fit_values=False):
     """Theme a ttk combobox's transient listbox on non-native platforms.
 
     ttk creates the popdown lazily, so this is intended for the combobox's
-    ``postcommand`` callback.  Aqua owns the native macOS control and must be
-    left untouched.
+    ``postcommand`` callback.  Aqua owns the native macOS list's colors and
+    font, so there the listbox is left untouched and ``None`` is returned;
+    only an opted-in ``fit_values`` width applies, through the style's post
+    offset, which ttk honors on every platform.
     """
     ui = resolved or theme()
-    if ui.system == "darwin":
-        return None
-    popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
-    listbox = f"{popdown}.f.l"
-    combo.tk.call(
-        listbox,
-        "configure",
-        "-background", ui.field,
-        "-foreground", ui.text,
-        "-selectbackground", ui.select_bg,
-        "-selectforeground", ui.select_fg,
-        "-font", ui.font(10),
-        "-relief", "flat",
-        "-borderwidth", ui.space_sm,
-        "-highlightthickness", 0,
-        "-selectborderwidth", 0,
-        "-activestyle", "none",
-    )
+    listbox = None
+    if ui.system != "darwin":
+        popdown = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
+        listbox = f"{popdown}.f.l"
+        combo.tk.call(
+            listbox,
+            "configure",
+            "-background", ui.field,
+            "-foreground", ui.text,
+            "-selectbackground", ui.select_bg,
+            "-selectforeground", ui.select_fg,
+            "-font", ui.font(10),
+            "-relief", "flat",
+            "-borderwidth", ui.space_sm,
+            "-highlightthickness", 0,
+            "-selectborderwidth", 0,
+            "-activestyle", "none",
+        )
     if fit_values:
         # Callers opt in with their own style so unrelated comboboxes retain
         # their popup geometry. Fit long endpoint names inside the window.
@@ -656,6 +660,18 @@ def configure_manager_styles(style, resolved=None):
         padding=[("selected", (18, 10))],
         expand=[("selected", (0, 0, 0, 0))],
     )
+    # Page container for a shell that navigates from its own sidebar: the
+    # same frame, with the tab strip removed so it costs no vertical space.
+    style.configure(
+        "Pages.TNotebook",
+        background=ui.surface,
+        borderwidth=0,
+        tabmargins=(0, 0, 0, 0),
+        bordercolor=ui.surface,
+        lightcolor=ui.surface,
+        darkcolor=ui.surface,
+    )
+    style.layout("Pages.TNotebook.Tab", [])
     style.configure(
         "Horizontal.TProgressbar",
         troughcolor=ui.field,

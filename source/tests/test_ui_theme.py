@@ -311,7 +311,7 @@ class WidgetOptionTests(unittest.TestCase):
     def test_windows_keeps_its_button_widths_and_window_size(self):
         theme = ui_theme.build_theme("windows", system="windows")
         self.assertEqual(theme.button_width(12), 12)
-        self.assertEqual(theme.manager_window_size, ("1120x820", 920, 700))
+        self.assertEqual(theme.manager_window_size, ("1120x820", 1040, 700))
         self.assertFalse(theme.stacked_toolbar_status)
 
     def test_fluent_spacing_and_tree_density_are_stable(self):
@@ -562,12 +562,16 @@ class TtkThemeSelectionTests(unittest.TestCase):
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, name, **options):
                 self.configured[name] = options
 
             def map(self, name, **options):
                 self.mapped[name] = options
+
+            def layout(self, name, layout):
+                self.layouts[name] = layout
 
         style = Recorder()
         theme = ui_theme.build_theme("windows", system="windows")
@@ -587,18 +591,24 @@ class TtkThemeSelectionTests(unittest.TestCase):
             style.mapped["Manager.Treeview"]["background"],
             [("selected", theme.select_bg)],
         )
+        # The sidebar shell's page container draws no tab strip.
+        self.assertEqual(style.layouts["Pages.TNotebook.Tab"], [])
 
     def test_device_combobox_style_has_roomy_font_and_focus_states(self):
         class Recorder:
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, name, **options):
                 self.configured[name] = options
 
             def map(self, name, **options):
                 self.mapped[name] = options
+
+            def layout(self, name, layout):
+                self.layouts[name] = layout
 
         style = Recorder()
         theme = ui_theme.build_theme("dark", system="windows")
@@ -663,17 +673,64 @@ class TtkThemeSelectionTests(unittest.TestCase):
         theme = ui_theme.build_theme("dark", system="darwin")
         self.assertIsNone(ui_theme.configure_combobox_popdown(FakeCombo(), theme))
 
+    def test_macos_popdown_fit_widens_only_through_the_post_offset(self):
+        calls = []
+
+        class FakeTk:
+            def call(self, *args):
+                calls.append(args)
+
+        class FakeWindow:
+            def winfo_width(self):
+                return 900
+
+            def winfo_rootx(self):
+                return 0
+
+        class FakeCombo:
+            tk = FakeTk()
+
+            def __str__(self):
+                return ".device"
+
+            def cget(self, option):
+                return {"values": ("A long endpoint name",), "style": "system.Device.TCombobox"}[option]
+
+            def winfo_toplevel(self):
+                return FakeWindow()
+
+            def winfo_width(self):
+                return 200
+
+            def winfo_rootx(self):
+                return 100
+
+        theme = ui_theme.build_theme("dark", system="darwin")
+        with mock.patch.object(ui_theme.tkfont, "Font") as font:
+            font.return_value.measure.return_value = 360
+            self.assertIsNone(
+                ui_theme.configure_combobox_popdown(FakeCombo(), theme, fit_values=True))
+        self.assertEqual(len(calls), 1)
+        command, subcommand, style, option, offset = calls[0]
+        self.assertEqual((command, subcommand, style, option),
+                         ("ttk::style", "configure", "system.Device.TCombobox", "-postoffset"))
+        self.assertGreaterEqual(200 + offset[2], 360)
+
     def test_dark_manager_styles_replace_clam_light_defaults(self):
         class Recorder:
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, name, **options):
                 self.configured[name] = options
 
             def map(self, name, **options):
                 self.mapped[name] = options
+
+            def layout(self, name, layout):
+                self.layouts[name] = layout
 
         style = Recorder()
         theme = ui_theme.build_theme("dark", system="windows")
