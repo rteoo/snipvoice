@@ -118,7 +118,10 @@ class DeviceMenuNativeTests(unittest.TestCase):
         controller.devices.return_value = DEVICES
         controller.list_sessions.return_value = []
         controller.read_workspace.return_value = {"generation": 0, "collections": [], "series": []}
-        theme = ui_theme.build_theme(preference, system="windows")
+        # Keep this native Tk smoke portable: the preference exercises the
+        # Windows palette, while the system must describe the host running Tk.
+        # ``SystemButtonText`` is valid on Win32 but rejected by X11 Tk.
+        theme = ui_theme.build_theme(preference, system=ui_theme.current_os())
         with mock.patch("meeting_gui.ui_theme.bind", return_value=theme):
             view = MeetingWindow(self.root, controller, lambda: {}, mock.Mock())
         self.addCleanup(view.close)

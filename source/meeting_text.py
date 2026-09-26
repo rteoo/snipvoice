@@ -164,40 +164,58 @@ def _value(value, fallback="") -> str:
     return str(value).strip() if value is not None else fallback
 
 
-def format_summary(value) -> str:
-    """Render a generated summary in readable prose instead of raw JSON."""
-    if isinstance(value, str):
-        return value.strip()
+_SUMMARY_SECTION_ORDER = (
+    "summary", "key_points", "decisions", "feedback", "objections", "risks",
+    "open_questions", "action_items", "follow_up_email",
+)
+_SUMMARY_SECTION_LABELS = {
+    "key_points": "Pontos principais",
+    "decisions": "Decisões",
+    "feedback": "Feedback",
+    "objections": "Objeções",
+    "risks": "Riscos",
+    "open_questions": "Questões em aberto",
+    "action_items": "Ações",
+    "follow_up_email": "E-mail de acompanhamento",
+}
+
+
+def _summary_payload(value):
+    """Return the generated or section mapping from known report envelopes."""
     if not isinstance(value, Mapping):
-        return ""
-    # Report envelopes keep the model result under ``generated``.  Legacy
-    # meeting metadata stores the same fields at the top level.
-    if not any(key in value for key in ("summary", "decisions", "action_items")):
-        generated = value.get("generated")
-        if isinstance(generated, Mapping):
-            value = generated
-    sections = []
-    summary_value = value.get("summary")
-    if isinstance(summary_value, Mapping):
-        summary_value = summary_value.get("text", summary_value.get("summary", ""))
-    summary = _value(summary_value)
-    if summary:
-        sections.append(summary)
-    decisions = value.get("decisions")
-    if isinstance(decisions, list) and decisions:
-        lines = ["Decisões:"]
-        for item in decisions:
-            text = _value(item.get("text") if isinstance(item, Mapping) else item)
-            if text:
-                lines.append(f"• {text}")
-        if len(lines) > 1:
-            sections.append("\n".join(lines))
-    actions = value.get("action_items")
-    if isinstance(actions, list) and actions:
-        lines = ["Ações:"]
-        for item in actions:
-            if isinstance(item, Mapping):
-                text = _value(item.get("text"))
+        return value
+    generated = value.get("generated")
+    if isinstance(generated, Mapping):
+        merged = dict(generated)
+        reviewed = value.get("reviewed_artifact")
+        reviewed_sections = reviewed.get("sections") if isinstance(reviewed, Mapping) else None
+        if isinstance(reviewed_sections, Mapping):
+            merged.update(reviewed_sections)
+        value = merged
+    sections = value.get("sections")
+    if isinstance(sections, Mapping):
+        # Reviewed-artifact and lightweight library projections use this shape.
+        value = sections
+    return value
+
+
+def _summary_mapping_text(value) -> str:
+    if not isinstance(value, Mapping):
+        return _value(value)
+    return _value(value.get("text", value.get("summary", "")))
+
+
+def _summary_items(value, section) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if not isinstance(value, list):
+        return []
+    lines = []
+    for item in value:
+        if isinstance(item, Mapping):
+            text = _value(item.get("text"))
+            if section == "action_items":
                 details = []
                 owner = _value(item.get("owner"))
                 deadline = _value(item.get("deadline"))
@@ -207,10 +225,42 @@ def format_summary(value) -> str:
                     details.append(f"prazo: {deadline}")
                 if details:
                     text = f"{text} ({'; '.join(details)})"
+        else:
+            text = _value(item)
+        if text:
+            lines.append(text)
+    return lines
+
+
+def format_summary(value) -> str:
+    """Render a generated summary in readable prose instead of raw JSON."""
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, Mapping):
+        return ""
+    value = _summary_payload(value)
+    sections = []
+    summary = _summary_mapping_text(value.get("summary"))
+    if summary:
+        sections.append(summary)
+    for section in _SUMMARY_SECTION_ORDER[1:]:
+        current = value.get(section)
+        if section == "follow_up_email":
+            if isinstance(current, Mapping):
+                subject = _value(current.get("subject"))
+                body = _value(current.get("body", current.get("text")))
+                lines = []
+                if subject:
+                    lines.append(f"Assunto: {subject}")
+                if body:
+                    lines.append(body)
             else:
-                text = _value(item)
-            if text:
-                lines.append(f"• {text}")
-        if len(lines) > 1:
-            sections.append("\n".join(lines))
+                lines = [_value(current)] if _value(current) else []
+        else:
+            lines = _summary_items(current, section)
+        if lines:
+            label = _SUMMARY_SECTION_LABELS[section]
+            sections.append("\n".join([f"{label}:"] + [f"• {line}" for line in lines])
+                            if section != "follow_up_email" else
+                            "\n".join([f"{label}:"] + lines))
     return "\n\n".join(sections)

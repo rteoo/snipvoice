@@ -100,6 +100,23 @@ class WindowsPaletteTests(unittest.TestCase):
         )
 
 
+class LinuxPaletteTests(unittest.TestCase):
+    def test_windows_palette_uses_literal_native_colors_on_linux(self):
+        # ``SystemButtonText`` is a Win32 Tk color name. Linux may still use
+        # the Windows/Fluent appearance preference, but X11 Tk needs the
+        # literal fallback for widgets that receive an explicit foreground.
+        theme = ui_theme.build_theme("windows", system="linux")
+        self.assertEqual(theme.text_native, theme.text)
+        for options in (
+            theme.checkbutton_colors(theme.surface),
+            theme.toolbar_button_colors(theme.card),
+            theme.nav_button_colors(theme.surface),
+            theme.glyph_button_colors(theme.card),
+            theme.button_colors(),
+        ):
+            self.assertNotIn("SystemButtonText", options.values())
+
+
 class MacPaletteTests(unittest.TestCase):
 
     def test_backgrounds_and_text_use_aqua_dynamic_colors(self):

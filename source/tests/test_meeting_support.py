@@ -88,6 +88,15 @@ class MeetingControllerTests(unittest.TestCase):
             self.controller.shutdown()
         self.temp.cleanup()
 
+    def test_generate_report_forwards_focus_and_session_target(self):
+        intelligence = Mock()
+        intelligence.generate_report.return_value = {"summary": "ok"}
+        with patch.object(self.controller, "_intelligence", return_value=intelligence):
+            self.controller.generate_report(
+                "session", "model", profile="meeting_notes", focus="Priorize decisões.",
+            )
+        self.assertEqual(intelligence.generate_report.call_args.kwargs["focus"], "Priorize decisões.")
+
     def _quiet_recording(self):
         root = Path(self.temp.name) / "adjustment"
         store = MeetingStore(root / "meetings")

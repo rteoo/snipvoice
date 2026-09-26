@@ -65,6 +65,54 @@ class MeetingTextTests(unittest.TestCase):
     def test_summary_report_envelope_is_readable(self):
         self.assertEqual(format_summary({"generated": {"summary": {"text": "Gerado."}}}), "Gerado.")
 
+    def test_summary_preserves_all_builtin_sections_in_template_order(self):
+        result = format_summary({
+            "generated": {
+                "follow_up_email": {"subject": "Próximos passos", "body": "Obrigado pela conversa."},
+                "risks": ["Prazo apertado."],
+                "summary": {"text": "A conversa alinhou o plano."},
+                "key_points": ["Cliente prioriza simplicidade."],
+                "open_questions": ["Quem aprova o orçamento?"],
+                "feedback": ["A demonstração foi clara."],
+                "objections": ["O prazo parece curto."],
+                "decisions": [{"text": "Fazer um piloto."}],
+                "action_items": [{"text": "Enviar proposta", "owner": "Ana", "deadline": "sexta"}],
+            },
+        })
+        self.assertEqual(result, "\n\n".join((
+            "A conversa alinhou o plano.",
+            "Pontos principais:\n• Cliente prioriza simplicidade.",
+            "Decisões:\n• Fazer um piloto.",
+            "Feedback:\n• A demonstração foi clara.",
+            "Objeções:\n• O prazo parece curto.",
+            "Riscos:\n• Prazo apertado.",
+            "Questões em aberto:\n• Quem aprova o orçamento?",
+            "Ações:\n• Enviar proposta (responsável: Ana; prazo: sexta)",
+            "E-mail de acompanhamento:\nAssunto: Próximos passos\nObrigado pela conversa.",
+        )))
+
+    def test_summary_accepts_reviewed_sections_and_omits_empty_sections(self):
+        self.assertEqual(format_summary({
+            "sections": {
+                "summary": "Revisado.", "feedback": "Bom retorno.",
+                "risks": [], "action_items": [],
+            },
+        }), "Revisado.\n\nFeedback:\n• Bom retorno.")
+
+    def test_summary_library_envelope_applies_reviewed_section_overrides(self):
+        self.assertEqual(format_summary({
+            "generated": {"summary": {"text": "Gerado."}, "risks": ["Risco original"]},
+            "reviewed_artifact": {"sections": {"summary": "Revisado.", "risks": "Risco confirmado."}},
+        }), "Revisado.\n\nRiscos:\n• Risco confirmado.")
+
+    def test_summary_legacy_output_remains_exact(self):
+        value = {
+            "summary": "A equipe alinhou o próximo passo.",
+            "decisions": [{"text": "Publicar na sexta."}],
+            "action_items": [{"text": "Preparar anúncio", "owner": "Ana", "deadline": "sexta"}],
+        }
+        self.assertEqual(format_summary(value), "A equipe alinhou o próximo passo.\n\nDecisões:\n• Publicar na sexta.\n\nAções:\n• Preparar anúncio (responsável: Ana; prazo: sexta)")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1486,18 +1486,18 @@ class MeetingController:
         )
 
     def generate_report(self, session_id, model, *, profile=None, revision=None,
-                        language=None):
+                        language=None, focus=None):
         """Generate one immutable structured report off the GUI thread."""
         def work():
             token = self.voice.reserve_for_meeting()
             try:
                 return self._intelligence().generate_report(
                     session_id, model, profile=profile, revision=revision,
-                    language=language, cancel_event=self._cancel,
+                    language=language, focus=focus, cancel_event=self._cancel,
                 )
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work)
+        return self._file_work(work, session_id=session_id)
 
     def ask_this_meeting(self, session_id, question, model, *, revision=None,
                          revision_id=None, language=None, history=None):

@@ -310,7 +310,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.transcribe_button = mock.Mock()
         view.export_audio_button = mock.Mock()
         view.raw_remove_button = mock.Mock()
-        view.highlight_export_button = mock.Mock()
         view.audio_capability_status = Variable()
         view.track = Variable("Microfone")
         view._set_audio_capabilities({
@@ -334,7 +333,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.transcribe_button = mock.Mock()
         view.export_audio_button = mock.Mock()
         view.raw_remove_button = mock.Mock()
-        view.highlight_export_button = mock.Mock()
         view.audio_capability_status = Variable()
         view.track = Variable("Sistema")
         view._set_audio_capabilities({
@@ -1067,13 +1065,9 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
     def test_regenerate_summary_dispatches_for_selected_recording(self):
         view = MeetingWindow.__new__(MeetingWindow)
-        view.selected = "meeting-1"
-        view.summary_model = Variable("local-model")
-        view._action = mock.Mock()
+        view.generate_report = mock.Mock()
         view.summarize()
-        view._action.assert_called_once()
-        self.assertEqual(view._action.call_args.args[:3],
-                         ("summarize", "meeting-1", "local-model"))
+        view.generate_report.assert_called_once_with()
 
     def test_adjust_audio_regenerates_final_audio_for_microphone_recording(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1291,16 +1285,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(len(page["segments"]), TRANSCRIPT_PAGE_SIZE)
         self.assertEqual(len(consumed), TRANSCRIPT_PAGE_SIZE + 1)
         self.assertTrue(page["has_more"])
-
-    def test_manual_speaker_label_overrides_generated_projection(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.speaker_labels = {
-            "speaker-1": {"segment_id": "segment-1", "label": "Manual label"},
-        }
-        self.assertEqual(
-            view._speaker_for_segment({"id": "segment-1", "speaker": "Generated label"}),
-            "Manual label",
-        )
 
     def test_stale_playback_snapshot_does_not_update_tk_state(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1672,7 +1656,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertNotIn("notes", view.detail_sections.frames)
         self.assertFalse(hasattr(view, "notes"))
         self.assertFalse(hasattr(view, "bookmark_picker"))
-        self.assertFalse(view.transcript_tools.winfo_ismapped())
+        self.assertFalse(hasattr(view, "transcript_tools_toggle"))
+        self.assertNotIn("speaker", view.transcript["columns"])
+        self.assertEqual(tuple(view.transcript["columns"]), ("time", "track", "text"))
         self.assertFalse(view.report_frame.winfo_ismapped())
 
     def test_library_replay_button_dispatches_saved_mix(self):
@@ -1733,6 +1719,65 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertLessEqual(view.meeting_chat.send_button.winfo_rootx()
                              + view.meeting_chat.send_button.winfo_width(),
                              view.detail_canvas.winfo_rootx() + view.detail_canvas.winfo_width())
+
+    def test_summary_templates_generate_in_primary_view_with_optional_focus(self):
+        callback_errors = []
+        previous_reporter = self.root.report_callback_exception
+        self.root.report_callback_exception = lambda *args: callback_errors.append(args)
+        self.addCleanup(setattr, self.root, "report_callback_exception", previous_reporter)
+        self.addCleanup(lambda: self.assertEqual(callback_errors, []))
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view._show_library_detail(True)
+        view.selected = "synthetic-session"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.summary_model.set("synthetic-model")
+        view.summary_model_installed = {"synthetic-model": True}
+        self.assertEqual([item["id"] for item in view.report_profiles[:5]],
+                         ["meeting_notes", "interview", "one_on_one", "sales", "customer_feedback"])
+        self.assertEqual(view._selected_report_profile()["id"], "meeting_notes")
+        hints = set()
+        for label, profile in view.report_profile_by_label.items():
+            if profile["id"] in {"meeting_notes", "interview", "one_on_one", "sales", "customer_feedback"}:
+                view.report_profile_choice.set(label)
+                view._report_profile_changed()
+                hints.add(view.summary_format_hint.get())
+        self.assertEqual(len(hints), 5)
+        label = next(label for label, item in view.report_profile_by_label.items()
+                     if item["id"] == "customer_feedback")
+        view.report_profile_choice.set(label)
+        view._report_profile_changed()
+        view.detail_sections.select("summary")
+        view.summary_focus_toggle.invoke()
+        view.summary_focus.insert("1.0", "Priorize o acompanhamento.")
+        generated = {"summary": "Conversa revisada.", "feedback": [{"text": "A busca é útil."}],
+                     "action_items": [{"text": "Revisar filtros", "owner": None, "deadline": None}]}
+        view.controller.generate_report.return_value = dict(generated, report_id="saved-1")
+        view.controller.list_reports.return_value = [{"id": "saved-1", "kind": "report",
+                                                      "profile_id": "customer_feedback"}]
+        view.controller.get_report.return_value = {"id": "saved-1", "kind": "report",
+                                                   "profile_id": "customer_feedback", "generated": generated}
+        view._sync_summary_controls()
+        self.root.update()
+        self.assertFalse(view.report_frame.winfo_ismapped())
+        for widget in (view.report_profile_box, view.regenerate_summary_button, view.summary_focus):
+            self.assertTrue(widget.winfo_ismapped())
+            self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(),
+                                 view.detail_canvas.winfo_rootx() + view.detail_canvas.winfo_width())
+        view.regenerate_summary_button.invoke()
+        wait_for(lambda: (self.root.update(), view.summary_pending is None
+                         and view.selected_report is not None)[1])
+        self.assertEqual(view.controller.generate_report.call_args.kwargs["profile"]["id"], "customer_feedback")
+        self.assertEqual(view.controller.generate_report.call_args.kwargs["focus"], "Priorize o acompanhamento.")
+        self.assertIn("A busca é útil.", view.summary_text)
+        self.assertIn("Revisar filtros", view.summary_text)
+        self.assertNotIn("segment_ids", view.summary_text)
+        self.assertFalse(view.report_frame.winfo_ismapped())
+        self.assertTrue(view.copy_summary_button.winfo_ismapped())
+        self.assertLessEqual(view.copy_summary_button.winfo_rooty() + view.copy_summary_button.winfo_height(),
+                             view.detail_canvas.winfo_rooty() + view.detail_canvas.winfo_height())
 
     def test_every_index_state_has_a_portuguese_label(self):
         self.assertLessEqual(INDEX_STATES, set(INDEX_STATE_LABELS))

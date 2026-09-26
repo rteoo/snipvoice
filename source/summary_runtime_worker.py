@@ -5,7 +5,9 @@ import io
 import os
 import sys
 
-from summary_runtime import MAX_OUTPUT_BYTES, MAX_WIRE_BYTES, NativeSummaryRuntime
+from summary_runtime import (
+    MAX_OUTPUT_BYTES, MAX_WIRE_BYTES, NativeSummaryRuntime, SummaryOutputLimitError,
+)
 
 
 def _send(stream, response):
@@ -73,6 +75,9 @@ def serve(input_stream, output_stream):
                     result = runtime.generate(prompt, evidence, disable_thinking=disable)
                     if len(result.encode("utf-8")) > MAX_OUTPUT_BYTES:
                         raise ValueError("output too large")
+                except SummaryOutputLimitError as exc:
+                    _send(output_stream, {"ok": False, "error": str(exc)})
+                    return
                 except Exception:
                     _send(output_stream, {"ok": False, "error": "O runtime local não conseguiu gerar o resumo."})
                     return
