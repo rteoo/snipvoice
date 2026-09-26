@@ -39,9 +39,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SNIPVOICE_VERSION: "3.4.0"
-  SNIPVOICE_CHANNEL: "beta"
-  SNIPVOICE_RELEASE_LABEL: "3.4.0-beta.3"
+  SNIPVOICE_VERSION: "1.0.0"
+  SNIPVOICE_CHANNEL: "stable"
+  SNIPVOICE_RELEASE_LABEL: "1.0.0"
 
 jobs:
   windows:
@@ -153,7 +153,7 @@ jobs:
             Snipvoice-${{ env.SNIPVOICE_RELEASE_LABEL }}-windows-ffmpeg-build-info.zip.sha256
 
       # Store package versions must increase, and the fourth field is reserved
-      # as zero. Beta 2 already used 3.4.0.0; keep beta 3 out of Store builds.
+      # as zero, so only stable releases produce an MSIX.
       - name: Pack Microsoft Store MSIX
         if: vars.SNIPVOICE_MSIX_IDENTITY_NAME != '' && env.SNIPVOICE_CHANNEL == 'stable'
         shell: pwsh

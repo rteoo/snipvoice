@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml"><img src="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/rteoo/snipvoice/releases/tag/v3.3.2"><img src="https://img.shields.io/badge/stable-v3.3.2-blue.svg" alt="Stable v3.3.2"></a>
+  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.0.0"><img src="https://img.shields.io/badge/stable-v1.0.0-blue.svg" alt="Stable v1.0.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
@@ -45,7 +45,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v3.3.2 release](https://github.com/rteoo/snipvoice/releases/tag/v3.3.2).
+[stable v1.0.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.0.0).
 To run from source with Python installed:
 
 ```powershell
@@ -67,32 +67,29 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v3.3.2`](https://github.com/rteoo/snipvoice/releases/tag/v3.3.2):
+[`v1.0.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.0.0):
 
 | Platform | Package |
 | --- | --- |
 | Windows x64 | Per-user installer and portable ZIP |
 | macOS 14.4+ ARM64 | Ad-hoc-signed `.app` bundle in a ZIP |
 
-The current recording-workflow beta is
-[`v3.4.0-beta.3`](https://github.com/rteoo/snipvoice/releases/tag/v3.4.0-beta.3).
-It applies the Win Design System to the manager, keeps recording controls reachable
-at the minimum window size, simplifies the library's empty and filtered states,
-and groups less-used dictation tools in a menu. These beta packages need real-device
-recording feedback before a stable release.
-This beta omits MSIX: beta 2 already used Store package version `3.4.0.0`,
-and Store submissions require a higher version.
+Releases before 1.0.0 were renumbered into the 0.x series when SnipVoice
+reached its first stable release: 3.0.0–3.3.2 are now 0.3.0–0.6.2, 1.0.0 and
+2.0.0 are 0.1.0 and 0.2.0, and the 3.4.0 betas are the 1.0.0 betas. See the
+[changelog](CHANGELOG.md) for the full mapping.
 
 The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
 
-### What's new in v3.3.2
+### What's new in v1.0.0
 
-- Whisper Small, Whisper Large v3 Turbo and Whisper Large v3 are available as optional local transcription models.
-- The SnipVoice data folder and the downloaded-models folder can each be moved to another location, including a models folder shared with other apps.
-- Configurações groups transcription and summary model downloads under Modelos, and download buttons stand out clearly on their cards.
+- The interface is available in Brazilian Portuguese (default) and US English; switch in **Configurações > Geral > Idioma** without restarting.
+- The manager follows the Win Design System in light and dark appearance, with Ctrl+1 to Ctrl+4 to jump between Gravação, Biblioteca, Ditado, and Configurações.
+- A three-second source check with live meters runs before recording, and saved recordings replay with source selection and seeking.
+- Quiet microphone speech is raised in the final recording without touching the recoverable raw tracks.
 
 ## First use
 
