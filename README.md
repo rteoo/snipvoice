@@ -31,10 +31,11 @@ recordings, shortcuts, process identity, and installers.
 - Separate microphone and selected speaker-output recording on Windows and macOS.
 - Independent microphone/system toggles, live two-track waveforms, and OS-default or manually pinned endpoints.
 - Crash-recoverable segmented audio, explicit gaps, pause/resume, and partial-session preservation.
-- Atomic final WAV mixdown with an optional conservative microphone noise gate and voice gain.
-- Meeting library with local search, notes, bookmarks, playback, and transcription revisions.
+- Atomic final MP3 recording with conservative microphone volume adjustment; WAV remains an export option.
+- Meeting library with local search, playback, and transcription revisions.
 - WAV, MP3, AAC/M4A, FLAC, OGG, and Opus import plus Markdown, text, JSON, and per-track WAV export.
-- Configurable final-audio destination and opt-in automatic local transcription and summary.
+- Configurable final-audio destination, automatic transcription and summaries with installed local models, and summary regeneration.
+- Readable full-text transcripts by default, with a timestamped view and complete copy/export after recording.
 - Installed-only meeting transcription; automatic processing never downloads a model.
 - Cited summaries through a built-in llama.cpp runtime and downloadable local models.
 - Deterministic term corrections and optional literal spoken commands.
@@ -136,17 +137,17 @@ works when dictation is disabled and before any model is installed.
 | Sources | Independently toggle microphone and speaker output; raw sources stay in separate native PCM tracks |
 | Devices | Follow the OS multimedia/communications default or pin a stable endpoint |
 | Recovery | Append-only 30-second segments, CRC journal, atomic metadata, interrupted-session repair |
-| Workspace | Live source waveforms, pause/resume, meters, title, notes, bookmarks, local search, status filters |
+| Workspace | Live source waveforms, pause/resume, meters, title, local search, full-text and timestamped review |
 | Playback | Seek by timestamp and play one track through the current OS output |
-| Processing | Opt-in transcription followed by optional summary, with durable local-model revisions |
-| Files | Timestamp-aligned final PCM16 WAV plus bounded WAV/MP3/AAC/M4A/FLAC/OGG/Opus import and text/JSON/per-track exports |
+| Processing | Automatic transcription and summary with installed local models, with durable revisions and summary regeneration |
+| Files | Timestamp-aligned MP3 recordings, optional PCM16 WAV export, bounded WAV/MP3/AAC/M4A/FLAC/OGG/Opus import, and text/JSON/per-track exports |
 
 Selecting an output captures the mix already routed to that device; SnipVoice
 does not move another application's audio. Source labels identify tracks, not
 individual speakers. Acoustic echo cancellation and diarization are not included.
 
-The optional microphone booster applies a fixed low-level noise gate, bounded gain,
-and limiter to the derived final WAV. Raw source tracks remain unchanged; it is not
+The optional microphone volume adjustment measures the recording and applies bounded
+gain and a limiter to the derived final audio without gating quiet speech. Raw source tracks remain unchanged; it is not
 a spectral denoiser or acoustic echo canceller.
 
 ### Meeting memory: local data model and status

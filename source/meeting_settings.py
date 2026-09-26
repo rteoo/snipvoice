@@ -92,7 +92,7 @@ class MeetingSettings:
     output_enabled: bool = True
     auto_transcribe: bool = False
     auto_summary: bool = False
-    voice_boost: bool = False
+    voice_boost: bool = True
 
     def payload(self):
         return {"meeting_sources": self.sources,
@@ -162,7 +162,7 @@ def resolve_meeting_settings(value):
     if auto_summary and not auto_transcribe:
         raise ValueError("O resumo automático depende da transcrição automática.")
     voice_boost = _resolve_bool(data.get("meeting_voice_boost", _MISSING),
-                                "de reforço do microfone")
+                                "de reforço do microfone", default=True)
     return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),
                            resolve_selection(data.get("meeting_system")), hotkey,
                            profile, language, model, destination, input_enabled,

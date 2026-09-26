@@ -13,6 +13,7 @@ from meeting_settings import MeetingSettings, validate_hotkey_conflicts
 from meeting_library import AnnotationConflict, MeetingLibrary
 from meeting_retention import ConfirmationRequired, OperationRecoveryError
 from meeting_store import MeetingStore
+from meeting_mixdown import MixdownCancelled, export_mixdown
 from meeting_support import (
     MeetingController, REPORT_HISTORY_LIMIT, WAVEFORM_POINTS, _amplitude_envelope,
     _final_audio_path,
@@ -73,11 +74,73 @@ class MeetingControllerTests(unittest.TestCase):
         self.capture = FakeCapture()
         self.controller = MeetingController(self.temp.name, self.voice,
                                             capture_factory=lambda: self.capture)
+        # Controller tests exercise orchestration and metadata independently
+        # of the native codec. Real encoding is covered by the codec suite.
+        def synthetic_mixdown(_store, _session, path, **_options):
+            Path(path).write_bytes(b"synthetic encoded audio")
+            return str(path)
+        encoder = patch("meeting_support.export_mixdown", side_effect=synthetic_mixdown)
+        self.final_export = encoder.start()
+        self.addCleanup(encoder.stop)
 
     def tearDown(self):
         if self.controller.snapshot()["state"] != "unavailable":
             self.controller.shutdown()
         self.temp.cleanup()
+
+    def _quiet_recording(self):
+        root = Path(self.temp.name) / "adjustment"
+        store = MeetingStore(root / "meetings")
+        session = store.begin({"meeting_voice_boost": False}, "Quiet recording")
+        payload = struct.pack("<1000f", *([0.005] * 1000))
+        store.append_audio(session, {
+            "type": "audio", "generation": 0, "track": "microphone", "sequence": 0,
+            "timestamp": 0.0, "rate": 8000, "channels": 1, "frames": 1000,
+        }, payload)
+        store.finish(session)
+        previous = root / "previous.wav"
+        export_mixdown(store, session, previous)
+        store.save_final_audio(session, previous)
+        controller = MeetingController(str(root / "meetings"), self.voice, store=store)
+        self.addCleanup(controller.shutdown)
+        controller._queue_projection = Mock()
+        return controller, store, session, previous, payload
+
+    def test_adjust_final_audio_preserves_originals_and_publishes_adjusted_copy(self):
+        controller, store, session, previous, payload = self._quiet_recording()
+        previous_bytes = previous.read_bytes()
+        self.assertTrue(controller.regenerate_final_audio(session))
+        controller._processing_thread.join(3)
+        self.assertFalse(controller._processing_thread.is_alive())
+        self.assertFalse(controller.snapshot()["error"])
+        final = store.get(session)["final_audio"]
+        self.assertTrue(final["voice_boost"])
+        self.assertNotEqual(Path(final["path"]), previous)
+        self.assertEqual(Path(final["path"]).parent, previous.parent)
+        self.assertEqual(previous.read_bytes(), previous_bytes)
+        self.assertEqual(next(store.iter_audio(session, "microphone"))[1], payload)
+        self.assertEqual(Path(final["path"]).suffix, ".mp3")
+        self.assertTrue(self.final_export.call_args.kwargs["enhance_microphone"])
+        controller._queue_projection.assert_called_once_with(session)
+
+    def test_adjust_final_audio_cancellation_keeps_previous_selection(self):
+        controller, store, session, previous, _ = self._quiet_recording()
+        before = store.get(session)["final_audio"]
+        previous_bytes = previous.read_bytes()
+        with patch("meeting_support.export_mixdown", side_effect=MixdownCancelled("cancelled")):
+            self.assertTrue(controller.regenerate_final_audio(session))
+            controller._processing_thread.join(3)
+        self.assertEqual(store.get(session)["final_audio"], before)
+        self.assertEqual(previous.read_bytes(), previous_bytes)
+        self.assertIn("cancelled", controller.snapshot()["error"])
+
+    def test_adjust_final_audio_obeys_recording_playback_and_retention_reservations(self):
+        for name, value in (("_state", "recording"), ("_processing", True),
+                            ("_playback_active", True), ("_retention_active", True)):
+            with self.subTest(reservation=name), patch.object(self.controller, name, value):
+                self.assertFalse(self.controller.regenerate_final_audio("synthetic"))
+        with patch.object(self.controller, "_play_thread", Mock(is_alive=Mock(return_value=True))):
+            self.assertFalse(self.controller.regenerate_final_audio("synthetic"))
 
     def test_stop_drains_audio_before_releasing_dictation(self):
         self.assertTrue(self.controller.start(MeetingSettings()))
@@ -99,6 +162,22 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(len(list(store.iter_audio(session))), 1)
         self.assertEqual(next(store.iter_events(session))["type"], "source_changed")
         self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
+        self.assertEqual(Path(metadata["final_audio"]["path"]).suffix, ".mp3")
+
+    def test_missing_mp3_encoder_preserves_recording_and_releases_capture(self):
+        self.final_export.side_effect = RuntimeError("MP3 encoder unavailable")
+        self.assertTrue(self.controller.start(MeetingSettings()))
+        self.assertTrue(self.capture.started.wait(2))
+        self.controller.stop()
+        self.controller._thread.join(3)
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot["state"], "idle")
+        self.assertIn("MP3 encoder unavailable", snapshot["error"])
+        metadata = self.controller.store.get(snapshot["session_id"])
+        self.assertEqual(metadata["status"], "completed")
+        self.assertIsNone(metadata["final_audio"])
+        self.assertEqual(len(list(self.controller.store.iter_audio(snapshot["session_id"]))), 1)
+        self.voice.release_meeting.assert_called_once_with("lease")
 
     def test_snapshot_exposes_bounded_real_waveform_envelopes(self):
         values = [0.0, 0.25, -0.5, 0.1, 0.75, -0.2]
@@ -152,12 +231,12 @@ class MeetingControllerTests(unittest.TestCase):
         settings = MeetingSettings()
         first = _final_audio_path(Path(self.temp.name) / "meetings", settings,
                                   "session", ' Review: Q3 / next? ')
-        self.assertEqual(first.name, "session - Review- Q3 - next.wav")
+        self.assertEqual(first.name, "session - Review- Q3 - next.mp3")
         self.assertEqual(first.parent, Path(self.temp.name) / "recordings")
         first.write_bytes(b"existing")
         second = _final_audio_path(Path(self.temp.name) / "meetings", settings,
                                    "session", ' Review: Q3 / next? ')
-        self.assertEqual(second.name, "session - Review- Q3 - next (2).wav")
+        self.assertEqual(second.name, "session - Review- Q3 - next (2).mp3")
 
     def test_configured_final_audio_destination_must_exist_and_be_absolute(self):
         settings = MeetingSettings(destination="relative")
@@ -220,7 +299,9 @@ class MeetingControllerTests(unittest.TestCase):
 
     def test_enabled_automatic_transcription_then_summary_run_after_mixdown(self):
         settings = MeetingSettings(auto_transcribe=True, auto_summary=True, voice_boost=True)
-        with patch("meeting_transcription.transcribe_meeting") as transcribe, \
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_installed_summary_model", return_value="qwen3.5-2b-q4"), \
+                patch("meeting_transcription.transcribe_meeting") as transcribe, \
                 patch("meeting_summary.summarize_meeting") as summarize:
             self.assertTrue(self.controller.start(settings, title="Planning"))
             self.assertTrue(self.capture.started.wait(2))
@@ -235,6 +316,23 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(transcribe.call_args.args[1], session)
         self.assertEqual(summarize.call_args.args[1], session)
         self.assertEqual(self.controller.snapshot()["postprocess"], "Pós-processamento concluído")
+
+    def test_installed_models_run_automatically_when_legacy_switches_are_false(self):
+        settings = MeetingSettings()
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_installed_summary_model", return_value="local-summary"), \
+                patch("meeting_transcription.transcribe_meeting") as transcribe, \
+                patch("meeting_summary.summarize_meeting") as summarize:
+            self.assertTrue(self.controller.start(settings, title="Planning"))
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(3)
+
+        session = self.controller.snapshot()["session_id"]
+        transcribe.assert_called_once()
+        summarize.assert_called_once()
+        self.assertEqual(transcribe.call_args.args[1:3], (session, "balanced"))
+        self.assertEqual(summarize.call_args.args[1:3], (session, "local-summary"))
 
     def test_manual_transcription_refines_only_an_automatic_title(self):
         store = self.controller.store
@@ -254,10 +352,51 @@ class MeetingControllerTests(unittest.TestCase):
             "2026-09-15-14-07-Revisão-Planejamento-Financeiro-Anual",
         )
 
+    def test_manual_transcription_runs_installed_summary_for_existing_recording(self):
+        store = self.controller.store
+        session = store.begin({}, "Existing")
+        store.finish(session)
+        with patch("meeting_transcription.transcribe_meeting"), \
+                patch.object(self.controller, "_installed_summary_model", return_value="local-summary"), \
+                patch("meeting_summary.summarize_meeting") as summarize:
+            self.assertTrue(self.controller.transcribe(session, "balanced", "auto"))
+            self.controller._processing_thread.join(2)
+        summarize.assert_called_once_with(
+            store, session, "local-summary", cancel_event=self.controller._cancel,
+        )
+
+    def test_direct_summary_uses_installed_fallback_and_rejects_missing_models(self):
+        with patch.object(self.controller, "_installed_summary_model", return_value="fallback"), \
+                patch("meeting_summary.summarize_meeting") as summarize:
+            self.assertTrue(self.controller.summarize("session", "preferred"))
+            self.controller._processing_thread.join(2)
+        summarize.assert_called_once()
+        with patch.object(self.controller, "_installed_summary_model", return_value=None):
+            self.assertTrue(self.controller.summarize("session", "preferred"))
+            self.controller._processing_thread.join(2)
+        self.assertIn("Nenhum modelo de resumo instalado", self.controller.snapshot()["error"])
+
+    def test_imported_audio_enters_automatic_transcription_workflow(self):
+        settings = MeetingSettings()
+        with patch("meeting_files.import_audio", return_value="imported"), \
+                patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_transcribe_and_summarize") as process:
+            self.assertEqual(self.controller.import_audio("recording.wav", settings), "imported")
+        process.assert_called_once_with("imported", "balanced", settings.language, settings.summary_model)
+
+    def test_imported_audio_without_installed_voice_model_skips_inference(self):
+        settings = MeetingSettings()
+        with patch("meeting_files.import_audio", return_value="imported"), \
+                patch.object(self.controller, "_installed_voice_profile", return_value=None), \
+                patch.object(self.controller, "_transcribe_and_summarize") as process:
+            self.assertEqual(self.controller.import_audio("recording.wav", settings), "imported")
+        process.assert_not_called()
+
     def test_auto_transcription_resource_failure_keeps_lease_and_source_audio(self):
         from meeting_transcription import MeetingTranscriptionError
         settings = MeetingSettings(auto_transcribe=True)
-        with patch("meeting_transcription.transcribe_meeting",
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch("meeting_transcription.transcribe_meeting",
                    side_effect=MeetingTranscriptionError("still live", resource_live=True)):
             self.controller.start(settings)
             self.assertTrue(self.capture.started.wait(2))
@@ -275,7 +414,9 @@ class MeetingControllerTests(unittest.TestCase):
         def cancel_during_transcription(*_args, **_kwargs):
             self.controller._cancel.set()
 
-        with patch("meeting_transcription.transcribe_meeting",
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_installed_summary_model", return_value="qwen3.5-2b-q4"), \
+                patch("meeting_transcription.transcribe_meeting",
                    side_effect=cancel_during_transcription), \
                 patch("meeting_summary.summarize_meeting") as summarize:
             self.controller.start(settings)
@@ -309,6 +450,25 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(len(last["segments"]), 5)
         self.assertFalse(last["has_more"])
         self.assertEqual(last["segments"][-1]["id"], "microphone:504:1")
+
+    def test_transcript_preview_formats_complete_revision_without_page_limit(self):
+        session = self.controller.store.begin({}, "Preview")
+        self.controller.store.finish(session)
+        revision = self.controller.store.begin_revision(session, "balanced", "auto")
+        self.controller.store.add_transcript(session, revision, {
+            "id": "microphone:0:1", "track": "microphone", "start": 0,
+            "end": 1, "text": "First sentence.",
+        })
+        self.controller.store.add_transcript(session, revision, {
+            "id": "microphone:1:1", "track": "microphone", "start": 1,
+            "end": 2, "text": "Second sentence.",
+        })
+        self.controller.store.finish_revision(session, revision)
+
+        readable = self.controller.get_transcript_preview(session)
+        timestamped = self.controller.get_transcript_preview(session, style="timestamped")
+        self.assertEqual(readable, {"text": "First sentence. Second sentence.", "truncated": False})
+        self.assertIn("00:00:00 Microfone: First sentence.", timestamped["text"])
 
     def test_playback_progress_is_controller_owned_and_stale_completion_is_ignored(self):
         clock = FakeClock()
@@ -429,6 +589,30 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         self.assertEqual(reader.call_args.kwargs["cursor"], "c1")
         self.assertEqual(reader.call_args.kwargs["collection"], "project-1")
         self.assertEqual(search.call_args.kwargs, {"limit": 5, "offset": 0, "tag": "planning"})
+
+    def test_rename_preserves_legacy_notes_and_bookmarks(self):
+        session = self.controller.store.begin({}, "Legacy")
+        self.controller.store.finish(session)
+        bookmarks = [{"timestamp": 1.0, "label": "Keep this bookmark"}]
+        self.controller.update_notes(session, "Old title", "Keep these notes", bookmarks)
+
+        self.assertTrue(self.controller.rename_session(session, "New title"))
+
+        metadata = self.controller.get_session(session)
+        self.assertEqual(metadata["title"], "New title")
+        self.assertEqual(metadata["notes"], "Keep these notes")
+        self.assertEqual(metadata["bookmarks"], bookmarks)
+        self.assertTrue(self.controller.rename_session(session, "Another title"))
+
+    def test_rename_rejects_stale_annotation_generation(self):
+        session = self.controller.store.begin({}, "Original")
+        self.controller.store.finish(session)
+        self.controller.get_session(session)
+        self.library.update_annotations(session, {"title": "External edit"}, expected_generation=0)
+
+        with self.assertRaises(AnnotationConflict):
+            self.controller.rename_session(session, "Stale edit")
+        self.assertEqual(self.library.get_session(session)["title"], "External edit")
 
     def test_rebuild_index_reports_progress_and_surfaces_cancellation_state(self):
         progress = []
@@ -564,6 +748,19 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
             intelligence.save_answer.call_args.kwargs["provenance"],
             answer["_provenance"],
         )
+
+    def test_controller_forwards_bounded_follow_up_history(self):
+        intelligence = Mock()
+        intelligence.ask_this_meeting.return_value = {
+            "answer": "A decisão foi aprovada.", "citations": [], "uncertainty": "high",
+            "_provenance": {"revision": "revision-1", "model": {}},
+        }
+        history = [{"question": "O que foi decidido?", "answer": "A aprovação."}]
+        with patch.object(self.controller, "_intelligence", return_value=intelligence):
+            self.controller.ask_this_meeting(
+                "session", "E o prazo?", "qwen3.5-2b-q4", history=history,
+            )
+        self.assertEqual(intelligence.ask_this_meeting.call_args.kwargs["history"], history)
 
     def test_highlight_clip_export_uses_file_worker_bridge_operation(self):
         with patch("meeting_files.export_highlight_clip", return_value="clip.wav") as export:

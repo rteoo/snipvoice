@@ -8,9 +8,16 @@ screen builders use those tokens instead of literal colors or fonts.
 
 - **Gravação:** check sources, record, and read the current state. Keep the
   primary recording action and recovery state visible together.
-- **Biblioteca:** search and select a recording, then listen first. Notes,
-  transcript, summary, questions, and files are peer detail sections. Filters,
-  batch actions, and cross-recording questions appear when requested.
+- **Biblioteca:** search and select a recording, then read the full transcript.
+  Full text with paragraphs is the default; users can switch to timestamps
+  afterward without running transcription again. Copy and export use that
+  presentation. Audio, summary, questions, and files remain accessible.
+  The manual Notes tab is removed; existing notes and bookmarks remain in saved data.
+  There are no manual category, tag, person, series, or status filters.
+  New recordings use installed transcription and summary models automatically;
+  unavailable models are skipped without downloads. Summaries are readable and
+  saved automatically, with Copy and Regenerate actions. Advanced reports and
+  cross-recording questions appear when requested.
 - **Ditado:** choose the active model and language, then use the hotkey. Model
   downloads and privacy controls belong in settings. Keep history beside the
   primary save action; corrections, command reload, licenses, and model removal
@@ -44,7 +51,7 @@ consistently, so opaque layers and a one-pixel border carry the hierarchy.
 - The current state appears beside the action it governs. Errors identify a
   next step, and technical detail is available on demand.
 - Recording and model work stays off the GUI and keyboard callback threads.
-- Search, filters, and the selected recording preserve context while the user
+- Search and the selected recording preserve context while the user
   moves among detail sections.
 - The main destinations support `Ctrl+1` through `Ctrl+4` in displayed order.
 - Destructive operations retain their existing explicit confirmation and

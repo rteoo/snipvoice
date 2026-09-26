@@ -12,6 +12,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from meeting_intelligence import (
     BUILTIN_PROFILE_IDS,
     MAX_CROSS_CANONICAL_SCAN,
+    MAX_HISTORY_BYTES,
+    MAX_HISTORY_TURNS,
     SUPPORTED_SECTIONS,
     MeetingIntelligence,
     profile_hash,
@@ -293,6 +295,55 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertNotIn(question, question_prompt)
         self.assertEqual(question_evidence[-1]["kind"], "question")
         self.assertEqual(question_evidence[-1]["question"], question)
+
+    def test_question_history_is_context_only_and_current_question_stays_separate(self):
+        intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Friday.", "citations": [next(item["id"] for item in evidence if "id" in item)],
+            "uncertainty": "low",
+        }))
+        history = [{"question": "What was decided?", "answer": "The review was approved."}]
+        intelligence.ask_this_meeting(
+            self.session_id, "When is that due?", DEFAULT_SUMMARY_MODEL, history=history,
+        )
+        prompt, evidence, *_ = runtime.calls[0]
+        self.assertIn("Conversation history is context", prompt)
+        self.assertEqual(evidence[-1], {"kind": "question", "question": "When is that due?"})
+        self.assertEqual(evidence[-2]["kind"], "conversation_context")
+        self.assertEqual(evidence[-2]["turns"], history)
+        self.assertTrue(runtime.closed)
+
+    def test_question_history_is_bounded_to_recent_turns_and_model_budget(self):
+        intelligence, runtime = self._intelligence(lambda _prompt, evidence: json.dumps({
+            "answer": "Friday.", "citations": [next(item["id"] for item in evidence if "id" in item)],
+            "uncertainty": "low",
+        }))
+        history = [
+            {"question": f"Question {index}", "answer": "A" * 900}
+            for index in range(MAX_HISTORY_TURNS + 2)
+        ]
+        intelligence.ask_this_meeting(
+            self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL, history=history,
+        )
+        turns = runtime.calls[0][1][-2]["turns"]
+        self.assertLessEqual(len(turns), MAX_HISTORY_TURNS)
+        self.assertLessEqual(
+            len(json.dumps(runtime.calls[0][1][-2], ensure_ascii=False).encode("utf-8")),
+            MAX_HISTORY_BYTES,
+        )
+        self.assertEqual(runtime.calls[0][1][-1]["question"], "Follow up")
+
+    def test_question_history_rejects_metadata_and_oversized_input(self):
+        intelligence, _runtime = self._intelligence()
+        with self.assertRaises(ValueError):
+            intelligence.ask_this_meeting(
+                self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL,
+                history=[{"question": "Q", "answer": "A", "citations": ["s1"]}],
+            )
+        with self.assertRaises(ValueError):
+            intelligence.ask_this_meeting(
+                self.session_id, "Follow up", DEFAULT_SUMMARY_MODEL,
+                history=[{"question": "Q", "answer": "A" * (MAX_HISTORY_BYTES + 1)}],
+            )
 
     def test_action_owner_and_deadline_must_appear_in_each_item_citation(self):
         # The revision is already completed; use a fresh completed revision so

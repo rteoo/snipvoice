@@ -5,6 +5,7 @@ import re
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 from PIL import Image
 
@@ -13,6 +14,77 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class PackagingExcludeTests(unittest.TestCase):
+    def test_ffmpeg_orchestration_uses_shared_lame_prefix(self):
+        path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
+        spec = importlib.util.spec_from_file_location("clean_audio_runtime_orchestration", path)
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "ffmpeg-source"
+            source.mkdir()
+            prefix = root / "prefix"
+            with mock.patch.object(recipe.platform, "system", return_value="Linux"):
+                command = recipe.ffmpeg_configure_command(source, prefix, prefix, os.environ.copy())
+        cflags = next(value for value in command if value.startswith("--extra-cflags="))
+        ldflags = next(value for value in command if value.startswith("--extra-ldflags="))
+        self.assertTrue(cflags.endswith("/prefix/include") or cflags.endswith("\\prefix\\include"))
+        self.assertTrue(ldflags.endswith("/prefix/lib") or ldflags.endswith("\\prefix\\lib"))
+        self.assertIn("--enable-libmp3lame", command)
+        self.assertIn("--enable-encoder=libmp3lame", command)
+        self.assertIn("--enable-muxer=mp3", command)
+
+    def test_repaired_wheel_must_contain_lame_runtime(self):
+        path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
+        spec = importlib.util.spec_from_file_location("clean_audio_runtime_wheel", path)
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            wheel = Path(temporary_directory) / "av.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                for name in (
+                    "av.libs/avcodec.dll", "av.libs/avdevice.dll", "av.libs/avfilter.dll",
+                    "av.libs/avformat.dll", "av.libs/avutil.dll", "av.libs/swresample.dll",
+                    "av.libs/swscale.dll", "av.libs/libmp3lame-0.dll",
+                ):
+                    archive.writestr(name, b"synthetic")
+            recipe.verify_wheel(wheel)
+
+    def test_lame_architecture_flags_cover_darwin_arm64_and_x64(self):
+        path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
+        spec = importlib.util.spec_from_file_location("clean_audio_runtime_arch", path)
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+        self.assertEqual(
+            recipe.lame_architecture_flags("Darwin", "arm64"),
+            ("--build=aarch64-apple-darwin", "--host=aarch64-apple-darwin"),
+        )
+        self.assertEqual(
+            recipe.lame_architecture_flags("Darwin", "x86_64"),
+            ("--build=x86_64-apple-darwin", "--host=x86_64-apple-darwin"),
+        )
+        self.assertEqual(recipe.lame_architecture_flags("Windows", "AMD64"), ())
+
+    def test_lame_export_adjustment_only_removes_static_deprecated_symbol(self):
+        path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
+        spec = importlib.util.spec_from_file_location("clean_audio_runtime_symbols", path)
+        recipe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(recipe)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "source"
+            (source / "include").mkdir(parents=True)
+            (source / "include" / "libmp3lame.sym").write_text(
+                "lame_init\nlame_init_old\nlame_encode_buffer\n", encoding="ascii",
+            )
+            build = root / "build"
+            build.mkdir()
+            filtered = recipe.prepare_lame_export_adjustment(source, build)
+            self.assertEqual(
+                filtered.read_text(encoding="ascii"),
+                "lame_init\nlame_encode_buffer\n",
+            )
+
     def test_windows_clean_audio_recipe_bootstraps_msys2_from_powershell(self):
         path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
         spec = importlib.util.spec_from_file_location("clean_audio_runtime", path)
@@ -236,8 +308,14 @@ class PackagingExcludeTests(unittest.TestCase):
             "--disable-everything",
             "--disable-network",
             "--enable-protocol=file",
+            "--enable-libmp3lame",
+            "--enable-encoder=libmp3lame",
+            "--enable-muxer=mp3",
         ):
             self.assertIn(flag, recipe_text)
+        self.assertIn('LAME_VERSION = "3.100"', recipe_text)
+        self.assertIn("LAME_SHA256 =", recipe_text)
+        self.assertIn("LAME-configure.txt", recipe_text)
         for forbidden_library in ("libx264", "libx265", "libfdk-aac"):
             self.assertNotIn(f'"--enable-{forbidden_library}"', recipe_text)
 

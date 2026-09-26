@@ -60,7 +60,12 @@ class MeetingSettingsTests(unittest.TestCase):
         self.assertTrue(settings.output_enabled)
         self.assertFalse(settings.auto_transcribe)
         self.assertFalse(settings.auto_summary)
+        self.assertTrue(settings.voice_boost)
+
+    def test_microphone_adjustment_preserves_an_explicit_opt_out(self):
+        settings = resolve_meeting_settings({"meeting_voice_boost": False})
         self.assertFalse(settings.voice_boost)
+        self.assertFalse(resolve_meeting_settings(settings.payload()).voice_boost)
 
     def test_destination_and_switches_round_trip_without_touching_destination(self):
         destination = os.path.join(os.path.dirname(__file__), "missing-recordings")

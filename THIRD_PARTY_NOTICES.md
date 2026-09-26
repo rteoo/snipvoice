@@ -10,8 +10,9 @@ The application depends on the following separately licensed projects:
 | `Pillow` | Image and icon handling | [Pillow license](https://github.com/python-pillow/Pillow/blob/main/LICENSE) |
 | `sounddevice` / PortAudio | Optional voice capture | [sounddevice](https://github.com/spatialaudio/python-sounddevice), [PortAudio](https://github.com/PortAudio/portaudio) |
 | `soxr` / libsoxr / PFFFT | Optional voice sample-rate conversion | [python-soxr](https://github.com/dofuuz/python-soxr), [LGPLv2.1+ license](https://github.com/dofuuz/python-soxr/blob/main/LICENSE.txt), [libsoxr](https://sourceforge.net/projects/soxr/) |
-| `PyAV` | Python bindings for compressed audio-file decoding | BSD-3-Clause; the exact license text is in `THIRD_PARTY_LICENSES/FFmpeg/PyAV-LICENSE.txt` |
-| Custom FFmpeg audio runtime | Shared native decoding of MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV and related audio formats | LGPL-2.1-or-later; source, configuration, hashes, build evidence, and the exact license text are in `THIRD_PARTY_LICENSES/FFmpeg/` |
+| `PyAV` | Python bindings for compressed audio-file encoding and decoding | BSD-3-Clause; the exact license text is in `THIRD_PARTY_LICENSES/FFmpeg/PyAV-LICENSE.txt` |
+| `LAME` 3.100 | LGPL MP3 encoder linked into the approved FFmpeg runtime | LGPL-2.0-or-later; the exact source archive, hash, build flags, and license text are in `THIRD_PARTY_LICENSES/FFmpeg/` |
+| Custom FFmpeg audio runtime | Shared native encoding of MP3 and decoding of MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV and related audio formats | LGPL-2.1-or-later; source, configuration, hashes, build evidence, and the exact license text are in `THIRD_PARTY_LICENSES/FFmpeg/` |
 | `transcribe-cpp` / `transcribe-cpp-native` | Optional local transcription runtime | [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) |
 | `llama-cpp-python` / `llama.cpp` | Built-in local summary inference | [llama-cpp-python](https://github.com/abetlen/llama-cpp-python), [llama.cpp](https://github.com/ggml-org/llama.cpp) |
 

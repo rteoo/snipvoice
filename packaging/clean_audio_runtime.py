@@ -1,9 +1,10 @@
 """Build PyAV against a minimal, shared, LGPL FFmpeg audio runtime.
 
 This script is intentionally the only release path for PyAV.  It downloads
-hash-pinned upstream source archives, builds FFmpeg without external codec
-libraries, builds PyAV against those shared libraries, repairs the wheel, and
-writes the compliance material consumed by the desktop bundle jobs.
+hash-pinned upstream source archives, builds the LGPL LAME encoder and FFmpeg
+with only the approved external encoder, builds PyAV against those shared
+libraries, repairs the wheel, and writes the compliance material consumed by
+the desktop bundle jobs.
 """
 
 from __future__ import annotations
@@ -25,6 +26,10 @@ import zipfile
 FFMPEG_VERSION = "8.1.2"
 FFMPEG_URL = f"https://ffmpeg.org/releases/ffmpeg-{FFMPEG_VERSION}.tar.xz"
 FFMPEG_SHA256 = "464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c"
+LAME_VERSION = "3.100"
+LAME_SOURCE_URL = "https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz/download"
+LAME_URL = "https://distfiles.macports.org/lame/lame-3.100.tar.gz"
+LAME_SHA256 = "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
 PYAV_VERSION = "18.1.0"
 PYAV_URL = (
     "https://files.pythonhosted.org/packages/8d/f4/"
@@ -69,6 +74,24 @@ DECODERS = ",".join(
     )
 )
 PARSERS = "aac,aac_latm,ac3,flac,mpegaudio,opus,vorbis"
+LAME_CONFIGURE_FLAGS = (
+    "--disable-static",
+    "--enable-shared",
+    "--disable-frontend",
+)
+
+
+def lame_architecture_flags(system=None, machine=None) -> tuple[str, ...]:
+    """Return native Darwin flags accepted by LAME 3.100's config.sub."""
+    system = platform.system() if system is None else system
+    machine = platform.machine() if machine is None else machine
+    if system != "Darwin":
+        return ()
+    if machine.casefold() in {"arm64", "aarch64"}:
+        return ("--build=aarch64-apple-darwin", "--host=aarch64-apple-darwin")
+    if machine.casefold() in {"x86_64", "amd64"}:
+        return ("--build=x86_64-apple-darwin", "--host=x86_64-apple-darwin")
+    raise RuntimeError(f"Unsupported Darwin build architecture for LAME: {machine}")
 
 CONFIGURE_FLAGS = (
     "--disable-static",
@@ -93,6 +116,9 @@ CONFIGURE_FLAGS = (
     f"--enable-demuxer={DEMUXERS}",
     f"--enable-decoder={DECODERS}",
     f"--enable-parser={PARSERS}",
+    "--enable-libmp3lame",
+    "--enable-encoder=libmp3lame",
+    "--enable-muxer=mp3",
     "--enable-filter=anull,aresample",
 )
 
@@ -223,12 +249,21 @@ def write_compliance(
     output: Path,
     ffmpeg_source: Path,
     ffmpeg_build: Path,
+    lame_source: Path,
+    lame_symbols: Path,
     pyav_source: Path,
     prefix: Path,
     env: dict[str, str],
 ) -> None:
     output.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ffmpeg_source / "COPYING.LGPLv2.1", output / "FFmpeg-COPYING.LGPLv2.1.txt")
+    lame_license = next(
+        (lame_source / name for name in ("COPYING", "LICENSE") if (lame_source / name).is_file()),
+        None,
+    )
+    if lame_license is None:
+        raise RuntimeError("LAME source archive did not contain COPYING or LICENSE")
+    shutil.copy2(lame_license, output / "LAME-LICENSE.txt")
     shutil.copy2(pyav_source / "LICENSE.txt", output / "PyAV-LICENSE.txt")
     shutil.copy2(Path(__file__), output / "clean_audio_runtime.py")
     shutil.copy2(ffmpeg_build / "ffbuild" / "config.log", output / "FFmpeg-config.log")
@@ -237,6 +272,18 @@ def write_compliance(
     (output / "FFmpeg-configure.txt").write_text(
         " ".join(("./configure", *CONFIGURE_FLAGS)) + "\n", encoding="utf-8"
     )
+    (output / "LAME-configure.txt").write_text(
+        " ".join(("./configure", *LAME_CONFIGURE_FLAGS)) + "\n", encoding="utf-8"
+    )
+    shutil.copy2(lame_symbols, output / "LAME-export-symbols.txt")
+    (output / "LAME-build-adjustment.txt").write_text(
+        "Filtered only lame_init_old from libmp3lame.sym because LAME 3.100 "
+        "compiles that deprecated entry point static while the public export "
+        "list still names it. The vendor source archive is unchanged.\n"
+        "LAME linker flags: -version-info 0:0 -export-symbols "
+        "libmp3lame.filtered.sym -no-undefined\n",
+        encoding="utf-8",
+    )
     manifest = {
         "ffmpeg": {
             "version": FFMPEG_VERSION,
@@ -244,6 +291,14 @@ def write_compliance(
             "sha256": FFMPEG_SHA256,
             "license": "LGPL-2.1-or-later",
             "configure_flags": list(CONFIGURE_FLAGS),
+        },
+        "lame": {
+            "version": LAME_VERSION,
+            "source_url": LAME_SOURCE_URL,
+            "download_url": LAME_URL,
+            "sha256": LAME_SHA256,
+            "license": "LGPL-2.0-or-later",
+            "configure_flags": list(LAME_CONFIGURE_FLAGS),
         },
         "pyav": {
             "version": PYAV_VERSION,
@@ -277,7 +332,10 @@ def write_compliance(
 
 
 def verify_wheel(wheel: Path) -> None:
-    expected = ("avcodec", "avdevice", "avfilter", "avformat", "avutil", "swresample", "swscale")
+    expected = (
+        "avcodec", "avdevice", "avfilter", "avformat", "avutil",
+        "swresample", "swscale", "mp3lame",
+    )
     forbidden = ("x264", "x265", "xvid", "fdk", "rubberband", "vidstab")
     with zipfile.ZipFile(wheel) as archive:
         names = [name.lower() for name in archive.namelist()]
@@ -287,6 +345,38 @@ def verify_wheel(wheel: Path) -> None:
         raise RuntimeError(
             f"Unapproved repaired wheel; missing={missing}, forbidden={found_forbidden}"
         )
+
+
+def ffmpeg_configure_command(
+    ffmpeg_source: Path, prefix: Path, lame_prefix: Path, env: dict[str, str]
+) -> list[str]:
+    """Build FFmpeg's configure command with the isolated LAME search paths."""
+    include_dir = shell_path(lame_prefix / "include", env)
+    library_dir = shell_path(lame_prefix / "lib", env)
+    return [
+        "sh",
+        shell_path(ffmpeg_source / "configure", env),
+        f"--prefix={shell_path(prefix, env)}",
+        f"--libdir={shell_path(prefix / 'lib', env)}",
+        f"--shlibdir={shell_path(prefix / ('bin' if platform.system() == 'Windows' else 'lib'), env)}",
+        f"--extra-cflags=-I{include_dir}",
+        f"--extra-ldflags=-L{library_dir}",
+        *CONFIGURE_FLAGS,
+    ]
+
+
+def prepare_lame_export_adjustment(lame_source: Path, lame_build: Path) -> Path:
+    """Filter the one stale static symbol without modifying the source archive."""
+    source_symbols = lame_source / "include" / "libmp3lame.sym"
+    if not source_symbols.is_file():
+        raise RuntimeError("LAME source archive did not contain libmp3lame.sym")
+    symbols = [
+        line for line in source_symbols.read_text(encoding="utf-8").splitlines()
+        if line.strip() and line.strip() != "lame_init_old"
+    ]
+    destination = lame_build / "libmp3lame.filtered.sym"
+    destination.write_text("\n".join(symbols) + "\n", encoding="ascii")
+    return destination
 
 
 def main() -> int:
@@ -310,20 +400,50 @@ def main() -> int:
         directory.mkdir(parents=True, exist_ok=True)
 
     ffmpeg_archive = downloads / f"ffmpeg-{FFMPEG_VERSION}.tar.xz"
+    lame_archive = downloads / f"lame-{LAME_VERSION}.tar.gz"
     pyav_archive = downloads / f"av-{PYAV_VERSION}.tar.gz"
     download(FFMPEG_URL, ffmpeg_archive, FFMPEG_SHA256)
+    download(LAME_URL, lame_archive, LAME_SHA256)
     download(PYAV_URL, pyav_archive, PYAV_SHA256)
     ffmpeg_source = extract(ffmpeg_archive, sources / "ffmpeg")
+    lame_source = extract(lame_archive, sources / "lame")
     pyav_source = extract(pyav_archive, sources / "pyav")
 
-    configure = [
+    # Keep LAME in the FFmpeg prefix so the existing wheel repair --add-path
+    # / delocate search sees its shared library too.
+    lame_prefix = prefix
+    lame_build = work / "lame-build"
+    lame_build.mkdir(exist_ok=True)
+    lame_configure = [
         "sh",
-        shell_path(ffmpeg_source / "configure", runtime_environment),
-        f"--prefix={shell_path(prefix, runtime_environment)}",
-        f"--libdir={shell_path(prefix / 'lib', runtime_environment)}",
-        f"--shlibdir={shell_path(prefix / ('bin' if platform.system() == 'Windows' else 'lib'), runtime_environment)}",
-        *CONFIGURE_FLAGS,
+        shell_path(lame_source / "configure", runtime_environment),
+        f"--prefix={shell_path(lame_prefix, runtime_environment)}",
+        *lame_architecture_flags(),
+        *LAME_CONFIGURE_FLAGS,
     ]
+    run(lame_configure, cwd=lame_build, env=runtime_environment)
+    lame_symbols = prepare_lame_export_adjustment(lame_source, lame_build)
+    lame_ldflags = (
+        "libmp3lame_la_LDFLAGS=-version-info 0:0 "
+        f"-export-symbols {shell_path(lame_symbols, runtime_environment)} -no-undefined"
+    )
+    run(
+        ["make", "-j", str(os.cpu_count() or 2), lame_ldflags],
+        cwd=lame_build,
+        env=runtime_environment,
+    )
+    run(["make", "install"], cwd=lame_build, env=runtime_environment)
+
+    runtime_environment["PKG_CONFIG_PATH"] = os.pathsep.join(
+        filter(None, (
+            shell_path(lame_prefix / "lib" / "pkgconfig", runtime_environment),
+            runtime_environment.get("PKG_CONFIG_PATH", ""),
+        ))
+    )
+
+    configure = ffmpeg_configure_command(
+        ffmpeg_source, prefix, lame_prefix, runtime_environment,
+    )
     build_dir = work / "ffmpeg-build"
     build_dir.mkdir(exist_ok=True)
     run(configure, cwd=build_dir, env=runtime_environment)
@@ -382,11 +502,14 @@ def main() -> int:
         args.compliance_dir.resolve(),
         ffmpeg_source,
         build_dir,
+        lame_source,
+        lame_symbols,
         pyav_source,
         prefix,
         runtime_environment,
     )
     shutil.copy2(ffmpeg_archive, args.compliance_dir / ffmpeg_archive.name)
+    shutil.copy2(lame_archive, args.compliance_dir / lame_archive.name)
     (args.compliance_dir / "PyAV-wheel-sha256.txt").write_text(
         f"{hashlib.sha256(repaired_wheels[0].read_bytes()).hexdigest()}  {repaired_wheels[0].name}\n",
         encoding="ascii",

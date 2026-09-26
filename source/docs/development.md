@@ -42,15 +42,25 @@ Offline meetings add owned Windows/macOS capture helpers built by
 the package scripts compile/bundle these helpers and run the non-recording
 `--meeting-capture-probe` before promotion. The meeting workspace shares the
 existing GUI root and keeps new device/disk/inference work on workers.
-`meeting_mixdown.py` derives one bounded, atomic PCM16 WAV from the timestamped
-raw tracks after a normal stop. It linearly adapts a lower native rate to the
+`meeting_mixdown.py` derives one bounded, atomic MP3 from the timestamped raw
+tracks after a normal stop; PCM16 WAV is an explicit export option. The bundled
+PyAV/LAME encoder streams the mix without a permanent WAV intermediate.
+It linearly adapts a lower native rate to the
 higher source clock and never rewrites the recoverable track segments. The
 optional microphone volume adjustment measures the raw track in bounded memory,
-then applies capped gain and a limiter only to the derived WAV. It preserves
+then applies capped gain and a limiter only to the derived playback file. It preserves
 quiet speech instead of hard-gating it; do not describe it as spectral denoising
-or echo cancellation.
-Automatic transcription and summary remain opt-in and run sequentially under
-the existing local inference reservation.
+or echo cancellation. Transcription continues to consume the original raw
+tracks, so MP3 compression does not alter model input. Existing final WAVs stay
+playable and are never automatically converted or removed. Raw storage remains
+available for recovery and retranscription under the existing retention policy.
+New recordings and imports automatically use installed transcription and
+summary models, sequentially under the existing local inference reservation.
+Unavailable models are skipped without downloads. The library opens full text
+by default, offers a timestamped presentation, and copies/exports the selected
+format without rerunning inference. Summaries are saved automatically and can
+be regenerated. Manual organization and filter controls are removed from the
+interface; stored organization metadata remains intact.
 See [implementation validation and open hardware gates](offline-meeting-validation.md).
 
 Local meeting-memory development uses the canonical-bundle/disposable-index
@@ -60,7 +70,7 @@ Run storage, index, report, annotation, clip, and retention tests only against
 copied fixtures under `source/tests/tmp`; never point them at a live
 `SNIPVOICE_HOME`. Deleting `library.sqlite*` is an index-rebuild test, not a
 data-deletion test. The SQLite/FTS runtime probe, repair/rebuild UI, report and
-Q&A controls, organization filters, consent settings, retention preview, trash,
+Q&A controls, consent settings, retention preview, trash,
 restore, and purge routes are implemented. On 2026-09-17,
 `python -m unittest discover -s tests -q` ran 1,195 tests successfully with 53
 environment/platform skips. Ruff is unavailable in this validation context and

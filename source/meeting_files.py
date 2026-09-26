@@ -18,10 +18,16 @@ import wave
 # ceiling: 1,024 frames per playback write and 8,192 per import; raise only after cancellation/memory profiling.
 PLAY_FRAMES = 1024
 IMPORT_FRAMES = 8192
+# ceiling: 250 ms preroll is enough for MP3 bit-reservoir reconstruction; raise only with codec evidence.
+MP3_SEEK_PREROLL_SECONDS = 0.25
 RIFF_LIMIT = 0xFFFFFFFF
 SUPPORTED_AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg", ".opus"})
 MAX_EXPORT_REPORTS = 64
 MAX_EXPORT_CITATIONS = 256
+
+# Native capture timestamps can jitter around packet boundaries. Keep this
+# bounded so an actual pause is still represented as silence.
+TIMESTAMP_JITTER_SECONDS = 0.02
 
 
 def _cancel(cancel_event):
@@ -577,14 +583,51 @@ def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=
     """Trim overlapping blocks and seeks, preserving elapsed-time gaps."""
     cursor = start
     rate = channels = None
-    for event, payload in store.iter_audio(session, track, start):
+    previous_format = None
+    events = iter(store.iter_audio(session, track, start))
+    _cancel(cancel_event)
+    pending = next(events, None)
+    while pending is not None:
+        event, payload = pending
         _cancel(cancel_event)
         rate, channels = event["rate"], event["channels"]
         frame_bytes = channels * 4
         if len(payload) != event["frames"] * frame_bytes:
             raise ValueError("O bloco de áudio salvo está incompleto. Preserve a reunião e tente recuperá-la.")
-        skip = min(event["frames"], max(0, math.ceil((cursor - event["timestamp"]) * rate - 1e-9)))
-        timestamp = event["timestamp"] + skip / rate
+        _cancel(cancel_event)
+        pending = next(events, None)
+        event_timestamp = float(event["timestamp"])
+        overlap = cursor - event_timestamp
+        jitter = max(TIMESTAMP_JITTER_SECONDS, 2.0 / rate)
+        current_end = event_timestamp + event["frames"] / rate
+        same_previous_format = (
+            previous_format is not None
+            and previous_format == (rate, channels, event.get("generation"))
+        )
+        next_closes_gap = False
+        if pending is not None and -jitter <= overlap < 0:
+            next_event = pending[0]
+            next_timestamp = float(next_event["timestamp"])
+            next_overlap = current_end - next_timestamp
+            gap = -overlap
+            same_format = (
+                next_event.get("rate") == rate
+                and next_event.get("channels") == channels
+                and next_event.get("generation") == event.get("generation")
+            )
+            next_closes_gap = (
+                same_format
+                and 0 < next_overlap <= jitter
+                and abs(next_overlap - gap) <= 2.0 / rate
+            )
+        if same_previous_format and (0 < overlap <= jitter or next_closes_gap):
+            # Preserve the complete packet when its timestamp lands just
+            # before the previous packet's frame boundary.  If a small gap is
+            # followed by a matching overlap, both timestamps are clock
+            # jitter; an isolated forward gap remains explicit silence.
+            event_timestamp = cursor
+        skip = min(event["frames"], max(0, math.ceil((cursor - event_timestamp) * rate - 1e-9)))
+        timestamp = event_timestamp + skip / rate
         if skip == event["frames"]:
             continue
         gap = max(0, round((timestamp - cursor) * rate))
@@ -597,7 +640,8 @@ def _audio_chunks(store, session, track, start=0.0, cancel_event=None, duration=
             _cancel(cancel_event)
             end = min(event["frames"], frame + PLAY_FRAMES)
             yield rate, channels, payload[frame * frame_bytes:end * frame_bytes]
-        cursor = event["timestamp"] + event["frames"] / rate
+        cursor = event_timestamp + event["frames"] / rate
+        previous_format = (rate, channels, event.get("generation"))
     if rate is not None and isinstance(duration, (int, float)) and math.isfinite(duration):
         gap = max(0, round((duration - cursor) * rate))
         while gap:
@@ -763,6 +807,50 @@ def export_meeting(store, session_id, path, format="markdown", cancel_event=None
                 _json_export(handle, store, session_id, metadata, cancel_event)
             else:
                 _text_export(handle, store, session_id, metadata, format == "markdown", cancel_event)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _cancel(cancel_event)
+        os.replace(temporary, destination)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return str(destination)
+
+
+def export_transcript(store, session_id, path, *, style="full_text", revision=None,
+                      cancel_event=None):
+    """Export the complete selected revision in the chosen presentation format."""
+    from meeting_text import iter_transcript_text
+
+    _cancel(cancel_event)
+    if style not in {"full_text", "timestamped"}:
+        raise ValueError("Escolha texto completo ou texto com horários.")
+    destination = Path(path).absolute()
+    if not destination.parent.is_dir() or destination.is_dir():
+        raise ValueError("Escolha um arquivo em uma pasta existente para exportar.")
+    library = os.path.realpath(store.root)
+    try:
+        inside_library = os.path.commonpath((library, os.path.realpath(destination))) == library
+    except ValueError:
+        inside_library = False
+    if inside_library:
+        raise ValueError("Escolha uma pasta fora da biblioteca para preservar os arquivos originais.")
+    paragraphs = iter_transcript_text(store.get_transcript(session_id, revision), style)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            first = True
+            for paragraph in paragraphs:
+                _cancel(cancel_event)
+                if not first:
+                    handle.write("\n\n")
+                handle.write(paragraph)
+                first = False
             handle.flush()
             os.fsync(handle.fileno())
         _cancel(cancel_event)
@@ -1019,6 +1107,10 @@ def _final_audio_chunks(metadata, start, cancel_event):
     path = final.get("path") if isinstance(final, dict) else None
     if not isinstance(path, str) or not path or not os.path.isfile(path):
         raise ValueError("O áudio final não está disponível para reprodução.")
+    suffix = os.path.splitext(path)[1].casefold()
+    if suffix == ".mp3":
+        yield from _pyav_final_audio_chunks(path, float(start), cancel_event)
+        return
     try:
         with wave.open(path, "rb") as reader:
             rate, channels, width = reader.getframerate(), reader.getnchannels(), reader.getsampwidth()
@@ -1032,6 +1124,108 @@ def _final_audio_chunks(metadata, start, cancel_event):
                 yield rate, channels, _pcm_float(raw, width)
     except (OSError, wave.Error) as exc:
         raise ValueError("Não foi possível ler o arquivo de áudio final.") from exc
+
+
+def _pyav_final_audio_chunks(path, start, cancel_event):
+    """Decode bounded final MP3 frames, seeking before decoding the target."""
+    try:
+        import av
+    except ImportError as error:
+        raise RuntimeError(
+            "A reprodução de MP3 exige o decodificador de áudio incluído na instalação completa do SnipVoice."
+        ) from error
+    try:
+        with av.open(str(path), mode="r") as container:
+            stream = container.streams.best("audio")
+            if stream is None:
+                raise ValueError("O arquivo MP3 não contém uma faixa de áudio compatível.")
+            target = max(0.0, float(start))
+            time_base = getattr(stream, "time_base", None)
+            time_scale = float(time_base) if time_base else None
+            stream_start = getattr(stream, "start_time", None)
+            origin = (float(stream_start) * time_scale
+                      if stream_start is not None and time_scale else 0.0)
+            stream_duration = getattr(stream, "duration", None)
+            if (stream_duration is not None and time_scale
+                    and target >= max(0.0, float(stream_duration) * time_scale)):
+                return
+            _cancel(cancel_event)
+            seek_target = max(0.0, target - MP3_SEEK_PREROLL_SECONDS)
+            did_seek = seek_target > 0
+            if did_seek:
+                offset = (int(stream_start or 0) + int(seek_target / time_scale)
+                          if time_scale else int(seek_target * 1_000_000))
+                container.seek(offset, stream=stream, backward=True)
+
+            resampler = None
+            rate = channels = None
+            timeline_known = not did_seek
+            source_seen = False
+            sample_cursor = seek_target if did_seek else 0.0
+
+            def frames_from(source_frame):
+                nonlocal resampler, rate, channels, timeline_known, source_seen, sample_cursor
+                _cancel(cancel_event)
+                if source_frame is not None:
+                    source_seen = True
+                    if resampler is None:
+                        rate = source_frame.sample_rate
+                        channels = source_frame.layout.nb_channels
+                        if channels not in (1, 2) or not isinstance(rate, int) or not 8000 <= rate <= 48000:
+                            raise ValueError("O MP3 final deve usar áudio de 8–48 kHz e 1–2 canais.")
+                        resampler = av.AudioResampler(
+                            format="flt", layout=source_frame.layout.name, rate=rate,
+                            frame_size=PLAY_FRAMES,
+                        )
+                    decoded = resampler.resample(source_frame)
+                else:
+                    decoded = resampler.resample(None)
+                for frame in decoded:
+                    _cancel(cancel_event)
+                    if frame.samples > PLAY_FRAMES:
+                        raise ValueError("O decodificador retornou um bloco MP3 grande demais.")
+                    payload = _packed_float_frame(frame, rate, channels)
+                    frame_time = getattr(frame, "time", None)
+                    if frame_time is None:
+                        pts = getattr(frame, "pts", None)
+                        frame_base = getattr(frame, "time_base", None)
+                        if pts is not None and frame_base is not None:
+                            frame_time = float(pts * frame_base)
+                    if frame_time is None:
+                        if not timeline_known:
+                            raise ValueError("O decodificador MP3 não informou timestamps para uma busca precisa.")
+                        frame_time = sample_cursor
+                    else:
+                        frame_time = float(frame_time) - origin
+                        timeline_known = True
+                    frame_end = frame_time + frame.samples / rate
+                    sample_cursor = max(sample_cursor, frame_end)
+                    if frame_end <= target:
+                        continue
+                    if frame_time < target:
+                        skip = min(frame.samples, max(0, int(math.ceil((target - frame_time) * rate - 1e-9))))
+                        payload = payload[skip * channels * 4:]
+                        if not payload:
+                            continue
+                    yield rate, channels, payload
+
+            for source_frame in container.decode(stream):
+                yield from frames_from(source_frame)
+            if not source_seen and target <= 0:
+                raise ValueError("O arquivo MP3 não contém áudio decodificável.")
+            if resampler is not None:
+                yield from frames_from(None)
+    except Exception as error:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError(
+                "A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."
+            ) from error
+        ffmpeg_error = getattr(av, "FFmpegError", ())
+        if isinstance(error, ffmpeg_error):
+            raise ValueError("Não foi possível decodificar o MP3 final.") from error
+        if isinstance(error, (OSError, ValueError, RuntimeError)):
+            raise
+        raise ValueError("Não foi possível decodificar o MP3 final.") from error
 
 
 def play_audio(store, session_id, track, start, cancel_event):

@@ -105,6 +105,9 @@ jobs:
           $pythonDirectory = Split-Path -Parent $python
           $env:PATH = "$pythonDirectory;$env:SystemRoot\System32;$env:SystemRoot"
           & $python -c "from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime; verify_clean_ffmpeg_runtime()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build application and installer
         shell: cmd
@@ -210,6 +213,7 @@ jobs:
           test "${#wheel[@]}" -eq 1
           python -m pip install --no-index "${wheel[0]}"
           DYLD_LIBRARY_PATH= PYTHONPATH=source python -c "from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime; verify_clean_ffmpeg_runtime()"
+          DYLD_LIBRARY_PATH= PYTHONPATH=source python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests -v
 
       - name: Build application bundle
         env:
