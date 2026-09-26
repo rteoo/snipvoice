@@ -1086,8 +1086,15 @@ class MeetingWindow:
                 sources, text=label, variable=variable, command=self._source_toggled,
                 font=self.ui.font(9, "bold"), **self.ui.checkbutton_colors(self.ui.card),
             )
-            line = row * 3
-            control.grid(row=line, column=0, sticky="w", padx=(0, self.ui.space_lg))
+            # Stacked: the device list spans the whole card. On Aqua the popup is
+            # as wide as the combobox, so a column beside the checkbox would clip
+            # long endpoint names in the half-width setup column.
+            line = row * 4
+            control.grid(row=line, column=0, sticky="w")
+            self._label(
+                sources, tr("Sua voz") if track == "microphone" else tr("Sons dos aplicativos"),
+                bg=self.ui.card, fg=self.ui.text_muted, anchor="w", font=self.ui.font(8),
+            ).grid(row=line, column=1, sticky="w", padx=(self.ui.space_sm, 0))
             combo = ttk.Combobox(
                 sources, textvariable=self.endpoint_vars[track], state="readonly",
                 style=f"{track}.Device.TCombobox", font=self.ui.font(10), width=24, height=8,
@@ -1096,30 +1103,25 @@ class MeetingWindow:
             combo.configure(postcommand=lambda box=combo: ui_theme.configure_combobox_popdown(
                 box, self.ui, fit_values=True,
             ))
-            combo.grid(row=line, column=1, sticky="ew", pady=(2, 0))
+            combo.grid(row=line + 1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
             combo.bind("<<ComboboxSelected>>", self._source_selection_changed)
-            self._label(
-                sources, tr("Sua voz") if track == "microphone" else tr("Sons dos aplicativos"),
-                bg=self.ui.card, fg=self.ui.text_muted, anchor="w", font=self.ui.font(8),
-            ).grid(row=line + 1, column=0, sticky="nw", padx=(4, self.ui.space_lg),
-                   pady=(2 if compact_recording else 4, 0))
             hint = self._wrap_label(
                 sources, "", bg=self.ui.card, fg=self.ui.text_muted, anchor="w",
                 justify="left", font=self.ui.font(8),
             )
-            hint.grid(row=line + 1, column=1, sticky="ew",
+            hint.grid(row=line + 2, column=0, columnspan=2, sticky="ew",
                       pady=(2 if compact_recording else 4, recording_gap))
             self.endpoint_hints[track] = hint
             if row == 0:
                 tk.Frame(sources, bg=self.ui.divider, height=1).grid(
-                    row=line + 2, column=0, columnspan=2, sticky="ew", pady=(0, recording_gap),
+                    row=line + 3, column=0, columnspan=2, sticky="ew", pady=(0, recording_gap),
                 )
             self.source_checks[track] = control
             self.endpoint_boxes[track] = combo
         self.device_refresh_button = self._button(sources, tr("Atualizar dispositivos"), self.refresh_devices)
-        self.device_refresh_button.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.device_refresh_button.grid(row=8, column=0, sticky="w", pady=(4, 0))
         self.preview_button = self._button(sources, tr("Testar fontes"), self.preview_sources)
-        self.preview_button.grid(row=6, column=1, sticky="e", pady=(4, 0))
+        self.preview_button.grid(row=8, column=1, sticky="e", pady=(4, 0))
         self.waveform = MeetingWaveform(
             monitor, theme=self.ui, height=96 if compact_recording else 140,
             track_labels={"microphone": N_("Microfone"), "system": N_("Áudio do sistema")},
