@@ -279,11 +279,13 @@ class Theme:
         """``(geometry, min_width, min_height)`` for the manager window.
 
         macOS needs a wider default because Aqua's native buttons and controls
-        have larger minimum metrics than their Win32 counterparts.
+        have larger minimum metrics than their Win32 counterparts. The minimum
+        width includes the navigation sidebar, which trades horizontal room
+        for the height a header and tab strip used to take.
         """
         if self.system == "darwin":
-            return ("1160x840", 980, 700)
-        return ("1120x820", 920, 700)
+            return ("1160x840", 1100, 700)
+        return ("1120x820", 1040, 700)
 
     @property
     def stacked_toolbar_status(self):
@@ -656,6 +658,18 @@ def configure_manager_styles(style, resolved=None):
         padding=[("selected", (18, 10))],
         expand=[("selected", (0, 0, 0, 0))],
     )
+    # Page container for a shell that navigates from its own sidebar: the
+    # same frame, with the tab strip removed so it costs no vertical space.
+    style.configure(
+        "Pages.TNotebook",
+        background=ui.surface,
+        borderwidth=0,
+        tabmargins=(0, 0, 0, 0),
+        bordercolor=ui.surface,
+        lightcolor=ui.surface,
+        darkcolor=ui.surface,
+    )
+    style.layout("Pages.TNotebook.Tab", [])
     style.configure(
         "Horizontal.TProgressbar",
         troughcolor=ui.field,

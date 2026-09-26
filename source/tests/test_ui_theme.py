@@ -311,7 +311,7 @@ class WidgetOptionTests(unittest.TestCase):
     def test_windows_keeps_its_button_widths_and_window_size(self):
         theme = ui_theme.build_theme("windows", system="windows")
         self.assertEqual(theme.button_width(12), 12)
-        self.assertEqual(theme.manager_window_size, ("1120x820", 920, 700))
+        self.assertEqual(theme.manager_window_size, ("1120x820", 1040, 700))
         self.assertFalse(theme.stacked_toolbar_status)
 
     def test_fluent_spacing_and_tree_density_are_stable(self):
@@ -562,12 +562,16 @@ class TtkThemeSelectionTests(unittest.TestCase):
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, name, **options):
                 self.configured[name] = options
 
             def map(self, name, **options):
                 self.mapped[name] = options
+
+            def layout(self, name, layout):
+                self.layouts[name] = layout
 
         style = Recorder()
         theme = ui_theme.build_theme("windows", system="windows")
@@ -587,18 +591,24 @@ class TtkThemeSelectionTests(unittest.TestCase):
             style.mapped["Manager.Treeview"]["background"],
             [("selected", theme.select_bg)],
         )
+        # The sidebar shell's page container draws no tab strip.
+        self.assertEqual(style.layouts["Pages.TNotebook.Tab"], [])
 
     def test_device_combobox_style_has_roomy_font_and_focus_states(self):
         class Recorder:
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, name, **options):
                 self.configured[name] = options
 
             def map(self, name, **options):
                 self.mapped[name] = options
+
+            def layout(self, name, layout):
+                self.layouts[name] = layout
 
         style = Recorder()
         theme = ui_theme.build_theme("dark", system="windows")
@@ -668,12 +678,16 @@ class TtkThemeSelectionTests(unittest.TestCase):
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, name, **options):
                 self.configured[name] = options
 
             def map(self, name, **options):
                 self.mapped[name] = options
+
+            def layout(self, name, layout):
+                self.layouts[name] = layout
 
         style = Recorder()
         theme = ui_theme.build_theme("dark", system="windows")

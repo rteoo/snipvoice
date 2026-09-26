@@ -360,52 +360,52 @@ class Snipvoice:
         ui_theme.configure_manager_styles(style, ui)
         ui_theme.apply_window_chrome(window, ui)
 
-        header = tk.Frame(window, bg=ui.surface, padx=ui.space_xl, pady=ui.space_md)
-        header.pack(fill=tk.X)
-        identity = tk.Frame(header, bg=ui.surface)
-        identity.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # Identity, navigation, and the privacy promise share a left sidebar
+        # so every page gets the window's full height; the notebook below is
+        # only the page container and draws no tab strip.
+        sidebar = tk.Frame(window, bg=ui.surface_alt, padx=ui.space_md, pady=ui.space_lg)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(window, bg=ui.divider, width=1).pack(side=tk.LEFT, fill=tk.Y)
         tk.Label(
-            identity,
+            sidebar,
             text=APP_DISPLAY_NAME,
             font=ui.font(12, "bold"),
-            bg=ui.surface,
+            bg=ui.surface_alt,
             fg=ui.text_strong,
-        ).pack(anchor="w")
+            anchor="w",
+        ).pack(fill=tk.X, padx=(ui.space_sm, 0))
         tk.Label(
-            identity,
+            sidebar,
             text=tr("Gravações e ditado"),
             font=ui.font(9),
-            bg=ui.surface,
+            bg=ui.surface_alt,
             fg=ui.text_muted,
-        ).pack(anchor="w", pady=(2, 0))
-        privacy = tk.Frame(
-            header, bg=ui.surface,
-        )
-        privacy.pack(side=tk.RIGHT, padx=(ui.space_lg, 0), anchor="center")
+            anchor="w",
+        ).pack(fill=tk.X, padx=(ui.space_sm, 0), pady=(2, ui.space_lg))
+        nav = tk.Frame(sidebar, bg=ui.surface_alt)
+        nav.pack(fill=tk.X)
+        privacy = tk.Frame(sidebar, bg=ui.surface_alt)
+        privacy.pack(side=tk.BOTTOM, fill=tk.X, padx=(ui.space_sm, 0))
         tk.Label(
             privacy,
             text=tr("100% local"),
             font=ui.font(8, "bold"),
-            bg=ui.surface,
+            bg=ui.surface_alt,
             fg=ui.success,
-        ).pack(anchor="e")
+            anchor="w",
+        ).pack(fill=tk.X)
         tk.Label(
             privacy,
             text=tr("sem upload automático"),
             font=ui.font(8),
-            bg=ui.surface,
+            bg=ui.surface_alt,
             fg=ui.text_muted,
-        ).pack(anchor="e", pady=(1, 0))
-        tk.Frame(window, bg=ui.divider, height=1).pack(fill=tk.X)
+            anchor="w",
+        ).pack(fill=tk.X, pady=(1, 0))
 
-        notebook = ttk.Notebook(window, style="Manager.TNotebook")
+        notebook = ttk.Notebook(window, style="Pages.TNotebook")
         self._manager_notebook = notebook
-        notebook.pack(
-            fill=tk.BOTH,
-            expand=True,
-            padx=ui.space_xl,
-            pady=(0, ui.space_lg),
-        )
+        notebook.pack(fill=tk.BOTH, expand=True)
         from meeting_gui import add_meeting_tabs
         meeting_view = add_meeting_tabs(
             root, window, notebook, self.meetings,
@@ -463,6 +463,7 @@ class Snipvoice:
                 window,
                 models_parent=getattr(meeting_view, "transcription_models_parent", None),
             )
+        self._build_manager_nav(ui, nav, notebook)
         notebook.select(meeting_view.recording_tab)
         # Keep the four destinations available from the keyboard while focus
         # remains inside a recording, search, or settings control.
@@ -484,6 +485,41 @@ class Snipvoice:
         x = max(0, (screen_width - window_width) // 2)
         y = max(0, (screen_height - window_height) // 2)
         window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+    @staticmethod
+    def _build_manager_nav(ui, nav, notebook):
+        """One sidebar button per notebook page, in tab order, tracking selection."""
+        bg = nav.cget("background")
+        items = {}
+        for tab_id in notebook.tabs():
+            item = tk.Frame(nav, bg=bg)
+            item.pack(fill=tk.X, pady=1)
+            marker = tk.Frame(item, bg=bg, width=3)
+            marker.pack(side=tk.LEFT, fill=tk.Y)
+            chrome = ui.button_chrome(compact=True)
+            if chrome:
+                # Keep the keyboard focus ring, but no idle border around each item.
+                chrome["highlightbackground"] = bg
+            button = tk.Button(
+                item, text=notebook.tab(tab_id, "text"), font=ui.font(10), anchor="w",
+                command=lambda target=tab_id: notebook.select(target),
+                **ui.nav_button_colors(bg), **chrome,
+            )
+            button.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            items[str(tab_id)] = (button, marker)
+
+        def highlight(_event=None):
+            current = str(notebook.select())
+            for tab_id, (button, marker) in items.items():
+                selected = tab_id == current
+                button.configure(
+                    font=ui.font(10, "bold" if selected else None),
+                    **ui.nav_button_colors(bg, selected=selected),
+                )
+                marker.configure(bg=ui.accent if selected else bg)
+
+        notebook.bind("<<NotebookTabChanged>>", highlight, add="+")
+        highlight()
 
     def _reopen_manager_for_appearance(self, root, preference):
         """Rebuild the manager after a persisted appearance change.
@@ -1557,23 +1593,6 @@ class Snipvoice:
         ui = ui_theme.theme()
         main = tk.Frame(parent, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         main.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(
-            main,
-            text=tr("Entrada por voz"),
-            font=ui.font(16, "bold"),
-            bg=ui.surface,
-            fg=ui.text_strong,
-        ).pack(anchor="w")
-        tk.Label(
-            main,
-            text=tr("Ative a entrada por voz e escolha o modelo, o idioma e os atalhos."),
-            font=ui.font(9),
-            bg=ui.surface,
-            fg=ui.text_muted,
-            wraplength=640,
-            justify="left",
-        ).pack(anchor="w", pady=(ui.space_xs, ui.space_lg))
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
         status_text = (

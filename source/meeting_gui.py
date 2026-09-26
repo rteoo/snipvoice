@@ -726,17 +726,6 @@ class MeetingWindow:
         return tk.Entry(parent, textvariable=variable, width=width, font=self.ui.font(),
                         **self.ui.entry_colors(), **self.ui.entry_chrome())
 
-    def _page_header(self, parent, title, description):
-        header = tk.Frame(parent, bg=self.ui.surface)
-        header.pack(fill="x", padx=self.ui.space_lg, pady=(self.ui.space_lg, self.ui.space_sm))
-        self._label(
-            header, title, font=self.ui.font(16, "bold"), fg=self.ui.text_strong,
-        ).pack(anchor="w")
-        self._label(
-            header, description, font=self.ui.font(9), fg=self.ui.text_muted,
-            anchor="w", justify="left", wraplength=940,
-        ).pack(fill="x", pady=(self.ui.space_xs, 0))
-
     def _card(self, parent, **kwargs):
         kwargs.setdefault("padx", self.ui.space_lg)
         kwargs.setdefault("pady", self.ui.space_md)
@@ -775,6 +764,54 @@ class MeetingWindow:
             except tk.TclError:
                 pass
         self._mousewheel_bindings = []
+
+    def _scroll_area(self, parent, *, fill_height=False, on_resize=None):
+        """A vertically scrollable region whose scrollbar shows only on overflow.
+
+        Returns ``(view, canvas, holder, content)``: grid or pack ``view`` and
+        build into ``content``; ``holder`` is the canvas window around it. The
+        scrollbar column keeps its width while hidden so toggling it never
+        re-wraps the content and oscillates. ``fill_height`` stretches the
+        content to the viewport so expanding children (text views, the
+        waveform) take the spare height instead of their fixed request. It is
+        a grid row minimum rather than a fixed window height, because a fixed
+        height stops content growth from reaching the canvas as a resize.
+        """
+        view = ttk.Frame(parent, style="Meeting.TFrame")
+        view.columnconfigure(0, weight=1)
+        view.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(view, background=self.ui.surface, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(view, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        view.columnconfigure(1, minsize=scrollbar.winfo_reqwidth() + self.ui.space_sm)
+        holder = ttk.Frame(canvas, style="Meeting.TFrame")
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        content = ttk.Frame(holder, style="Meeting.TFrame")
+        content.grid(row=0, column=0, sticky="nsew")
+        item = canvas.create_window((0, 0), window=holder, anchor="nw")
+
+        def sync(_event=None):
+            width, height = canvas.winfo_width(), canvas.winfo_height()
+            if fill_height:
+                holder.rowconfigure(0, minsize=height)
+            needed = content.winfo_reqheight()
+            canvas.itemconfigure(item, width=width)
+            canvas.configure(scrollregion=(0, 0, width, max(needed, height)))
+            if needed > height > 1:
+                scrollbar.grid(row=0, column=1, sticky="nse")
+            else:
+                scrollbar.grid_remove()
+                canvas.yview_moveto(0)
+            if on_resize is not None:
+                on_resize(width, height)
+
+        holder.bind("<Configure>", sync, add="+")
+        content.bind("<Configure>", sync, add="+")
+        canvas.bind("<Configure>", sync, add="+")
+        self._bind_mousewheel_region(view, canvas)
+        return view, canvas, holder, content
 
     def _build(self):
         style = ttk.Style(self.window)
@@ -828,21 +865,6 @@ class MeetingWindow:
         notebook.add(self.recording_tab, text=tr("Gravação"))
         notebook.add(self.library_tab, text=tr("Biblioteca"))
         notebook.add(self.settings_tab, text=tr("Configurações"))
-        self._page_header(
-            self.recording_tab,
-            tr("Gravar reunião"),
-            tr("Dê um nome, confira as fontes e comece quando a reunião começar."),
-        )
-        self._page_header(
-            self.library_tab,
-            tr("Biblioteca"),
-            tr("Ouça e revise suas gravações locais."),
-        )
-        self._page_header(
-            self.settings_tab,
-            tr("Configurações"),
-            tr("Ajuste a gravação, a aparência, a privacidade e os modelos locais."),
-        )
         self.status = tk.StringVar(self.window, tr("Carregando configurações…"))
         footer = tk.Frame(self.window, bg=self.ui.surface_alt)
         self.status_footer = footer
@@ -852,68 +874,25 @@ class MeetingWindow:
             footer, "", textvariable=self.status, anchor="w", justify="left",
             bg=self.ui.surface_alt, fg=self.ui.text_muted, font=self.ui.font(8),
         ).pack(fill="x", padx=self.ui.space_xl, pady=self.ui.space_sm)
-        recording_view = ttk.Frame(self.recording_tab, style="Meeting.TFrame")
+        # No per-page headers: the manager's navigation already names the page,
+        # and every row they used came out of the recording, list, or model area.
+        page_pad = self.ui.space_lg
+        recording_view, recording_canvas, _holder, recording = self._scroll_area(
+            self.recording_tab, fill_height=True,
+        )
         recording_view.pack(fill="both", expand=True)
-        recording_canvas = tk.Canvas(
-            recording_view, background=self.ui.surface,
-            highlightthickness=0, borderwidth=0,
-        )
-        recording_scrollbar = ttk.Scrollbar(
-            recording_view, orient="vertical", command=recording_canvas.yview,
-        )
-        recording_canvas.configure(yscrollcommand=recording_scrollbar.set)
-        recording_canvas.pack(side="left", fill="both", expand=True)
-        recording_scrollbar.pack(side="right", fill="y")
-        recording = ttk.Frame(
-            recording_canvas, padding=(16, 0, 16, 16), style="Meeting.TFrame",
-        )
-        recording_window = recording_canvas.create_window(
-            (0, 0), window=recording, anchor="nw",
-        )
-
-        def update_recording_scroll_region(_event=None):
-            recording_canvas.configure(scrollregion=recording_canvas.bbox("all"))
-
-        def stretch_recording_content(event):
-            recording_canvas.itemconfigure(recording_window, width=event.width)
-
-        recording.bind("<Configure>", update_recording_scroll_region)
-        recording_canvas.bind("<Configure>", stretch_recording_content)
-        self._bind_mousewheel_region(recording_view, recording_canvas)
+        recording.configure(padding=page_pad)
         self.recording_canvas = recording_canvas
-        recording.columnconfigure(0, weight=1)
-        library = ttk.Frame(self.library_tab, padding=(16, 0, 16, 16), style="Meeting.TFrame")
+        library = ttk.Frame(self.library_tab, padding=page_pad, style="Meeting.TFrame")
         library.pack(fill="both", expand=True)
         settings_view = ttk.Frame(self.settings_tab, style="Meeting.TFrame")
-        settings_view.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        settings_view.pack(fill="both", expand=True, padx=self.ui.space_lg, pady=self.ui.space_lg)
         settings_view.columnconfigure(1, weight=1)
         settings_view.rowconfigure(0, weight=1)
         settings_nav = tk.Frame(settings_view, bg=self.ui.surface)
         settings_nav.grid(row=0, column=0, sticky="nsw", padx=(0, self.ui.space_lg))
-        settings_canvas = tk.Canvas(
-            settings_view, background=self.ui.surface, highlightthickness=0,
-            borderwidth=0,
-        )
-        settings_scrollbar = ttk.Scrollbar(
-            settings_view, orient="vertical", command=settings_canvas.yview,
-        )
-        settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
-        settings_canvas.grid(row=0, column=1, sticky="nsew")
-        settings_scrollbar.grid(row=0, column=2, sticky="ns", padx=(self.ui.space_sm, 0))
-        settings_content = ttk.Frame(settings_canvas, style="Meeting.TFrame")
-        settings_window = settings_canvas.create_window(
-            (0, 0), window=settings_content, anchor="nw",
-        )
-
-        def update_settings_scroll_region(_event=None):
-            settings_canvas.configure(scrollregion=settings_canvas.bbox("all"))
-
-        def stretch_settings_content(event):
-            settings_canvas.itemconfigure(settings_window, width=event.width)
-
-        settings_content.bind("<Configure>", update_settings_scroll_region)
-        settings_canvas.bind("<Configure>", stretch_settings_content)
-        self._bind_mousewheel_region(settings_view, settings_canvas)
+        settings_scroll, settings_canvas, _holder, settings_content = self._scroll_area(settings_view)
+        settings_scroll.grid(row=0, column=1, sticky="nsew")
         self.settings_canvas = settings_canvas
         self.settings_content = settings_content
         # One section at a time instead of a single page several screens long.
@@ -1068,9 +1047,19 @@ class MeetingWindow:
         commands = tk.Frame(settings_card, bg=self.ui.card)
         commands.grid(row=note_row + 1, column=0, sticky="w")
         self._button(commands, tr("Salvar como padrão"), self.save_settings).pack(side="left")
+        # Setup and transport on the left, the live signal on the right: side
+        # by side the page fits the window instead of scrolling one tall card.
+        recording.columnconfigure(0, weight=1, uniform="recording")
+        recording.columnconfigure(1, weight=1, uniform="recording")
+        recording.rowconfigure(0, weight=1)
         activity = self._card(recording, pady=card_pady)
-        activity.grid(row=0, column=0, sticky="nsew")
+        activity.grid(row=0, column=0, sticky="nsew", padx=(0, self.ui.space_md))
         self.recording_activity = activity
+        monitor = self._card(recording, pady=card_pady)
+        monitor.grid(row=0, column=1, sticky="nsew")
+        monitor.columnconfigure(1, weight=1)
+        monitor.rowconfigure(0, weight=1)
+        self.recording_monitor = monitor
         self._label(
             activity, tr("Gravação"), bg=self.ui.card, fg=self.ui.text_strong,
             font=self.ui.font(11, "bold"),
@@ -1080,7 +1069,6 @@ class MeetingWindow:
         )
         self.recording_options_button.grid(row=0, column=1, sticky="e", pady=(0, self.ui.space_sm))
         activity.columnconfigure(1, weight=1)
-        activity.rowconfigure(4, weight=1)
         self._label(activity, tr("Título da reunião (opcional)"), anchor="w",
                     bg=self.ui.card).grid(row=1, column=0, columnspan=2, sticky="ew")
         self.record_title_entry = self._entry(activity, self.record_title)
@@ -1102,7 +1090,7 @@ class MeetingWindow:
             control.grid(row=line, column=0, sticky="w", padx=(0, self.ui.space_lg))
             combo = ttk.Combobox(
                 sources, textvariable=self.endpoint_vars[track], state="readonly",
-                style=f"{track}.Device.TCombobox", font=self.ui.font(10), width=42, height=8,
+                style=f"{track}.Device.TCombobox", font=self.ui.font(10), width=24, height=8,
                 takefocus=True,
             )
             combo.configure(postcommand=lambda box=combo: ui_theme.configure_combobox_popdown(
@@ -1133,27 +1121,47 @@ class MeetingWindow:
         self.preview_button = self._button(sources, tr("Testar fontes"), self.preview_sources)
         self.preview_button.grid(row=6, column=1, sticky="e", pady=(4, 0))
         self.waveform = MeetingWaveform(
-            activity, theme=self.ui, height=96 if compact_recording else 140,
+            monitor, theme=self.ui, height=96 if compact_recording else 140,
             track_labels={"microphone": N_("Microfone"), "system": N_("Áudio do sistema")},
             state_labels={"idle": N_("Pronto"), "checking": N_("Testando"),
                           "recording": N_("Gravando"), "paused": N_("Pausado")},
         )
-        self.waveform.grid(row=4, column=0, columnspan=2, sticky="nsew",
+        self.waveform.grid(row=0, column=0, columnspan=2, sticky="nsew",
                            pady=(0, recording_gap))
-        transport = tk.Frame(activity, bg=self.ui.card)
-        transport.grid(row=5, column=0, columnspan=2, sticky="w")
+        self.meters = {}
+        meters = (("microphone", tr("Nível do microfone")),
+                  ("system", tr("Nível do sistema")))
+        for row, (track, label) in enumerate(meters, 1):
+            self._label(monitor, label, anchor="w", bg=self.ui.card).grid(
+                row=row, column=0, sticky="w", padx=(0, 18),
+                pady=3 if compact_recording else 6,
+            )
+            meter = ttk.Progressbar(monitor, maximum=1.0)
+            meter.grid(row=row, column=1, sticky="ew")
+            self.meters[track] = meter
+        # Clock and transport sit under the signal they start: check that
+        # both sources move, then press Start without leaving the meters.
+        self.record_status = tk.StringVar(self.window, tr("Pronto") + " · 00:00:00")
+        self._wrap_label(
+            monitor, "", textvariable=self.record_status, justify="center",
+            bg=self.ui.card, fg=self.ui.text_strong, font=self.ui.font(14, "bold"),
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_md, self.ui.space_sm))
+        transport = tk.Frame(monitor, bg=self.ui.card)
+        transport.grid(row=4, column=0, columnspan=2)
         self.start_button = self._button(transport, tr("Iniciar gravação"), self.start, accent=True)
         self.start_button.pack(side="left", padx=(0, 8))
         self.pause_button = self._button(transport, tr("Pausar"), self.pause_resume)
         self.pause_button.pack(side="left", padx=(0, 8))
         self.stop_button = self._button(transport, tr("Parar e preservar"), self.stop)
         self.stop_button.pack(side="left")
-        self.record_status = tk.StringVar(self.window, tr("Pronto") + " · 00:00:00")
-        status_row = tk.Frame(activity, bg=self.ui.card)
-        status_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 4))
-        self._label(status_row, "", textvariable=self.record_status, anchor="w",
-                    wraplength=600, bg=self.ui.card, fg=self.ui.text_muted).pack(
-                        side="left", fill="x", expand=True)
+        self.preview_status = tk.StringVar(
+            self.window, tr("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas."),
+        )
+        status_row = tk.Frame(monitor, bg=self.ui.card)
+        status_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
+        self._wrap_label(status_row, "", textvariable=self.preview_status, anchor="w",
+                         justify="left", bg=self.ui.card, fg=self.ui.text_muted).pack(
+                             side="left", fill="x", expand=True)
         self.record_details = ""
         self.operation_details = ""
         self.record_details_button = self._button(
@@ -1161,24 +1169,6 @@ class MeetingWindow:
         )
         self.record_details_button.configure(state="disabled")
         self.record_details_button.pack(side="right", padx=(self.ui.space_sm, 0))
-        self.meters = {}
-        meters = (("microphone", tr("Nível do microfone")),
-                  ("system", tr("Nível do sistema")))
-        for row, (track, label) in enumerate(meters, 7):
-            self._label(activity, label, anchor="w", bg=self.ui.card).grid(
-                row=row, column=0, sticky="w", padx=(0, 18),
-                pady=3 if compact_recording else 6,
-            )
-            meter = ttk.Progressbar(activity, maximum=1.0)
-            meter.grid(row=row, column=1, sticky="ew")
-            self.meters[track] = meter
-        self.preview_status = tk.StringVar(
-            self.window, tr("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas."),
-        )
-        self._wrap_label(activity, "", textvariable=self.preview_status, anchor="w",
-                         fg=self.ui.text_muted).grid(
-                             row=9, column=0, columnspan=2, sticky="ew", pady=(6, 0),
-                         )
         self._profile_changed()
         self._sync_source_controls()
         self.options.clear()
@@ -1310,24 +1300,6 @@ class MeetingWindow:
         )
 
     def _build_library(self, parent):
-        # One toolbar row; filters and the cross-meeting question open on
-        # demand so the list and the selected recording get the height.
-        toolbar = self._card(parent, pady=self.ui.space_sm)
-        toolbar.pack(fill="x", pady=(0, self.ui.space_sm))
-        self.query = tk.StringVar(self.window)
-        search = self._entry(toolbar, self.query, 12)
-        search.pack(side="left", fill="x", expand=True)
-        search.bind("<Return>", lambda _event: self.search())
-        self._placeholder(search, self.query, tr("Buscar gravações e transcrições"))
-        self._button(toolbar, tr("Buscar"), self.search, accent=True).pack(side="left", padx=(6, 0))
-        self.cross_toggle = self._button(
-            toolbar, tr("Perguntar à biblioteca"), lambda: self._toggle_library_panel("cross"),
-        )
-        self.cross_toggle.pack(side="left", padx=(6, 0))
-        self.tools_toggle = self._button(toolbar, tr("Mais"), lambda: self._toggle_library_panel("tools"))
-        self.tools_toggle.pack(side="right", padx=(6, 0))
-        self._button(toolbar, tr("Importar áudio…"), self.import_audio).pack(side="right", padx=(6, 0))
-
         cross_frame = self._card(parent, pady=self.ui.space_sm)
         question_row = tk.Frame(cross_frame, bg=self.ui.card)
         question_row.pack(fill="x")
@@ -1371,8 +1343,6 @@ class MeetingWindow:
         panes.pack(fill="both", expand=True)
         self.library_panes = panes
         self.library_panels = {"cross": cross_frame, "tools": tools_panel}
-        self.library_panel_toggles = {"cross": self.cross_toggle, "tools": self.tools_toggle}
-        self._refresh_library_toggles()
         left = ttk.Frame(panes, style="Meeting.TFrame")
         right_outer = ttk.Frame(panes, style="Meeting.TFrame")
         panes.add(left, weight=1)
@@ -1383,10 +1353,35 @@ class MeetingWindow:
             # The first layout splits by requested widths, which left the
             # list wider than the recording it opens; start at about a third.
             if event.width > 100 and len(panes.panes()) > 1:
-                panes.sashpos(0, max(260, int(event.width * 0.36)))
+                panes.sashpos(0, max(360, int(event.width * 0.36)))
                 panes.unbind("<Configure>")
 
         panes.bind("<Configure>", place_sash)
+
+        # Search and library actions sit above the list they act on, so the
+        # selected recording gets the pane's full height. The cross-meeting
+        # question and maintenance tools open on demand above both panes.
+        toolbar = self._card(left, pady=self.ui.space_sm, padx=self.ui.space_md)
+        toolbar.pack(fill="x", pady=(0, self.ui.space_sm))
+        search_row = tk.Frame(toolbar, bg=self.ui.card)
+        search_row.pack(fill="x")
+        self.query = tk.StringVar(self.window)
+        search = self._entry(search_row, self.query, 12)
+        search.pack(side="left", fill="x", expand=True)
+        search.bind("<Return>", lambda _event: self.search())
+        self._placeholder(search, self.query, tr("Buscar gravações e transcrições"))
+        self._button(search_row, tr("Buscar"), self.search, accent=True).pack(side="left", padx=(6, 0))
+        action_row = tk.Frame(toolbar, bg=self.ui.card)
+        action_row.pack(fill="x", pady=(self.ui.space_sm, 0))
+        self.cross_toggle = self._button(
+            action_row, tr("Perguntar à biblioteca"), lambda: self._toggle_library_panel("cross"),
+        )
+        self.cross_toggle.pack(side="left")
+        self.tools_toggle = self._button(action_row, tr("Mais"), lambda: self._toggle_library_panel("tools"))
+        self.tools_toggle.pack(side="right", padx=(6, 0))
+        self._button(action_row, tr("Importar áudio…"), self.import_audio).pack(side="right", padx=(6, 0))
+        self.library_panel_toggles = {"cross": self.cross_toggle, "tools": self.tools_toggle}
+        self._refresh_library_toggles()
 
         # Recording list with an empty state drawn over the tree.
         list_frame = tk.Frame(left, bg=self.ui.surface)
@@ -1485,58 +1480,28 @@ class MeetingWindow:
         detail_nav = tk.Frame(self.detail_frame, bg=self.ui.surface)
         detail_nav.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0))
         tk.Frame(self.detail_frame, bg=self.ui.border, height=1).pack(fill="x", padx=(12, 0))
-        detail_body = ttk.Frame(self.detail_frame, style="Meeting.TFrame")
-        detail_body.pack(fill="both", expand=True, pady=(self.ui.space_sm, 0))
-        detail_body.columnconfigure(0, weight=1)
-        detail_body.rowconfigure(0, weight=1)
-        self.detail_canvas = tk.Canvas(
-            detail_body, background=self.ui.surface, highlightthickness=0, borderwidth=0,
-        )
-        self.detail_scrollbar = ttk.Scrollbar(
-            detail_body, orient="vertical", command=self.detail_canvas.yview,
-        )
-        self.detail_canvas.configure(yscrollcommand=self.detail_scrollbar.set)
-        self.detail_canvas.grid(row=0, column=0, sticky="nsew")
-        self.detail_scrollbar.grid(row=0, column=1, sticky="ns", padx=(self.ui.space_sm, 0))
-        right = ttk.Frame(self.detail_canvas, style="Meeting.TFrame")
-        detail_window = self.detail_canvas.create_window((0, 0), window=right, anchor="nw")
-
-        def update_detail_scroll_region(_event=None):
-            self.detail_canvas.configure(scrollregion=self.detail_canvas.bbox("all"))
-
-        def stretch_detail_content(event):
-            self.detail_canvas.itemconfigure(detail_window, width=event.width)
+        def fit_chat(_width, height):
             if hasattr(self, "meeting_chat"):
-                self.meeting_chat.set_height(max(300, event.height - 8))
+                self.meeting_chat.set_height(max(300, height - 8))
 
-        right.bind("<Configure>", update_detail_scroll_region)
-        self.detail_canvas.bind("<Configure>", stretch_detail_content)
-        self.detail_content = right
-        self._bind_mousewheel_region(right, self.detail_canvas)
+        detail_body, self.detail_canvas, self.detail_content, right = self._scroll_area(
+            self.detail_frame, fill_height=True, on_resize=fit_chat,
+        )
+        detail_body.pack(fill="both", expand=True, pady=(self.ui.space_sm, 0))
         self.detail_sections = SectionSwitcher(
             self.ui, detail_nav, right,
             on_select=lambda _key: self.detail_canvas.yview_moveto(0),
         )
         transcript_page = self.detail_sections.add("transcript", tr("Transcrição"))
-        audio_page = self.detail_sections.add("audio", tr("Ouvir"))
         summary_page = self.detail_sections.add("summary", tr("Resumo"))
         ask_page = self.detail_sections.add("ask", "Chat")
         files_page = self.detail_sections.add("files", tr("Arquivos"))
 
-        player = self._card(audio_page, padx=18, pady=18)
-        player.pack(fill="x", padx=(12, 0), pady=(4, 0))
-        self._label(player, tr("Reproduzir gravação"), bg=self.ui.card,
-                    fg=self.ui.text_strong, font=self.ui.font(12, "bold")).pack(anchor="w")
-        self.audio_overview = tk.StringVar(self.window, tr("Selecione uma gravação para ouvir."))
-        self._label(player, "", textvariable=self.audio_overview, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w").pack(fill="x", pady=(2, 14))
-        self._label(player, tr("Fonte de áudio"), bg=self.ui.card, fg=self.ui.text_muted,
-                    anchor="w").pack(fill="x")
-        self.audio_source = tk.StringVar(self.window)
-        self.audio_source_box = ttk.Combobox(player, textvariable=self.audio_source,
-                                             state="disabled", values=(), width=22)
-        self.audio_source_box.pack(anchor="w", pady=(4, 14))
-        self.audio_source_box.bind("<<ComboboxSelected>>", self._player_source_changed)
+        # The player sits above the transcript it plays, so listening and
+        # reading happen on one page: row one drives playback, row two holds
+        # the state and the less frequent source and volume choices.
+        player = self._card(transcript_page, padx=self.ui.space_md, pady=self.ui.space_sm)
+        player.pack(fill="x", padx=(12, 0), pady=(0, self.ui.space_sm))
         player_actions = tk.Frame(player, bg=self.ui.card)
         player_actions.pack(fill="x")
         self.play_button = self._button(player_actions, tr("Reproduzir"), self.play_selected_recording,
@@ -1545,22 +1510,38 @@ class MeetingWindow:
         self.play_button.pack(side="left")
         self.replay_stop_button = self._button(player_actions, tr("Parar"), self.stop_selected_recording)
         self.replay_stop_button.configure(state="disabled")
-        self.replay_stop_button.pack(side="left", padx=(8, 0))
-        self.adjust_audio_button = self._button(player_actions, tr("Ajustar volume"), self.adjust_audio)
-        self.adjust_audio_button.configure(state="disabled")
-        self.adjust_audio_button.pack(side="left", padx=(8, 0))
+        self.replay_stop_button.pack(side="left", padx=(6, 0))
         self.playback_clock = tk.StringVar(self.window, "00:00:00 / 00:00:00")
         self._label(player_actions, "", textvariable=self.playback_clock, bg=self.ui.card,
-                    fg=self.ui.text_muted).pack(side="right")
+                    fg=self.ui.text_muted).pack(side="right", padx=(self.ui.space_sm, 0))
         self.playback_position = tk.DoubleVar(self.window, 0.0)
-        self.playback_seek = ttk.Scale(player, from_=0, to=1, variable=self.playback_position,
+        self.playback_seek = ttk.Scale(player_actions, from_=0, to=1, variable=self.playback_position,
                                        orient="horizontal", style="Playback.Horizontal.TScale")
-        self.playback_seek.pack(fill="x", pady=(16, 5))
+        self.playback_seek.pack(side="left", fill="x", expand=True, padx=(self.ui.space_md, 0))
         self.playback_seek.bind("<ButtonPress-1>", self._player_seek_begin)
         self.playback_seek.bind("<ButtonRelease-1>", self._player_seek_end)
+        player_details = tk.Frame(player, bg=self.ui.card)
+        player_details.pack(fill="x", pady=(self.ui.space_xs, 0))
+        self._label(player_details, tr("Fonte de áudio"), bg=self.ui.card,
+                    fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
+        self.audio_source = tk.StringVar(self.window)
+        self.audio_source_box = ttk.Combobox(player_details, textvariable=self.audio_source,
+                                             state="disabled", values=(), width=16)
+        self.audio_source_box.pack(side="left")
+        self.audio_source_box.bind("<<ComboboxSelected>>", self._player_source_changed)
+        self.adjust_audio_button = self._button(player_details, tr("Ajustar volume"), self.adjust_audio)
+        self.adjust_audio_button.configure(state="disabled")
+        self.adjust_audio_button.pack(side="left", padx=(6, 0))
+        status = tk.Frame(player, bg=self.ui.card)
+        status.pack(fill="x", pady=(self.ui.space_xs, 0))
+        self.audio_overview = tk.StringVar(self.window, tr("Selecione uma gravação para ouvir."))
+        self._label(status, "", textvariable=self.audio_overview, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w", font=self.ui.font(8)).pack(side="left")
         self.playback_status = tk.StringVar(self.window, tr("Pronto para ouvir."))
-        self._label(player, "", textvariable=self.playback_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w").pack(fill="x")
+        self._wrap_label(status, "", textvariable=self.playback_status, bg=self.ui.card,
+                         fg=self.ui.text_muted, anchor="w", justify="left",
+                         font=self.ui.font(8)).pack(side="left", fill="x", expand=True,
+                                                    padx=(self.ui.space_sm, 0))
 
         # Transcript playback keeps its seek position independently of review text.
         self.position = tk.StringVar(self.window, "0")
@@ -1588,15 +1569,17 @@ class MeetingWindow:
         self.transcript_document_frame = ttk.Frame(transcript_page, style="Meeting.TFrame")
         self.transcript_document_frame.pack(fill="both", expand=True, padx=(12, 0))
         self.transcript_document = tk.Text(
-            self.transcript_document_frame, height=14, wrap="word", font=self.ui.font(),
+            self.transcript_document_frame, height=8, wrap="word", font=self.ui.font(),
             padx=self.ui.space_md, pady=self.ui.space_md, spacing3=self.ui.space_sm,
             **self.ui.text_colors(),
         )
-        self.transcript_document.pack(side="left", fill="both", expand=True)
+        # Scrollbar first: pack serves requests in order, and the text's
+        # 80-column request would otherwise squeeze it out of a narrow pane.
         document_scroll = ttk.Scrollbar(
             self.transcript_document_frame, orient="vertical", command=self.transcript_document.yview,
         )
         document_scroll.pack(side="right", fill="y")
+        self.transcript_document.pack(side="left", fill="both", expand=True)
         self.transcript_document.configure(yscrollcommand=document_scroll.set)
         self.transcript_document.configure(state="disabled")
         self.transcript_document.bind("<Control-a>", self._select_transcript_text)
@@ -1708,9 +1691,9 @@ class MeetingWindow:
                                padx=self.ui.space_sm, pady=self.ui.space_sm,
                                spacing3=self.ui.space_sm,
                                **self.ui.text_colors())
-        self.summary.pack(side="left", fill="both", expand=True)
         summary_scroll = ttk.Scrollbar(summary_body, orient="vertical", command=self.summary.yview)
         summary_scroll.pack(side="right", fill="y")
+        self.summary.pack(side="left", fill="both", expand=True)
         self.summary.configure(yscrollcommand=summary_scroll.set)
         self.summary.insert("1.0", tr("O resumo aparecerá aqui após o processamento local."))
         self.summary.configure(state="disabled")

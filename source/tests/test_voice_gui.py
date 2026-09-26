@@ -66,6 +66,13 @@ def _descendants(widget):
         yield from _descendants(child)
 
 
+def _ancestors(widget):
+    parent = widget.master
+    while parent is not None:
+        yield parent
+        parent = parent.master
+
+
 @unittest.skipUnless(TK_AVAILABLE, TK_SKIP_REASON)
 class ManagerGuiSmokeTests(unittest.TestCase):
     def setUp(self):
@@ -480,7 +487,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         title, titles, notebook_style, labels, manager_size = self._on_gui(open_settings)
         self.assertEqual(title, "Ditado")
-        self.assertEqual(notebook_style, "Manager.TNotebook")
+        self.assertEqual(notebook_style, "Pages.TNotebook")
         self.assertGreaterEqual(manager_size[0], 900)
         self.assertGreaterEqual(manager_size[1], 700)
         self.assertLessEqual(manager_size[0], 1120)
@@ -758,26 +765,57 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         controls_bottom, visible_bottom = self._on_gui(measure)
         self.assertLessEqual(controls_bottom, visible_bottom)
 
-    def test_recording_controls_remain_reachable_at_minimum_height(self):
+    def test_recording_page_fits_without_scrolling_at_minimum_size(self):
         def measure(shared_root):
             self.app._show_manager_window(shared_root)
             manager = self.app.manager_window
-            manager.geometry("920x700")
+            _geometry, min_width, min_height = ui_theme.theme().manager_window_size
+            manager.geometry(f"{min_width}x{min_height}")
             manager.update()
             view = self.app._manager_meeting_view
             canvas = view.recording_canvas
-            initial_end = canvas.yview()[1]
-            canvas.yview_moveto(1)
-            manager.update()
-            meter_bottom = max(
-                meter.winfo_rooty() + meter.winfo_height()
-                for meter in view.meters.values()
-            )
-            return initial_end, meter_bottom, canvas.winfo_rooty() + canvas.winfo_height()
+            canvas_box = (canvas.winfo_rootx(), canvas.winfo_rooty(),
+                          canvas.winfo_rootx() + canvas.winfo_width(),
+                          canvas.winfo_rooty() + canvas.winfo_height())
+            controls = [*view.meters.values(), view.start_button, view.stop_button,
+                        view.record_details_button, view.preview_button]
+            boxes = [(widget.winfo_rootx(), widget.winfo_rooty(),
+                      widget.winfo_rootx() + widget.winfo_width(),
+                      widget.winfo_rooty() + widget.winfo_height()) for widget in controls]
+            return canvas.yview(), canvas_box, boxes
 
-        initial_end, meter_bottom, canvas_bottom = self._on_gui(measure)
-        self.assertLess(initial_end, 1)
-        self.assertLessEqual(meter_bottom, canvas_bottom)
+        view_range, canvas_box, boxes = self._on_gui(measure)
+        self.assertEqual(view_range, (0.0, 1.0))
+        for left, top, right, bottom in boxes:
+            self.assertGreaterEqual(left, canvas_box[0])
+            self.assertGreaterEqual(top, canvas_box[1])
+            self.assertLessEqual(right, canvas_box[2])
+            self.assertLessEqual(bottom, canvas_box[3])
+
+    def test_sidebar_navigates_pages_in_tab_order(self):
+        def navigate(shared_root):
+            self.app._show_manager_window(shared_root)
+            window = self.app.manager_window
+            notebook = self.app._manager_notebook
+            window.update()
+            buttons = [
+                widget for widget in _descendants(window)
+                if isinstance(widget, tk.Button)
+                and widget.cget("text") in {"Gravação", "Biblioteca", "Ditado", "Configurações"}
+                and notebook not in _ancestors(widget)
+            ]
+            labels = [button.cget("text") for button in buttons]
+            library = buttons[labels.index("Biblioteca")]
+            library.invoke()
+            window.update()
+            return (labels, notebook.tab(notebook.select(), "text"),
+                    str(library.cget("font")), str(buttons[0].cget("font")))
+
+        labels, selected, library_font, recording_font = self._on_gui(navigate)
+        self.assertEqual(labels, ["Gravação", "Biblioteca", "Ditado", "Configurações"])
+        self.assertEqual(selected, "Biblioteca")
+        self.assertIn("bold", library_font)
+        self.assertNotIn("bold", recording_font)
 
     def test_ditado_tab_is_last_and_recording_is_default_when_voice_is_unavailable(self):
         self.app.voice = None
