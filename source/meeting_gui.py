@@ -1855,10 +1855,8 @@ class MeetingWindow:
         self.qa_mode = tk.StringVar(self.window, "explicit_save")
         self.whole_meeting_policy = tk.StringVar(self.window, "keep")
         self.whole_meeting_after_days = tk.StringVar(self.window, "")
-        self.raw_audio_policy = tk.StringVar(self.window, "keep")
-        self.raw_audio_after_days = tk.StringVar(self.window, "")
-        self.raw_audio_microphone = tk.BooleanVar(self.window, False)
-        self.raw_audio_system = tk.BooleanVar(self.window, False)
+        self.raw_audio_auto = tk.BooleanVar(self.window, False)
+        self.raw_audio_after_days = tk.StringVar(self.window, "30")
         self.trash_days = tk.StringVar(self.window, "30")
 
         row = 2
@@ -1908,32 +1906,24 @@ class MeetingWindow:
                     fg=self.ui.text_muted, anchor="w").grid(row=row, column=2, sticky="w",
                     padx=(self.ui.space_sm, 0), pady=2)
         row += 1
-        self._label(card, tr("Política de áudio raw"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
+        raw_row = tk.Frame(card, bg=self.ui.card)
+        raw_row.grid(row=row, column=0, columnspan=3, sticky="w", pady=(self.ui.space_sm, 2))
+        self.raw_audio_auto_check = tk.Checkbutton(
+            raw_row, text=tr("Remover as faixas originais automaticamente após"),
+            variable=self.raw_audio_auto, command=self._sync_raw_policy_controls,
+            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
         )
-        self.raw_audio_policy_box = ttk.Combobox(
-            card, textvariable=self.raw_audio_policy,
-            values=("keep", "raw_tracks"), state="readonly", width=18,
-        )
-        self.raw_audio_policy_box.grid(row=row, column=1, sticky="w", pady=2)
-        self.raw_audio_policy_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_raw_policy_controls())
+        self.raw_audio_auto_check.pack(side="left")
+        self.raw_audio_days_entry = self._entry(raw_row, self.raw_audio_after_days, 5)
+        self.raw_audio_days_entry.pack(side="left", padx=(self.ui.space_xs, self.ui.space_xs))
+        self._label(raw_row, tr("dias"), bg=self.ui.card).pack(side="left")
         row += 1
-        self._label(card, tr("Dias até remover áudio raw"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
-        )
-        self._entry(card, self.raw_audio_after_days, 12).grid(row=row, column=1, sticky="w", pady=2)
-        raw_tracks = tk.Frame(card, bg=self.ui.card)
-        raw_tracks.grid(row=row, column=2, sticky="w", padx=(self.ui.space_sm, 0), pady=2)
-        self.raw_audio_microphone_check = tk.Checkbutton(
-            raw_tracks, text=tr("Microfone"), variable=self.raw_audio_microphone,
-            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
-        )
-        self.raw_audio_microphone_check.pack(side="left")
-        self.raw_audio_system_check = tk.Checkbutton(
-            raw_tracks, text=tr("Sistema"), variable=self.raw_audio_system,
-            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
-        )
-        self.raw_audio_system_check.pack(side="left", padx=(self.ui.space_sm, 0))
+        self._wrap_label(
+            card,
+            tr("Só em gravações com áudio final salvo e transcrição concluída. Libera a maior parte do "
+               "espaço, mas essas gravações não poderão ser transcritas novamente."),
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
+        ).grid(row=row, column=0, columnspan=3, sticky="ew", padx=(24, 0), pady=(0, self.ui.space_sm))
         row += 1
         self._label(card, tr("Prazo da lixeira (dias)"), bg=self.ui.card, anchor="w").grid(
             row=row, column=0, sticky="w", pady=2,
@@ -2217,13 +2207,9 @@ class MeetingWindow:
             self.window.after_idle(lambda: self.on_appearance_changed(preference))
 
     def _sync_raw_policy_controls(self):
-        enabled = self.raw_audio_policy.get() == "raw_tracks"
-        for widget in (
-            getattr(self, "raw_audio_microphone_check", None),
-            getattr(self, "raw_audio_system_check", None),
-        ):
-            if widget is not None:
-                widget.configure(state="normal" if enabled else "disabled")
+        entry = getattr(self, "raw_audio_days_entry", None)
+        if entry is not None:
+            entry.configure(state="normal" if self.raw_audio_auto.get() else "disabled")
 
     @staticmethod
     def _policy_days(value, *, field):
@@ -2278,12 +2264,9 @@ class MeetingWindow:
         raw_mode = raw.get("mode")
         if raw_mode is None and raw.get("after_days") is not None:
             raw_mode = "raw_tracks"
-        self.raw_audio_policy.set(str(raw_mode or "keep"))
-        self.raw_audio_after_days.set(
-            "" if raw.get("after_days") is None else str(raw.get("after_days")))
-        tracks = set(raw.get("tracks", ()) if isinstance(raw.get("tracks", ()), (list, tuple)) else ())
-        self.raw_audio_microphone.set("microphone" in tracks)
-        self.raw_audio_system.set("system" in tracks)
+        days = raw.get("after_days")
+        self.raw_audio_auto.set(raw_mode == "raw_tracks" and days is not None)
+        self.raw_audio_after_days.set("30" if days is None else f"{float(days):g}")
         self.trash_days.set(str(self.retention_defaults.get("trash_days", 30)))
         self._sync_raw_policy_controls()
         self._sync_qa_controls()
@@ -2306,7 +2289,10 @@ class MeetingWindow:
             return
         try:
             whole_days = self._policy_days(self.whole_meeting_after_days.get(), field=tr("Reunião"))
-            raw_days = self._policy_days(self.raw_audio_after_days.get(), field=tr("Áudio raw"))
+            raw_auto = bool(self.raw_audio_auto.get())
+            raw_days = self._policy_days(self.raw_audio_after_days.get(), field=tr("Faixas originais"))
+            if raw_auto and not raw_days:
+                raise ValueError(tr("Informe após quantos dias remover as faixas originais."))
             trash = self._policy_days(self.trash_days.get(), field=tr("Lixeira"))
             if trash is None:
                 trash = 30.0
@@ -2316,14 +2302,6 @@ class MeetingWindow:
             whole_mode = self.whole_meeting_policy.get().strip()
             if whole_mode not in {"keep", "whole_meeting"}:
                 raise ValueError(tr("Escolha uma política de reunião válida."))
-            raw_mode = self.raw_audio_policy.get().strip()
-            if raw_mode not in {"keep", "raw_tracks"}:
-                raise ValueError(tr("Escolha uma política de áudio raw válida."))
-            tracks = []
-            if self.raw_audio_microphone.get():
-                tracks.append("microphone")
-            if self.raw_audio_system.get():
-                tracks.append("system")
             privacy = copy.deepcopy(self.privacy_defaults)
             notice = privacy.setdefault("recording_notice", {})
             if not isinstance(notice, dict):
@@ -2345,8 +2323,9 @@ class MeetingWindow:
             raw = copy.deepcopy(retention.get("raw_audio", {}))
             if not isinstance(raw, dict):
                 raw = {}
-            raw["mode"] = raw_mode
-            raw["tracks"] = tracks
+            # Automatic removal always takes every original track together.
+            raw["mode"] = "raw_tracks" if raw_auto else "keep"
+            raw["tracks"] = []
             if raw_days is None:
                 raw.pop("after_days", None)
             else:
@@ -4616,7 +4595,8 @@ class MeetingWindow:
 
         if not self._submit(
             "raw_retention_plan",
-            lambda: self.controller.plan_raw_tracks(session_id, tracks=selected_tracks),
+            lambda: self.controller.plan_raw_tracks(
+                session_id, tracks=selected_tracks, policy={"mode": "raw_tracks", "after_days": 0}),
             loaded,
         ):
             self.raw_remove_button.configure(state="normal")
