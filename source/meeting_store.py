@@ -336,6 +336,23 @@ class MeetingStore:
 
     # -- Bounded readers and transcripts ---------------------------------
 
+    def raw_track_bytes(self, session_id, track):
+        """Bytes one raw source keeps on disk, or None when its folder is gone."""
+        if track not in _TRACKS:
+            raise ValueError(tr("A fonte de áudio é inválida."))
+        root = os.path.join(self._session_dir(session_id), track)
+        if not os.path.isdir(root):
+            return None
+        total = 0
+        # ceiling: walks every segment file; cache per session if listing gets slow.
+        for folder, _dirs, files in os.walk(root):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(folder, name))
+                except OSError:
+                    continue
+        return total
+
     def iter_audio(self, session_id, track=None, start=0.0):
         if track is not None and track not in _TRACKS:
             raise ValueError(tr("A fonte de áudio é inválida."))

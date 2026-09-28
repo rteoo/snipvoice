@@ -1594,6 +1594,11 @@ class MeetingWindow:
         self.transcribe_button = self._button(actions, tr("Transcrever novamente"), self.transcribe)
         self.transcribe_button.pack(side="left", padx=(0, 6))
         self._button(actions, tr("Cancelar processamento"), lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
+        # Says why Transcrever novamente is disabled once the raw tracks are gone.
+        self.retranscribe_hint = tk.StringVar(self.window, "")
+        self._wrap_label(actions, "", textvariable=self.retranscribe_hint, anchor="w", justify="left",
+                         fg=self.ui.text_muted, font=self.ui.font(8)).pack(
+                             side="left", fill="x", expand=True, padx=(self.ui.space_sm, 0))
         self.transcript_timing = tk.StringVar(
             self.window, tr("Dois cliques ou Enter para ouvir; horários marcam blocos de áudio, não palavras."),
         )
@@ -1779,40 +1784,56 @@ class MeetingWindow:
         self.ask_status = self.meeting_chat.status
         self._render_chat()
 
-        # Arquivos: exports and raw-audio storage.
-        self._label(files_page, tr("Exportar"), anchor="w", fg=self.ui.text_strong,
+        # Arquivos: text exports, the final audio, the raw tracks it was mixed
+        # from, and deletion last. Once the raw tracks are removed the final
+        # audio is the recording's only audio, so this page says so plainly.
+        self._label(files_page, tr("Exportar texto"), anchor="w", fg=self.ui.text_strong,
                     font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(0, 4))
         exports = ttk.Frame(files_page, style="Meeting.TFrame")
-        exports.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        exports.pack(fill="x", padx=(12, 0), pady=(0, self.ui.space_md))
         self._button(exports, "Markdown…", lambda: self.export("markdown")).pack(side="left", padx=(0, 6))
-        self._button(exports, tr("Texto…"), lambda: self.export("text")).pack(side="left", padx=(0, 6))
-        self.export_audio_button = self._button(exports, tr("Áudio final…"), self.export_audio)
-        self.export_audio_button.pack(side="left")
+        self._button(exports, tr("Texto…"), lambda: self.export("text")).pack(side="left")
+
+        audio = self._card(files_page, padx=self.ui.space_md, pady=self.ui.space_md)
+        audio.pack(fill="x", padx=(12, 0))
+        audio.columnconfigure(0, weight=1)
+        self._label(audio, tr("Áudio final"), bg=self.ui.card, fg=self.ui.text_strong,
+                    font=self.ui.font(10, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
+        self.final_audio_status = tk.StringVar(self.window, tr("Selecione uma gravação."))
+        self._wrap_label(audio, "", textvariable=self.final_audio_status, bg=self.ui.card,
+                         fg=self.ui.text_muted, anchor="w", justify="left").grid(
+                             row=1, column=0, sticky="ew", pady=(2, 0))
+        self.export_audio_button = self._button(audio, tr("Baixar áudio final…"), self.export_audio)
+        self.export_audio_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(self.ui.space_md, 0))
+        tk.Frame(audio, bg=self.ui.divider, height=1).grid(
+            row=2, column=0, columnspan=2, sticky="ew", pady=self.ui.space_md)
+        self._label(audio, tr("Faixas originais (raw)"), bg=self.ui.card, fg=self.ui.text_strong,
+                    font=self.ui.font(10, "bold"), anchor="w").grid(row=3, column=0, sticky="w")
+        self.audio_capability_status = tk.StringVar(self.window, "")
+        self._wrap_label(audio, "", textvariable=self.audio_capability_status, bg=self.ui.card,
+                         fg=self.ui.text_muted, anchor="w", justify="left").grid(
+                             row=4, column=0, columnspan=2, sticky="ew", pady=(2, self.ui.space_sm))
+        self.raw_track_status = {}
+        self.raw_track_buttons = {}
+        for row, (track, label) in enumerate((("microphone", N_("Microfone")),
+                                              ("system", N_("Áudio do sistema"))), 5):
+            status = tk.StringVar(self.window, tr(label))
+            self._label(audio, "", textvariable=status, bg=self.ui.card, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=2)
+            button = self._button(audio, tr("Baixar…"), lambda value=track: self.export_track(value))
+            button.configure(state="disabled")
+            button.grid(row=row, column=1, sticky="e", padx=(self.ui.space_md, 0), pady=2)
+            self.raw_track_status[track] = (status, label)
+            self.raw_track_buttons[track] = button
+        self.raw_remove_button = self._button(audio, tr("Remover faixas originais…"), self.preview_raw_tracks,
+                                              danger=True)
+        self.raw_remove_button.configure(state="disabled")
+        self.raw_remove_button.grid(row=7, column=0, sticky="w", pady=(self.ui.space_md, 0))
+
         self.delete_button = self._button(files_page, tr("Excluir gravação…"), self.delete_selected,
                                           danger=True)
         self.delete_button.configure(state="disabled")
-        self.delete_button.pack(anchor="w", padx=12, pady=(18, 4))
-        self._label(files_page, tr("Áudio raw"), anchor="w", fg=self.ui.text_strong,
-                    font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(12, 2))
-        self.audio_capability_status = tk.StringVar(self.window, tr("Áudio raw disponível."))
-        self._wrap_label(files_page, "", textvariable=self.audio_capability_status, anchor="w",
-                         fg=self.ui.text_muted).pack(fill="x", padx=12, pady=(0, 4))
-        raw_row = ttk.Frame(files_page, style="Meeting.TFrame")
-        raw_row.pack(fill="x", padx=(12, 0))
-        self.raw_remove_microphone = tk.BooleanVar(self.window, False)
-        self.raw_remove_system = tk.BooleanVar(self.window, False)
-        self.raw_remove_microphone_check = tk.Checkbutton(
-            raw_row, text=tr("Microfone"), variable=self.raw_remove_microphone,
-            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
-        )
-        self.raw_remove_microphone_check.pack(side="left", padx=(0, 2))
-        self.raw_remove_system_check = tk.Checkbutton(
-            raw_row, text=tr("Sistema"), variable=self.raw_remove_system,
-            font=self.ui.font(9), **self.ui.checkbutton_colors(self.ui.surface),
-        )
-        self.raw_remove_system_check.pack(side="left", padx=(0, 6))
-        self.raw_remove_button = self._button(raw_row, tr("Remover áudio raw…"), self.preview_raw_tracks, danger=True)
-        self.raw_remove_button.pack(side="left")
+        self.delete_button.pack(anchor="w", padx=12, pady=(self.ui.space_lg, 4))
 
     def _build_privacy_card(self, parent):
         """Build privacy/retention controls inside the existing scrollable page."""
@@ -4218,6 +4239,12 @@ class MeetingWindow:
             final = raw.get("final_audio")
             final_path = final.get("path") if isinstance(final, dict) else None
             metadata["final_available"] = bool(isinstance(final_path, str) and os.path.isfile(final_path))
+            inventory = getattr(self.controller, "audio_inventory", None)
+            try:
+                sizes = inventory(session_id) if callable(inventory) else {}
+            except (OSError, ValueError):
+                sizes = {}
+            metadata["audio_sizes"] = sizes if isinstance(sizes, dict) else {}
             tracks = raw.get("tracks") if isinstance(raw.get("tracks"), dict) else {}
             metadata["tracks"] = {
                 track: {
@@ -4283,6 +4310,7 @@ class MeetingWindow:
         self.playback_clock.set(f"{format_time(0)} / {format_time(self.playback_duration)}")
         state = tr(STATE_LABELS.get(metadata.get("status"), N_("Gravação")))
         self.audio_overview.set(f"{format_time(self.playback_duration)} · {state}")
+        self.audio_sizes = metadata.get("audio_sizes") or {}
         self._set_audio_capabilities(metadata.get("tracks", {}), metadata.get("final_available", False))
         self.detail_ready = True
         self._sync_qa_controls()
@@ -4314,18 +4342,17 @@ class MeetingWindow:
                     self.raw_tracks_present.add(track)
                 if isinstance(value, dict) and (value.get("available") is False or value.get("raw_removed")):
                     unavailable.add(track)
-        for track, variable_name, widget_name in (
-            ("microphone", "raw_remove_microphone", "raw_remove_microphone_check"),
-            ("system", "raw_remove_system", "raw_remove_system_check"),
-        ):
-            variable = getattr(self, variable_name, None)
-            if variable is not None:
-                variable.set(track in self.raw_tracks_present and track not in unavailable)
-            widget = getattr(self, widget_name, None)
-            if widget is not None:
-                widget.configure(state="normal" if track in self.raw_tracks_present and track not in unavailable else "disabled")
         self.raw_unavailable_tracks = unavailable
+        self.final_available = bool(final_available)
         available = self.raw_tracks_present - unavailable
+        sizes = getattr(self, "audio_sizes", None) or {}
+
+        def size_text(value):
+            # Non-breaking space: a wrapped label must not split "35" from "MB".
+            if not isinstance(value, int) or isinstance(value, bool):
+                return ""
+            return format_size(value).replace(" ", "\u00a0")
+
         self.playback_choices = playback_sources(tracks, final_available)
         if hasattr(self, "audio_source_box"):
             self.audio_source_box.configure(values=self.playback_choices,
@@ -4338,24 +4365,51 @@ class MeetingWindow:
             "clip": bool(available),
             "audio_export": bool(available),
         }
-        if unavailable:
-            labels = ", ".join(TRACK_LABELS.get(item, item) for item in sorted(unavailable))
+        if hasattr(self, "final_audio_status"):
+            if final_available:
+                detail = " · ".join(value for value in (
+                    sizes.get("final_format", ""), size_text(sizes.get("final"))) if value)
+                self.final_audio_status.set(
+                    tr("O áudio mixado usado para ouvir e baixar.")
+                    + (f" {detail}." if detail else ""))
+            else:
+                self.final_audio_status.set(tr("Esta gravação ainda não tem áudio final salvo."))
+        for track, (variable, label) in getattr(self, "raw_track_status", {}).items():
+            if track in available:
+                size = size_text(sizes.get(track))
+                variable.set(f"{tr(label)} · {size}" if size else tr(label))
+            elif track in self.raw_tracks_present:
+                variable.set(tr("{source} · removida", source=tr(label)))
+            else:
+                variable.set(tr("{source} · não gravada", source=tr(label)))
+        if unavailable and not available:
             self.audio_capability_status.set(
-                tr("Áudio raw indisponível ({labels}). Transcrição, relatórios, citações e exportações de texto continuam disponíveis.",
-                   labels=labels)
-            )
+                tr("As faixas originais foram removidas. A reprodução e os downloads usam só o áudio final, "
+                   "e esta gravação não pode ser transcrita novamente."))
+        elif available:
+            known = [sizes.get(track) for track in available if isinstance(sizes.get(track), int)]
+            text = tr("Uma faixa sem compressão por fonte, necessária para transcrever novamente.")
+            if known:
+                text += " " + tr("Ocupam {size}.", size=format_size(sum(known)))
+            if unavailable:
+                # Older builds and automatic retention could remove one source only.
+                text += " " + tr("Transcrever novamente usa só as faixas que restam.")
+            self.audio_capability_status.set(text)
         else:
-            self.audio_capability_status.set(
-                tr("Áudio raw disponível para reprodução, retranscrição e clipes.")
-                if available else tr("Nenhuma fonte de áudio raw está disponível.")
-            )
+            self.audio_capability_status.set(tr("Nenhuma faixa original está disponível."))
+        if hasattr(self, "retranscribe_hint"):
+            self.retranscribe_hint.set(
+                tr("As faixas originais foram removidas; não é possível transcrever novamente.")
+                if self.raw_tracks_present and not available else "")
+        for track, button in getattr(self, "raw_track_buttons", {}).items():
+            button.configure(state="normal" if track in available else "disabled")
         for name, state in (
             ("play_button", "normal" if self.playback_choices else "disabled"),
             ("transcribe_button", "normal" if self.raw_capabilities["retranscription"] else "disabled"),
             ("adjust_audio_button", "normal" if "microphone" in available else "disabled"),
-            ("export_audio_button", "normal" if self.raw_capabilities["audio_export"] else "disabled"),
+            ("export_audio_button", "normal" if final_available else "disabled"),
             ("raw_remove_button", "normal" if getattr(self, "retention_ready", True)
-             and available
+             and available and final_available
              else "disabled"),
         ):
             widget = getattr(self, name, None)
@@ -4507,20 +4561,16 @@ class MeetingWindow:
         if not getattr(self, "retention_ready", True):
             self.status.set(tr("A retenção aguarda a recuperação do workspace."))
             return
+        if not getattr(self, "final_available", False):
+            self.status.set(tr("Salve o áudio final antes de remover as faixas originais."))
+            return
         if tracks is None:
-            selected_tracks = tuple(
-                track for track, variable_name in (
-                    ("microphone", "raw_remove_microphone"), ("system", "raw_remove_system"),
-                ) if bool(getattr(self, variable_name, None) and getattr(self, variable_name).get())
-            )
-        else:
-            selected_tracks = tuple(tracks)
+            # All or nothing: afterwards the final audio is the only audio.
+            tracks = sorted(getattr(self, "raw_tracks_present", set())
+                            - getattr(self, "raw_unavailable_tracks", set()))
+        selected_tracks = tuple(tracks)
         if not selected_tracks:
-            selected_tracks = tuple(sorted(
-                getattr(self, "raw_tracks_present", set()) - getattr(self, "raw_unavailable_tracks", set())
-            ))
-        if not selected_tracks:
-            self.status.set(tr("Nenhuma fonte raw disponível para remoção."))
+            self.status.set(tr("Nenhuma faixa original disponível para remover."))
             return
         session_id = self.selected
         self.retention_request += 1
@@ -4543,10 +4593,14 @@ class MeetingWindow:
                 self.status.set(tr("A remoção raw foi bloqueada; a transcrição existente permanece disponível."))
                 return
             if not messagebox.askyesno(
-                    tr("Remover áudio raw"),
+                    tr("Remover faixas originais"),
                     self._retention_preview_text(projection)
-                    + tr("\n\nEssa operação desabilita reprodução, retranscrição, novos clipes e exportação de áudio para as fontes escolhidas. Aplicar?"),
-                    parent=self.window):
+                    + tr("\n\nDepois disso:\n"
+                         "• esta gravação não poderá ser transcrita novamente;\n"
+                         "• ouvir e baixar usarão só o áudio final;\n"
+                         "• transcrição, resumos, chat e citações continuam disponíveis.\n\n"
+                         "Isso não pode ser desfeito no SnipVoice. Remover?"),
+                    icon="warning", default="no", parent=self.window):
                 self.raw_remove_button.configure(state="normal")
                 self.status.set(tr("Nenhum áudio raw foi removido."))
                 return
@@ -5048,29 +5102,39 @@ class MeetingWindow:
             self._action("export", self.selected, path, format=format)
 
     def export_audio(self):
+        """Save a copy of the final audio, the file playback uses."""
         if not self.selected:
             self.status.set(tr("Selecione uma gravação na biblioteca."))
             return
-        available = getattr(self, "raw_tracks_present", set()) - getattr(
-            self, "raw_unavailable_tracks", set())
-        if not available:
-            self.status.set(tr("A exportação de áudio está desabilitada porque não há áudio raw disponível."))
+        if not getattr(self, "final_available", False):
+            self.status.set(tr("Esta gravação ainda não tem áudio final salvo."))
             return
-        try:
-            settings = self._current_settings()
-        except ValueError as exc:
-            self.status.set(str(exc))
-            return
-        initial = settings.destination or None
-        options = {"parent": self.window, "title": tr("Exportar áudio final"),
-                   "defaultextension": ".mp3",
-                   "filetypes": ((tr("Áudio MP3"), "*.mp3"), (tr("Áudio WAV"), "*.wav"))}
-        if initial:
-            options["initialdir"] = initial
+        sizes = getattr(self, "audio_sizes", None) or {}
+        extension = "." + (sizes.get("final_format") or "MP3").lower()
+        options = {"parent": self.window, "title": tr("Baixar áudio final"),
+                   "defaultextension": extension, "initialfile": self.title.get().strip() + extension,
+                   "filetypes": ((tr("Áudio {format}", format=extension[1:].upper()), "*" + extension),)}
         path = filedialog.asksaveasfilename(**options)
         if path:
-            self._action("export_mixdown", self.selected, path,
-                         enhance_microphone=settings.voice_boost)
+            self._action("export_final_audio", self.selected, path)
+
+    def export_track(self, track):
+        """Save one original source on its own, as MP3 or WAV."""
+        if not self.selected:
+            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            return
+        available = getattr(self, "raw_tracks_present", set()) - getattr(self, "raw_unavailable_tracks", set())
+        if track not in available:
+            self.status.set(tr("Esta faixa original não está mais disponível."))
+            return
+        source = tr(AUDIO_TRACK_LABELS.get(track, track))
+        options = {"parent": self.window, "title": tr("Baixar faixa: {source}", source=source),
+                   "defaultextension": ".mp3",
+                   "initialfile": f"{self.title.get().strip()} - {source}.mp3",
+                   "filetypes": ((tr("Áudio MP3"), "*.mp3"), (tr("Áudio WAV"), "*.wav"))}
+        path = filedialog.asksaveasfilename(**options)
+        if path:
+            self._action("export_track", self.selected, track, path)
 
     def summarize(self):
         self.generate_report()

@@ -132,6 +132,32 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertTrue(self.final_export.call_args.kwargs["enhance_microphone"])
         controller._queue_projection.assert_called_once_with(session)
 
+    def test_final_audio_download_copies_the_saved_file_without_raw_tracks(self):
+        controller, store, session, previous, _payload = self._quiet_recording()
+        target = Path(self.temp.name) / "downloaded.wav"
+        self.assertEqual(controller.export_final_audio(session, target), str(target.absolute()))
+        self.assertEqual(target.read_bytes(), previous.read_bytes())
+        with self.assertRaises(ValueError):
+            controller.export_final_audio(session, Path(self.temp.name) / "wrong.mp3")
+        with self.assertRaises(ValueError):
+            controller.export_final_audio(session, Path(store.root) / "inside.wav")
+
+    def test_track_download_exports_only_that_source(self):
+        controller, _store, session, _previous, _payload = self._quiet_recording()
+        target = Path(self.temp.name) / "microphone.mp3"
+        controller.export_track(session, "microphone", target)
+        self.assertEqual(self.final_export.call_args.kwargs["tracks"], ("microphone",))
+        with self.assertRaises(ValueError):
+            controller.export_track(session, "final", target)
+
+    def test_audio_inventory_reports_final_and_raw_sizes(self):
+        controller, _store, session, previous, payload = self._quiet_recording()
+        inventory = controller.audio_inventory(session)
+        self.assertEqual(inventory["final"], previous.stat().st_size)
+        self.assertEqual(inventory["final_format"], "WAV")
+        self.assertGreaterEqual(inventory["microphone"], len(payload))
+        self.assertIsNone(inventory["system"])
+
     def test_adjust_final_audio_cancellation_keeps_previous_selection(self):
         controller, store, session, previous, _ = self._quiet_recording()
         before = store.get(session)["final_audio"]

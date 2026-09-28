@@ -294,6 +294,12 @@ class MeetingRetentionTests(unittest.TestCase):
         self.assertFalse(retention.list_trash())
         self.assertTrue(self.external.is_file())
 
+    def test_raw_plan_requires_the_saved_final_audio(self):
+        self.external.unlink()
+        plan = self.retention().plan("fixture-meeting-v1", RetentionPolicy.raw_tracks(after_days=1))
+        self.assertFalse(plan.eligible)
+        self.assertIn("final", " ".join(plan.reasons))
+
     def test_raw_removal_stages_tracks_updates_only_canonical_projection_and_keeps_transcript(self):
         retention = self.retention()
         plan = retention.plan(
