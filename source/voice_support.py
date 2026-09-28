@@ -59,6 +59,12 @@ STATE_TRANSCRIBING = "transcribing"
 STATE_ROUTING = "routing"
 
 _SHUTDOWN_JOIN_SECONDS = 2.0
+# The dictation model (~0.8 GB for the default) stays loaded for quick
+# follow-ups and is released after this long without a press or a
+# transcription; the next dictation reloads it (about 1 s) while capture runs.
+# ceiling: fixed 10 minutes; make it a setting if users ask for control.
+DICTATION_IDLE_UNLOAD_SECONDS = 10 * 60
+_IDLE_UNLOAD_CHECK_SECONDS = 30.0
 
 
 class _TrackedWorker:
@@ -208,6 +214,15 @@ class VoiceController:
         self._disable_requested = False
         self._meeting_token = None
         self._stream_worker_events = {}
+        # Idle release: the model lock covers reloading and releasing, and the
+        # user count keeps a release from starting under a transcription;
+        # "parked" means released for idleness, so the next transcription
+        # reloads it first. Transcriptions themselves may still overlap.
+        self._model_lock = threading.Lock()
+        self._model_users = 0
+        self._model_parked = False
+        self._last_model_use = time.monotonic()
+        self._idle_unloader = None
         self.last_outcome = None
         for warning in warnings:
             self._log(warning)
@@ -765,6 +780,7 @@ class VoiceController:
             self._cancel.clear()
             self._capture_starting = True
             self._startup_generation = generation
+            self._last_model_use = time.monotonic()
         if self._microphone_status is not None:
             try:
                 status = self._microphone_status()
@@ -1149,6 +1165,7 @@ class VoiceController:
                 if not self._provider.profile_installed(previous.profile):
                     raise VoiceRuntimeError(tr("O modelo anterior não está mais instalado."))
                 self._provider.prepare(previous.profile, previous.language)
+                self._model_loaded()
                 with self._lock:
                     if not self._switch_valid_locked(generation):
                         if not self.settings.enabled or self._shutdown.is_set():
@@ -1201,6 +1218,7 @@ class VoiceController:
             progress=progress,
             cancel_event=self._cancel,
         )
+        self._model_loaded()
 
     def _download_profile_worker(self, profile):
         def progress(done, total):
@@ -1322,9 +1340,7 @@ class VoiceController:
                         return
                 raw_transcript = self._provider.finalize_stream()
             else:
-                raw_transcript = self._provider.transcribe(
-                    pcm, cancel_event=self._cancel
-                )
+                raw_transcript = self._transcribe_with_model(pcm)
             inference_duration = max(0.0, time.monotonic() - inference_started)
         except VoiceRuntimeError as exc:
             self._recording_failed_if_current(generation, recording, exc)
@@ -1694,14 +1710,12 @@ class VoiceController:
             if not updated:
                 return
             inference_started = time.monotonic()
-            raw_transcript = self._provider.transcribe(
-                pcm, cancel_event=self._cancel
-            )
+            raw_transcript = self._transcribe_with_model(pcm)
             inference_duration = max(0.0, time.monotonic() - inference_started)
-            if not str(raw_transcript or "").strip():
-                raise ValueError(tr("Nenhuma fala foi reconhecida na gravação."))
             if self._retry_aborted(generation):
                 return
+            if not str(raw_transcript or "").strip():
+                raise ValueError(tr("Nenhuma fala foi reconhecida na gravação."))
             transcript = self._apply_text_replacements(
                 raw_transcript,
                 entry.get("mode", MODE_DICTATION),
@@ -1785,7 +1799,77 @@ class VoiceController:
         except Exception as exc:
             self._warn(f"Não foi possível gravar as configurações de voz: {exc}")
 
+    def _model_loaded(self):
+        if self._provider.is_ready():
+            self._model_parked = False
+            self._last_model_use = time.monotonic()
+
+    def _transcribe_with_model(self, pcm):
+        """Transcribe, first reloading a model the idle timer released."""
+        with self._model_lock:
+            if self._model_parked:
+                self._provider.prepare(self.settings.profile, self.settings.language,
+                                       cancel_event=self._cancel, allow_download=False)
+                self._model_loaded()
+                if self._model_parked:
+                    # Cancelled mid-reload: the caller's cancel check takes over.
+                    return ""
+            self._model_users += 1
+        try:
+            return self._provider.transcribe(pcm, cancel_event=self._cancel)
+        finally:
+            with self._model_lock:
+                self._model_users -= 1
+                self._last_model_use = time.monotonic()
+
+    def _release_idle_model(self, now=None):
+        """Release the dictation model after DICTATION_IDLE_UNLOAD_SECONDS unused."""
+        now = time.monotonic() if now is None else now
+
+        def eligible_locked():
+            return (not self._model_parked and self._state == STATE_IDLE
+                    and not self._capture_starting and self._meeting_token is None
+                    and not self._disable_requested and self.settings.enabled
+                    and self.settings.profile != PROFILE_STREAMING
+                    and now - self._last_model_use >= DICTATION_IDLE_UNLOAD_SECONDS)
+
+        with self._lock:
+            if not eligible_locked():
+                return False
+        with self._unload_lock:
+            if self._unload_pending or self._unload_in_progress:
+                return False
+        # A reload holds the model lock; try again on the next check.
+        if not self._model_lock.acquire(blocking=False):
+            return False
+        try:
+            if self._model_users:
+                return False
+            with self._lock:
+                if not eligible_locked():
+                    return False
+            # A press may start capture from here on; its transcription waits
+            # for this lock and then reloads the parked model.
+            self._provider.unload()
+            self._model_parked = True
+        finally:
+            self._model_lock.release()
+        self._log("Modelo de ditado liberado após inatividade.")
+        return True
+
+    def _idle_unload_loop(self):
+        while not self._shutdown.wait(_IDLE_UNLOAD_CHECK_SECONDS):
+            try:
+                self._release_idle_model()
+            except Exception as exc:
+                self._warn(f"Não foi possível liberar o modelo de ditado ocioso: {exc}")
+
     def _start_monitor(self):
+        if self._idle_unloader is None:
+            self._idle_unloader = threading.Thread(
+                target=self._idle_unload_loop, name="voice-idle-unload", daemon=True,
+            )
+            self._idle_unloader.start()
         self._stop_monitor()
         try:
             dictation = parse_chord(self.settings.hotkey)
@@ -2020,6 +2104,7 @@ class VoiceController:
         try:
             self._provider.prepare(self.settings.profile, self.settings.language,
                                    cancel_event=self._cancel, allow_download=False)
+            self._model_loaded()
         except Exception as exc:
             with self._lock:
                 if generation != self._session_generation or self._shutdown.is_set():

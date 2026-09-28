@@ -22,6 +22,7 @@ from voice_dispatch import (
 )
 from voice_runtime import FakeAsrBackend, VoiceRuntimeError
 from voice_support import (
+    DICTATION_IDLE_UNLOAD_SECONDS,
     STATE_IDLE,
     STATE_LOADING,
     STATE_RECORDING,
@@ -135,6 +136,50 @@ class ControllerTests(unittest.TestCase):
                 mock.patch.object(self.controller, "_start_monitor"):
             self.controller.enable()
         self.assertEqual(self.controller.state, STATE_IDLE)
+
+    def test_dictation_model_is_released_after_idle_and_reloaded_on_use(self):
+        self._ready()
+        self.assertTrue(self.backend.is_loaded())
+        last = self.controller._last_model_use
+        # A quick follow-up window keeps the model resident.
+        self.assertFalse(self.controller._release_idle_model(now=last + DICTATION_IDLE_UNLOAD_SECONDS - 1))
+        self.assertTrue(self.backend.is_loaded())
+        # +1: at large monotonic values (last + limit) - last can round below limit.
+        self.assertTrue(self.controller._release_idle_model(now=last + DICTATION_IDLE_UNLOAD_SECONDS + 1))
+        self.assertFalse(self.backend.is_loaded())
+        self.assertEqual(self.controller.state, STATE_IDLE)  # the hotkey still works
+        with mock.patch("voice_support.installed_model_path", return_value="model.gguf"):
+            self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+            self.controller.handle_hotkey_release(MODE_DICTATION)
+        self.assertEqual(self.inserted, ["hello world"])
+        self.assertTrue(self.backend.is_loaded())
+        self.assertFalse(self.controller._model_parked)
+
+    def test_each_press_restarts_the_idle_clock(self):
+        self._ready()
+        start = self.controller._last_model_use
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+        self.controller.handle_hotkey_release(MODE_DICTATION)
+        self.assertGreaterEqual(self.controller._last_model_use, start)
+        self.assertFalse(self.controller._release_idle_model(
+            now=self.controller._last_model_use + DICTATION_IDLE_UNLOAD_SECONDS - 1))
+        self.assertTrue(self.backend.is_loaded())
+
+    def test_idle_release_waits_while_dictation_is_busy_or_reserved(self):
+        self._ready()
+        later = self.controller._last_model_use + DICTATION_IDLE_UNLOAD_SECONDS + 1
+        self.controller._state = STATE_RECORDING
+        self.assertFalse(self.controller._release_idle_model(now=later))
+        self.controller._state = STATE_IDLE
+        self.controller._model_users = 1  # a transcription in flight
+        self.assertFalse(self.controller._release_idle_model(now=later))
+        self.controller._model_users = 0
+        self.controller._meeting_token = object()
+        self.assertFalse(self.controller._release_idle_model(now=later))
+        self.controller._meeting_token = None
+        with mock.patch.object(self.controller.settings, "profile", PROFILE_STREAMING):
+            self.assertFalse(self.controller._release_idle_model(now=later))
+        self.assertTrue(self.backend.is_loaded())
 
     def test_defaults_off(self):
         self.assertFalse(self.controller.enabled)
