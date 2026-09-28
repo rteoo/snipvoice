@@ -1839,111 +1839,102 @@ class MeetingWindow:
         """Build privacy/retention controls inside the existing scrollable page."""
         card = self._card(parent)
         card.pack(fill="x", pady=(0, self.ui.space_md))
+        card.columnconfigure(0, weight=1)
         self.privacy_card = card
         self._label(
             card, tr("Privacidade e retenção local"), bg=self.ui.card,
             fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
-        ).grid(row=0, column=0, columnspan=3, sticky="w")
-        self._label(
-            card,
-            tr("O SnipVoice grava somente após uma ação explícita. As políticas abaixo são locais e preservam chaves futuras do workspace."),
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=860,
-        ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
+        ).grid(row=0, column=0, sticky="w")
+        self._wrap_label(
+            card, tr("O SnipVoice só grava quando você inicia. Estas opções ficam neste computador."),
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
+        ).grid(row=1, column=0, sticky="ew", pady=(self.ui.space_xs, self.ui.space_md))
 
+        # Stored values stay the workspace's codes; the controls below show
+        # plain choices and write those codes back.
         self.privacy_notice_enabled = tk.BooleanVar(self.window, False)
         self.privacy_notice_language = tk.StringVar(self.window, "pt-BR")
+        self.privacy_notice_language_display = tk.StringVar(self.window, i18n.LANGUAGE_NAMES["pt-BR"])
         self.qa_mode = tk.StringVar(self.window, "explicit_save")
-        self.whole_meeting_policy = tk.StringVar(self.window, "keep")
-        self.whole_meeting_after_days = tk.StringVar(self.window, "")
+        self.qa_never_save = tk.BooleanVar(self.window, False)
+        self.whole_meeting_auto = tk.BooleanVar(self.window, False)
+        self.whole_meeting_after_days = tk.StringVar(self.window, "90")
         self.raw_audio_auto = tk.BooleanVar(self.window, False)
         self.raw_audio_after_days = tk.StringVar(self.window, "30")
         self.trash_days = tk.StringVar(self.window, "30")
+        self.privacy_notice_language.trace_add("write", lambda *_args: self.privacy_notice_language_display.set(
+            i18n.LANGUAGE_NAMES.get(self.privacy_notice_language.get(), self.privacy_notice_language.get())))
+        self.qa_mode.trace_add("write", lambda *_args: self.qa_never_save.set(self.qa_mode.get() == "memory_only"))
 
-        row = 2
-        self.privacy_notice_check = tk.Checkbutton(
-            card, text=tr("Mostrar aviso antes de cada gravação"), variable=self.privacy_notice_enabled,
-            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
-        )
-        self.privacy_notice_check.grid(row=row, column=0, columnspan=2, sticky="w", pady=2)
-        row += 1
-        self._label(card, tr("Idioma do aviso"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
-        )
+        def option(row, text, variable, command=None):
+            line = tk.Frame(card, bg=self.ui.card)
+            line.grid(row=row, column=0, sticky="w", pady=(self.ui.space_sm, 0))
+            check = tk.Checkbutton(line, text=text, variable=variable, command=command,
+                                   font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card))
+            check.pack(side="left")
+            return line, check
+
+        def hint(row, text):
+            self._wrap_label(card, text, bg=self.ui.card, fg=self.ui.text_muted, anchor="w",
+                             justify="left").grid(row=row, column=0, sticky="ew", padx=(24, 0))
+
+        def days_entry(line, variable):
+            entry = self._entry(line, variable, 5)
+            entry.pack(side="left", padx=self.ui.space_xs)
+            self._label(line, tr("dias"), bg=self.ui.card).pack(side="left")
+            return entry
+
+        line, self.privacy_notice_check = option(2, tr("Mostrar um aviso antes de cada gravação, em"),
+                                                 self.privacy_notice_enabled)
         self.privacy_notice_language_box = ttk.Combobox(
-            card, textvariable=self.privacy_notice_language,
-            values=("pt-BR", "en-US"), state="readonly", width=14,
+            line, textvariable=self.privacy_notice_language_display,
+            values=tuple(i18n.LANGUAGE_NAMES.values()), state="readonly", width=18,
         )
-        self.privacy_notice_language_box.grid(row=row, column=1, sticky="w", pady=2)
-        row += 1
-        self._label(card, tr("Salvar respostas de Q&A"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
-        )
-        self.qa_mode_box = ttk.Combobox(
-            card, textvariable=self.qa_mode,
-            values=("explicit_save", "memory_only"), state="readonly", width=18,
-        )
-        self.qa_mode_box.grid(row=row, column=1, sticky="w", pady=2)
-        self._label(card, tr("explicit_save permite o botão Salvar; memory_only descarta a resposta ao fechar."),
-                    bg=self.ui.card, fg=self.ui.text_muted, anchor="w").grid(
-            row=row, column=2, sticky="w", padx=(self.ui.space_sm, 0), pady=2,
-        )
-        self.qa_mode_box.bind("<<ComboboxSelected>>", lambda _event: self._sync_qa_controls())
-        row += 1
-        self._label(card, tr("Política da reunião"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
-        )
-        self.whole_meeting_policy_box = ttk.Combobox(
-            card, textvariable=self.whole_meeting_policy,
-            values=("keep", "whole_meeting"), state="readonly", width=18,
-        )
-        self.whole_meeting_policy_box.grid(row=row, column=1, sticky="w", pady=2)
-        row += 1
-        self._label(card, tr("Dias até excluir reunião"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
-        )
-        self._entry(card, self.whole_meeting_after_days, 12).grid(row=row, column=1, sticky="w", pady=2)
-        self._label(card, tr("Vazio mantém indefinidamente"), bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w").grid(row=row, column=2, sticky="w",
-                    padx=(self.ui.space_sm, 0), pady=2)
-        row += 1
-        raw_row = tk.Frame(card, bg=self.ui.card)
-        raw_row.grid(row=row, column=0, columnspan=3, sticky="w", pady=(self.ui.space_sm, 2))
-        self.raw_audio_auto_check = tk.Checkbutton(
-            raw_row, text=tr("Remover as faixas originais automaticamente após"),
-            variable=self.raw_audio_auto, command=self._sync_raw_policy_controls,
-            font=self.ui.font(), **self.ui.checkbutton_colors(self.ui.card),
-        )
-        self.raw_audio_auto_check.pack(side="left")
-        self.raw_audio_days_entry = self._entry(raw_row, self.raw_audio_after_days, 5)
-        self.raw_audio_days_entry.pack(side="left", padx=(self.ui.space_xs, self.ui.space_xs))
-        self._label(raw_row, tr("dias"), bg=self.ui.card).pack(side="left")
-        row += 1
+        self.privacy_notice_language_box.pack(side="left", padx=(self.ui.space_xs, 0))
+        self.privacy_notice_language_box.bind("<<ComboboxSelected>>", lambda _event: self.privacy_notice_language.set(
+            displayed_key(i18n.LANGUAGE_NAMES, self.privacy_notice_language_display.get())))
+        hint(3, tr("Um texto para ler ou colar na chamada avisando que a reunião será gravada."))
+
+        _line, self.qa_never_save_check = option(4, tr("Nunca salvar respostas do chat"), self.qa_never_save,
+                                                 self._qa_never_save_changed)
+        hint(5, tr("As respostas somem ao fechar a gravação, e o botão Salvar fica oculto."))
+
+        line, _check = option(6, tr("Mover gravações para a lixeira automaticamente após"),
+                              self.whole_meeting_auto, self._sync_raw_policy_controls)
+        self.whole_meeting_days_entry = days_entry(line, self.whole_meeting_after_days)
+        hint(7, tr("A gravação inteira vai para a lixeira, de onde ainda pode ser restaurada."))
+
+        line, self.raw_audio_auto_check = option(
+            8, tr("Remover as faixas originais automaticamente após"), self.raw_audio_auto,
+            self._sync_raw_policy_controls)
+        self.raw_audio_days_entry = days_entry(line, self.raw_audio_after_days)
+        hint(9, tr("Só em gravações com áudio final salvo e transcrição concluída. Libera a maior parte do "
+                   "espaço, mas essas gravações não poderão ser transcritas novamente."))
+
+        trash = tk.Frame(card, bg=self.ui.card)
+        trash.grid(row=10, column=0, sticky="w", pady=(self.ui.space_md, 0))
+        self._label(trash, tr("Manter itens na lixeira por"), bg=self.ui.card).pack(side="left")
+        self._entry(trash, self.trash_days, 5).pack(side="left", padx=self.ui.space_xs)
+        self._label(trash, tr("dias"), bg=self.ui.card).pack(side="left")
+        hint(11, tr("Depois disso, Esvaziar expirados, na lixeira da Biblioteca, apaga esses itens de vez."))
+
         self._wrap_label(
             card,
-            tr("Só em gravações com áudio final salvo e transcrição concluída. Libera a maior parte do "
-               "espaço, mas essas gravações não poderão ser transcritas novamente."),
+            tr("Apagar não garante eliminação forense em SSDs, e cópias que você exportou para outras pastas "
+               "não são afetadas."),
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-        ).grid(row=row, column=0, columnspan=3, sticky="ew", padx=(24, 0), pady=(0, self.ui.space_sm))
-        row += 1
-        self._label(card, tr("Prazo da lixeira (dias)"), bg=self.ui.card, anchor="w").grid(
-            row=row, column=0, sticky="w", pady=2,
-        )
-        self._entry(card, self.trash_days, 12).grid(row=row, column=1, sticky="w", pady=2)
-        row += 1
-        self._label(
-            card,
-            tr("A exclusão local e a lixeira não prometem apagamento forense de SSD; cópias externas exportadas ficam fora do escopo."),
-            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left", wraplength=860,
-        ).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_sm, 2))
-        row += 1
+        ).grid(row=12, column=0, sticky="ew", pady=(self.ui.space_md, 2))
+        footer = tk.Frame(card, bg=self.ui.card)
+        footer.grid(row=13, column=0, sticky="ew", pady=(self.ui.space_sm, 0))
         self.privacy_status = tk.StringVar(self.window, tr("Configurações de privacidade carregando…"))
-        self._label(card, "", textvariable=self.privacy_status, bg=self.ui.card,
-                    fg=self.ui.text_muted, anchor="w").grid(row=row, column=0, columnspan=2, sticky="w")
-        self._button(card, tr("Salvar privacidade"), self.save_privacy_settings, accent=True).grid(
-            row=row, column=2, sticky="e", pady=(self.ui.space_sm, 0),
-        )
-        card.columnconfigure(2, weight=1)
+        self._label(footer, "", textvariable=self.privacy_status, bg=self.ui.card,
+                    fg=self.ui.text_muted, anchor="w").pack(side="left")
+        self._button(footer, tr("Salvar privacidade"), self.save_privacy_settings, accent=True).pack(side="right")
         self._sync_raw_policy_controls()
+
+    def _qa_never_save_changed(self):
+        self.qa_mode.set("memory_only" if self.qa_never_save.get() else "explicit_save")
+        self._sync_qa_controls()
 
     def _location_specs(self):
         """Folder cards: app data (Geral) and downloaded models (Modelos)."""
@@ -2207,9 +2198,11 @@ class MeetingWindow:
             self.window.after_idle(lambda: self.on_appearance_changed(preference))
 
     def _sync_raw_policy_controls(self):
-        entry = getattr(self, "raw_audio_days_entry", None)
-        if entry is not None:
-            entry.configure(state="normal" if self.raw_audio_auto.get() else "disabled")
+        for entry_name, variable_name in (("raw_audio_days_entry", "raw_audio_auto"),
+                                          ("whole_meeting_days_entry", "whole_meeting_auto")):
+            entry = getattr(self, entry_name, None)
+            if entry is not None:
+                entry.configure(state="normal" if getattr(self, variable_name).get() else "disabled")
 
     @staticmethod
     def _policy_days(value, *, field):
@@ -2254,9 +2247,9 @@ class MeetingWindow:
         whole_mode = whole.get("mode")
         if whole_mode is None and whole.get("after_days") is not None:
             whole_mode = "whole_meeting"
-        self.whole_meeting_policy.set(str(whole_mode or "keep"))
-        self.whole_meeting_after_days.set(
-            "" if whole.get("after_days") is None else str(whole.get("after_days")))
+        whole_days = whole.get("after_days")
+        self.whole_meeting_auto.set(whole_mode == "whole_meeting" and whole_days is not None)
+        self.whole_meeting_after_days.set("90" if whole_days is None else f"{float(whole_days):g}")
         raw = self.retention_defaults.get("raw_audio", self.retention_defaults.get(
             "raw_audio_policy", {"mode": "keep", "tracks": []}))
         if not isinstance(raw, dict):
@@ -2267,7 +2260,7 @@ class MeetingWindow:
         days = raw.get("after_days")
         self.raw_audio_auto.set(raw_mode == "raw_tracks" and days is not None)
         self.raw_audio_after_days.set("30" if days is None else f"{float(days):g}")
-        self.trash_days.set(str(self.retention_defaults.get("trash_days", 30)))
+        self.trash_days.set(f"{float(self.retention_defaults.get('trash_days', 30)):g}")
         self._sync_raw_policy_controls()
         self._sync_qa_controls()
 
@@ -2288,7 +2281,10 @@ class MeetingWindow:
             self.privacy_status.set(tr("Aguarde a atualização de privacidade em andamento."))
             return
         try:
+            whole_auto = bool(self.whole_meeting_auto.get())
             whole_days = self._policy_days(self.whole_meeting_after_days.get(), field=tr("Reunião"))
+            if whole_auto and not whole_days:
+                raise ValueError(tr("Informe após quantos dias mover gravações para a lixeira."))
             raw_auto = bool(self.raw_audio_auto.get())
             raw_days = self._policy_days(self.raw_audio_after_days.get(), field=tr("Faixas originais"))
             if raw_auto and not raw_days:
@@ -2299,9 +2295,7 @@ class MeetingWindow:
             qa_mode = self.qa_mode.get().strip()
             if qa_mode not in {"memory_only", "explicit_save"}:
                 raise ValueError(tr("Escolha um modo de Q&A válido."))
-            whole_mode = self.whole_meeting_policy.get().strip()
-            if whole_mode not in {"keep", "whole_meeting"}:
-                raise ValueError(tr("Escolha uma política de reunião válida."))
+            whole_mode = "whole_meeting" if whole_auto else "keep"
             privacy = copy.deepcopy(self.privacy_defaults)
             notice = privacy.setdefault("recording_notice", {})
             if not isinstance(notice, dict):
