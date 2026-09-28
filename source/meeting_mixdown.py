@@ -128,7 +128,10 @@ class _Track:
             start = self._last_end
             end = start + frames / rate
         self._last_end = end
-        data = _numpy().frombuffer(raw, dtype="<f4").astype("float64").reshape(frames, channels)
+        np = _numpy()
+        data = np.frombuffer(raw, dtype="<f4").astype("float64").reshape(frames, channels)
+        # A damaged sample is silence, not a value to interpolate or boost.
+        np.nan_to_num(data, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         self._current = (start, end, frames, data)
 
     def render(self, first_frame, last_frame, output_rate, output_channels, target):
@@ -159,10 +162,7 @@ class _Track:
                 # Linear interpolation toward the next source frame; the last
                 # frame of a block has no successor and is held as-is.
                 following = data[np.minimum(index + 1, frames - 1)]
-                # Non-finite samples propagate as they did per sample; the
-                # final PCM conversion turns them into silence.
-                with np.errstate(invalid="ignore"):
-                    interpolated = value + (following - value) * fraction
+                interpolated = value + (following - value) * fraction
                 value = np.where((index + 1 < frames)[:, None], interpolated, value)
                 rows = target.reshape(-1, output_channels)
                 # A mono value broadcasts to every output channel.
@@ -174,17 +174,53 @@ class _Track:
 
 
 class _MicEnhancer:
-    """Apply a bounded gain without deleting quiet speech below a hard gate."""
+    """Raise the microphone by one gain; the mix limiter keeps its peaks in range."""
 
     def __init__(self, gain=1.5):
         self.gain = gain
-        self.limit = 0.95
 
     def apply(self, samples, channels):
+        samples *= self.gain
+
+
+class _PeakLimiter:
+    """Brick-wall limiter for the final mix: instant attack, linear-dB release.
+
+    Frames that stay under the threshold pass through unchanged, so ordinary
+    audio is bit-exact; only peaks that would clip are pulled down, and the
+    gain then recovers at a fixed rate instead of snapping back. Channels are
+    linked so stereo placement doesn't shift. State carries across chunks.
+    """
+
+    THRESHOLD_DB = -1.0
+    # ceiling: 80 dB/s recovers a 15 dB knock in about 0.2 s; tune only with
+    # listening tests on real meetings.
+    RELEASE_DB_PER_SECOND = 80.0
+
+    def __init__(self, rate, channels):
+        self.threshold = 10 ** (self.THRESHOLD_DB / 20)
+        self.release = self.RELEASE_DB_PER_SECOND / rate
+        self.channels = channels
+        self.gain_db = 0.0
+
+    def apply(self, samples):
         np = _numpy()
-        boosted = samples * self.gain
-        # NaN takes the positive limit, as min(limit, nan) did per sample.
-        samples[:] = np.where(np.isnan(boosted), self.limit, np.clip(boosted, -self.limit, self.limit))
+        frames = samples.reshape(-1, self.channels)
+        if not len(frames):
+            return
+        peak = np.abs(frames).max(axis=1)
+        over = peak > self.threshold
+        if not over.any() and self.gain_db == 0.0:
+            return
+        required = np.zeros(len(peak))
+        required[over] = 20 * np.log10(self.threshold / peak[over])
+        # gain[n] = min(0, required[n], gain[n-1] + release), unrolled with a
+        # running minimum so the whole chunk is computed at once.
+        steps = np.arange(len(peak)) * self.release
+        floor = np.minimum.accumulate(required - steps)
+        gain_db = np.minimum(0.0, steps + np.minimum(self.gain_db + self.release, floor))
+        self.gain_db = float(gain_db[-1])
+        frames *= (10 ** (gain_db / 20))[:, None]
 
 
 def _adaptive_microphone_gain(source, cancel_event):
@@ -240,8 +276,9 @@ def _adaptive_microphone_gain(source, cancel_event):
             break
     if percentile < 0.002:
         return 1.0
-    # Aim for speech around -24 dBFS while preserving transient headroom.
-    return max(1.0, min(8.0, (10 ** (-24 / 20)) / percentile, 0.95 / peak))
+    # Aim for speech around -24 dBFS. Loud moments (a knock, a laugh) no
+    # longer cap the gain for the whole recording; the mix limiter handles them.
+    return max(1.0, min(8.0, (10 ** (-24 / 20)) / percentile))
 
 
 def _write_header(handle, rate, channels):
@@ -371,6 +408,9 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
                 handle, rate, output_channels, format, cancel_event) as write_pcm:
             np = _numpy()
             enhancer = _MicEnhancer(microphone_gain) if enhance_microphone else None
+            # A single untouched source stays as recorded; mixing or boosting
+            # can push peaks past full scale, so those outputs are limited.
+            limiter = _PeakLimiter(rate, output_channels) if enhancer is not None or len(tracks) > 1 else None
             frame = 0
             # ceiling: output chunks are capped at 4,096 frames (~32 KiB for
             # stereo PCM16); increase only with measured memory profiling.
@@ -393,6 +433,8 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
                     final_end_frame = int(math.ceil(final_end * rate - 1e-9))
                     write_frames = max(0, min(next_end, final_end_frame) - frame)
                     samples = samples[:write_frames * output_channels]
+                if limiter is not None:
+                    limiter.apply(samples)
                 write_pcm(_pcm16_bytes(samples))
                 frame = next_end
                 if all_done:
