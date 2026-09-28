@@ -95,6 +95,9 @@ APP_VERSION = "1.1.1"
 RELEASE_CHANNEL = "stable"
 BETA_NUMBER = 0
 APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
+# ceiling: a six-hour pass is cheap for hundreds of recordings; lower it only
+# if users expect removal within hours of the deadline.
+RAW_RETENTION_INTERVAL_SECONDS = 6 * 60 * 60
 if RELEASE_CHANNEL == "beta":
     APP_DISPLAY_NAME = f"{APP_DISPLAY_NAME} beta {BETA_NUMBER}"
 elif RELEASE_CHANNEL != "stable":
@@ -656,6 +659,7 @@ class Snipvoice:
             self.voice.enable()
         if self._meeting_startup_ready:
             self._rebuild_meeting_monitor()
+            self.task_runner.start(self._raw_retention_loop, name="raw-retention")
         else:
             self.notify_error(
                 tr("A recuperação local do SnipVoice precisa de revisão manual; o atalho de reunião foi desativado."),
@@ -668,6 +672,25 @@ class Snipvoice:
         except Exception:
             pass
         self.refresh_tray_menu()
+
+    def _raw_retention_loop(self):
+        """Apply the automatic original-track clean-up now, then periodically."""
+        while not self._quitting.is_set():
+            try:
+                result = self.meetings.sweep_raw_retention()
+                if not isinstance(result, dict):
+                    result = {}
+                if result.get("removed"):
+                    self.logger.info("Removed original tracks from %d recording(s) past the retention period",
+                                     result["removed"])
+                if result.get("errors"):
+                    self.logger.warning("Automatic original-track removal skipped %d recording(s): %s",
+                                        len(result["errors"]), ", ".join(sorted(set(result["errors"]))))
+            except Exception as exc:
+                # Class name only: exception text can carry workspace paths.
+                self.logger.warning("Automatic original-track removal failed: %s", type(exc).__name__)
+            if self._quitting.wait(RAW_RETENTION_INTERVAL_SECONDS):
+                return
 
     def _surface_meeting_startup(self, _root=None):
         view = self._manager_meeting_view

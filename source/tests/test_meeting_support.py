@@ -1,3 +1,4 @@
+import json
 import struct
 import shutil
 import sys
@@ -149,6 +150,8 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(self.final_export.call_args.kwargs["tracks"], ("microphone",))
         with self.assertRaises(ValueError):
             controller.export_track(session, "final", target)
+        with self.assertRaises(ValueError):
+            controller.export_track(session, "microphone", Path(self.temp.name) / "microphone.wav")
 
     def test_audio_inventory_reports_final_and_raw_sizes(self):
         controller, _store, session, previous, payload = self._quiet_recording()
@@ -892,6 +895,41 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
             self.controller.purge_session("fixture-meeting-v1")
         purged = self.controller.purge_session("fixture-meeting-v1", confirm=True)
         self.assertEqual(purged.state, "purged")
+
+    def _with_final_audio(self):
+        final = self.home / "recordings" / "final.mp3"
+        final.parent.mkdir()
+        final.write_bytes(b"final audio")
+        metadata_path = self.home / "meetings" / "fixture-meeting-v1" / "metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["final_audio"] = {"path": str(final), "created_at": "2026-09-16T12:04:00Z"}
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    def test_raw_sweep_removes_original_tracks_only_when_enabled(self):
+        self._with_final_audio()
+        self.assertEqual(self.controller.sweep_raw_retention()["removed"], 0)
+        self.library.update_workspace(
+            {"retention_defaults": {"raw_audio": {"mode": "raw_tracks", "after_days": 1, "tracks": []}}},
+            expected_generation=0,
+        )
+        result = self.controller.sweep_raw_retention()
+        self.assertEqual((result["removed"], result["errors"]), (1, []))
+        tracks = self.controller.store.get("fixture-meeting-v1")["tracks"]
+        self.assertTrue(all(value.get("available") is False for value in tracks.values()))
+        self.assertEqual(self.controller.sweep_raw_retention()["removed"], 0)
+
+    def test_raw_sweep_waits_for_age_and_skips_while_busy(self):
+        self._with_final_audio()
+        self.library.update_workspace(
+            {"retention_defaults": {"raw_audio": {"mode": "raw_tracks", "after_days": 3650, "tracks": []}}},
+            expected_generation=0,
+        )
+        self.assertEqual(self.controller.sweep_raw_retention()["removed"], 0)
+        self.controller._processing = True
+        try:
+            self.assertTrue(self.controller.sweep_raw_retention().get("busy"))
+        finally:
+            self.controller._processing = False
 
     def test_retention_admission_rejects_processing_and_memory_only_refuses_save(self):
         self.controller._processing = True
