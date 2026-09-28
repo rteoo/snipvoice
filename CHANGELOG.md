@@ -8,6 +8,8 @@
 - Remove the original tracks together, and only once a final audio file is saved; automatic retention follows the same rule. The confirmation warns that the recording can no longer be transcribed again, and afterwards playback and downloads use only the final audio.
 - Stop pre-selecting every original track for removal, and never fall back to removing all tracks when none is chosen.
 - Add Configurações > Privacidade > "Remover as faixas originais automaticamente após N dias". The app applies it at startup and every six hours, only to recordings with a saved final audio and a finished transcript. The previous raw-audio policy was stored but never applied.
+- Rewrite Configurações > Privacidade in plain language instead of workspace codes: the recording notice names its language, "Nunca salvar respostas do chat" replaces the Q&A mode, and trash lifetime reads in whole days.
+- Apply "Mover gravações para a lixeira automaticamente após N dias" in the same pass. It moves recordings to the restorable trash and never purges; the meeting policy was also stored but never applied before.
 
 ## 1.1.0 - 2026-09-26
 
