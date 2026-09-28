@@ -144,7 +144,8 @@ class ControllerTests(unittest.TestCase):
         # A quick follow-up window keeps the model resident.
         self.assertFalse(self.controller._release_idle_model(now=last + DICTATION_IDLE_UNLOAD_SECONDS - 1))
         self.assertTrue(self.backend.is_loaded())
-        self.assertTrue(self.controller._release_idle_model(now=last + DICTATION_IDLE_UNLOAD_SECONDS))
+        # +1: at large monotonic values (last + limit) - last can round below limit.
+        self.assertTrue(self.controller._release_idle_model(now=last + DICTATION_IDLE_UNLOAD_SECONDS + 1))
         self.assertFalse(self.backend.is_loaded())
         self.assertEqual(self.controller.state, STATE_IDLE)  # the hotkey still works
         with mock.patch("voice_support.installed_model_path", return_value="model.gguf"):
