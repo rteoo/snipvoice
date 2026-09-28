@@ -342,7 +342,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.preview_raw_tracks()
         view._submit.call_args.args[1]()
         view.controller.plan_raw_tracks.assert_called_once_with(
-            "meeting-1", tracks=("microphone", "system"))
+            "meeting-1", tracks=("microphone", "system"),
+            policy={"mode": "raw_tracks", "after_days": 0})
 
     def test_raw_removal_requires_saved_final_audio(self):
         view = self._raw_removal_view(final_available=False)
@@ -368,6 +369,48 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._set_audio_capabilities(tracks, final_available=False)
         view.raw_remove_button.configure.assert_called_with(state="disabled")
         view.export_audio_button.configure.assert_called_with(state="disabled")
+
+    def _privacy_view(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        for name, value in (("privacy_notice_enabled", False), ("privacy_notice_language", "pt-BR"),
+                            ("qa_mode", "explicit_save"), ("whole_meeting_policy", "keep"),
+                            ("whole_meeting_after_days", ""), ("raw_audio_auto", False),
+                            ("raw_audio_after_days", "30"), ("trash_days", "30"),
+                            ("privacy_status", "")):
+            setattr(view, name, Variable(value))
+        view.privacy_defaults, view.retention_defaults = {}, {}
+        view.workspace_generation = 0
+        view.privacy_save_inflight = False
+        view.controller = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+        view._sync_qa_controls = mock.Mock()
+        return view
+
+    def test_auto_clean_setting_loads_and_saves_all_track_policy(self):
+        view = self._privacy_view()
+        view._apply_workspace_settings({"retention_defaults": {
+            "raw_audio": {"mode": "raw_tracks", "after_days": 14.0, "tracks": ["microphone"]}}})
+        self.assertTrue(view.raw_audio_auto.get())
+        self.assertEqual(view.raw_audio_after_days.get(), "14")
+        view.save_privacy_settings()
+        saved = view._submit.call_args
+        self.assertEqual(saved.args[0], "save_privacy")
+        saved.args[1]()
+        patch = view.controller.update_workspace.call_args.args[0]["retention_defaults"]["raw_audio"]
+        self.assertEqual(patch, {"mode": "raw_tracks", "after_days": 14.0, "tracks": []})
+
+    def test_auto_clean_off_keeps_tracks_and_requires_days_when_on(self):
+        view = self._privacy_view()
+        view.save_privacy_settings()
+        view._submit.call_args.args[1]()
+        patch = view.controller.update_workspace.call_args.args[0]["retention_defaults"]["raw_audio"]
+        self.assertEqual(patch["mode"], "keep")
+        view = self._privacy_view()
+        view.raw_audio_auto.set(True)
+        view.raw_audio_after_days.set("")
+        view.save_privacy_settings()
+        view._submit.assert_not_called()
+        self.assertIn("dias", view.privacy_status.get())
 
     def test_removed_raw_tracks_leave_only_final_audio(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -550,7 +593,9 @@ class MeetingGuiLogicTests(unittest.TestCase):
         apply_call = view._submit.call_args_list[-1]
         self.assertEqual(apply_call.args[0], "raw_retention_apply")
         apply_call.args[1]()
-        view.controller.plan_raw_tracks.assert_called_once_with("meeting-1", tracks=("microphone",))
+        # Manual removal ignores the automatic age limit.
+        view.controller.plan_raw_tracks.assert_called_once_with(
+            "meeting-1", tracks=("microphone",), policy={"mode": "raw_tracks", "after_days": 0})
         view.controller.apply_raw_tracks.assert_called_once_with(plan, confirm=True)
 
     def test_label_allows_an_explicit_font_override(self):
