@@ -9,7 +9,7 @@ import unittest
 import warnings
 import wave
 
-from meeting_mixdown import MixdownCancelled, export_mixdown, mixdown_tracks
+from meeting_mixdown import MixdownCancelled, _adaptive_microphone_gain, export_mixdown, mixdown_tracks
 
 
 def _event(track, values, *, rate=4, channels=1, timestamp=0.0, sequence=0):
@@ -131,6 +131,33 @@ class MeetingMixdownTests(unittest.TestCase):
         self.assertGreater(samples[0], 1000)
         self.assertLess(samples[0], 1500)
         self.assertEqual(samples[-1], 29204)
+
+    def test_boost_raises_your_voice_toward_a_louder_call(self):
+        mic = [_event("microphone", [0.05] * 1000, rate=1000)]
+        loud_call = [_event("system", [0.2] * 2000, rate=1000, channels=2)]
+        quiet_call = [_event("system", [0.01] * 2000, rate=1000, channels=2)]
+        alone = _adaptive_microphone_gain(iter(mic), None)
+        balanced = _adaptive_microphone_gain(iter(mic), None, system_source=iter(loud_call))
+        # About 1.3x toward -24 dBFS alone; about 4.5x to meet the call's level.
+        self.assertAlmostEqual(alone, 1.26, places=2)
+        self.assertAlmostEqual(balanced, 4.47, places=2)
+        # A quieter call never pulls your voice below the usual target.
+        self.assertEqual(_adaptive_microphone_gain(iter(mic), None, system_source=iter(quiet_call)), alone)
+
+    def test_export_balances_the_boost_against_the_call(self):
+        store = _Store({
+            "microphone": [_event("microphone", [0.05] * 1000, rate=1000)],
+            "system": [_event("system", [0.2] * 1000, rate=1000)],
+        })
+        export_mixdown(store, "session", self.destination, enhance_microphone=True,
+                       tracks=("microphone",))
+        mic_only = struct.unpack("<h", _read(self.destination)[2][:2])[0]
+        store.reads.clear()
+        export_mixdown(store, "session", self.destination, enhance_microphone=True)
+        self.assertIn("system", store.reads)
+        # Both sources sum; the boosted mic is well above its unbalanced level.
+        mixed = struct.unpack("<h", _read(self.destination)[2][:2])[0]
+        self.assertGreater(mixed - round(0.2 * 32767), 2 * mic_only)
 
     def test_export_leaves_near_silence_unboosted(self):
         silent = _Store({"microphone": [_event("microphone", [0.001] * 1000, rate=1000)]})
