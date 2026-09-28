@@ -1019,52 +1019,65 @@ class MeetingController:
 
     plan_raw_audio = plan_raw_tracks
 
-    def sweep_raw_retention(self):
-        """Apply the automatic raw-track policy to every eligible recording.
+    def sweep_retention(self):
+        """Apply the automatic retention settings to every eligible recording.
 
-        The policy is the user's standing consent, so plans apply without a
-        per-recording prompt. Eligibility is the planner's: old enough, a saved
-        final audio, a finished transcript, and no active lease. Returns counts
-        and per-recording error types; it skips the pass while the controller
-        is busy rather than waiting.
+        The settings are the user's standing consent, so plans apply without a
+        per-recording prompt. Whole recordings older than their limit move to
+        the restorable trash first; original tracks are then removed from the
+        rest. Eligibility is the planner's (age, final state, a saved final
+        audio and finished transcript for raw removal, no active lease). The
+        pass is skipped while the controller is busy rather than waiting.
         """
         from meeting_retention import RetentionPolicy
-        from meeting_store import MAX_LIST_LIMIT
 
-        raw = self.library.read_retention_defaults().get("raw_audio")
-        policy = RetentionPolicy.from_value(raw) if isinstance(raw, dict) else None
-        if policy is None or policy.mode != "raw_tracks" or policy.after_days is None:
-            return {"removed": 0, "errors": [], "active": False}
-        # Automatic removal is all-or-nothing, like the Files tab.
-        policy = RetentionPolicy.raw_tracks(
-            after_days=policy.after_days, purge_after_days=policy.purge_after_days,
-        )
-        session_ids = []
-        offset = 0
-        while True:
-            page = self.store.list_sessions(offset=offset, limit=MAX_LIST_LIMIT)
-            session_ids.extend(item["id"] for item in page if isinstance(item, dict) and item.get("id"))
-            if len(page) < MAX_LIST_LIMIT:
-                break
-            offset += MAX_LIST_LIMIT
-        removed, errors = 0, []
+        defaults = self.library.read_retention_defaults()
+        trash_days = defaults.get("trash_days", 30.0)
+        policies = []
+        whole = defaults.get("whole_meeting")
+        whole = RetentionPolicy.from_value(whole) if isinstance(whole, dict) else None
+        if whole is not None and whole.mode == "whole_meeting" and whole.after_days is not None:
+            policies.append(("trashed", RetentionPolicy.whole_meeting(
+                after_days=whole.after_days, purge_after_days=trash_days)))
+        raw = defaults.get("raw_audio")
+        raw = RetentionPolicy.from_value(raw) if isinstance(raw, dict) else None
+        if raw is not None and raw.mode == "raw_tracks" and raw.after_days is not None:
+            # Automatic removal is all-or-nothing, like the Files tab.
+            policies.append(("raw_removed", RetentionPolicy.raw_tracks(
+                after_days=raw.after_days, purge_after_days=raw.purge_after_days)))
+        counts = {"trashed": 0, "raw_removed": 0}
+        if not policies:
+            return {**counts, "errors": [], "active": False}
+        errors = []
 
         def sweep(retention):
-            nonlocal removed
-            for session_id in session_ids:
-                try:
-                    plan = retention.plan(session_id, policy)
-                    if plan.eligible:
-                        retention.apply(plan, confirm=True)
-                        removed += 1
-                except Exception as exc:  # one bad recording must not stop the pass
-                    errors.append(type(exc).__name__)
+            for key, policy in policies:
+                # Re-list per policy: recordings trashed by the first pass are gone.
+                for session_id in self._all_session_ids():
+                    try:
+                        plan = retention.plan(session_id, policy)
+                        if plan.eligible:
+                            retention.apply(plan, confirm=True)
+                            counts[key] += 1
+                    except Exception as exc:  # one bad recording must not stop the pass
+                        errors.append(type(exc).__name__)
 
         try:
             self._run_retention(sweep)
         except RuntimeError:
-            return {"removed": 0, "errors": [], "active": True, "busy": True}
-        return {"removed": removed, "errors": errors, "active": True}
+            return {**counts, "errors": [], "active": True, "busy": True}
+        return {**counts, "errors": errors, "active": True}
+
+    def _all_session_ids(self):
+        from meeting_store import MAX_LIST_LIMIT
+
+        session_ids, offset = [], 0
+        while True:
+            page = self.store.list_sessions(offset=offset, limit=MAX_LIST_LIMIT)
+            session_ids.extend(item["id"] for item in page if isinstance(item, dict) and item.get("id"))
+            if len(page) < MAX_LIST_LIMIT:
+                return session_ids
+            offset += MAX_LIST_LIMIT
 
     def apply_raw_tracks(self, plan, *, confirm=False):
         return self.apply_retention(plan, confirm=confirm)

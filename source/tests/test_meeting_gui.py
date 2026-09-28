@@ -373,8 +373,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def _privacy_view(self):
         view = MeetingWindow.__new__(MeetingWindow)
         for name, value in (("privacy_notice_enabled", False), ("privacy_notice_language", "pt-BR"),
-                            ("qa_mode", "explicit_save"), ("whole_meeting_policy", "keep"),
-                            ("whole_meeting_after_days", ""), ("raw_audio_auto", False),
+                            ("qa_mode", "explicit_save"), ("whole_meeting_auto", False),
+                            ("whole_meeting_after_days", "90"), ("raw_audio_auto", False),
                             ("raw_audio_after_days", "30"), ("trash_days", "30"),
                             ("privacy_status", "")):
             setattr(view, name, Variable(value))
@@ -411,6 +411,22 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.save_privacy_settings()
         view._submit.assert_not_called()
         self.assertIn("dias", view.privacy_status.get())
+
+    def test_meeting_auto_trash_setting_round_trips_and_needs_days(self):
+        view = self._privacy_view()
+        view._apply_workspace_settings({"retention_defaults": {
+            "whole_meeting": {"mode": "whole_meeting", "after_days": 180.0}, "trash_days": 30.0}})
+        self.assertTrue(view.whole_meeting_auto.get())
+        self.assertEqual((view.whole_meeting_after_days.get(), view.trash_days.get()), ("180", "30"))
+        view.save_privacy_settings()
+        view._submit.call_args.args[1]()
+        patch = view.controller.update_workspace.call_args.args[0]["retention_defaults"]["whole_meeting"]
+        self.assertEqual(patch, {"mode": "whole_meeting", "after_days": 180.0})
+        view = self._privacy_view()
+        view.whole_meeting_auto.set(True)
+        view.whole_meeting_after_days.set("")
+        view.save_privacy_settings()
+        view._submit.assert_not_called()
 
     def test_removed_raw_tracks_leave_only_final_audio(self):
         view = MeetingWindow.__new__(MeetingWindow)

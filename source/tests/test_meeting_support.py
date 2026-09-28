@@ -907,16 +907,28 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
 
     def test_raw_sweep_removes_original_tracks_only_when_enabled(self):
         self._with_final_audio()
-        self.assertEqual(self.controller.sweep_raw_retention()["removed"], 0)
+        self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
         self.library.update_workspace(
             {"retention_defaults": {"raw_audio": {"mode": "raw_tracks", "after_days": 1, "tracks": []}}},
             expected_generation=0,
         )
-        result = self.controller.sweep_raw_retention()
-        self.assertEqual((result["removed"], result["errors"]), (1, []))
+        result = self.controller.sweep_retention()
+        self.assertEqual((result["raw_removed"], result["errors"]), (1, []))
         tracks = self.controller.store.get("fixture-meeting-v1")["tracks"]
         self.assertTrue(all(value.get("available") is False for value in tracks.values()))
-        self.assertEqual(self.controller.sweep_raw_retention()["removed"], 0)
+        self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
+
+    def test_retention_sweep_moves_old_recordings_to_restorable_trash(self):
+        self.library.update_workspace(
+            {"retention_defaults": {"whole_meeting": {"mode": "whole_meeting", "after_days": 1}}},
+            expected_generation=0,
+        )
+        result = self.controller.sweep_retention()
+        self.assertEqual((result["trashed"], result["errors"]), (1, []))
+        self.assertFalse((self.home / "meetings" / "fixture-meeting-v1").exists())
+        self.assertEqual(self.controller.list_trash()[0].session_id, "fixture-meeting-v1")
+        self.controller.restore_session("fixture-meeting-v1")
+        self.assertTrue((self.home / "meetings" / "fixture-meeting-v1").exists())
 
     def test_raw_sweep_waits_for_age_and_skips_while_busy(self):
         self._with_final_audio()
@@ -924,10 +936,10 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
             {"retention_defaults": {"raw_audio": {"mode": "raw_tracks", "after_days": 3650, "tracks": []}}},
             expected_generation=0,
         )
-        self.assertEqual(self.controller.sweep_raw_retention()["removed"], 0)
+        self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
         self.controller._processing = True
         try:
-            self.assertTrue(self.controller.sweep_raw_retention().get("busy"))
+            self.assertTrue(self.controller.sweep_retention().get("busy"))
         finally:
             self.controller._processing = False
 
