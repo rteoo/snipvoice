@@ -133,6 +133,19 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertTrue(self.final_export.call_args.kwargs["enhance_microphone"])
         controller._queue_projection.assert_called_once_with(session)
 
+    def test_repeated_adjustment_replaces_the_mp3_final_instead_of_copying_it(self):
+        controller, store, session, previous, _payload = self._quiet_recording()
+        for _ in range(3):
+            self.assertTrue(controller.regenerate_final_audio(session))
+            controller._processing_thread.join(3)
+            self.assertFalse(controller.snapshot()["error"])
+        final = Path(store.get(session)["final_audio"]["path"])
+        self.assertEqual(final.suffix, ".mp3")
+        # The legacy WAV stays; the MP3 is rebuilt in place, never copied.
+        self.assertEqual(sorted(path.name for path in previous.parent.iterdir() if path.is_file()),
+                         sorted([previous.name, final.name]))
+        self.assertEqual(self.final_export.call_args.args[2], final)
+
     def test_final_audio_download_copies_the_saved_file_without_raw_tracks(self):
         controller, store, session, previous, _payload = self._quiet_recording()
         target = Path(self.temp.name) / "downloaded.wav"

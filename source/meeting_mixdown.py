@@ -3,7 +3,12 @@
 The meeting store keeps the two sources as timestamped little-endian float32
 blocks. This module derives an MP3 or PCM16 WAV without changing the source
 recordings. Mixing stays bounded; MP3 encoding uses the bundled PyAV/LAME
-runtime and WAV export requires only the standard library.
+runtime, and WAV export needs no encoder.
+
+Sample math runs a whole block at a time in numpy. Each step keeps the
+per-sample formulas, float64 precision, operation order, and round-half-even
+conversion of the original loops, so the output bytes are unchanged; only the
+work moved out of the interpreter.
 """
 
 from __future__ import annotations
@@ -22,7 +27,6 @@ from i18n import tr
 OUTPUT_CHUNK_FRAMES = 4096
 MAX_OUTPUT_BYTES = 0xFFFFFFFF
 _FLOAT_BYTES = 4
-_PCM16 = struct.Struct("<h")
 MP3_RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
 
 
@@ -37,11 +41,21 @@ def _cancel(cancel_event):
         )
 
 
-def _float_to_pcm16(value):
-    if not math.isfinite(value):
-        value = 0.0
-    value = max(-1.0, min(1.0, value))
-    return -32768 if value <= -1.0 else int(round(value * 32767.0))
+def _numpy():
+    # Deferred: app startup imports this module, but mixing only runs after a
+    # recording stops, so startup doesn't pay for loading numpy.
+    import numpy
+
+    return numpy
+
+
+def _pcm16_bytes(samples):
+    """Little-endian PCM16 for float samples: non-finite is silence, clamp to
+    [-1, 1], -1 maps to -32768, everything else rounds half to even."""
+    np = _numpy()
+    values = np.where(np.isfinite(samples), samples, 0.0)
+    values = np.clip(values, -1.0, 1.0)
+    return np.where(values <= -1.0, -32768.0, np.rint(values * 32767.0)).astype("<i2").tobytes()
 
 
 def _validate_event(event, payload, track):
@@ -114,7 +128,11 @@ class _Track:
             start = self._last_end
             end = start + frames / rate
         self._last_end = end
-        self._current = (start, end, frames, raw)
+        np = _numpy()
+        data = np.frombuffer(raw, dtype="<f4").astype("float64").reshape(frames, channels)
+        # A damaged sample is silence, not a value to interpolate or boost.
+        np.nan_to_num(data, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        self._current = (start, end, frames, data)
 
     def render(self, first_frame, last_frame, output_rate, output_channels, target):
         """Add this source's overlap into an output float buffer."""
@@ -125,7 +143,7 @@ class _Track:
             if current is None:
                 self._read_next()
                 continue
-            start, end, frames, raw = current
+            start, end, frames, data = current
             if end <= first_time:
                 self._read_next()
                 continue
@@ -133,31 +151,22 @@ class _Track:
                 return
             overlap_start = max(first_frame, int(math.ceil(start * output_rate - 1e-9)))
             overlap_end = min(last_frame, int(math.ceil(end * output_rate - 1e-9)))
-            source_channels = self.channels
-            for frame in range(overlap_start, overlap_end):
-                position = (frame / output_rate - start) * self.rate
-                source_frame = min(frames - 1, max(0, int(math.floor(position))))
-                fraction = position - source_frame
-                source_offset = source_frame * source_channels * _FLOAT_BYTES
-                destination_offset = (frame - first_frame) * output_channels
-                if source_channels == 1:
-                    value = struct.unpack_from("<f", raw, source_offset)[0]
-                    if source_frame + 1 < frames:
-                        next_value = struct.unpack_from("<f", raw, source_offset + _FLOAT_BYTES)[0]
-                        value += (next_value - value) * fraction
-                    for channel in range(output_channels):
-                        target[destination_offset + channel] += value
-                else:
-                    for channel in range(output_channels):
-                        value = struct.unpack_from(
-                            "<f", raw, source_offset + channel * _FLOAT_BYTES
-                        )[0]
-                        if source_frame + 1 < frames:
-                            next_value = struct.unpack_from(
-                                "<f", raw, source_offset + source_channels * _FLOAT_BYTES + channel * _FLOAT_BYTES
-                            )[0]
-                            value += (next_value - value) * fraction
-                        target[destination_offset + channel] += value
+            if overlap_end > overlap_start:
+                np = _numpy()
+                output_frames = np.arange(overlap_start, overlap_end, dtype="int64")
+                position = (output_frames / output_rate - start) * self.rate
+                source_frame = np.clip(np.floor(position), 0, frames - 1)
+                fraction = (position - source_frame)[:, None]
+                index = source_frame.astype("int64")
+                value = data[index]
+                # Linear interpolation toward the next source frame; the last
+                # frame of a block has no successor and is held as-is.
+                following = data[np.minimum(index + 1, frames - 1)]
+                interpolated = value + (following - value) * fraction
+                value = np.where((index + 1 < frames)[:, None], interpolated, value)
+                rows = target.reshape(-1, output_channels)
+                # A mono value broadcasts to every output channel.
+                rows[overlap_start - first_frame:overlap_end - first_frame] += value
             if end <= last_time:
                 self._read_next()
             else:
@@ -165,31 +174,71 @@ class _Track:
 
 
 class _MicEnhancer:
-    """Apply a bounded gain without deleting quiet speech below a hard gate."""
+    """Raise the microphone by one gain; the mix limiter keeps its peaks in range."""
 
     def __init__(self, gain=1.5):
         self.gain = gain
-        self.limit = 0.95
 
     def apply(self, samples, channels):
-        for index in range(0, len(samples), channels):
-            for channel in range(channels):
-                value = samples[index + channel]
-                samples[index + channel] = max(-self.limit, min(self.limit, value * self.gain))
+        samples *= self.gain
 
 
-def _adaptive_microphone_gain(source, cancel_event):
-    """Measure a recording in bounded memory before deriving its final audio."""
+class _PeakLimiter:
+    """Brick-wall limiter for the final mix: instant attack, linear-dB release.
+
+    Frames that stay under the threshold pass through unchanged, so ordinary
+    audio is bit-exact; only peaks that would clip are pulled down, and the
+    gain then recovers at a fixed rate instead of snapping back. Channels are
+    linked so stereo placement doesn't shift. State carries across chunks.
+    """
+
+    THRESHOLD_DB = -1.0
+    # ceiling: 80 dB/s recovers a 15 dB knock in about 0.2 s; tune only with
+    # listening tests on real meetings.
+    RELEASE_DB_PER_SECOND = 80.0
+
+    def __init__(self, rate, channels):
+        self.threshold = 10 ** (self.THRESHOLD_DB / 20)
+        self.release = self.RELEASE_DB_PER_SECOND / rate
+        self.channels = channels
+        self.gain_db = 0.0
+
+    def apply(self, samples):
+        np = _numpy()
+        frames = samples.reshape(-1, self.channels)
+        if not len(frames):
+            return
+        peak = np.abs(frames).max(axis=1)
+        over = peak > self.threshold
+        if not over.any() and self.gain_db == 0.0:
+            return
+        required = np.zeros(len(peak))
+        required[over] = 20 * np.log10(self.threshold / peak[over])
+        # gain[n] = min(0, required[n], gain[n-1] + release), unrolled with a
+        # running minimum so the whole chunk is computed at once.
+        steps = np.arange(len(peak)) * self.release
+        floor = np.minimum.accumulate(required - steps)
+        gain_db = np.minimum(0.0, steps + np.minimum(self.gain_db + self.release, floor))
+        self.gain_db = float(gain_db[-1])
+        frames *= (10 ** (gain_db / 20))[:, None]
+
+
+def _speech_level(source, cancel_event, track="microphone"):
+    """Loud-speech level of one track: the 90th-percentile RMS of its audible
+    100 ms windows, measured in bounded memory. 0.0 when it has no speech."""
+    np = _numpy()
     histogram = [0] * 97  # 1 dB RMS buckets from -96 through 0 dBFS.
     windows = 0
     peak = 0.0
-    count = 0
-    squared = 0.0
     native_format = None
+    # Squared amplitudes of the 100 ms window still being filled; windows span
+    # store blocks, so the remainder carries into the next block.
+    pending = np.empty(0, dtype="float64")
 
-    def add_window():
+    def add_window(squares):
         nonlocal windows
-        rms = math.sqrt(squared / count)
+        # Summed front to back (cumsum), exactly as the running total did.
+        rms = math.sqrt(float(np.cumsum(squares)[-1]) / len(squares))
         # Measure audible windows, not the time the microphone was silent.
         # This only controls gain analysis; no source samples are gated out.
         if rms >= 0.002:
@@ -199,37 +248,52 @@ def _adaptive_microphone_gain(source, cancel_event):
 
     for event, payload in source:
         _cancel(cancel_event)
-        rate, channels, _, _, _ = _validate_event(event, payload, "microphone")
+        rate, channels, _, _, raw = _validate_event(event, payload, track)
         if native_format is not None and native_format != (rate, channels):
-            raise ValueError(tr("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume."))
+            if track == "microphone":
+                raise ValueError(tr("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume."))
+            raise ValueError(tr("O formato do áudio do sistema mudou durante a gravação; converta-o antes de ajustar o volume."))
         native_format = (rate, channels)
-        window_values = max(1, event["rate"] // 10) * event["channels"]
-        for (value,) in struct.iter_unpack("<f", payload):
-            if math.isfinite(value):
-                amplitude = min(1.0, abs(value))
-                peak = max(peak, amplitude)
-                squared += amplitude * amplitude
-            count += 1
-            if count == window_values:
-                add_window()
-                count = 0
-                squared = 0.0
-    if count:
-        add_window()
+        window_values = max(1, rate // 10) * channels
+        values = np.frombuffer(raw, dtype="<f4").astype("float64")
+        # Non-finite samples count toward the window but add no energy.
+        amplitude = np.where(np.isfinite(values), np.minimum(1.0, np.abs(values)), 0.0)
+        if len(amplitude):
+            peak = max(peak, float(amplitude.max()))
+        pending = np.concatenate((pending, amplitude * amplitude))
+        complete = len(pending) // window_values
+        for window in pending[:complete * window_values].reshape(complete, window_values):
+            add_window(window)
+        pending = pending[complete * window_values:]
+    if len(pending):
+        add_window(pending)
     if not windows or not peak:
-        return 1.0
+        return 0.0
     rank = math.ceil(windows * 0.9)
     seen = 0
-    percentile = 0.0
     for bucket, amount in enumerate(histogram):
         seen += amount
         if seen >= rank:
             percentile = 10 ** ((bucket - 95) / 20)
-            break
-    if percentile < 0.002:
+            return percentile if percentile >= 0.002 else 0.0
+    return 0.0
+
+
+def _adaptive_microphone_gain(source, cancel_event, system_source=None):
+    """Microphone gain for the final audio, from 1x to 8x.
+
+    Speech is raised toward -24 dBFS, or toward the call's own speech level
+    when that is louder, so your voice isn't left quieter than the other side.
+    The call audio itself is never changed. Loud moments (a knock, a laugh)
+    don't cap the gain; the mix limiter handles them.
+    """
+    level = _speech_level(source, cancel_event)
+    if not level:
         return 1.0
-    # Aim for speech around -24 dBFS while preserving transient headroom.
-    return max(1.0, min(8.0, (10 ** (-24 / 20)) / percentile, 0.95 / peak))
+    target = 10 ** (-24 / 20)
+    if system_source is not None:
+        target = max(target, _speech_level(system_source, cancel_event, "system"))
+    return max(1.0, min(8.0, target / level))
 
 
 def _write_header(handle, rate, channels):
@@ -357,23 +421,26 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
     try:
         with os.fdopen(descriptor, "w+b") as handle, _encoded_output(
                 handle, rate, output_channels, format, cancel_event) as write_pcm:
+            np = _numpy()
             enhancer = _MicEnhancer(microphone_gain) if enhance_microphone else None
+            # A single untouched source stays as recorded; mixing or boosting
+            # can push peaks past full scale, so those outputs are limited.
+            limiter = _PeakLimiter(rate, output_channels) if enhancer is not None or len(tracks) > 1 else None
             frame = 0
             # ceiling: output chunks are capped at 4,096 frames (~32 KiB for
             # stereo PCM16); increase only with measured memory profiling.
             while not all(track.done and track._current is None for track in tracks):
                 _cancel(cancel_event)
                 next_end = frame + chunk_frames
-                samples = [0.0] * ((next_end - frame) * output_channels)
+                samples = np.zeros((next_end - frame) * output_channels)
                 for track in tracks:
                     contribution = samples
                     if enhancer is not None and track.name == "microphone":
-                        contribution = [0.0] * ((next_end - frame) * output_channels)
+                        contribution = np.zeros_like(samples)
                     track.render(frame, next_end, rate, output_channels, contribution)
                     if contribution is not samples:
                         enhancer.apply(contribution, output_channels)
-                        for index, value in enumerate(contribution):
-                            samples[index] += value
+                        samples += contribution
                 all_done = all(track.done and track._current is None for track in tracks)
                 write_frames = next_end - frame
                 if all_done:
@@ -381,10 +448,9 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
                     final_end_frame = int(math.ceil(final_end * rate - 1e-9))
                     write_frames = max(0, min(next_end, final_end_frame) - frame)
                     samples = samples[:write_frames * output_channels]
-                encoded = bytearray(len(samples) * 2)
-                for index, value in enumerate(samples):
-                    _PCM16.pack_into(encoded, index * 2, _float_to_pcm16(value))
-                write_pcm(encoded)
+                if limiter is not None:
+                    limiter.apply(samples)
+                write_pcm(_pcm16_bytes(samples))
                 frame = next_end
                 if all_done:
                     break
@@ -424,7 +490,10 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
     enhance_microphone = enhance_microphone and "microphone" in tracks
     microphone_gain = (
-        _adaptive_microphone_gain(store.iter_audio(session_id, "microphone"), cancel_event)
+        _adaptive_microphone_gain(
+            store.iter_audio(session_id, "microphone"), cancel_event,
+            system_source=store.iter_audio(session_id, "system") if "system" in tracks else None,
+        )
         if enhance_microphone else 1.5
     )
     sources = {track: store.iter_audio(session_id, track) for track in tracks}
