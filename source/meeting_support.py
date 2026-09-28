@@ -1342,9 +1342,11 @@ class MeetingController:
         ), session_id=session_id)
 
     def export_track(self, session_id, track, path):
-        """Export one raw source on its own, as MP3 or WAV by extension."""
+        """Export one raw source on its own, as MP3."""
         if track not in ("microphone", "system"):
             raise ValueError(tr("A fonte de áudio é inválida."))
+        if Path(path).suffix.lower() != ".mp3":
+            raise ValueError(tr("Salve a faixa original como MP3."))
         return self._file_work(lambda: export_mixdown(
             self.store, session_id, path, tracks=(track,), cancel_event=self._cancel,
         ), session_id=session_id)

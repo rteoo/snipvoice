@@ -1112,7 +1112,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(dialog.call_args.kwargs["filetypes"], (("Áudio MP3", "*.mp3"),))
         view._action.assert_called_once_with("export_final_audio", "meeting-1", "final.mp3")
 
-    def test_track_download_exports_one_source_as_mp3_or_wav(self):
+    def test_track_download_exports_one_source_as_mp3(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
         view.raw_tracks_present = {"microphone", "system"}
@@ -1121,11 +1121,11 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.window = mock.Mock()
         view.status = Variable()
         view._action = mock.Mock()
-        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="mic.wav") as dialog:
+        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="mic.mp3") as dialog:
             view.export_track("microphone")
-        self.assertEqual(dialog.call_args.kwargs["filetypes"],
-                         (("Áudio MP3", "*.mp3"), ("Áudio WAV", "*.wav")))
-        view._action.assert_called_once_with("export_track", "meeting-1", "microphone", "mic.wav")
+        self.assertEqual(dialog.call_args.kwargs["defaultextension"], ".mp3")
+        self.assertEqual(dialog.call_args.kwargs["filetypes"], (("Áudio MP3", "*.mp3"),))
+        view._action.assert_called_once_with("export_track", "meeting-1", "microphone", "mic.mp3")
         view.raw_unavailable_tracks = {"system"}
         view._action.reset_mock()
         view.export_track("system")
