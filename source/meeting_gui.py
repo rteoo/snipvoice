@@ -5119,7 +5119,7 @@ class MeetingWindow:
             self._action("export_final_audio", self.selected, path)
 
     def export_track(self, track):
-        """Save one original source on its own, as MP3 or WAV."""
+        """Save one original source on its own, as MP3."""
         if not self.selected:
             self.status.set(tr("Selecione uma gravação na biblioteca."))
             return
@@ -5131,7 +5131,7 @@ class MeetingWindow:
         options = {"parent": self.window, "title": tr("Baixar faixa: {source}", source=source),
                    "defaultextension": ".mp3",
                    "initialfile": f"{self.title.get().strip()} - {source}.mp3",
-                   "filetypes": ((tr("Áudio MP3"), "*.mp3"), (tr("Áudio WAV"), "*.wav"))}
+                   "filetypes": ((tr("Áudio MP3"), "*.mp3"),)}
         path = filedialog.asksaveasfilename(**options)
         if path:
             self._action("export_track", self.selected, track, path)

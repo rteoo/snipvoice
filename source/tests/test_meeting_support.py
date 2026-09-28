@@ -149,6 +149,8 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(self.final_export.call_args.kwargs["tracks"], ("microphone",))
         with self.assertRaises(ValueError):
             controller.export_track(session, "final", target)
+        with self.assertRaises(ValueError):
+            controller.export_track(session, "microphone", Path(self.temp.name) / "microphone.wav")
 
     def test_audio_inventory_reports_final_and_raw_sizes(self):
         controller, _store, session, previous, payload = self._quiet_recording()
