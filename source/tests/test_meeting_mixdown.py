@@ -6,6 +6,7 @@ import struct
 import tempfile
 import threading
 import unittest
+import warnings
 import wave
 
 from meeting_mixdown import MixdownCancelled, export_mixdown, mixdown_tracks
@@ -71,6 +72,24 @@ class MeetingMixdownTests(unittest.TestCase):
         _, channels, raw = _read(self.destination)
         self.assertEqual(channels, 2)
         self.assertEqual(struct.unpack("<4h", raw), (32767, 32767, 32767, 32767))
+
+    def test_non_finite_samples_follow_the_per_sample_rules_quietly(self):
+        # Interpolation carries a non-finite neighbour into the frame before
+        # it; unboosted, non-finite becomes silence; boosted, NaN takes the
+        # positive limit. Pinned so block-wise math keeps per-sample results.
+        values = [0.25, 0.1, float("nan"), 0.1, 0.1, float("inf"), 0.1, float("-inf"),
+                  2.0, -3.0, -1.0, 0.2]
+        cases = (
+            (False, (8192, 0, 0, 3277, 0, 0, 0, 0, 32767, -32768, -32768, 6553)),
+            (True, (16384, 31129, 31129, 6553, 31129, 31129, 31129, 31129, 31129,
+                    -31129, -31129, 13107)),
+        )
+        for boost, expected in cases:
+            with self.subTest(boost=boost), warnings.catch_warnings():
+                warnings.simplefilter("error")
+                mixdown_tracks({"microphone": [_event("microphone", values)]}, self.destination,
+                               enhance_microphone=boost, microphone_gain=2.0)
+                self.assertEqual(struct.unpack("<12h", _read(self.destination)[2]), expected)
 
     def test_opt_in_mic_booster_preserves_quiet_speech(self):
         source = [_event("microphone", [0.005, 0.2, -0.2], timestamp=0.0)]
