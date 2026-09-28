@@ -62,6 +62,23 @@ class MeetingSettingsTests(unittest.TestCase):
         self.assertFalse(settings.auto_summary)
         self.assertTrue(settings.voice_boost)
 
+    def test_recordings_follow_the_dictation_model_by_default(self):
+        settings = resolve_meeting_settings({"voice_profile": "compact"})
+        self.assertTrue(settings.follows_dictation)
+        self.assertEqual(settings.profile, "compact")
+        self.assertEqual(settings.payload()["meeting_profile"], "dictation")
+        # The stored marker keeps following when dictation changes model.
+        followed = resolve_meeting_settings({**settings.payload(), "voice_profile": "whisper-small"})
+        self.assertEqual(followed.profile, "whisper-small")
+        # A dictation-only model can't transcribe recordings; use the default.
+        self.assertEqual(resolve_meeting_settings({"voice_profile": "streaming"}).profile, "balanced")
+
+    def test_an_explicit_recording_model_is_kept(self):
+        settings = resolve_meeting_settings({"meeting_profile": "whisper-large-v3", "voice_profile": "compact"})
+        self.assertFalse(settings.follows_dictation)
+        self.assertEqual(settings.profile, "whisper-large-v3")
+        self.assertEqual(settings.payload()["meeting_profile"], "whisper-large-v3")
+
     def test_microphone_adjustment_preserves_an_explicit_opt_out(self):
         settings = resolve_meeting_settings({"meeting_voice_boost": False})
         self.assertFalse(settings.voice_boost)

@@ -376,6 +376,23 @@ class GuiThreadHeadlessTests(unittest.TestCase):
         self.assertTrue(done.is_set())
         self.assertIsInstance(box.get("error"), RuntimeError)
 
+    def test_pump_slows_down_while_idle_and_speeds_up_for_work(self):
+        gui = GuiThread(main_thread=False)
+        gui.root = mock.Mock()
+        # Idle past the threshold with nothing queued: the slow cadence.
+        gui._last_work -= gt.PUMP_IDLE_AFTER_MS / 1000 + 1
+        gui._pump()
+        self.assertEqual(gui.root.after.call_args.args[0], gt.PUMP_IDLE_INTERVAL_MS)
+        # Work arrives: that tick runs it and schedules the fast cadence.
+        ran = []
+        gui._queue.put((lambda _root: ran.append(True), None, None))
+        gui._pump()
+        self.assertEqual(ran, [True])
+        self.assertEqual(gui.root.after.call_args.args[0], gt.PUMP_INTERVAL_MS)
+        # Just after work the pump stays fast, so a follow-up request is prompt.
+        gui._pump()
+        self.assertEqual(gui.root.after.call_args.args[0], gt.PUMP_INTERVAL_MS)
+
 
 class MainThreadModeHeadlessTests(unittest.TestCase):
     """Main-thread mode guard rails, asserted without ever creating a root."""
