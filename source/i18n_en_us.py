@@ -717,7 +717,7 @@ EN_US = {
     'A retenção aguarda a recuperação do workspace.': 'Retention is waiting for workspace recovery.',
     'Calculando prévia de retenção…': 'Calculating retention preview…',
     'Selecione uma gravação antes de remover áudio raw.': 'Select a recording before removing raw audio.',
-    'Nenhuma fonte raw disponível para remoção.': 'No raw source available for removal.',
+    'Marque as fontes de áudio raw que deseja remover.': 'Tick the raw audio sources you want to remove.',
     'Calculando prévia de remoção raw…': 'Calculating raw removal preview…',
     'A prévia raw falhou; nenhum áudio foi removido.': 'The raw preview failed; no audio was removed.',
     'Remoção raw bloqueada': 'Raw removal blocked',

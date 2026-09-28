@@ -4318,9 +4318,11 @@ class MeetingWindow:
             ("microphone", "raw_remove_microphone", "raw_remove_microphone_check"),
             ("system", "raw_remove_system", "raw_remove_system_check"),
         ):
+            # Removal is destructive, so no source starts selected: the user
+            # ticks each track to remove, for every recording loaded.
             variable = getattr(self, variable_name, None)
             if variable is not None:
-                variable.set(track in self.raw_tracks_present and track not in unavailable)
+                variable.set(False)
             widget = getattr(self, widget_name, None)
             if widget is not None:
                 widget.configure(state="normal" if track in self.raw_tracks_present and track not in unavailable else "disabled")
@@ -4516,11 +4518,7 @@ class MeetingWindow:
         else:
             selected_tracks = tuple(tracks)
         if not selected_tracks:
-            selected_tracks = tuple(sorted(
-                getattr(self, "raw_tracks_present", set()) - getattr(self, "raw_unavailable_tracks", set())
-            ))
-        if not selected_tracks:
-            self.status.set(tr("Nenhuma fonte raw disponível para remoção."))
+            self.status.set(tr("Marque as fontes de áudio raw que deseja remover."))
             return
         session_id = self.selected
         self.retention_request += 1

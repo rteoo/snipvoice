@@ -322,6 +322,36 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.transcribe_button.configure.assert_called_with(state="normal")
         self.assertIn("transcrição", view.audio_capability_status.get().lower())
 
+    def test_raw_removal_sources_start_unticked_for_each_recording(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.raw_remove_microphone = Variable(True)
+        view.raw_remove_system = Variable(True)
+        view.raw_remove_microphone_check = mock.Mock()
+        view.raw_remove_system_check = mock.Mock()
+        view.audio_capability_status = Variable()
+        view._set_audio_capabilities({"microphone": {"available": True}, "system": {"available": True}})
+        self.assertFalse(view.raw_remove_microphone.get())
+        self.assertFalse(view.raw_remove_system.get())
+        view.raw_remove_microphone_check.configure.assert_called_with(state="normal")
+        view.raw_remove_system_check.configure.assert_called_with(state="normal")
+
+    def test_raw_removal_with_no_source_ticked_plans_nothing(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.retention_ready = True
+        view.raw_remove_microphone = Variable(False)
+        view.raw_remove_system = Variable(False)
+        view.raw_tracks_present = {"microphone", "system"}
+        view.raw_unavailable_tracks = set()
+        view.raw_remove_button = mock.Mock()
+        view.status = Variable()
+        view._submit = mock.Mock()
+        view.preview_raw_tracks()
+        view._submit.assert_not_called()
+        view.raw_remove_button.configure.assert_not_called()
+        self.assertIn("Marque", view.status.get())
+
     def test_raw_capability_gating_keeps_remaining_source_actions_available(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.retention_ready = True
