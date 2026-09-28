@@ -86,8 +86,9 @@ launch. The Windows installer uses no administrator rights and installs under
 
 ### What's new in v1.1.1
 
-- **Biblioteca > Arquivos** separates the final audio from the original (raw) tracks, shows their sizes, and downloads the final audio or each original track on its own.
+- **Biblioteca > Arquivos** separates the final audio from the original (raw) tracks, shows their sizes, and downloads the final audio or each original track on its own as MP3.
 - Removing the original tracks frees most of a recording's space but keeps the final audio, transcript, summaries, and chat; the recording can no longer be transcribed again.
+- **Configurações > Privacidade** can remove original tracks automatically after a number of days you choose.
 
 ### What's new in v1.1.0
 
