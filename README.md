@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml"><img src="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/stable-v1.1.0-blue.svg" alt="Stable v1.1.0"></a>
+  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.2.0"><img src="https://img.shields.io/badge/stable-v1.2.0-blue.svg" alt="Stable v1.2.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
@@ -45,7 +45,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v1.1.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.1.0).
+[stable v1.2.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.2.0).
 To run from source with Python installed:
 
 ```powershell
@@ -67,7 +67,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v1.1.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.1.0):
+[`v1.2.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.2.0):
 
 | Platform | Package |
 | --- | --- |
@@ -83,6 +83,14 @@ The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
+
+### What's new in v1.2.0
+
+- **Biblioteca > Arquivos** separates the final audio from the original (raw) tracks, shows their sizes, and downloads the final audio or each original track on its own as MP3.
+- Removing the original tracks frees most of a recording's space but keeps the final audio, transcript, summaries, and chat; the recording can no longer be transcribed again.
+- **Configurações > Privacidade** is written in plain language and can automatically remove original tracks, or move whole recordings to the restorable trash, after a number of days you choose.
+- The final audio is ready about 10x faster after a recording, and the microphone boost now survives loud moments, balances your voice against the call, and never clips.
+- Recordings use the dictation model by default, and the dictation model leaves memory after 10 idle minutes.
 
 ### What's new in v1.1.0
 
