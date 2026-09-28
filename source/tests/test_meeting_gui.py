@@ -298,6 +298,15 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertNotIn("C:\\Users", text)
         self.assertIn("[caminho local]", text)
 
+    def test_follow_dictation_uses_the_current_dictation_model(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.profile = Variable("dictation")
+        view.raw_settings = {"voice_profile": "balanced"}
+        view.settings_getter = lambda: {"voice_profile": "whisper-small"}
+        self.assertEqual(view._effective_profile(), "whisper-small")
+        view.profile = Variable("accuracy")
+        self.assertEqual(view._effective_profile(), "accuracy")
+
     def test_raw_capability_gating_keeps_transcript_surface_available(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.raw_unavailable_tracks = set()

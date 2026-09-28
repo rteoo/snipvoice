@@ -79,6 +79,17 @@ def _resolve_destination(value):
         raise ValueError(tr("A pasta de gravações é inválida."))
 
 
+# Stored meeting_profile value meaning "use the dictation model". It is the
+# default, so one downloaded model serves dictation and recordings.
+FOLLOW_DICTATION = "dictation"
+
+
+def dictation_profile(data):
+    """The dictation model when it can transcribe recordings, else the default."""
+    profile = data.get("voice_profile", DEFAULT_PROFILE) if isinstance(data, dict) else DEFAULT_PROFILE
+    return profile if is_selectable_profile(profile) else DEFAULT_PROFILE
+
+
 @dataclass(frozen=True)
 class MeetingSettings:
     sources: str = "both"
@@ -94,12 +105,18 @@ class MeetingSettings:
     auto_transcribe: bool = False
     auto_summary: bool = False
     voice_boost: bool = True
+    follows_dictation: bool = True
+
+    @property
+    def profile_setting(self):
+        """What is stored: the follow marker, or the explicitly chosen model."""
+        return FOLLOW_DICTATION if self.follows_dictation else self.profile
 
     def payload(self):
         return {"meeting_sources": self.sources,
                 "meeting_microphone": self.microphone.payload(),
                 "meeting_system": self.system.payload(), "meeting_hotkey": self.hotkey,
-                "meeting_profile": self.profile, "meeting_language": self.language,
+                "meeting_profile": self.profile_setting, "meeting_language": self.language,
                 "meeting_summary_model": self.summary_model,
                 "meeting_destination": self.destination,
                 "meeting_input_enabled": self.input_enabled,
@@ -118,7 +135,9 @@ def resolve_meeting_settings(value):
     if not isinstance(hotkey, str):
         raise ValueError(tr("O atalho de gravação é inválido."))
     hotkey = parse_chord(hotkey).spec if hotkey.strip() else ""
-    profile = data.get("meeting_profile", DEFAULT_PROFILE)
+    stored_profile = data.get("meeting_profile", FOLLOW_DICTATION)
+    follows_dictation = stored_profile == FOLLOW_DICTATION
+    profile = dictation_profile(data) if follows_dictation else stored_profile
     if not is_selectable_profile(profile):
         raise ValueError(tr("Selecione um modelo local disponível para gravações."))
     language = data.get("meeting_language", LANGUAGE_AUTO)
@@ -167,7 +186,8 @@ def resolve_meeting_settings(value):
     return MeetingSettings(sources, resolve_selection(data.get("meeting_microphone")),
                            resolve_selection(data.get("meeting_system")), hotkey,
                            profile, language, model, destination, input_enabled,
-                           output_enabled, auto_transcribe, auto_summary, voice_boost)
+                           output_enabled, auto_transcribe, auto_summary, voice_boost,
+                           follows_dictation)
 
 
 def validate_hotkey_conflicts(settings):
