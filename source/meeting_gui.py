@@ -18,7 +18,10 @@ from i18n import N_, tr
 from meeting_files import report_export_projection
 from meeting_chat import MeetingChat
 from meeting_text import format_summary
-from meeting_settings import EndpointSelection, resolve_meeting_settings, validate_hotkey_conflicts
+from meeting_settings import (
+    FOLLOW_DICTATION, EndpointSelection, dictation_profile, resolve_meeting_settings,
+    validate_hotkey_conflicts,
+)
 from meeting_waveform import MeetingWaveform
 from summary_catalog import format_model_size, summary_catalog, summary_catalog_entry
 from summary_models import (
@@ -80,6 +83,11 @@ AUDIO_SOURCE_LABELS = {N_("Áudio final"): "final", **TRACK_LABELS}
 AUDIO_TRACK_LABELS = {track: label for label, track in AUDIO_SOURCE_LABELS.items()}
 SUMMARY_LABELS = {entry["id"]: f'{entry["name"]} · {entry["parameters"]}'
                   for entry in summary_catalog()}
+
+
+def profile_display_label(profile):
+    """Dropdown text for a stored meeting model setting."""
+    return tr("Igual ao ditado") if profile == FOLLOW_DICTATION else tr(PROFILE_LABELS[profile])
 
 
 def displayed_key(labels, displayed):
@@ -946,9 +954,9 @@ class MeetingWindow:
             self.window, destination_display(self.settings.destination),
         )
         self.voice_boost = tk.BooleanVar(self.window, self.settings.voice_boost)
-        self.profile = tk.StringVar(self.window, self.settings.profile)
+        self.profile = tk.StringVar(self.window, self.settings.profile_setting)
         self.language = tk.StringVar(self.window, self.settings.language)
-        self.profile_display = tk.StringVar(self.window, tr(PROFILE_LABELS[self.settings.profile]))
+        self.profile_display = tk.StringVar(self.window, profile_display_label(self.settings.profile_setting))
         self.language_display = tk.StringVar(self.window, tr(LANGUAGE_LABELS[self.settings.language]))
         self.hotkey = tk.StringVar(self.window)
         self.summary_model = tk.StringVar(self.window, self.settings.summary_model)
@@ -968,7 +976,8 @@ class MeetingWindow:
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
         self.profile_box = ttk.Combobox(
             defaults, textvariable=self.profile_display,
-            values=[tr(PROFILE_LABELS[entry["profile"]]) for entry in selectable_catalog()],
+            values=[profile_display_label(FOLLOW_DICTATION)]
+            + [tr(PROFILE_LABELS[entry["profile"]]) for entry in selectable_catalog()],
             state="readonly",
         )
         self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
@@ -3139,9 +3148,9 @@ class MeetingWindow:
         self.destination.set(settings.destination)
         self.destination_label.set(destination_display(settings.destination))
         self.voice_boost.set(settings.voice_boost)
-        self.profile.set(settings.profile)
+        self.profile.set(settings.profile_setting)
         self.language.set(settings.language)
-        self.profile_display.set(tr(PROFILE_LABELS[settings.profile]))
+        self.profile_display.set(profile_display_label(settings.profile_setting))
         self.language_display.set(tr(LANGUAGE_LABELS[settings.language]))
         self.hotkey.set(settings.hotkey)
         self.summary_model.set(settings.summary_model)
@@ -3203,12 +3212,24 @@ class MeetingWindow:
             self.privacy_status.set(tr("Privacidade local carregada."))
 
     def _profile_changed(self, _event=None):
-        self.profile.set(next(key for key, label in PROFILE_LABELS.items() if tr(label) == self.profile_display.get()))
-        languages = available_languages(self.profile.get())
+        shown = self.profile_display.get()
+        self.profile.set(FOLLOW_DICTATION if shown == profile_display_label(FOLLOW_DICTATION) else
+                         next(key for key, label in PROFILE_LABELS.items() if tr(label) == shown))
+        languages = available_languages(self._effective_profile())
         self.language_box.configure(values=[tr(LANGUAGE_LABELS[language]) for language in languages])
         if self.language.get() not in languages:
             self.language.set(languages[0])
         self.language_display.set(tr(LANGUAGE_LABELS[self.language.get()]))
+
+    def _effective_profile(self):
+        """The model a recording would use now; follows the current dictation choice."""
+        if self.profile.get() != FOLLOW_DICTATION:
+            return self.profile.get()
+        try:
+            current = self.settings_getter()
+        except Exception:
+            current = self.raw_settings
+        return dictation_profile(current if isinstance(current, dict) else self.raw_settings)
 
     def _language_changed(self, _event=None):
         self.language.set(next(key for key, label in LANGUAGE_LABELS.items() if tr(label) == self.language_display.get()))
@@ -3277,6 +3298,9 @@ class MeetingWindow:
         if not self.settings_loaded:
             raise ValueError(tr("Aguarde o carregamento das configurações antes de gravar ou salvar."))
         data = dict(self.raw_settings)
+        if self.profile.get() == FOLLOW_DICTATION:
+            # The dictation model can change while this window is open.
+            data["voice_profile"] = self._effective_profile()
         data.update(meeting_input_enabled=bool(self.input_enabled.get()),
                     meeting_output_enabled=bool(self.output_enabled.get()),
                     meeting_destination=self.destination.get(),
@@ -5028,7 +5052,7 @@ class MeetingWindow:
                      callback=lambda value, error: self._processing_launched(session_id, value, error))
 
     def import_model(self):
-        profile = self.profile.get()
+        profile = self._effective_profile()
         path = filedialog.askopenfilename(parent=self.window, title=tr("Importar modelo local compatível"),
                                            filetypes=((tr("Modelo GGUF"), "*.gguf"), (tr("Todos os arquivos"), "*")))
         if path:
