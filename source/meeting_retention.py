@@ -1076,6 +1076,12 @@ class MeetingRetention:
             if metadata.get("status") not in _RAW_ELIGIBLE_STATUSES:
                 reasons.append("Raw-audio removal requires a completed or partial meeting, not an interrupted/failed state.")
                 eligible = False
+            # The final audio becomes the recording's only audio afterwards.
+            final_audio = metadata.get("final_audio")
+            final_path = final_audio.get("path") if isinstance(final_audio, dict) else None
+            if not (isinstance(final_path, str) and os.path.isfile(final_path)):
+                reasons.append(tr("Remover o áudio raw exige o áudio final salvo, que passa a ser o único áudio da gravação."))
+                eligible = False
             annotations = self._annotations(session_id, metadata)
             complete, _has_revision, revision_ids, revision_ranges, transcript_reason = self._transcript_state(
                 session_id, metadata,

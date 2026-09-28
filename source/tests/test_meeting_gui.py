@@ -320,37 +320,76 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(view.playback_choices, ("Sistema",))
         view.play_button.configure.assert_called_with(state="normal")
         view.transcribe_button.configure.assert_called_with(state="normal")
-        self.assertIn("transcrição", view.audio_capability_status.get().lower())
+        self.assertIn("faixas que restam", view.audio_capability_status.get())
 
-    def test_raw_removal_sources_start_unticked_for_each_recording(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.raw_remove_microphone = Variable(True)
-        view.raw_remove_system = Variable(True)
-        view.raw_remove_microphone_check = mock.Mock()
-        view.raw_remove_system_check = mock.Mock()
-        view.audio_capability_status = Variable()
-        view._set_audio_capabilities({"microphone": {"available": True}, "system": {"available": True}})
-        self.assertFalse(view.raw_remove_microphone.get())
-        self.assertFalse(view.raw_remove_system.get())
-        view.raw_remove_microphone_check.configure.assert_called_with(state="normal")
-        view.raw_remove_system_check.configure.assert_called_with(state="normal")
-
-    def test_raw_removal_with_no_source_ticked_plans_nothing(self):
+    def _raw_removal_view(self, *, final_available=True, removed=()):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
         view.detail_ready = True
         view.retention_ready = True
-        view.raw_remove_microphone = Variable(False)
-        view.raw_remove_system = Variable(False)
+        view.retention_request = 0
+        view.final_available = final_available
         view.raw_tracks_present = {"microphone", "system"}
-        view.raw_unavailable_tracks = set()
+        view.raw_unavailable_tracks = set(removed)
         view.raw_remove_button = mock.Mock()
         view.status = Variable()
-        view._submit = mock.Mock()
+        view.controller = mock.Mock()
+        view._submit = mock.Mock(return_value=True)
+        return view
+
+    def test_raw_removal_takes_every_remaining_track(self):
+        view = self._raw_removal_view()
+        view.preview_raw_tracks()
+        view._submit.call_args.args[1]()
+        view.controller.plan_raw_tracks.assert_called_once_with(
+            "meeting-1", tracks=("microphone", "system"))
+
+    def test_raw_removal_requires_saved_final_audio(self):
+        view = self._raw_removal_view(final_available=False)
         view.preview_raw_tracks()
         view._submit.assert_not_called()
-        view.raw_remove_button.configure.assert_not_called()
-        self.assertIn("Marque", view.status.get())
+        self.assertIn("áudio final", view.status.get())
+
+    def test_raw_removal_with_nothing_left_plans_nothing(self):
+        view = self._raw_removal_view(removed=("microphone", "system"))
+        view.preview_raw_tracks()
+        view._submit.assert_not_called()
+        self.assertIn("Nenhuma faixa original", view.status.get())
+
+    def test_raw_removal_is_offered_only_with_final_audio_saved(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.retention_ready = True
+        view.raw_remove_button = mock.Mock()
+        view.export_audio_button = mock.Mock()
+        view.audio_capability_status = Variable()
+        tracks = {"microphone": {"available": True}, "system": {"available": True}}
+        view._set_audio_capabilities(tracks, final_available=True)
+        view.raw_remove_button.configure.assert_called_with(state="normal")
+        view._set_audio_capabilities(tracks, final_available=False)
+        view.raw_remove_button.configure.assert_called_with(state="disabled")
+        view.export_audio_button.configure.assert_called_with(state="disabled")
+
+    def test_removed_raw_tracks_leave_only_final_audio(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        for name in ("play_button", "transcribe_button", "adjust_audio_button",
+                     "export_audio_button", "raw_remove_button"):
+            setattr(view, name, mock.Mock())
+        view.audio_capability_status = Variable()
+        view.retranscribe_hint = Variable()
+        view.raw_track_buttons = {"microphone": mock.Mock(), "system": mock.Mock()}
+        view._set_audio_capabilities({
+            "microphone": {"available": False, "raw_removed": True},
+            "system": {"available": False, "raw_removed": True},
+        }, final_available=True)
+        self.assertEqual(view.playback_choices, ("Áudio final",))
+        view.play_button.configure.assert_called_with(state="normal")
+        view.export_audio_button.configure.assert_called_with(state="normal")
+        for name in ("transcribe_button", "adjust_audio_button", "raw_remove_button"):
+            getattr(view, name).configure.assert_called_with(state="disabled")
+        for button in view.raw_track_buttons.values():
+            button.configure.assert_called_with(state="disabled")
+        self.assertIn("não pode ser transcrita novamente", view.audio_capability_status.get())
+        self.assertIn("não é possível transcrever novamente", view.retranscribe_hint.get())
 
     def test_raw_capability_gating_keeps_remaining_source_actions_available(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -368,7 +407,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._set_audio_capabilities({
             "microphone": {"available": False, "raw_removed": True},
             "system": {"available": True},
-        })
+        }, final_available=True)
         view.play_button.configure.assert_called_with(state="normal")
         view.transcribe_button.configure.assert_called_with(state="normal")
         view.export_audio_button.configure.assert_called_with(state="normal")
@@ -487,6 +526,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.selected = "meeting-1"
         view.detail_ready = True
         view.retention_ready = True
+        view.final_available = True
         view.retention_request = 0
         view.raw_remove_button = mock.Mock()
         view.status = Variable()
@@ -1057,25 +1097,39 @@ class MeetingGuiLogicTests(unittest.TestCase):
             style="timestamped", revision="revision-2",
         )
 
-    def test_audio_export_defaults_to_mp3_and_keeps_wav_available(self):
+    def test_final_audio_download_copies_the_saved_file_format(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
-        view.raw_tracks_present = {"microphone"}
-        view.raw_unavailable_tracks = set()
+        view.final_available = True
+        view.audio_sizes = {"final": 1024, "final_format": "MP3"}
+        view.title = Variable("Reunião")
         view.window = mock.Mock()
         view.status = Variable()
-        view._current_settings = mock.Mock(return_value=types.SimpleNamespace(
-            destination="", voice_boost=True,
-        ))
         view._action = mock.Mock()
-        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="recording.mp3") as dialog:
+        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="final.mp3") as dialog:
             view.export_audio()
         self.assertEqual(dialog.call_args.kwargs["defaultextension"], ".mp3")
+        self.assertEqual(dialog.call_args.kwargs["filetypes"], (("Áudio MP3", "*.mp3"),))
+        view._action.assert_called_once_with("export_final_audio", "meeting-1", "final.mp3")
+
+    def test_track_download_exports_one_source_as_mp3_or_wav(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.raw_tracks_present = {"microphone", "system"}
+        view.raw_unavailable_tracks = set()
+        view.title = Variable("Reunião")
+        view.window = mock.Mock()
+        view.status = Variable()
+        view._action = mock.Mock()
+        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="mic.wav") as dialog:
+            view.export_track("microphone")
         self.assertEqual(dialog.call_args.kwargs["filetypes"],
                          (("Áudio MP3", "*.mp3"), ("Áudio WAV", "*.wav")))
-        view._action.assert_called_once_with(
-            "export_mixdown", "meeting-1", "recording.mp3", enhance_microphone=True,
-        )
+        view._action.assert_called_once_with("export_track", "meeting-1", "microphone", "mic.wav")
+        view.raw_unavailable_tracks = {"system"}
+        view._action.reset_mock()
+        view.export_track("system")
+        view._action.assert_not_called()
 
     def test_summary_display_is_readable_and_read_only(self):
         view = MeetingWindow.__new__(MeetingWindow)

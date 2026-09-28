@@ -1,6 +1,7 @@
 """Worker-owned meeting lifecycle; keyboard and Tk callbacks only enqueue work."""
 
 import array
+import contextlib
 import copy
 from collections import deque
 import itertools
@@ -9,7 +10,9 @@ import os
 from pathlib import Path
 import queue
 import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 
@@ -1337,6 +1340,61 @@ class MeetingController:
             self.store, session_id, path, enhance_microphone=enhance_microphone,
             cancel_event=self._cancel,
         ), session_id=session_id)
+
+    def export_track(self, session_id, track, path):
+        """Export one raw source on its own, as MP3 or WAV by extension."""
+        if track not in ("microphone", "system"):
+            raise ValueError(tr("A fonte de áudio é inválida."))
+        return self._file_work(lambda: export_mixdown(
+            self.store, session_id, path, tracks=(track,), cancel_event=self._cancel,
+        ), session_id=session_id)
+
+    def export_final_audio(self, session_id, path):
+        """Copy the saved final audio as-is; it needs no raw tracks."""
+        def work():
+            final = self.store.get(session_id, include_events=False).get("final_audio")
+            source = final.get("path") if isinstance(final, dict) else None
+            if not (isinstance(source, str) and os.path.isfile(source)):
+                raise ValueError(tr("O áudio final desta gravação não foi encontrado."))
+            destination = Path(path).absolute()
+            if destination.suffix.lower() != Path(source).suffix.lower():
+                raise ValueError(tr("Salve o áudio final com a extensão original ({suffix}).",
+                                    suffix=Path(source).suffix.lower()))
+            library = os.path.realpath(self.store.root)
+            try:
+                inside = os.path.commonpath((library, os.path.realpath(destination))) == library
+            except ValueError:
+                inside = False
+            if inside:
+                raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
+            if not destination.parent.is_dir() or destination.is_dir():
+                raise ValueError(tr("A pasta destino deve existir e o destino deve ser um arquivo."))
+            descriptor, temporary = tempfile.mkstemp(
+                prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
+            )
+            os.close(descriptor)
+            try:
+                shutil.copyfile(source, temporary)
+                os.replace(temporary, destination)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary)
+                raise
+            return str(destination)
+        return self._file_work(work, session_id=session_id)
+
+    def audio_inventory(self, session_id):
+        """Bytes of the final audio and each raw source; None where absent."""
+        final = self.store.get(session_id, include_events=False).get("final_audio")
+        source = final.get("path") if isinstance(final, dict) else None
+        final_bytes = None
+        if isinstance(source, str) and os.path.isfile(source):
+            final_bytes = os.path.getsize(source)
+        return {
+            "final": final_bytes,
+            "final_format": Path(source).suffix.lstrip(".").upper() if final_bytes is not None else "",
+            **{track: self.store.raw_track_bytes(session_id, track) for track in ("microphone", "system")},
+        }
 
     def regenerate_final_audio(self, session_id):
         """Publish a new level-adjusted mix, preserving every previous audio file."""

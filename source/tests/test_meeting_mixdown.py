@@ -53,6 +53,17 @@ class MeetingMixdownTests(unittest.TestCase):
         mixdown_tracks({"microphone": mic, "system": ()}, single, chunk_frames=1)
         self.assertEqual(struct.unpack("<2h", _read(single)[2]), (8192, 8192))
 
+    def test_export_can_mix_a_single_source(self):
+        store = _Store({
+            "microphone": [_event("microphone", [0.25, 0.25], timestamp=0.0)],
+            "system": [_event("system", [0.5, 0.5], timestamp=0.0)],
+        })
+        export_mixdown(store, "session", self.destination, tracks=("system",), chunk_frames=2)
+        self.assertEqual(store.reads, ["system"])
+        self.assertEqual(struct.unpack("<2h", _read(self.destination)[2]), (16384, 16384))
+        with self.assertRaises(ValueError):
+            export_mixdown(store, "session", self.destination, tracks=())
+
     def test_stereo_system_and_clipping_are_safe(self):
         mic = [_event("microphone", [0.8, 0.8], timestamp=0.0)]
         system = [_event("system", [0.8, 0.8, 0.8, 0.8], channels=2, timestamp=0.0)]

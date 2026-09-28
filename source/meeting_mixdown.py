@@ -405,8 +405,15 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
 
 
 def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
-                   cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES):
-    """Export one meeting's two store tracks without retaining the session."""
+                   cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES,
+                   tracks=("microphone", "system")):
+    """Export one meeting's store tracks without retaining the session.
+
+    ``tracks`` narrows the mix, so a single source exports on its own.
+    """
+    tracks = tuple(tracks)
+    if not tracks or set(tracks) - {"microphone", "system"}:
+        raise ValueError(tr("Somente as fontes microfone e sistema são suportadas."))
     destination = Path(destination).absolute()
     library = os.path.realpath(store.root)
     try:
@@ -415,14 +422,12 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         inside_library = False
     if inside_library:
         raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
+    enhance_microphone = enhance_microphone and "microphone" in tracks
     microphone_gain = (
         _adaptive_microphone_gain(store.iter_audio(session_id, "microphone"), cancel_event)
         if enhance_microphone else 1.5
     )
-    sources = {
-        track: store.iter_audio(session_id, track)
-        for track in ("microphone", "system")
-    }
+    sources = {track: store.iter_audio(session_id, track) for track in tracks}
     return mixdown_tracks(
         sources,
         destination,
