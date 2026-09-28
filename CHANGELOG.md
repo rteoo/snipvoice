@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.1.1 - 2026-09-28
+
+- Split Arquivos into the final audio and the original (raw) tracks, with the format and size of each. Download the final audio as saved, or each original track on its own as MP3 or WAV.
+- Remove the original tracks together, and only once a final audio file is saved; automatic retention follows the same rule. The confirmation warns that the recording can no longer be transcribed again, and afterwards playback and downloads use only the final audio.
+- Stop pre-selecting every original track for removal, and never fall back to removing all tracks when none is chosen.
+
 ## 1.1.0 - 2026-09-26
 
 Redesign the manager so pages use the window's height instead of scrolling.

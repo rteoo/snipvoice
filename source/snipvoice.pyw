@@ -1,5 +1,5 @@
 """Snipvoice - local push-to-talk dictation for Windows and macOS.
-Version: 1.1.0
+Version: 1.1.1
 Channel: stable
 
 Recording is explicit and local. Audio and transcripts are kept in recoverable
@@ -91,7 +91,7 @@ from meeting_library import MeetingLibrary
 from meeting_support import MeetingController
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 RELEASE_CHANNEL = "stable"
 BETA_NUMBER = 0
 APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
