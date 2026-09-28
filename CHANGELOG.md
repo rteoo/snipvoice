@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 1.1.1 - 2026-09-28
+## 1.2.0 - 2026-09-28
 
 - Split Arquivos into the final audio and the original (raw) tracks, with the format and size of each. Download the final audio as saved, or each original track on its own as MP3.
 - Remove the original tracks together, and only once a final audio file is saved; automatic retention follows the same rule. The confirmation warns that the recording can no longer be transcribed again, and afterwards playback and downloads use only the final audio.
@@ -10,6 +10,13 @@
 - Add Configurações > Privacidade > "Remover as faixas originais automaticamente após N dias". The app applies it at startup and every six hours, only to recordings with a saved final audio and a finished transcript. The previous raw-audio policy was stored but never applied.
 - Rewrite Configurações > Privacidade in plain language instead of workspace codes: the recording notice names its language, "Nunca salvar respostas do chat" replaces the Q&A mode, and trash lifetime reads in whole days.
 - Apply "Mover gravações para a lixeira automaticamente após N dias" in the same pass. It moves recordings to the restorable trash and never purges; the meeting policy was also stored but never applied before.
+- Build the final audio about 10x faster after a recording (about 20 s instead of 3-5 minutes for a 24-minute meeting); Ajustar volume and audio downloads get the same speed-up.
+- Keep the microphone boost through loud moments: one knock or laugh no longer disables it for the whole recording. Loud overlaps are limited instead of clipped, and damaged samples become silence.
+- Raise your voice to at least the call's speech level in the final audio when the call is louder.
+- Rebuild the MP3 final audio in place when using Ajustar volume instead of adding "(2).mp3" copies.
+- Transcribe recordings with the dictation model by default ("Igual ao ditado" in Configurações > Gravação); an explicitly chosen recording model is kept.
+- Release the dictation model from memory after 10 minutes without use (about 0.8 GB for the default); the next dictation reloads it in about a second, and quick follow-ups stay instant.
+- Cut idle CPU use from about 1.3% to 0.3% of a core while the window is closed.
 
 ## 1.1.0 - 2026-09-26
 
