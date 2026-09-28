@@ -1459,7 +1459,12 @@ class MeetingController:
         }
 
     def regenerate_final_audio(self, session_id):
-        """Publish a new level-adjusted mix, preserving every previous audio file."""
+        """Rebuild the final audio with the microphone boost; raw tracks are untouched.
+
+        An existing MP3 final is replaced in place (atomically), so repeated
+        adjustments don't pile up copies. A legacy WAV final is left where it is
+        and a new MP3 becomes the final audio.
+        """
         def work():
             metadata = self.store.get(session_id, include_events=False)
             microphone = metadata.get("tracks", {}).get("microphone")
@@ -1478,10 +1483,14 @@ class MeetingController:
             folder = stored_settings.get("meeting_destination", "")
             if isinstance(previous_path, str) and os.path.isabs(previous_path):
                 folder = str(Path(previous_path).parent)
-            destination = _final_audio_path(
-                self.root, resolve_meeting_settings({"meeting_destination": folder}), session_id,
-                metadata.get("title", ""),
-            )
+            if (isinstance(previous_path, str) and os.path.isabs(previous_path)
+                    and previous_path.lower().endswith(".mp3") and os.path.isfile(previous_path)):
+                destination = Path(previous_path)
+            else:
+                destination = _final_audio_path(
+                    self.root, resolve_meeting_settings({"meeting_destination": folder}), session_id,
+                    metadata.get("title", ""),
+                )
             output = export_mixdown(
                 self.store, session_id, destination,
                 enhance_microphone=True, cancel_event=self._cancel,

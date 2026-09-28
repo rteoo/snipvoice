@@ -1483,6 +1483,7 @@ EN_US = {
     'Escolha um arquivo MP3 ou WAV para salvar o áudio final.': 'Choose an MP3 or WAV file to save the final audio.',
     'Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais.': 'Choose a destination outside the meetings library to preserve the original recordings.',
     'O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume.': 'The microphone format changed during recording; convert it before adjusting the volume.',
+    'O formato do áudio do sistema mudou durante a gravação; converta-o antes de ajustar o volume.': 'The system audio format changed during recording; convert it before adjusting the volume.',
     'A gravação MP3 exige o codificador incluído na instalação completa do Snipvoice. O áudio original foi preservado; atualize o aplicativo ou exporte como WAV.': 'MP3 recording requires the encoder included in the full Snipvoice install. The original audio was preserved; update the app or export as WAV.',
     'A pasta destino deve existir e o destino deve ser um arquivo.': 'The destination folder must exist and the destination must be a file.',
     'A fonte {track} contém um evento que não é áudio.': 'The {track} source contains a non-audio event.',

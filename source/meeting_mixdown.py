@@ -223,8 +223,9 @@ class _PeakLimiter:
         frames *= (10 ** (gain_db / 20))[:, None]
 
 
-def _adaptive_microphone_gain(source, cancel_event):
-    """Measure a recording in bounded memory before deriving its final audio."""
+def _speech_level(source, cancel_event, track="microphone"):
+    """Loud-speech level of one track: the 90th-percentile RMS of its audible
+    100 ms windows, measured in bounded memory. 0.0 when it has no speech."""
     np = _numpy()
     histogram = [0] * 97  # 1 dB RMS buckets from -96 through 0 dBFS.
     windows = 0
@@ -247,9 +248,11 @@ def _adaptive_microphone_gain(source, cancel_event):
 
     for event, payload in source:
         _cancel(cancel_event)
-        rate, channels, _, _, raw = _validate_event(event, payload, "microphone")
+        rate, channels, _, _, raw = _validate_event(event, payload, track)
         if native_format is not None and native_format != (rate, channels):
-            raise ValueError(tr("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume."))
+            if track == "microphone":
+                raise ValueError(tr("O formato do microfone mudou durante a gravação; converta-o antes de ajustar o volume."))
+            raise ValueError(tr("O formato do áudio do sistema mudou durante a gravação; converta-o antes de ajustar o volume."))
         native_format = (rate, channels)
         window_values = max(1, rate // 10) * channels
         values = np.frombuffer(raw, dtype="<f4").astype("float64")
@@ -265,20 +268,32 @@ def _adaptive_microphone_gain(source, cancel_event):
     if len(pending):
         add_window(pending)
     if not windows or not peak:
-        return 1.0
+        return 0.0
     rank = math.ceil(windows * 0.9)
     seen = 0
-    percentile = 0.0
     for bucket, amount in enumerate(histogram):
         seen += amount
         if seen >= rank:
             percentile = 10 ** ((bucket - 95) / 20)
-            break
-    if percentile < 0.002:
+            return percentile if percentile >= 0.002 else 0.0
+    return 0.0
+
+
+def _adaptive_microphone_gain(source, cancel_event, system_source=None):
+    """Microphone gain for the final audio, from 1x to 8x.
+
+    Speech is raised toward -24 dBFS, or toward the call's own speech level
+    when that is louder, so your voice isn't left quieter than the other side.
+    The call audio itself is never changed. Loud moments (a knock, a laugh)
+    don't cap the gain; the mix limiter handles them.
+    """
+    level = _speech_level(source, cancel_event)
+    if not level:
         return 1.0
-    # Aim for speech around -24 dBFS. Loud moments (a knock, a laugh) no
-    # longer cap the gain for the whole recording; the mix limiter handles them.
-    return max(1.0, min(8.0, (10 ** (-24 / 20)) / percentile))
+    target = 10 ** (-24 / 20)
+    if system_source is not None:
+        target = max(target, _speech_level(system_source, cancel_event, "system"))
+    return max(1.0, min(8.0, target / level))
 
 
 def _write_header(handle, rate, channels):
@@ -475,7 +490,10 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
     enhance_microphone = enhance_microphone and "microphone" in tracks
     microphone_gain = (
-        _adaptive_microphone_gain(store.iter_audio(session_id, "microphone"), cancel_event)
+        _adaptive_microphone_gain(
+            store.iter_audio(session_id, "microphone"), cancel_event,
+            system_source=store.iter_audio(session_id, "system") if "system" in tracks else None,
+        )
         if enhance_microphone else 1.5
     )
     sources = {track: store.iter_audio(session_id, track) for track in tracks}
