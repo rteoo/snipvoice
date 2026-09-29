@@ -62,7 +62,7 @@ _PARAKEET_Q8 = {
         "for transcribe.cpp."
     ),
     "source_url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
-    "purpose": N_("Parakeet TDT 0.6B v3 (padrão): ditado após soltar o atalho."),
+    "purpose": N_("Equilibrado · Parakeet (padrão): ditado após soltar o atalho."),
     "user_selectable": True,
 }
 
@@ -96,7 +96,7 @@ _QWEN_06_Q8 = {
     ),
     "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
     "purpose": (
-        N_("Qwen3-ASR 0.6B: menor e mais rápido que o Qwen3-ASR 1.7B; usa "
+        N_("Preciso · Qwen 0.6B: menor e mais rápido que o Qwen 1.7B; usa "
            "detecção automática de idioma.")
     ),
     "user_selectable": True,
@@ -131,8 +131,8 @@ _QWEN_Q8 = {
     ),
     "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
     "purpose": (
-        N_("Qwen3-ASR 1.7B (opcional): modelo maior, mais lento e com maior uso "
-           "de memória; nunca é selecionado automaticamente.")
+        N_("Muito preciso · Qwen 1.7B (opcional): modelo maior, mais lento e com "
+           "maior uso de memória; nunca é selecionado automaticamente.")
     ),
     "user_selectable": True,
 }
@@ -199,8 +199,8 @@ _WHISPER_SMALL_Q8 = {
     ),
     "source_url": "https://huggingface.co/openai/whisper-small",
     "purpose": (
-        N_("Whisper Small: download menor e pouca memória; menos preciso que o "
-           "Parakeet em português.")
+        N_("Leve · Whisper Small: download menor e pouca memória; menos preciso "
+           "que o Parakeet em português.")
     ),
     "user_selectable": True,
 }
@@ -234,8 +234,8 @@ _WHISPER_TURBO_Q8 = {
     ),
     "source_url": "https://huggingface.co/openai/whisper-large-v3-turbo",
     "purpose": (
-        N_("Whisper Large v3 Turbo (opcional): multilíngue e preciso, porém bem "
-           "mais lento na CPU; nunca é selecionado automaticamente.")
+        N_("Intermediário · Whisper Turbo (opcional): multilíngue e preciso, porém "
+           "bem mais lento na CPU; nunca é selecionado automaticamente.")
     ),
     "user_selectable": True,
 }
@@ -269,21 +269,24 @@ _WHISPER_LARGE_Q8 = {
     ),
     "source_url": "https://huggingface.co/openai/whisper-large-v3",
     "purpose": (
-        N_("Whisper Large v3 (opcional): o mais preciso em português, porém "
-           "mais lento que o tempo real na CPU e com maior uso de memória; nunca "
-           "é selecionado automaticamente.")
+        N_("Máxima precisão · Whisper Large (opcional): o mais preciso em "
+           "português, porém mais lento que o tempo real na CPU e com maior uso de "
+           "memória; nunca é selecionado automaticamente.")
     ),
     "user_selectable": True,
 }
 
+# Selectable entries run from lowest to highest transcription quality, and the
+# settings lists and selectors show them in this order. Parakeet and Whisper
+# Turbo tied on the local corpus in asr-trending-candidate-triage.md.
 MODEL_CATALOG = (
+    _WHISPER_SMALL_Q8,
     _PARAKEET_Q8,
+    _WHISPER_TURBO_Q8,
     _QWEN_06_Q8,
     _QWEN_Q8,
-    _NEMOTRON_Q8,
-    _WHISPER_SMALL_Q8,
-    _WHISPER_TURBO_Q8,
     _WHISPER_LARGE_Q8,
+    _NEMOTRON_Q8,
 )
 
 DEFAULT_PROFILE = PROFILE_BALANCED

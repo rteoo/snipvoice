@@ -75,6 +75,22 @@ MMMLU 76.6% versus 67.4%; these vendor results do not measure Snipvoice summary
 quality. The pinned first-party QAT Q4_0 GGUF is 5,154,941,280 bytes with
 SHA-256 `676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee`.
 
+## Display order
+
+Settings and the recording selector list the catalog from lowest to highest
+expected summary quality: Qwen3.5 0.8B, Qwen3.5 2B, Gemma 4 E2B, LFM2.5 2.6B,
+Qwen3.5 4B, Gemma 4 E4B. With no Snipvoice benchmark, the order rests on vendor
+results checked 2026-09-29:
+
+- Gemma 4 E2B leads Qwen3.5 2B on MMLU-Pro (60.0 versus 55.3) and MMMLU
+  (67.4 versus 56.9).
+- LiquidAI's LFM2.5-2.6B card reports it ahead of Gemma 4 E2B on every listed
+  agentic, instruction-following, and hallucination benchmark.
+- Qwen3.5 4B leads on knowledge (MMLU-Pro 79.1 versus Gemma 4 E4B's 69.4), while
+  E4B leads on multi-turn instruction following, structured output, and
+  non-hallucination in LiquidAI's comparison. Summaries depend more on those
+  properties, and E4B is the larger model, so it sits last.
+
 ## Downloader and compatibility rules
 
 Every catalog URL names an immutable Hub commit. A model becomes usable only

@@ -771,14 +771,15 @@ class MeetingController:
         return errors, resource_live
 
     def _installed_voice_profile(self, preferred):
-        """Return the preferred installed ASR profile, then a stable fallback."""
-        from voice_catalog import catalog_entry, selectable_catalog
+        """Return the preferred installed ASR profile, then the default, then catalog order."""
+        from voice_catalog import DEFAULT_PROFILE, catalog_entry, selectable_catalog
         from voice_models import model_is_installed
 
         entries = []
-        preferred_entry = catalog_entry(preferred)
-        if preferred_entry is not None:
-            entries.append(preferred_entry)
+        for profile in (preferred, DEFAULT_PROFILE):
+            entry = catalog_entry(profile)
+            if entry is not None and entry not in entries:
+                entries.append(entry)
         entries.extend(entry for entry in selectable_catalog() if entry not in entries)
         for entry in entries:
             try:

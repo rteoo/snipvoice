@@ -396,7 +396,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         before_state, after_display, after_state = self._on_gui(build_and_refresh)
         self.assertEqual(before_state, ("balanced", "pt-BR"))
         self.assertEqual(after_state, ("accuracy", "auto"))
-        self.assertTrue(any("Precisão" in text for text in after_display), after_display)
+        self.assertIn("Muito preciso · Qwen 1.7B", after_display)
         self.assertTrue(any("Automático" in text for text in after_display), after_display)
 
     def test_voice_tab_download_button_downloads_its_model_without_enabling(self):
@@ -430,7 +430,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 rows[1].invoke()
 
         self._on_gui(build_and_download)
-        voice.download_profile.assert_called_once_with("compact")
+        voice.download_profile.assert_called_once_with("balanced")
         voice.enable.assert_not_called()
 
     def test_voice_replacements_editor_uses_shared_root_and_persists(self):
@@ -674,14 +674,14 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             )
             profile_values = tuple(profile_box["values"])
             language_values = tuple(language_box["values"])
-            profile_box.set("Compacto · Qwen 0.6B")
+            profile_box.set("Preciso · Qwen 0.6B")
             profile_box.event_generate("<<ComboboxSelected>>")
             compact_language_values = tuple(language_box["values"])
-            profile_box.set("Whisper Large v3 Turbo")
+            profile_box.set("Intermediário · Whisper Turbo")
             profile_box.event_generate("<<ComboboxSelected>>")
             whisper_language_values = tuple(language_box["values"])
             whisper_selected = self.app._manager_voice_tk_vars[0].get()
-            profile_box.set("Equilibrado · Parakeet TDT")
+            profile_box.set("Equilibrado · Parakeet")
             profile_box.event_generate("<<ComboboxSelected>>")
             language_box.set("Português (Brasil)")
             language_box.event_generate("<<ComboboxSelected>>")
@@ -703,13 +703,17 @@ class ManagerGuiSmokeTests(unittest.TestCase):
          selected, language) = self._on_gui(inspect_manager)
         self.assertIn("Modelos de transcrição", settings_text)
         self.assertIn("Modelos de resumo de texto", settings_text)
-        self.assertIn("Equilibrado · Parakeet TDT", profile_values)
-        self.assertIn("Compacto · Qwen 0.6B", profile_values)
-        self.assertIn("Precisão · Qwen 1.7B", profile_values)
-        self.assertIn("Whisper Small", profile_values)
-        self.assertIn("Whisper Large v3 Turbo", profile_values)
-        self.assertIn("Whisper Large v3", profile_values)
-        self.assertNotIn("Transcrição contínua", profile_values)
+        self.assertEqual(
+            profile_values,
+            (
+                "Leve · Whisper Small",
+                "Equilibrado · Parakeet",
+                "Intermediário · Whisper Turbo",
+                "Preciso · Qwen 0.6B",
+                "Muito preciso · Qwen 1.7B",
+                "Máxima precisão · Whisper Large",
+            ),
+        )
         self.assertEqual(whisper_selected, "whisper-turbo")
         self.assertEqual(whisper_language_values, language_values)
         self.assertIn("Automático", language_values)
@@ -717,8 +721,6 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(compact_language_values, ("Automático",))
         self.assertEqual(selected, "balanced")
         self.assertEqual(language, "pt-BR")
-        self.assertNotIn("Qwen3-ASR-0.6B", profile_values)
-        self.assertNotIn("0.0.0.00000000", profile_values)
 
     def test_meeting_shortcut_reuses_manager_and_selects_recording_tab(self):
         _ensure_voice(self.app)

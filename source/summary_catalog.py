@@ -4,11 +4,15 @@ from i18n import N_
 
 DEFAULT_SUMMARY_MODEL = "qwen3.5-2b-q4"
 
+# Ordered from lowest to highest expected summary quality; the settings list
+# and selector follow this order. The ranking rests on vendor benchmarks, not a
+# Snipvoice evaluation (docs/summary-model-selection.md, "Display order").
 SUMMARY_CATALOG = (
     {
         "id": "qwen3.5-0.8b-q4",
         "profile": "qwen3.5-0.8b-q4",
         "name": "Qwen3.5 0.8B",
+        "label": N_("Leve · Qwen3.5 0.8B"),
         "description": N_("Economia máxima · para hardware limitado, com menor qualidade"),
         "filename": "Qwen3.5-0.8B-Q4_K_M.gguf",
         "url": (
@@ -30,6 +34,7 @@ SUMMARY_CATALOG = (
         "id": DEFAULT_SUMMARY_MODEL,
         "profile": DEFAULT_SUMMARY_MODEL,
         "name": "Qwen3.5 2B",
+        "label": N_("Equilibrado · Qwen3.5 2B"),
         "description": N_("Recomendado · melhor equilíbrio para português, inglês e uso local"),
         "filename": "Qwen3.5-2B-Q4_K_M.gguf",
         "url": (
@@ -48,23 +53,26 @@ SUMMARY_CATALOG = (
         "disable_thinking": False,
     },
     {
-        "id": "qwen3.5-4b-q4",
-        "profile": "qwen3.5-4b-q4",
-        "name": "Qwen3.5 4B",
-        "description": N_("Mais qualidade · maior uso de memória e processamento"),
-        "filename": "Qwen3.5-4B-Q4_K_M.gguf",
+        "id": "gemma-4-e2b-q4",
+        "profile": "gemma-4-e2b-q4",
+        "name": "Gemma 4 E2B",
+        "label": N_("Intermediário · Gemma 4 E2B"),
+        "description": N_("2B efetivos / 5B totais · modelo oficial do Google, download maior"),
+        "filename": "gemma-4-E2B_q4_0-it.gguf",
         "url": (
-            "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/"
-            "f9f88ac3e234be915e23811a6d28ea287bdb927e/Qwen3.5-4B-Q4_K_M.gguf"
+            "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/"
+            "675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B_q4_0-it.gguf"
         ),
-        "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
-        "size_bytes": 2_707_513_696,
-        "parameters": "4B",
+        "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
+        "size_bytes": 3_349_516_256,
+        "parameters": "E2B / 5B",
         "context_length": 4096,
         "license_id": "Apache-2.0",
-        "license_url": "https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/LICENSE",
-        "upstream_model": "Qwen/Qwen3.5-4B",
-        "quant_source": "lmstudio-community/Qwen3.5-4B-GGUF",
+        "license_url": (
+            "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/main/LICENSE"
+        ),
+        "upstream_model": "google/gemma-4-E2B-it",
+        "quant_source": "google/gemma-4-E2B-it-qat-q4_0-gguf",
         "requires_acceptance": False,
         "disable_thinking": False,
     },
@@ -72,6 +80,7 @@ SUMMARY_CATALOG = (
         "id": "lfm2.5-2.6b-q4",
         "profile": "lfm2.5-2.6b-q4",
         "name": "LiquidAI LFM2.5-2.6B",
+        "label": N_("Avançado · LFM2.5 2.6B"),
         "description": N_("Alternativa eficiente · modelo oficial para português e uso local"),
         "filename": "LFM2.5-2.6B-Q4_K_M.gguf",
         "url": (
@@ -98,25 +107,24 @@ SUMMARY_CATALOG = (
         "disable_thinking": False,
     },
     {
-        "id": "gemma-4-e2b-q4",
-        "profile": "gemma-4-e2b-q4",
-        "name": "Gemma 4 E2B",
-        "description": N_("2B efetivos / 5B totais · modelo oficial do Google, download maior"),
-        "filename": "gemma-4-E2B_q4_0-it.gguf",
+        "id": "qwen3.5-4b-q4",
+        "profile": "qwen3.5-4b-q4",
+        "name": "Qwen3.5 4B",
+        "label": N_("Alta qualidade · Qwen3.5 4B"),
+        "description": N_("Mais qualidade · maior uso de memória e processamento"),
+        "filename": "Qwen3.5-4B-Q4_K_M.gguf",
         "url": (
-            "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/resolve/"
-            "675cff42a74c774d6cb76f76d8eacb49b48c9b93/gemma-4-E2B_q4_0-it.gguf"
+            "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/"
+            "f9f88ac3e234be915e23811a6d28ea287bdb927e/Qwen3.5-4B-Q4_K_M.gguf"
         ),
-        "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
-        "size_bytes": 3_349_516_256,
-        "parameters": "E2B / 5B",
+        "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
+        "size_bytes": 2_707_513_696,
+        "parameters": "4B",
         "context_length": 4096,
         "license_id": "Apache-2.0",
-        "license_url": (
-            "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/main/LICENSE"
-        ),
-        "upstream_model": "google/gemma-4-E2B-it",
-        "quant_source": "google/gemma-4-E2B-it-qat-q4_0-gguf",
+        "license_url": "https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/LICENSE",
+        "upstream_model": "Qwen/Qwen3.5-4B",
+        "quant_source": "lmstudio-community/Qwen3.5-4B-GGUF",
         "requires_acceptance": False,
         "disable_thinking": False,
     },
@@ -124,6 +132,7 @@ SUMMARY_CATALOG = (
         "id": "gemma-4-e4b-q4",
         "profile": "gemma-4-e4b-q4",
         "name": "Gemma 4 E4B",
+        "label": N_("Máxima qualidade · Gemma 4 E4B"),
         "description": N_("4,5B efetivos / 8B totais · mais qualidade e maior uso de memória"),
         "filename": "gemma-4-E4B_q4_0-it.gguf",
         "url": (

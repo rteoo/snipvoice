@@ -186,50 +186,27 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("soxr / libsoxr / PFFFT", text)
         self.assertNotIn("OpenMDW-1.1", text)
 
-    def test_balanced_compact_and_accuracy_are_user_selectable(self):
+    def test_selectable_profiles_run_from_lowest_to_highest_quality(self):
         from voice_catalog import selectable_catalog
         visible = selectable_catalog()
         self.assertEqual(
             [entry["profile"] for entry in visible],
             [
+                "whisper-small",
                 "balanced",
+                "whisper-turbo",
                 "compact",
                 "accuracy",
-                "whisper-small",
-                "whisper-turbo",
                 "whisper-large-v3",
             ],
         )
 
-    def test_selectable_copy_leads_with_model_names_and_marks_default(self):
-        self.assertTrue(
-            catalog_entry(PROFILE_BALANCED)["purpose"].startswith(
-                "Parakeet TDT 0.6B v3 (padrão):"
-            )
-        )
-        self.assertTrue(
-            catalog_entry(PROFILE_COMPACT)["purpose"].startswith(
-                "Qwen3-ASR 0.6B:"
-            )
-        )
-        self.assertTrue(
-            catalog_entry(PROFILE_ACCURACY)["purpose"].startswith(
-                "Qwen3-ASR 1.7B (opcional):"
-            )
-        )
-
-    def test_whisper_copy_leads_with_model_names(self):
-        self.assertTrue(
-            catalog_entry(PROFILE_WHISPER_SMALL)["purpose"].startswith("Whisper Small:")
-        )
-        self.assertTrue(
-            catalog_entry(PROFILE_WHISPER_TURBO)["purpose"].startswith(
-                "Whisper Large v3 Turbo (opcional):"
-            )
-        )
-        large_purpose = catalog_entry(PROFILE_WHISPER_LARGE)["purpose"]
-        self.assertTrue(large_purpose.startswith("Whisper Large v3 (opcional):"))
-        self.assertIn("automaticamente", large_purpose)
+    def test_selectable_copy_marks_only_the_default(self):
+        from voice_catalog import selectable_catalog
+        marked = [entry["profile"] for entry in selectable_catalog()
+                  if "(padrão)" in entry["purpose"]]
+        self.assertEqual(marked, [DEFAULT_PROFILE])
+        self.assertIn("automaticamente", catalog_entry(PROFILE_WHISPER_LARGE)["purpose"])
 
     def test_accuracy_copy_identifies_optional_resource_cost(self):
         purpose = catalog_entry(PROFILE_ACCURACY)["purpose"].lower()

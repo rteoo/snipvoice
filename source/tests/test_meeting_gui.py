@@ -168,6 +168,24 @@ class MeetingGuiLogicTests(unittest.TestCase):
         labels = [PROFILE_LABELS[entry["profile"]] for entry in selectable_catalog()]
         self.assertEqual(len(labels), len(set(labels)))
 
+    def test_models_list_copy_leads_with_the_selector_label(self):
+        from voice_catalog import selectable_catalog
+        for entry in selectable_catalog():
+            self.assertTrue(entry["purpose"].startswith(PROFILE_LABELS[entry["profile"]]),
+                            entry["profile"])
+
+    def test_summary_selector_maps_translated_labels_back_to_model_ids(self):
+        import i18n
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.summary_model = Variable("qwen3.5-2b-q4")
+        view.summary_display = Variable("High quality · Qwen3.5 4B")
+        i18n.set_language("en-US")
+        try:
+            view._summary_display_changed()
+        finally:
+            i18n.set_language(i18n.DEFAULT_LANGUAGE)
+        self.assertEqual(view.summary_model.get(), "qwen3.5-4b-q4")
+
     def test_appearance_save_persists_then_requests_a_safe_rebuild(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.appearance_display = Variable(APPEARANCE_LABELS["dark"])
