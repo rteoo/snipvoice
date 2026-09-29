@@ -40,10 +40,10 @@ smokes and signing need platform-specific verification before release.
 
 ## Git
 
-For the authorized initial project scaffold only, initialize and commit on main.
-Subsequent work uses task branches. Preserve signing/hooks. Stage explicit owned
-paths; push/PR/release actions need direct user authorization. Do not push changes
-to the predecessor as part of creating this repository. `CLAUDE.md` is `@AGENTS.md`.
+The initial scaffold is complete. Subsequent work uses task branches. Preserve
+signing/hooks and stage explicit owned paths. Push, PR, and release actions need
+direct user authorization. Do not modify the Sniptype predecessor as part of
+this repository's work.
 
 ## Public repository privacy gate
 
