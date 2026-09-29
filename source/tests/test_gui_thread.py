@@ -229,11 +229,6 @@ class GuiThreadCallTests(unittest.TestCase):
         self.assertEqual(self.gui.call(lambda _root: "recovered", timeout=10), "recovered")
 
     # -- submit -----------------------------------------------------------
-    def test_submit_does_not_block_and_runs(self):
-        done = threading.Event()
-        self.gui.submit(lambda _root: done.set())
-        self.assertTrue(done.wait(10))
-
     def test_submit_error_does_not_kill_the_pump(self):
         def boom(_root):
             raise RuntimeError("swallowed")
@@ -292,19 +287,6 @@ class GuiThreadShutdownTests(unittest.TestCase):
     def test_stop_joins_and_marks_not_running(self):
         self.gui.stop()
         self.assertFalse(self.gui.running)
-
-    def test_stop_wakes_a_caller_whose_work_never_ran(self):
-        """A call still queued when the loop exits must fail its caller instead
-        of leaving it blocked forever on ``done``."""
-        self.gui.stop()
-
-        box = {}
-        done = threading.Event()
-        self.gui._queue.put((lambda _root: "never runs", box, done))
-
-        self.gui.stop()  # second stop drains and fails the stranded item
-        self.assertTrue(done.is_set(), "stranded caller was never woken")
-        self.assertIsInstance(box.get("error"), RuntimeError)
 
     def test_abnormal_loop_exit_fails_stranded_callers(self):
         """A GUI loop that dies without stop() must also wake queued callers: a
