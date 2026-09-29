@@ -127,7 +127,7 @@ class ControllerTests(unittest.TestCase):
         )
         self.controller.bind_library(
             lambda: {"xadds": "hi"},
-            lambda: compile_trigger_index({"xadds": "hi"}, set()),
+            lambda: compile_trigger_index({"xadds": "hi"}),
         )
 
     def _ready(self):

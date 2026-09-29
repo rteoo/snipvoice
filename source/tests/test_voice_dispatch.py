@@ -24,7 +24,7 @@ from voice_dispatch import (
 
 
 def _index(snippets):
-    return compile_trigger_index(snippets, set())
+    return compile_trigger_index(snippets)
 
 
 class MatchCommandTests(unittest.TestCase):

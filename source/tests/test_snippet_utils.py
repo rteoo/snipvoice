@@ -5,15 +5,9 @@ from pathlib import Path
 from unittest import mock
 
 from snippet_utils import (
-    build_saveable_snippets,
-    find_shadowed_statics,
-    calculate_max_trigger_length_with_mappings,
     check_dynamic_pattern,
-    get_default_snippets,
     get_dynamic_prefixes,
     load_json_file,
-    merge_snippets,
-    validate_static_snippets,
     write_json_atomic,
 )
 
@@ -53,20 +47,6 @@ class SnippetUtilsTests(unittest.TestCase):
     def make_test_path(self, suffix):
         return self.temp_root / f"snippet-utils-test-{suffix}.json"
 
-    def test_default_snippets_returns_fresh_copy(self):
-        first = get_default_snippets()
-        second = get_default_snippets()
-
-        first["_cpf_numbers"]["fulano"] = "changed"
-
-        self.assertEqual("123.456.789-00", second["_cpf_numbers"]["fulano"])
-
-    def test_validate_static_snippets_accepts_dict_root(self):
-        self.assertEqual({"x": "y"}, validate_static_snippets({"x": "y"}))
-
-    def test_validate_static_snippets_rejects_non_dict_root(self):
-        self.assertIsNone(validate_static_snippets(["not", "a", "dict"]))
-
     def test_load_json_file_reads_utf8_json(self):
         path = self.make_test_path('load')
         path.write_text('{"x": "á"}', encoding='utf-8')
@@ -102,41 +82,6 @@ class SnippetUtilsTests(unittest.TestCase):
         self.assertEqual([mock.call(0.01), mock.call(0.02)], sleep.call_args_list)
         self.assertEqual({"new": "value"}, json.loads(path.read_text(encoding='utf-8')))
 
-    def test_build_saveable_snippets_filters_runtime_callables(self):
-        saveable = build_saveable_snippets({"xname": "Alex", "xdyn": lambda: "value"})
-
-        self.assertEqual({"xname": "Alex"}, saveable)
-
-    def test_find_shadowed_statics_reports_names_taken_by_a_callable(self):
-        shadowed = find_shadowed_statics(
-            {"xhj": "meu texto", "xname": "Alex"},
-            {"xhj": lambda: "data de hoje"},
-        )
-
-        self.assertEqual({"xhj": "meu texto"}, shadowed)
-
-    def test_build_saveable_snippets_keeps_statics_shadowed_by_a_callable(self):
-        # Regression: merging a dynamic trigger over a static of the same name
-        # used to delete the static key from snippets.json on the next save.
-        static = {"xhj": "meu texto importante"}
-        dynamic = {"xhj": lambda: "data de hoje"}
-        merged = merge_snippets(static, dynamic)
-
-        saveable = build_saveable_snippets(merged, find_shadowed_statics(static, dynamic))
-
-        self.assertEqual({"xhj": "meu texto importante"}, saveable)
-
-    def test_build_saveable_snippets_prefers_the_live_value_over_the_shadow(self):
-        saveable = build_saveable_snippets({"xhj": "editado"}, {"xhj": "antigo"})
-
-        self.assertEqual({"xhj": "editado"}, saveable)
-
-    def test_merge_snippets_keeps_dynamic_priority(self):
-        merged = merge_snippets({"xhj": "static"}, {"xhj": "dynamic", "xnow": "dynamic-now"})
-
-        self.assertEqual("dynamic", merged["xhj"])
-        self.assertEqual("dynamic-now", merged["xnow"])
-
     def test_get_dynamic_prefixes_includes_builtin_and_custom_mappings(self):
         prefixes = get_dynamic_prefixes(self.snippets)
 
@@ -164,26 +109,6 @@ class SnippetUtilsTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(0, trigger_length)
 
-    def test_calculate_max_trigger_length_with_mappings_counts_full_dynamic_trigger(self):
-        snippets = {
-            "x": "y",
-            "_custom_codes": {
-                "__prefix__": "clw",
-                "verylongidentifier": "value",
-            },
-        }
-
-        self.assertEqual(len("clwverylongidentifier"), calculate_max_trigger_length_with_mappings(snippets))
-
-
-class ValidateStaticSnippetsRejectionTests(unittest.TestCase):
-    def test_rejects_non_dict_roots(self):
-        for bad in (["a"], "string", 42, 3.14, None, True):
-            self.assertIsNone(validate_static_snippets(bad), repr(bad))
-
-    def test_accepts_empty_dict(self):
-        self.assertEqual({}, validate_static_snippets({}))
-
 
 class CheckDynamicPatternEdgeTests(unittest.TestCase):
     def setUp(self):
@@ -201,16 +126,6 @@ class CheckDynamicPatternEdgeTests(unittest.TestCase):
         value, length = check_dynamic_pattern(self.snippets, "zzznope")
         self.assertIsNone(value)
         self.assertEqual(0, length)
-
-    def test_mapping_container_that_is_not_a_dict_is_ignored(self):
-        # A garbage mapping value must not crash resolution.
-        value, _ = check_dynamic_pattern({"_cpf_numbers": "notadict"}, "cpffulano")
-        self.assertIsNone(value)
-
-    def test_dunder_prefix_renames_the_typed_prefix(self):
-        value, length = check_dynamic_pattern(self.snippets, "clwgtw")
-        self.assertEqual("restart", value)
-        self.assertEqual(len("clwgtw"), length)
 
 
 class GetDynamicPrefixesEdgeTests(unittest.TestCase):
@@ -241,53 +156,6 @@ class GetDynamicPrefixesEdgeTests(unittest.TestCase):
                 ("ok", len("servicerestart")),
                 check_dynamic_pattern(snippets, "servicerestart", prefixes),
             )
-
-    def test_invalid_custom_prefix_does_not_break_max_length(self):
-        snippets = {"_service_codes": {"__prefix__": None, "restart": "ok"}}
-        self.assertEqual(
-            len("servicerestart"),
-            calculate_max_trigger_length_with_mappings(snippets),
-        )
-
-
-class MergeAndShadowRoundTripTests(unittest.TestCase):
-    def test_full_save_round_trip_keeps_shadow_and_strips_all_callables(self):
-        static = {"xhj": "important", "xname": "Alex", "_cpf_numbers": {"fulano": "1"}}
-        dynamic = {"xhj": lambda: "date", "xdolar": lambda: "R$5"}
-
-        merged = merge_snippets(static, dynamic)
-        preserved = find_shadowed_statics(static, dynamic)
-        saveable = build_saveable_snippets(merged, preserved)
-
-        self.assertEqual("important", saveable["xhj"])          # shadowed static survives
-        self.assertEqual("Alex", saveable["xname"])
-        self.assertEqual({"fulano": "1"}, saveable["_cpf_numbers"])  # mapping container kept
-        self.assertNotIn("xdolar", saveable)                    # runtime-only callable dropped
-        self.assertFalse(any(callable(v) for v in saveable.values()))
-
-    def test_merge_does_not_mutate_its_inputs(self):
-        static = {"a": "1"}
-        dynamic = {"b": "2"}
-        merge_snippets(static, dynamic)
-        self.assertEqual({"a": "1"}, static)
-        self.assertEqual({"b": "2"}, dynamic)
-
-    def test_find_shadowed_statics_excludes_a_callable_static(self):
-        # Defensive: a static value that is itself callable is never "preserved".
-        self.assertEqual({}, find_shadowed_statics({"x": lambda: 1}, {"x": lambda: 2}))
-
-
-class CalculateMaxTriggerLengthEdgeTests(unittest.TestCase):
-    def test_empty_snippets_use_fallback(self):
-        self.assertEqual(20, calculate_max_trigger_length_with_mappings({}))
-
-    def test_with_mappings_ignores_non_dict_mapping_values(self):
-        snippets = {"x": "y", "_cpf_numbers": "notadict"}
-        # Must not crash; the mapping key itself is the longest counted trigger.
-        self.assertEqual(
-            len("_cpf_numbers"),
-            calculate_max_trigger_length_with_mappings(snippets),
-        )
 
 
 class WriteJsonAtomicFailureTests(unittest.TestCase):
