@@ -348,12 +348,6 @@ class ListenerFilterTests(unittest.TestCase):
 
 
 class SettingsTests(unittest.TestCase):
-    def test_defaults_are_off_and_balanced(self):
-        resolved = resolve_voice_settings({})
-        self.assertFalse(resolved.enabled)
-        self.assertEqual(resolved.profile, "balanced")
-        self.assertEqual(resolved.hotkey, DEFAULT_DICTATION_HOTKEY)
-
     def test_bad_profile_and_hotkey_fall_back(self):
         warnings = []
         resolved = resolve_voice_settings(
@@ -363,18 +357,6 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(resolved.profile, "balanced")
         self.assertEqual(resolved.hotkey, DEFAULT_DICTATION_HOTKEY)
         self.assertEqual(len(warnings), 2)
-
-    def test_colliding_hotkeys_are_separated(self):
-        warnings = []
-        resolved = resolve_voice_settings(
-            {
-                "voice_hotkey": "ctrl+alt+space",
-                "voice_command_hotkey": "ctrl+alt+space",
-            },
-            warnings,
-        )
-        self.assertNotEqual(resolved.hotkey, resolved.command_hotkey)
-        self.assertTrue(warnings)
 
 
 if __name__ == "__main__":

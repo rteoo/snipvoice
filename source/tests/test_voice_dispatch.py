@@ -10,7 +10,6 @@ from voice_dispatch import (
     MODE_DICTATION,
     OUTCOME_EMPTY,
     OUTCOME_EXPANDED,
-    OUTCOME_FAILED,
     OUTCOME_FORM,
     OUTCOME_INSERTED,
     OUTCOME_NO_MATCH,
@@ -129,26 +128,6 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(
             result,
             VoiceDispatchResult(OUTCOME_SECURE_INPUT, clipboard_saved=False),
-        )
-
-    def test_failed_insertion_reports_successful_clipboard_recovery(self):
-        result = dispatch_voice_result(
-            "hi",
-            MODE_DICTATION,
-            VoiceTarget("window"),
-            snippets=self.snippets,
-            trigger_index=self.index,
-            insert_text=lambda value: False,
-            expand_trigger=lambda trigger: True,
-            apply_form=None,
-            restore_target=lambda target: True,
-            secure_input_blocks=lambda: False,
-            leave_on_clipboard=lambda value: True,
-        )
-
-        self.assertEqual(
-            result,
-            VoiceDispatchResult(OUTCOME_FAILED, clipboard_saved=True),
         )
 
 

@@ -107,16 +107,15 @@ class VoiceSettingsTests(unittest.TestCase):
         self.assertTrue(notes)
 
     def test_colliding_hotkeys_stay_distinct(self):
-        notes = []
-        settings = resolve_voice_settings(
-            {
-                "voice_hotkey": "ctrl+alt+shift+space",
-                "voice_command_hotkey": "ctrl+alt+shift+space",
-            },
-            warnings=notes,
-        )
-        self.assertNotEqual(settings.hotkey, settings.command_hotkey)
-        self.assertTrue(notes)
+        for hotkey in ("ctrl+alt+shift+space", "ctrl+alt+space"):
+            with self.subTest(hotkey=hotkey):
+                notes = []
+                settings = resolve_voice_settings(
+                    {"voice_hotkey": hotkey, "voice_command_hotkey": hotkey},
+                    warnings=notes,
+                )
+                self.assertNotEqual(settings.hotkey, settings.command_hotkey)
+                self.assertTrue(notes)
 
     def test_aliased_modifiers_still_count_as_a_collision(self):
         notes = []

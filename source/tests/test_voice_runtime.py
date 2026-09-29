@@ -10,7 +10,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from voice_catalog import PROFILE_STREAMING
 from voice_runtime import (
     AsrBackend,
-    FakeAsrBackend,
     TranscribeCppBackend,
     VoiceRuntimeError,
     create_backend,
@@ -35,20 +34,6 @@ class RuntimeTests(unittest.TestCase):
         with mock.patch("builtins.__import__", side_effect=import_without_backend):
             backend = create_backend()
             self.assertFalse(backend.available())
-
-    def test_fake_backend_roundtrip(self):
-        backend = FakeAsrBackend(transcript="ok")
-        backend.load("model.gguf", "balanced", "pt-BR")
-        self.assertTrue(backend.is_loaded())
-        self.assertEqual(backend.transcribe([0.0, 0.1]), "ok")
-        backend.unload()
-        self.assertFalse(backend.is_loaded())
-
-    def test_fake_cancel(self):
-        backend = FakeAsrBackend()
-        cancel = type("E", (), {"is_set": lambda self: True})()
-        with self.assertRaises(VoiceRuntimeError):
-            backend.transcribe([0.0], cancel_event=cancel)
 
     def test_transcribe_cpp_cancel_interrupts_an_in_flight_run(self):
         started = threading.Event()

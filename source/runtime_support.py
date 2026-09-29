@@ -5,40 +5,14 @@ import threading
 import time
 from logging.handlers import RotatingFileHandler
 
-import json
 
 from clipboard_support import Clipboard
 from i18n import tr
 from platform_support import default_insertion_timings
 from rich_text_support import extract_plain_text
-from snippet_utils import write_json_atomic
 
 
 LOGGER_NAME = "snipvoice"
-NOTIFICATION_HISTORY_LIMIT = 120
-
-
-def load_notification_history(path, limit=NOTIFICATION_HISTORY_LIMIT):
-    """Load the persisted notification ring, or [] when missing/invalid."""
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception:
-        return []
-    if not isinstance(data, list):
-        return []
-    # Keep only well-formed entries so the history window (which reads dict keys)
-    # can't crash on an externally corrupted file.
-    return [item for item in data if isinstance(item, dict)][-limit:]
-
-
-def save_notification_history(path, history, limit=NOTIFICATION_HISTORY_LIMIT):
-    """Persist the newest ``limit`` notifications atomically. Best effort."""
-    try:
-        write_json_atomic(path, history[-limit:])
-        return True
-    except Exception:
-        return False
 LOG_FILE_NAME = "snipvoice.log"
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 _LOG_MAX_BYTES = 1_000_000
@@ -138,40 +112,6 @@ class BackgroundTaskRunner:
         )
         thread.start()
         return thread
-
-
-def truncate_notification_text(message, max_length=160):
-    """Keep tray messages short and single-line so Windows notifications stay readable."""
-
-    normalized = " ".join(str(message).split())
-    if len(normalized) <= max_length:
-        return normalized
-    return normalized[: max_length - 3].rstrip() + "..."
-
-
-def build_snippet_failure_notification(trigger, value):
-    """Return a concise notification message when a snippet result represents a fetch failure."""
-
-    text = extract_plain_text(value).strip()
-    if not text or text == "[Cancelado]":
-        return None
-
-    lowered = text.lower()
-    bracketed = text.startswith("[") and text.endswith("]")
-    single_line = "\n" not in text
-
-    if lowered.startswith("[erro"):
-        detail = text[1:-1].strip()
-        return truncate_notification_text(f"Falha no snippet {trigger}: {detail}")
-
-    if bracketed and ("indispon" in lowered or "falha" in lowered or "n/a" in lowered):
-        detail = text[1:-1].strip()
-        return truncate_notification_text(f"Falha no snippet {trigger}: {detail}")
-
-    if single_line and lowered.endswith(": n/a"):
-        return truncate_notification_text(f"Falha no snippet {trigger}: dado indisponível.")
-
-    return None
 
 
 def normalize_clipboard_text(value):
