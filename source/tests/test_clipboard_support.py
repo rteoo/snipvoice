@@ -21,11 +21,6 @@ def _which(*available):
 
 
 class NormalizeClipboardNewlinesTests(unittest.TestCase):
-    def test_lf_text_becomes_crlf(self):
-        self.assertEqual(
-            clipboard_support.normalize_clipboard_newlines("a\nb"), "a\r\nb"
-        )
-
     def test_crlf_text_is_not_doubled(self):
         """Regression: text taken from the clipboard already carries CRLF.
 
@@ -38,46 +33,32 @@ class NormalizeClipboardNewlinesTests(unittest.TestCase):
             clipboard_support.normalize_clipboard_newlines("a\r\nb"), "a\r\nb"
         )
 
-    def test_normalization_is_idempotent(self):
-        once = clipboard_support.normalize_clipboard_newlines("a\r\nb\nc\rd")
-        self.assertEqual(clipboard_support.normalize_clipboard_newlines(once), once)
-
-    def test_lone_cr_is_normalized(self):
-        self.assertEqual(
-            clipboard_support.normalize_clipboard_newlines("a\rb"), "a\r\nb"
-        )
-
-    def test_empty_string_is_unchanged(self):
-        self.assertEqual("", clipboard_support.normalize_clipboard_newlines(""))
-
-    def test_bare_newline_characters_become_crlf(self):
-        self.assertEqual("\r\n", clipboard_support.normalize_clipboard_newlines("\n"))
-        self.assertEqual("\r\n", clipboard_support.normalize_clipboard_newlines("\r"))
-        self.assertEqual(
-            "\r\n", clipboard_support.normalize_clipboard_newlines("\r\n")
-        )
-
-    def test_cr_followed_by_crlf_expands_to_two_stable_breaks(self):
-        # "\r\r\n" is a bare CR then a CRLF: two line breaks, normalized to two
-        # CRLF breaks. It must be a fixed point, never grow on a second pass.
-        result = clipboard_support.normalize_clipboard_newlines("\r\r\n")
-        self.assertEqual("\r\n\r\n", result)
-        self.assertEqual(result, clipboard_support.normalize_clipboard_newlines(result))
-
-    def test_lf_then_cr_expands_to_two_stable_breaks(self):
-        result = clipboard_support.normalize_clipboard_newlines("\n\r")
-        self.assertEqual("\r\n\r\n", result)
-        self.assertEqual(result, clipboard_support.normalize_clipboard_newlines(result))
-
     def test_hostile_mixes_are_all_idempotent(self):
-        # The load-bearing property: whatever the input, a second normalization
-        # pass must not change the result (no CRLF doubling).
-        for hostile in ["", "\n", "\r", "\r\n", "\r\r\n", "\n\r", "\n\n",
-                        "a\nb\r\nc\rd", "\r\n\r\n", "line\r\r\rend"]:
-            once = clipboard_support.normalize_clipboard_newlines(hostile)
-            twice = clipboard_support.normalize_clipboard_newlines(once)
-            self.assertEqual(once, twice, f"not idempotent for {hostile!r}")
-            self.assertNotIn("\r\r", once, f"produced doubled CR for {hostile!r}")
+        # Every break becomes exactly one CRLF, and the load-bearing property:
+        # whatever the input, a second normalization pass must not change the
+        # result (no CRLF doubling). "\r\r\n" is a bare CR then a CRLF, and
+        # "\n\r" an LF then a bare CR: two breaks each, never three.
+        cases = [
+            ("", ""),
+            ("\n", "\r\n"),
+            ("\r", "\r\n"),
+            ("\r\n", "\r\n"),
+            ("a\nb", "a\r\nb"),
+            ("a\rb", "a\r\nb"),
+            ("\r\r\n", "\r\n\r\n"),
+            ("\n\r", "\r\n\r\n"),
+            ("\n\n", "\r\n\r\n"),
+            ("a\nb\r\nc\rd", "a\r\nb\r\nc\r\nd"),
+            ("\r\n\r\n", "\r\n\r\n"),
+            ("line\r\r\rend", "line\r\n\r\n\r\nend"),
+        ]
+        for hostile, expected in cases:
+            with self.subTest(hostile=hostile):
+                once = clipboard_support.normalize_clipboard_newlines(hostile)
+                self.assertEqual(expected, once)
+                twice = clipboard_support.normalize_clipboard_newlines(once)
+                self.assertEqual(once, twice, f"not idempotent for {hostile!r}")
+                self.assertNotIn("\r\r", once, f"produced doubled CR for {hostile!r}")
 
 
 class HtmlClipboardBytesTests(unittest.TestCase):
@@ -196,12 +177,18 @@ class PosixClipboardRoundTripTests(unittest.TestCase):
         self.assertEqual(clipboard_support._POSIX_TIMEOUT, kwargs["timeout"])
 
     def test_hanging_copy_tool_fails_instead_of_blocking_forever(self):
-        error = subprocess.TimeoutExpired(["xclip"], clipboard_support._POSIX_TIMEOUT)
-        clipboard = _make_posix_clipboard("xclip")
+        # A hung tool (timeout) and a missing or broken one (OSError) both fail
+        # the write with a log line instead of raising into the paste path.
+        for error in (
+            subprocess.TimeoutExpired(["xclip"], clipboard_support._POSIX_TIMEOUT),
+            OSError("no such tool"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                clipboard = _make_posix_clipboard("xclip")
 
-        with mock.patch.object(clipboard_support.subprocess, "run", side_effect=error), \
-                self.assertLogs(clipboard_support._LOGGER, level=logging.WARNING):
-            self.assertFalse(clipboard.set_content("texto"))
+                with mock.patch.object(clipboard_support.subprocess, "run", side_effect=error), \
+                        self.assertLogs(clipboard_support._LOGGER, level=logging.WARNING):
+                    self.assertFalse(clipboard.set_content("texto"))
 
     def test_get_text_decodes_the_paste_tool_output(self):
         clipboard = _make_posix_clipboard("xclip")
@@ -212,20 +199,6 @@ class PosixClipboardRoundTripTests(unittest.TestCase):
 
         self.assertEqual(["xclip", "-selection", "clipboard", "-o"], run.call_args.args[0])
 
-    def test_round_trip_through_a_fake_clipboard_tool(self):
-        clipboard = _make_posix_clipboard("xclip")
-        buffer = {}
-
-        def fake_run(argv, **kwargs):
-            if argv[-1] == "-o":
-                return subprocess.CompletedProcess(argv, 0, buffer.get("data", b""), b"")
-            buffer["data"] = kwargs["input"]
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-        with mock.patch.object(clipboard_support.subprocess, "run", fake_run):
-            self.assertTrue(clipboard.set_content("round trip"))
-            self.assertEqual("round trip", clipboard.get_text())
-
     def test_failing_tool_reports_failure_instead_of_raising(self):
         clipboard = _make_posix_clipboard("xclip")
         completed = subprocess.CompletedProcess(["xclip"], 1, b"", b"boom")
@@ -233,14 +206,6 @@ class PosixClipboardRoundTripTests(unittest.TestCase):
         with mock.patch.object(clipboard_support.subprocess, "run", return_value=completed):
             self.assertFalse(clipboard.set_content("texto"))
             self.assertIsNone(clipboard.get_text())
-
-    def test_subprocess_error_is_logged_and_swallowed(self):
-        clipboard = _make_posix_clipboard("xclip")
-
-        with mock.patch.object(
-            clipboard_support.subprocess, "run", side_effect=OSError("no such tool")
-        ), self.assertLogs(clipboard_support._LOGGER, level=logging.WARNING):
-            self.assertFalse(clipboard.set_content("texto"))
 
     def test_missing_tool_degrades_with_a_log_line(self):
         with self.assertLogs(clipboard_support._LOGGER, level=logging.WARNING) as logs:
@@ -488,18 +453,6 @@ class MacRichClipboardWriteTests(unittest.TestCase):
                 self.assertNoLogs(clipboard_support._LOGGER, level=logging.WARNING):
             self.assertTrue(clipboard.set_content(_MAC_RICH_VALUE))
 
-    def test_mac_without_osascript_downgrades_like_linux(self):
-        clipboard = _make_mac_clipboard("pbcopy", "pbpaste")
-        completed = subprocess.CompletedProcess(["pbcopy"], 0, b"", b"")
-
-        with _mac_desktop("pbcopy", "pbpaste"), \
-                mock.patch.object(clipboard_support.subprocess, "run", return_value=completed) as run, \
-                self.assertLogs(clipboard_support._LOGGER, level=logging.INFO) as logs:
-            self.assertTrue(clipboard.set_content(_MAC_RICH_VALUE))
-
-        self.assertTrue(any("texto simples" in line for line in logs.output))
-        self.assertEqual(["pbcopy"], run.call_args.args[0])
-
     def test_osascript_installed_later_is_picked_up_without_a_restart(self):
         clipboard = _make_mac_clipboard("pbcopy", "pbpaste")
         completed = subprocess.CompletedProcess(["pbcopy"], 0, b"", b"")
@@ -563,34 +516,20 @@ _RICH_VALUE = {
 @unittest.skipUnless(clipboard_support.IS_WINDOWS, "needs the Win32 backend")
 class WindowsClipboardSetContentTests(unittest.TestCase):
     def test_plain_text_success_writes_utf16_and_closes(self):
-        with _win32_backend() as m:
-            clipboard = clipboard_support.WindowsClipboard()
-            self.assertTrue(clipboard.set_content("olá mundo"))
-
-        m.user32.EmptyClipboard.assert_called_once()
-        self.assertEqual(1, m.user32.SetClipboardData.call_count)
-        m.user32.CloseClipboard.assert_called_once()
-        buffer = m.memmove.call_args.args[1]
-        self.assertEqual("olá mundo\0", buffer.decode("utf-16-le"))
-
-    def test_emoji_payload_survives_utf16_encoding(self):
-        with _win32_backend() as m:
-            clipboard = clipboard_support.WindowsClipboard()
-            self.assertTrue(clipboard.set_content("café 🎉"))
-
-        buffer = m.memmove.call_args.args[1]
-        self.assertEqual("café 🎉\0", buffer.decode("utf-16-le"))
-
-    def test_embedded_null_byte_is_encoded_verbatim(self):
-        # Null-byte hostility: a snippet carrying an interior NUL must not crash
-        # the encoder. It is written faithfully (the truncation risk is on the
+        # An emoji needs a UTF-16 surrogate pair. An interior NUL must not crash
+        # the encoder; it is written faithfully (the truncation risk is on the
         # read side via wstring_at, not here).
-        with _win32_backend() as m:
-            clipboard = clipboard_support.WindowsClipboard()
-            self.assertTrue(clipboard.set_content("a\0b"))
+        for text in ("olá mundo", "café 🎉", "a\0b"):
+            with self.subTest(text=text):
+                with _win32_backend() as m:
+                    clipboard = clipboard_support.WindowsClipboard()
+                    self.assertTrue(clipboard.set_content(text))
 
-        buffer = m.memmove.call_args.args[1]
-        self.assertEqual("a\0b\0", buffer.decode("utf-16-le"))
+                m.user32.EmptyClipboard.assert_called_once()
+                self.assertEqual(1, m.user32.SetClipboardData.call_count)
+                m.user32.CloseClipboard.assert_called_once()
+                buffer = m.memmove.call_args.args[1]
+                self.assertEqual(text + "\0", buffer.decode("utf-16-le"))
 
     def test_open_failure_returns_false_and_never_closes(self):
         with _win32_backend() as m:

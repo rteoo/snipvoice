@@ -17,7 +17,7 @@ the state has to be probed explicitly, before anything relies on it:
 - ``AXIsProcessTrusted()`` for Accessibility.
 
 Both are read-only — neither prompts, neither adds the app to a pane — which is
-why the flow ends in a dialog that deep-links the panes instead.
+why startup can only notify the user to grant them and restart.
 
 Everything here is inert off macOS: the checks answer ``unknown`` and the
 decision layer then asks for nothing. The framework symbols are resolved lazily
@@ -28,7 +28,6 @@ import ctypes
 import ctypes.util
 import subprocess
 
-from i18n import N_, tr
 from platform_support import IS_MAC
 
 
@@ -54,18 +53,6 @@ SETTINGS_PANE_URLS = {
     INPUT_MONITORING: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
     ACCESSIBILITY: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
     MICROPHONE: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone",
-}
-
-PERMISSION_LABELS = {
-    INPUT_MONITORING: N_("Monitoramento de Entrada"),
-    ACCESSIBILITY: N_("Acessibilidade"),
-    MICROPHONE: N_("Microfone"),
-}
-
-PERMISSION_REASONS = {
-    INPUT_MONITORING: N_("detectar o atalho digitado"),
-    ACCESSIBILITY: N_("colar o texto expandido"),
-    MICROPHONE: N_("gravar o ditado"),
 }
 
 # IOKit/hid/IOHIDLib.h: IOHIDRequestType and IOHIDAccessType.
@@ -169,12 +156,6 @@ def secure_input_enabled():
         return False
 
 
-SECURE_INPUT_MESSAGE = N_(
-    "Entrada segura do macOS ativa (campo de senha ou Terminal com "
-    "\"Secure Keyboard Entry\"). O snippet não foi expandido."
-)
-
-
 def check_microphone():
     """Return the microphone grant state. Voice-only; unused by expansion.
 
@@ -219,11 +200,6 @@ def denied_permissions(status):
     return [name for name in PERMISSIONS if status.get(name) == DENIED]
 
 
-def unknown_permissions(status):
-    """Return the permissions whose state could not be read."""
-    return [name for name in PERMISSIONS if status.get(name, UNKNOWN) == UNKNOWN]
-
-
 def needs_onboarding(status):
     """True when the user must be shown the permission dialog.
 
@@ -232,95 +208,6 @@ def needs_onboarding(status):
     be unfalsifiable — it gets logged instead.
     """
     return bool(denied_permissions(status))
-
-
-def describe_status(status):
-    """One-line ``AppLogger`` rendering of a probe result."""
-    return ", ".join(
-        f"{PERMISSION_LABELS[name]}={status.get(name, UNKNOWN)}" for name in PERMISSIONS
-    )
-
-
-def build_prompt_message(status):
-    """PT-BR body for the onboarding dialog, listing only what is missing."""
-    missing = denied_permissions(status)
-    if not missing:
-        return ""
-
-    lines = [
-        tr("O SnipVoice precisa de permissões do macOS para funcionar."),
-        "",
-    ]
-    for name in missing:
-        lines.append(tr(
-            "• {label} — para {reason}.",
-            label=tr(PERMISSION_LABELS[name]), reason=tr(PERMISSION_REASONS[name]),
-        ))
-    lines += [
-        "",
-        tr("Sem elas o app abre normalmente, mas nada é expandido:"),
-        tr("o macOS bloqueia a captura do atalho em silêncio."),
-        "",
-        tr("O SnipVoice não armazena nem envia o que você digita;"),
-        tr("todo o processamento acontece no seu Mac."),
-        "",
-        tr("Abra o painel, marque o SnipVoice na lista e reinicie o app."),
-    ]
-    return "\n".join(lines)
-
-
-def build_tray_message(status):
-    """Short PT-BR tray/notification line for a denied state."""
-    missing = denied_permissions(status)
-    if not missing:
-        return ""
-    names = tr(" e ").join(tr(PERMISSION_LABELS[name]) for name in missing)
-    return tr("Permissão do macOS pendente: {names}. A expansão não vai funcionar.", names=names)
-
-
-RECHECK_RESOLVED = "resolved"
-RECHECK_PARTIAL = "partial"
-RECHECK_PENDING = "pending"
-
-
-def recheck_outcome(previous, current):
-    """Classify a re-check against the state the dialog was opened with.
-
-    Returns ``(state, message)``. A grant is never reported as "working now":
-    TCC decisions are read by the frameworks at process start, so a listener
-    that was already refused stays dead for this process's lifetime. The honest
-    answer is to ask for a restart — see issue #25, item 4.
-
-    Only an explicit ``granted`` clears a permission. One that answers
-    ``unknown`` on the re-check is still reported as missing: the probe failing
-    is not the user having fixed it.
-    """
-    was_denied = denied_permissions(previous)
-    resolved = {name for name in was_denied if current.get(name) == GRANTED}
-    still_denied = [
-        name
-        for name in PERMISSIONS
-        if (name in was_denied and name not in resolved) or current.get(name) == DENIED
-    ]
-
-    if not still_denied:
-        return RECHECK_RESOLVED, tr(
-            "Permissões concedidas. Reinicie o SnipVoice para que a captura "
-            "de teclado passe a funcionar."
-        )
-
-    names = tr(" e ").join(tr(PERMISSION_LABELS[name]) for name in still_denied)
-    if len(still_denied) < len(was_denied):
-        return RECHECK_PARTIAL, tr(
-            "Ainda falta: {names}. Conceda a permissão restante e reinicie o "
-            "SnipVoice.",
-            names=names,
-        )
-    return RECHECK_PENDING, tr(
-        "Nada mudou: {names} continua sem permissão. Marque o SnipVoice na "
-        "lista do painel do macOS.",
-        names=names,
-    )
 
 
 def open_settings_pane(permission, runner=None):
