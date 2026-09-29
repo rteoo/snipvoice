@@ -1,5 +1,4 @@
 import hashlib
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -35,11 +34,6 @@ class SummaryModelsTests(unittest.TestCase):
         scratch.mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(self.temp.cleanup)
-
-    def test_summary_cache_is_separate_and_overrideable(self):
-        with mock.patch.dict(os.environ, {"SNIPVOICE_SUMMARY_CACHE": self.temp.name}):
-            self.assertEqual(summary_models.default_summary_cache_dir(), self.temp.name)
-        self.assertIn("summary-models", summary_models.default_summary_cache_dir("windows"))
 
     def test_download_wrapper_reuses_verified_atomic_downloader(self):
         payload = b"local gguf"

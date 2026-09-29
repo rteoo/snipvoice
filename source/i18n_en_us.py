@@ -852,8 +852,6 @@ EN_US = {
     'A seleção de reuniões é inválida.': 'The meeting selection is invalid.',
     'A seleção de reuniões excede o limite ou contém duplicatas.': 'The meeting selection exceeds the limit or contains duplicates.',
     'A confirmação de gerações não corresponde à prévia.': "The generation confirmation doesn't match the preview.",
-    'A coleção é inválida.': 'The collection is invalid.',
-    'A confirmação não corresponde à prévia atual da coleção.': "The confirmation doesn't match the current collection preview.",
     'O filtro da biblioteca é inválido.': 'The library filter is invalid.',
     'data inicial': 'start date',
     'data final': 'end date',

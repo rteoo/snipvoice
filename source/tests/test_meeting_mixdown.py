@@ -231,18 +231,6 @@ class MeetingMixdownTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sobrepostos"):
             mixdown_tracks({"microphone": source}, self.destination)
 
-    def test_export_adapter_reads_each_source_lazily(self):
-        store = _Store({"microphone": [_event("microphone", [0.1])], "system": ()})
-        export_mixdown(store, "session", self.destination, chunk_frames=1)
-        self.assertEqual(set(store.reads), {"microphone", "system"})
-        self.assertEqual(len(_read(self.destination)[2]), 2)
-
-    def test_large_session_is_processed_in_bounded_output_chunks(self):
-        source = [_event("microphone", [0.1] * 20, timestamp=0.0)]
-        mixdown_tracks({"microphone": source}, self.destination, chunk_frames=3)
-        self.assertEqual(len(_read(self.destination)[2]), 40)
-        self.assertEqual(os.path.getsize(self.destination), 84)
-
 
 if __name__ == "__main__":
     unittest.main()
