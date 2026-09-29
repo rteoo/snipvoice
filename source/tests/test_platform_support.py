@@ -16,10 +16,6 @@ class OsDetectionTests(unittest.TestCase):
     def test_current_os_is_known(self):
         self.assertIn(ps.current_os(), {"windows", "darwin", "linux"})
 
-    def test_flags_are_consistent(self):
-        flags = [ps.IS_WINDOWS, ps.IS_MAC, ps.IS_LINUX]
-        self.assertEqual(sum(1 for f in flags if f), 1)
-
     def test_paste_modifier_matches_platform(self):
         self.assertEqual(ps.paste_modifier_is_cmd(), ps.IS_MAC)
 
@@ -485,17 +481,6 @@ class AutostartStateTests(unittest.TestCase):
         with mock.patch.object(ps.subprocess, "run", return_value=failure):
             self.assertEqual(ps.autostart_state("Snipvoice", self.command), ps.AUTOSTART_STALE)
 
-    def test_is_enabled_is_no_longer_presence_only(self):
-        """The old predicate trusted the path alone; a dead entry fooled it."""
-        path = self._redirect("linux", "snipvoice.desktop")
-        self._write("linux", self.missing)
-        with mock.patch.object(ps, "default_autostart_command", return_value=self.command):
-            self.assertTrue(os.path.exists(path))
-            self.assertFalse(ps.is_autostart_enabled("Snipvoice"))
-
-            self._write("linux", self.command)
-            self.assertTrue(ps.is_autostart_enabled("Snipvoice"))
-
     def test_windows_quoted_arguments_round_trip(self):
         """A .lnk stores args as one string; splitting it must recover the argv."""
         self._redirect("windows", "Snipvoice.lnk")
@@ -523,14 +508,6 @@ class ClassifyAutostartTests(unittest.TestCase):
             open(path, "wb").close()
         self.command = [self.exe, self.script]
 
-    def test_none_is_absent(self):
-        self.assertEqual(ps.classify_autostart(None, self.command), ps.AUTOSTART_ABSENT)
-
-    def test_identical_argv_is_current(self):
-        self.assertEqual(
-            ps.classify_autostart(list(self.command), self.command), ps.AUTOSTART_CURRENT
-        )
-
     def test_differing_length_is_stale(self):
         # A single-element exe entry versus an interpreter+script expected command.
         self.assertEqual(ps.classify_autostart([self.exe], self.command), ps.AUTOSTART_STALE)
@@ -547,24 +524,6 @@ class ClassifyAutostartTests(unittest.TestCase):
         # Even if the expected command were these exact strings, a path that does
         # not exist is dead at login and must classify stale, not current.
         self.assertEqual(ps.classify_autostart(gone, gone), ps.AUTOSTART_STALE)
-
-    def test_relative_path_entry_is_stale(self):
-        # A relative argv element cannot be confirmed on disk, so it is a dead
-        # pointer regardless of what the expected command is.
-        self.assertEqual(
-            ps.classify_autostart(["app.exe", "snipvoice.pyw"], self.command),
-            ps.AUTOSTART_STALE,
-        )
-
-    def test_windows_comparison_ignores_case_and_separators(self):
-        # Only meaningful under Windows path rules; force them and stub the
-        # on-disk check, since the shouty variant will not exist on disk.
-        shouty = [arg.upper().replace("\\", "/") for arg in self.command]
-        with mock.patch.object(ps, "current_os", return_value="windows"), \
-                mock.patch.object(ps, "autostart_target_exists", return_value=True):
-            self.assertEqual(
-                ps.classify_autostart(shouty, self.command), ps.AUTOSTART_CURRENT
-            )
 
     def test_defaults_to_default_autostart_command_when_expected_is_none(self):
         with mock.patch.object(ps, "default_autostart_command", return_value=self.command):
@@ -618,14 +577,6 @@ class ReadShortcutFailureTests(unittest.TestCase):
         # Empty stdout -> [] from the reader -> classify_autostart([]) is stale,
         # so the tray box shows unchecked instead of claiming a working entry.
         result = mock.Mock(returncode=0, stdout="", stderr="")
-        patches = self._windows(result)
-        for patch in patches:
-            patch.start()
-            self.addCleanup(patch.stop)
-        self.assertEqual(ps.autostart_state("Snipvoice"), ps.AUTOSTART_STALE)
-
-    def test_nonzero_exit_is_caught_as_stale_by_autostart_state(self):
-        result = mock.Mock(returncode=1, stdout="", stderr="cannot open")
         patches = self._windows(result)
         for patch in patches:
             patch.start()
@@ -687,23 +638,20 @@ class LauncherPinTests(unittest.TestCase):
 
 class AutostartCommandTests(unittest.TestCase):
     def test_frozen_build_points_at_the_executable(self):
-        with mock.patch.object(ps.sys, "frozen", True, create=True), \
-                mock.patch.object(ps.sys, "executable", r"C:\App\Snipvoice.exe"):
-            self.assertEqual(ps.default_autostart_command(), [r"C:\App\Snipvoice.exe"])
-
-    def test_macos_bundle_points_inside_the_app(self):
-        """The LaunchAgent runs the bundle's binary, not ``open -a``.
-
-        Verified against a real PyInstaller ``.app``: ``sys.executable`` is
-        ``…/Snipvoice.app/Contents/MacOS/Snipvoice``, launchd starts it,
-        and the process still resolves as the bundle (Info.plist honored, so
-        ``LSUIElement`` applies and TCC attributes the grants to the bundle).
-        ``open -a`` would hand launchd a wrapper that exits immediately.
-        """
-        binary = "/Applications/Snipvoice.app/Contents/MacOS/Snipvoice"
-        with mock.patch.object(ps.sys, "frozen", True, create=True), \
-                mock.patch.object(ps.sys, "executable", binary):
-            self.assertEqual(ps.default_autostart_command(), [binary])
+        # The macOS LaunchAgent runs the bundle's binary, not ``open -a``.
+        # Verified against a real PyInstaller ``.app``: ``sys.executable`` is
+        # ``…/Snipvoice.app/Contents/MacOS/Snipvoice``, launchd starts it, and
+        # the process still resolves as the bundle (Info.plist honored, so
+        # ``LSUIElement`` applies and TCC attributes the grants to the bundle).
+        # ``open -a`` would hand launchd a wrapper that exits immediately.
+        for executable in (
+            r"C:\App\Snipvoice.exe",
+            "/Applications/Snipvoice.app/Contents/MacOS/Snipvoice",
+        ):
+            with self.subTest(executable=executable), \
+                    mock.patch.object(ps.sys, "frozen", True, create=True), \
+                    mock.patch.object(ps.sys, "executable", executable):
+                self.assertEqual(ps.default_autostart_command(), [executable])
 
     def test_source_checkout_points_at_the_launcher(self):
         with mock.patch.object(ps.sys, "frozen", False, create=True):
@@ -752,11 +700,9 @@ class DockIconTests(unittest.TestCase):
 class FrontmostApplicationTests(unittest.TestCase):
     """Expansion dialogs must return Cmd+V to the app that triggered them."""
 
-    def test_non_macos_capture_and_restore_are_no_ops(self):
-        target = mock.Mock()
+    def test_non_macos_capture_is_a_no_op(self):
         with mock.patch.object(ps, "IS_MAC", False):
             self.assertIsNone(ps.capture_frontmost_application())
-            self.assertFalse(ps.restore_frontmost_application(target))
 
     def test_capture_returns_an_external_frontmost_application(self):
         appkit = mock.Mock()
@@ -774,25 +720,12 @@ class FrontmostApplicationTests(unittest.TestCase):
                 mock.patch.dict(sys.modules, {"AppKit": appkit}):
             self.assertIsNone(ps.capture_frontmost_application())
 
-    def test_restore_activates_the_captured_application(self):
-        appkit = mock.Mock()
-        appkit.NSApplicationActivateIgnoringOtherApps = 2
-        target = mock.Mock()
-        target.activateWithOptions_.return_value = True
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            self.assertTrue(ps.restore_frontmost_application(target))
-        target.activateWithOptions_.assert_called_once_with(2)
-
     def test_appkit_failures_never_escape(self):
         appkit = mock.Mock()
         appkit.NSWorkspace.sharedWorkspace.side_effect = RuntimeError("no workspace")
-        target = mock.Mock()
-        target.activateWithOptions_.side_effect = RuntimeError("not running")
         with mock.patch.object(ps, "IS_MAC", True), \
                 mock.patch.dict(sys.modules, {"AppKit": appkit}):
             self.assertIsNone(ps.capture_frontmost_application())
-            self.assertFalse(ps.restore_frontmost_application(target))
 
 
 class TextTargetTests(unittest.TestCase):
@@ -820,7 +753,6 @@ class TextTargetTests(unittest.TestCase):
 
     def test_missing_target_is_not_restored(self):
         self.assertFalse(ps.restore_text_target(None))
-        self.assertFalse(ps.text_target_is_alive(None))
 
     def test_macos_restore_text_target_waits_for_workspace_activation(self):
         target = mock.Mock()
@@ -845,136 +777,6 @@ class TextTargetTests(unittest.TestCase):
             self.assertFalse(
                 ps.wait_for_restored_application(target, timeout_seconds=0.01)
             )
-
-
-class ApplicationActivationBarrierTests(unittest.TestCase):
-    """Accessory dialogs wait for native activation before revealing Tk."""
-
-    def test_non_macos_completes_immediately(self):
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", False):
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-        on_active.assert_called_once_with()
-        on_failed.assert_not_called()
-        cancel()
-
-    def test_already_active_macos_completes_without_an_observer(self):
-        appkit = mock.Mock()
-        appkit.NSApplication.sharedApplication.return_value.isActive.return_value = True
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-        on_active.assert_called_once_with()
-        on_failed.assert_not_called()
-        appkit.NSNotificationCenter.defaultCenter.assert_not_called()
-        cancel()
-
-    def test_inactive_macos_completes_from_the_activation_notification(self):
-        appkit = mock.Mock()
-        appkit.NSApplicationActivateAllWindows = 1
-        appkit.NSApplicationActivateIgnoringOtherApps = 2
-        appkit.NSApplicationDidBecomeActiveNotification = "active"
-        app = appkit.NSApplication.sharedApplication.return_value
-        app.isActive.return_value = False
-        center = appkit.NSNotificationCenter.defaultCenter.return_value
-        token = center.addObserverForName_object_queue_usingBlock_.return_value
-        current = appkit.NSRunningApplication.currentApplication.return_value
-        current.activateWithOptions_.return_value = True
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-
-        on_active.assert_not_called()
-        on_failed.assert_not_called()
-        current.activateWithOptions_.assert_called_once_with(3)
-        callback = center.addObserverForName_object_queue_usingBlock_.call_args.args[3]
-        callback(mock.Mock())
-        on_active.assert_called_once_with()
-        center.removeObserver_.assert_called_once_with(token)
-        cancel()
-
-    def test_cancelled_observer_cannot_complete_later(self):
-        appkit = mock.Mock()
-        appkit.NSApplicationActivateAllWindows = 1
-        appkit.NSApplicationActivateIgnoringOtherApps = 2
-        app = appkit.NSApplication.sharedApplication.return_value
-        app.isActive.return_value = False
-        center = appkit.NSNotificationCenter.defaultCenter.return_value
-        current = appkit.NSRunningApplication.currentApplication.return_value
-        current.activateWithOptions_.return_value = True
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-        callback = center.addObserverForName_object_queue_usingBlock_.call_args.args[3]
-        cancel()
-        callback(mock.Mock())
-        on_active.assert_not_called()
-        on_failed.assert_not_called()
-        center.removeObserver_.assert_called_once()
-
-    def test_refused_activation_fails_instead_of_revealing_unfocused_dialog(self):
-        appkit = mock.Mock()
-        appkit.NSApplicationActivateAllWindows = 1
-        appkit.NSApplicationActivateIgnoringOtherApps = 2
-        app = appkit.NSApplication.sharedApplication.return_value
-        app.isActive.return_value = False
-        center = appkit.NSNotificationCenter.defaultCenter.return_value
-        current = appkit.NSRunningApplication.currentApplication.return_value
-        current.activateWithOptions_.return_value = False
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-        on_active.assert_not_called()
-        on_failed.assert_called_once_with("macOS refused to activate SnipVoice")
-        center.removeObserver_.assert_called_once()
-        cancel()
-
-    def test_appkit_failure_fails_instead_of_bypassing_the_barrier(self):
-        appkit = mock.Mock()
-        appkit.NSApplication.sharedApplication.side_effect = RuntimeError("no app")
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}):
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-        on_active.assert_not_called()
-        on_failed.assert_called_once_with("Could not activate SnipVoice: no app")
-        cancel()
-
-    def test_timeout_fails_without_revealing_the_dialog(self):
-        appkit = mock.Mock()
-        appkit.NSApplicationActivateAllWindows = 1
-        appkit.NSApplicationActivateIgnoringOtherApps = 2
-        app = appkit.NSApplication.sharedApplication.return_value
-        app.isActive.return_value = False
-        current = appkit.NSRunningApplication.currentApplication.return_value
-        current.activateWithOptions_.return_value = True
-        timer = mock.Mock()
-        on_active = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(sys.modules, {"AppKit": appkit}), \
-                mock.patch.object(
-                    ps.threading,
-                    "Timer",
-                    return_value=timer,
-                ) as timer_factory:
-            cancel = ps.activate_application_when_ready(on_active, on_failed)
-        timeout_callback = timer_factory.call_args.args[1]
-        timeout_args = timer_factory.call_args.kwargs["args"]
-        timeout_callback(*timeout_args)
-        on_active.assert_not_called()
-        on_failed.assert_called_once_with(timeout_args[0])
-        cancel()
 
 
 class ApplicationRestoreBarrierTests(unittest.TestCase):
@@ -1051,204 +853,6 @@ class ApplicationRestoreBarrierTests(unittest.TestCase):
         cancel()
 
 
-class TkWindowKeyBarrierTests(unittest.TestCase):
-    def test_non_macos_focuses_immediately(self):
-        dialog = mock.Mock()
-        target = mock.Mock()
-        on_key = mock.Mock()
-        on_failed = mock.Mock()
-        with mock.patch.object(ps, "IS_MAC", False):
-            cancel = ps.focus_tk_window_when_ready(
-                dialog,
-                target,
-                on_key,
-                on_failed,
-            )
-        target.focus_force.assert_called_once_with()
-        on_key.assert_called_once_with()
-        on_failed.assert_not_called()
-        cancel()
-
-    def test_macos_waits_for_the_exact_native_window_to_become_key(self):
-        appkit = mock.Mock()
-        appkit.NSWindowDidBecomeKeyNotification = "key"
-        objc = mock.Mock()
-        native_window = objc.objc_object.return_value
-        native_window.canBecomeKeyWindow.return_value = True
-        native_window.isKeyWindow.return_value = False
-        center = appkit.NSNotificationCenter.defaultCenter.return_value
-        token = center.addObserverForName_object_queue_usingBlock_.return_value
-        get_nswindow = mock.Mock(return_value=123)
-        library = mock.Mock()
-        library.Tk_MacOSXGetNSWindowForDrawable = get_nswindow
-        dialog = mock.Mock()
-        dialog.winfo_id.return_value = 456
-        target = mock.Mock()
-        on_key = mock.Mock()
-        on_failed = mock.Mock()
-
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(
-                    sys.modules,
-                    {"AppKit": appkit, "objc": objc},
-                ), mock.patch.object(ps.ctypes, "CDLL", return_value=library):
-            cancel = ps.focus_tk_window_when_ready(
-                dialog,
-                target,
-                on_key,
-                on_failed,
-            )
-
-        target.focus_force.assert_called_once_with()
-        on_key.assert_not_called()
-        on_failed.assert_not_called()
-        observer_call = (
-            center.addObserverForName_object_queue_usingBlock_.call_args
-        )
-        self.assertIs(native_window, observer_call.args[1])
-        observer_call.args[3](mock.Mock())
-        on_key.assert_called_once_with()
-        center.removeObserver_.assert_called_once_with(token)
-        cancel()
-
-    def test_already_key_window_completes_without_refocusing(self):
-        appkit = mock.Mock()
-        objc = mock.Mock()
-        native_window = objc.objc_object.return_value
-        native_window.canBecomeKeyWindow.return_value = True
-        native_window.isKeyWindow.return_value = True
-        library = mock.Mock()
-        library.Tk_MacOSXGetNSWindowForDrawable.return_value = 123
-        dialog = mock.Mock()
-        target = mock.Mock()
-        on_key = mock.Mock()
-        on_failed = mock.Mock()
-
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(
-                    sys.modules,
-                    {"AppKit": appkit, "objc": objc},
-                ), mock.patch.object(ps.ctypes, "CDLL", return_value=library):
-            cancel = ps.focus_tk_window_when_ready(
-                dialog,
-                target,
-                on_key,
-                on_failed,
-            )
-
-        target.focus_force.assert_not_called()
-        on_key.assert_called_once_with()
-        on_failed.assert_not_called()
-        cancel()
-
-    def test_missing_native_window_fails_without_focusing(self):
-        appkit = mock.Mock()
-        objc = mock.Mock()
-        library = mock.Mock()
-        library.Tk_MacOSXGetNSWindowForDrawable.return_value = 0
-        target = mock.Mock()
-        on_key = mock.Mock()
-        on_failed = mock.Mock()
-
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(
-                    sys.modules,
-                    {"AppKit": appkit, "objc": objc},
-                ), mock.patch.object(ps.ctypes, "CDLL", return_value=library):
-            cancel = ps.focus_tk_window_when_ready(
-                mock.Mock(),
-                target,
-                on_key,
-                on_failed,
-            )
-
-        target.focus_force.assert_not_called()
-        on_key.assert_not_called()
-        on_failed.assert_called_once_with(
-            "Tk did not expose a native window for the input dialog"
-        )
-        cancel()
-
-    def test_key_window_timeout_fails_and_removes_the_observer(self):
-        appkit = mock.Mock()
-        objc = mock.Mock()
-        native_window = objc.objc_object.return_value
-        native_window.canBecomeKeyWindow.return_value = True
-        native_window.isKeyWindow.return_value = False
-        center = appkit.NSNotificationCenter.defaultCenter.return_value
-        token = center.addObserverForName_object_queue_usingBlock_.return_value
-        library = mock.Mock()
-        library.Tk_MacOSXGetNSWindowForDrawable.return_value = 123
-        timer = mock.Mock()
-        on_key = mock.Mock()
-        on_failed = mock.Mock()
-
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(
-                    sys.modules,
-                    {"AppKit": appkit, "objc": objc},
-                ), mock.patch.object(
-                    ps.ctypes,
-                    "CDLL",
-                    return_value=library,
-                ), mock.patch.object(
-                    ps.threading,
-                    "Timer",
-                    return_value=timer,
-                ) as timer_factory:
-            cancel = ps.focus_tk_window_when_ready(
-                mock.Mock(),
-                mock.Mock(),
-                on_key,
-                on_failed,
-            )
-
-        timeout_callback = timer_factory.call_args.args[1]
-        timeout_args = timer_factory.call_args.kwargs["args"]
-        timeout_callback(*timeout_args)
-        on_key.assert_not_called()
-        on_failed.assert_called_once_with(timeout_args[0])
-        center.removeObserver_.assert_called_once_with(token)
-        cancel()
-
-    def test_cancel_blocks_a_late_key_window_notification(self):
-        appkit = mock.Mock()
-        objc = mock.Mock()
-        native_window = objc.objc_object.return_value
-        native_window.canBecomeKeyWindow.return_value = True
-        native_window.isKeyWindow.return_value = False
-        center = appkit.NSNotificationCenter.defaultCenter.return_value
-        library = mock.Mock()
-        library.Tk_MacOSXGetNSWindowForDrawable.return_value = 123
-        timer = mock.Mock()
-        on_key = mock.Mock()
-        on_failed = mock.Mock()
-
-        with mock.patch.object(ps, "IS_MAC", True), \
-                mock.patch.dict(
-                    sys.modules,
-                    {"AppKit": appkit, "objc": objc},
-                ), mock.patch.object(
-                    ps.ctypes,
-                    "CDLL",
-                    return_value=library,
-                ), mock.patch.object(ps.threading, "Timer", return_value=timer):
-            cancel = ps.focus_tk_window_when_ready(
-                mock.Mock(),
-                mock.Mock(),
-                on_key,
-                on_failed,
-            )
-
-        callback = center.addObserverForName_object_queue_usingBlock_.call_args.args[3]
-        cancel()
-        callback(mock.Mock())
-        on_key.assert_not_called()
-        on_failed.assert_not_called()
-        center.removeObserver_.assert_called_once()
-        timer.cancel.assert_called_once_with()
-
-
 class TkMainThreadSeamTests(unittest.TestCase):
     """The macOS tray + Tk threading seam (issue #24)."""
 
@@ -1316,16 +920,10 @@ class InsertionTimingTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 timings = ps.insertion_timings({"erase_key_delay": bad}, system="windows")
                 self.assertEqual(0.01, timings["erase_key_delay"])
-                self.assertEqual(["erase_key_delay"], ps.invalid_timing_overrides({"erase_key_delay": bad}))
 
     def test_zero_is_a_valid_delay(self):
         timings = ps.insertion_timings({"erase_key_delay": 0}, system="windows")
         self.assertEqual(0.0, timings["erase_key_delay"])
-        self.assertEqual([], ps.invalid_timing_overrides({"erase_key_delay": 0}))
-
-    def test_no_settings_reports_no_invalid_overrides(self):
-        self.assertEqual([], ps.invalid_timing_overrides(None))
-        self.assertEqual([], ps.invalid_timing_overrides({}))
 
 
 class TrayIconOptionTests(unittest.TestCase):

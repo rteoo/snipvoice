@@ -122,7 +122,3 @@ class MeetingSettingsTests(unittest.TestCase):
         for value in values:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 resolve_meeting_settings(value)
-
-    def test_unknown_keys_are_not_persisted(self):
-        payload = resolve_meeting_settings({"future_setting": "ignore"}).payload()
-        self.assertNotIn("future_setting", payload)

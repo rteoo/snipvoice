@@ -59,22 +59,6 @@ class ReplayChoiceTests(unittest.TestCase):
         self.assertEqual(playback_sources(tracks, False), ("Sistema",))
         self.assertEqual(playback_sources({}, False), ())
 
-    def test_direct_replay_starts_saved_mix_at_selected_position(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.selected = "meeting"
-        view.detail_ready = True
-        view.snapshot = {"state": "idle"}
-        view.playback_choices = ("Áudio final", "Microfone")
-        view.audio_source = Variable("Áudio final")
-        view.playback_position = Variable(12.5)
-        view.playback_duration = 30.0
-        view.playback_status = Variable()
-        view._action = mock.Mock()
-        view.play_selected_recording()
-        self.assertEqual(view._action.call_args.args[:3],
-                         ("seek_playback", "meeting", "final"))
-        self.assertEqual(view._action.call_args.kwargs["start"], 12.5)
-
 
 class Text:
     def __init__(self, text=""):
@@ -458,27 +442,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
             button.configure.assert_called_with(state="disabled")
         self.assertIn("não pode ser transcrita novamente", view.audio_capability_status.get())
         self.assertIn("não é possível transcrever novamente", view.retranscribe_hint.get())
-
-    def test_raw_capability_gating_keeps_remaining_source_actions_available(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.retention_ready = True
-        view.raw_remove_microphone = Variable()
-        view.raw_remove_system = Variable()
-        view.raw_remove_microphone_check = mock.Mock()
-        view.raw_remove_system_check = mock.Mock()
-        view.play_button = mock.Mock()
-        view.transcribe_button = mock.Mock()
-        view.export_audio_button = mock.Mock()
-        view.raw_remove_button = mock.Mock()
-        view.audio_capability_status = Variable()
-        view.track = Variable("Sistema")
-        view._set_audio_capabilities({
-            "microphone": {"available": False, "raw_removed": True},
-            "system": {"available": True},
-        }, final_available=True)
-        view.play_button.configure.assert_called_with(state="normal")
-        view.transcribe_button.configure.assert_called_with(state="normal")
-        view.export_audio_button.configure.assert_called_with(state="normal")
 
     def test_memory_only_q_and_a_does_not_submit_save(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1217,30 +1180,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertNotIn("segment_ids", view.summary.get())
         self.assertEqual(view.summary.state, "disabled")
 
-    def test_regenerate_summary_dispatches_for_selected_recording(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.generate_report = mock.Mock()
-        view.summarize()
-        view.generate_report.assert_called_once_with()
-
-    def test_adjust_audio_regenerates_final_audio_for_microphone_recording(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.selected = "meeting-1"
-        view.detail_ready = True
-        view.raw_tracks_present = {"microphone"}
-        view.raw_unavailable_tracks = set()
-        view.controller = mock.Mock()
-        view._action = mock.Mock(
-            side_effect=lambda method, session_id, **_kwargs:
-            view.controller.regenerate_final_audio(session_id)
-        )
-        view.adjust_audio()
-
-        self.assertEqual(view._action.call_args.args[:2],
-                         ("regenerate_final_audio", "meeting-1"))
-        self.assertIn("callback", view._action.call_args.kwargs)
-        view.controller.regenerate_final_audio.assert_called_once_with("meeting-1")
-
     def test_adjust_audio_marks_only_the_successful_recording_for_final_selection(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
@@ -1250,6 +1189,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._action = mock.Mock()
         view._processing_launched = mock.Mock()
         view.adjust_audio()
+        self.assertEqual(view._action.call_args.args[:2],
+                         ("regenerate_final_audio", "meeting-1"))
         callback = view._action.call_args.kwargs["callback"]
         callback(True, None)
         self.assertEqual(view._adjusted_audio_target, "meeting-1")
@@ -1595,26 +1536,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         cls.root = None
         # Collect closed window cycles on Tk's thread before worker tests.
         gc.collect()
-
-    def test_shared_root_build_and_background_settings_devices(self):
-        controller = mock.Mock()
-        controller.snapshot.return_value = {"state": "idle", "levels": {}, "elapsed": 0, "processing": False}
-        controller.devices.return_value = [{"id": "input", "name": "Mic", "kind": "microphone"}]
-        controller.list_sessions.return_value = []
-        window = open_meeting_window(self.root, controller, lambda: {}, mock.Mock())
-        view = window._meeting_view
-        try:
-            deadline = time.monotonic() + 2
-            while not view.settings_loaded and time.monotonic() < deadline:
-                self.root.update()
-                time.sleep(0.01)
-            self.assertIs(window.master, self.root)
-            self.assertTrue(view.settings_loaded)
-            self.assertEqual(view.hotkey.get(), "")
-            self.assertIn("input", [selection.endpoint_id for _, selection in view.options["microphone"]])
-        finally:
-            view.close()
-            self.root.update()
 
     def test_manager_controls_are_left_aligned_labelled_and_stacked(self):
         controller = mock.Mock()

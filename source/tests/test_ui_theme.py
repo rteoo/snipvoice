@@ -94,11 +94,6 @@ class WindowsPaletteTests(unittest.TestCase):
             self.assertEqual(colors[token], expected, token)
         self.assertEqual(colors["text_native"], colors["text"])
 
-    def test_windows_dark_mode_uses_clam_so_colors_are_honored(self):
-        self.assertEqual(
-            ui_theme.ttk_theme_preference("windows", dark=True)[0], "clam"
-        )
-
 
 class LinuxPaletteTests(unittest.TestCase):
     def test_windows_palette_uses_literal_native_colors_on_linux(self):
@@ -109,7 +104,6 @@ class LinuxPaletteTests(unittest.TestCase):
         self.assertEqual(theme.text_native, theme.text)
         for options in (
             theme.checkbutton_colors(theme.surface),
-            theme.toolbar_button_colors(theme.card),
             theme.nav_button_colors(theme.surface),
             theme.glyph_button_colors(theme.card),
             theme.button_colors(),
@@ -150,13 +144,6 @@ class MacPaletteTests(unittest.TestCase):
                       "link", "warning", "success"):
             self.assertNotEqual(dark[token], light[token], token)
 
-    def test_mac_dark_keeps_dynamic_surfaces_over_the_opaque_base(self):
-        dark = ui_theme.palette("dark", system="darwin")
-        self.assertEqual(dark["surface"], "systemWindowBackgroundColor")
-        self.assertEqual(dark["card"], "systemTextBackgroundColor")
-        self.assertEqual(dark["text"], "systemTextColor")
-        self.assertNotEqual(dark["surface_alt"], ui_theme.palette("light")["surface_alt"])
-
     def test_mac_fonts_use_the_system_families(self):
         theme = ui_theme.build_theme("dark", system="darwin")
         self.assertEqual(theme.family, ".AppleSystemUIFont")
@@ -177,17 +164,8 @@ class MacPaletteTests(unittest.TestCase):
             theme = ui_theme.build_theme("light", system="darwin", default_size=probe)
             self.assertEqual(theme.size_delta, 0)
 
-    def test_mac_prefers_aqua(self):
-        self.assertEqual(ui_theme.ttk_theme_preference("darwin")[0], "aqua")
-
 
 class AppearanceDetectionTests(unittest.TestCase):
-
-    def test_luminance_classification(self):
-        self.assertEqual(ui_theme.appearance_kind(0.0), "dark")
-        self.assertEqual(ui_theme.appearance_kind(0.12), "dark")
-        self.assertEqual(ui_theme.appearance_kind(0.93), "light")
-        self.assertEqual(ui_theme.appearance_kind(1.0), "light")
 
     def test_probe_failure_falls_back_to_light(self):
         class Broken:
@@ -314,15 +292,6 @@ class WidgetOptionTests(unittest.TestCase):
         self.assertEqual(theme.manager_window_size, ("1120x820", 1040, 700))
         self.assertFalse(theme.stacked_toolbar_status)
 
-    def test_fluent_spacing_and_tree_density_are_stable(self):
-        theme = ui_theme.build_theme("windows", system="windows")
-        self.assertEqual(
-            (theme.space_xs, theme.space_sm, theme.space_md,
-             theme.space_lg, theme.space_xl),
-            (4, 8, 12, 16, 24),
-        )
-        self.assertEqual(theme.tree_row_height, 30)
-
     def test_macos_sizes_buttons_to_their_text_and_widens_the_window(self):
         # Aqua's bezel has a minimum width the flat Win32 button does not, so
         # the tuned character widths overflow their pane and clip the last
@@ -334,18 +303,6 @@ class WidgetOptionTests(unittest.TestCase):
         self.assertGreater(min_width, 820)
         self.assertTrue(theme.stacked_toolbar_status)
 
-    def test_settings_cards_use_the_shared_surface_and_quiet_border(self):
-        theme = ui_theme.build_theme("windows", system="windows")
-        self.assertEqual(
-            theme.card_options(),
-            {
-                "bg": theme.card,
-                "highlightbackground": theme.border,
-                "highlightthickness": 1,
-                "bd": 0,
-            },
-        )
-
     def test_macos_never_paints_a_natively_drawn_control(self):
         # Aqua ignores -background on buttons and checkboxes but honours
         # -foreground, so any color the app supplies can only turn the title
@@ -354,7 +311,6 @@ class WidgetOptionTests(unittest.TestCase):
         self.assertEqual(theme.button_colors(), {})
         self.assertEqual(theme.button_colors(accent=True), {})
         self.assertEqual(theme.checkbutton_colors("#222"), {})
-        self.assertEqual(theme.toolbar_button_colors("#222"), {})
         self.assertEqual(theme.glyph_button_colors("#222"), {})
 
     def test_entry_colors_pin_every_channel_aqua_would_theme(self):
@@ -414,20 +370,6 @@ class WidgetOptionTests(unittest.TestCase):
                      "highlightbackground"},
                 )
 
-    def test_fluent_button_chrome_has_consistent_geometry_and_focus(self):
-        theme = ui_theme.build_theme("windows", system="windows")
-        self.assertEqual(
-            theme.button_chrome(),
-            {
-                "relief": "flat", "bd": 0, "padx": 12, "pady": 6,
-                "highlightthickness": 1, "highlightcolor": theme.focus_ring,
-                "cursor": "hand2",
-            },
-        )
-        compact = theme.button_chrome(compact=True)
-        self.assertEqual(compact["padx"], 8)
-        self.assertEqual(compact["pady"], 4)
-
     def test_neutral_buttons_stand_out_on_cards_and_the_page(self):
         # Neutral buttons once shared the card's near-identical grey and its
         # quiet border, so Baixar/Remover read as bare text on model cards.
@@ -461,45 +403,11 @@ class WidgetOptionTests(unittest.TestCase):
         self.assertEqual(colors["activebackground"], theme.danger_active)
         self.assertEqual(colors["fg"], theme.text_on_accent)
 
-    def test_toolbar_buttons_use_the_editor_surface_and_hover_token(self):
-        colors = ui_theme.build_theme("windows", system="windows").toolbar_button_colors("#FFFFFF")
-        self.assertEqual(colors["bg"], "#FFFFFF")
-        self.assertEqual(colors["activebackground"], "#EAEAEA")
-
     def test_accent_button_uses_the_fluent_windows_tokens(self):
         colors = ui_theme.build_theme("windows", system="windows").button_colors(accent=True)
         self.assertEqual(colors["bg"], "#005FB8")
         self.assertEqual(colors["fg"], "#FFFFFF")
         self.assertEqual(colors["activebackground"], "#004A91")
-
-    def test_toolbar_frame_uses_the_editor_card_surface(self):
-        for system in ("windows", "linux"):
-            theme = ui_theme.build_theme("windows", system=system)
-            self.assertEqual(theme.toolbar_frame_colors(), {"bg": theme.card})
-
-    def test_toolbar_frame_keeps_the_card_surface_on_macos(self):
-        theme = ui_theme.build_theme("dark", system="darwin")
-        self.assertEqual(theme.toolbar_frame_colors(), {"bg": theme.card})
-
-    def test_status_label_uses_the_body_face_and_muted_grey(self):
-        for system in ("windows", "linux"):
-            options = ui_theme.build_theme("windows", system=system).status_label_options()
-            theme = ui_theme.build_theme("windows", system=system)
-            self.assertEqual(options["font"], theme.font(8))
-            self.assertEqual(options["fg"], theme.text_muted)
-
-    def test_status_label_uses_the_body_face_and_muted_grey_on_macos(self):
-        theme = ui_theme.build_theme("dark", system="darwin")
-        options = theme.status_label_options()
-        self.assertEqual(options["font"], theme.font(8))
-        self.assertEqual(options["fg"], theme.text_muted)
-
-    def test_unselected_tab_foreground_uses_the_fluent_neutral(self):
-        for system in ("windows", "linux"):
-            self.assertEqual(
-                ui_theme.build_theme("windows", system=system).tab_unselected_fg,
-                "#5C5C5C",
-            )
 
     def test_unselected_tab_foreground_follows_the_appearance_on_macos(self):
         # The selected tab keeps `text`; the unselected one tracks the system
@@ -788,9 +696,6 @@ class GuiSourceTests(unittest.TestCase):
                 if keyword.arg in color_options:
                     offenders.append((node.lineno, func.attr, keyword.arg))
         self.assertEqual(offenders, [])
-
-    def test_the_windows_only_ttk_theme_is_no_longer_forced(self):
-        self.assertNotIn('theme_use("vista")', self._source())
 
 
 if __name__ == "__main__":

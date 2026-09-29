@@ -174,7 +174,7 @@ class Snipvoice:
         self._meeting_startup_error = ""
         self._settings_lock = threading.RLock()
         self.snippets = {}
-        self.trigger_index = compile_trigger_index({}, set())
+        self.trigger_index = compile_trigger_index({})
         self._load_commands()
         self.voice = VoiceController(
             self.settings, task_runner=self.task_runner,
@@ -313,7 +313,7 @@ class Snipvoice:
             self.notify_error(tr("Não foi possível ler commands.json. Os comandos anteriores foram preservados."))
             return False
         self.snippets = commands
-        self.trigger_index = compile_trigger_index(commands, set())
+        self.trigger_index = compile_trigger_index(commands)
         return True
 
     def reload_commands(self, icon=None, item=None):

@@ -57,11 +57,6 @@ class MeetingLibraryFixtureTests(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
-    def test_fixture_metadata_is_json_schema_one(self):
-        data = json.loads((self.root / "fixture-meeting-v1" / "metadata.json").read_text(encoding="utf-8"))
-        self.assertEqual(data["schema_version"], 1)
-        self.assertEqual(set(data["tracks"]), {"microphone", "system"})
-
 
 class MeetingLibrarySidecarTests(unittest.TestCase):
     def setUp(self):
@@ -169,18 +164,24 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         self.assertEqual(foreign["items"][0]["id"], first["items"][0]["id"])
 
     def test_combined_organization_filters_use_normalized_sidecar_labels(self):
-        self.library.save_collection(
+        collection = self.library.save_collection(
             {"id": "project-1", "name": "Product", "kind": "project"},
             expected_generation=0,
         )
-        self.library.save_series(
+        self.assertEqual(collection["kind"], "project")
+        series = self.library.save_series(
             {"id": "weekly", "name": "Weekly review"}, expected_generation=1,
         )
-        self.library.assign_organization(
+        self.assertEqual(series["id"], "weekly")
+        assigned = self.library.assign_organization(
             "fixture-meeting-v1", collection_ids=["project-1"],
             tags=[" Planejamento "], people=[" Teô "], series_id="weekly",
             expected_generation=0,
         )
+        self.assertEqual(assigned["collection_ids"], ["project-1"])
+        self.assertEqual(assigned["tags"], ["Planejamento"])
+        self.assertEqual(assigned["people"], ["Teô"])
+        self.assertEqual(assigned["series_id"], "weekly")
         page = self.library.list_sessions_page(
             limit=10, collection="project-1", tag="Planejamento", person="Teô",
             series="weekly", status="completed", date_from="2026-09-16",
@@ -672,53 +673,6 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "memory_only"):
             self.library.save_report("fixture-meeting-v1", envelope)
         self.assertFalse((self.session_dir / "reports" / "qa-memory-only.json").exists())
-
-    def test_collections_series_tags_and_people_use_one_canonical_model(self):
-        collection = self.library.save_collection(
-            {"id": "project-1", "name": "Product", "kind": "project"},
-            expected_generation=0,
-        )
-        self.assertEqual(collection["kind"], "project")
-        series = self.library.save_series(
-            {"id": "weekly", "name": "Weekly review"}, expected_generation=1,
-        )
-        self.assertEqual(series["id"], "weekly")
-        assigned = self.library.assign_organization(
-            "fixture-meeting-v1",
-            collection_ids=["project-1"],
-            tags=[" planejamento "],
-            people=[" Teô "],
-            series_id="weekly",
-            expected_generation=0,
-        )
-        self.assertEqual(assigned["collection_ids"], ["project-1"])
-        self.assertEqual(assigned["tags"], ["planejamento"])
-        self.assertEqual(assigned["people"], ["Teô"])
-        self.assertEqual(assigned["series_id"], "weekly")
-
-    def test_collection_delete_requires_exact_preview_and_never_deletes_meetings(self):
-        self.library.save_collection(
-            {"id": "project-1", "name": "Product", "kind": "folder"},
-            expected_generation=0,
-        )
-        self.library.assign_organization(
-            "fixture-meeting-v1", collection_ids=["project-1"], expected_generation=0,
-        )
-        preview = self.library.preview_collection_delete("project-1")
-        self.assertEqual(preview["session_ids"], ["fixture-meeting-v1"])
-        with self.assertRaises(ValueError):
-            self.library.delete_collection(
-                "project-1", expected_generation=1, confirmed_session_ids=[],
-            )
-        result = self.library.delete_collection(
-            "project-1",
-            expected_generation=1,
-            confirmed_session_ids=["fixture-meeting-v1"],
-        )
-        self.assertEqual(result["removed_from"], ["fixture-meeting-v1"])
-        self.assertTrue(self.session_dir.is_dir())
-        self.assertEqual(self.library.read_annotations("fixture-meeting-v1")["collection_ids"], [])
-        self.assertEqual(self.library.read_workspace()["collections"], [])
 
     def test_duplicate_normalized_collection_names_are_rejected_without_workspace_write(self):
         self.library.save_collection(

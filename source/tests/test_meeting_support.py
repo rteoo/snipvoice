@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from meeting_settings import MeetingSettings, validate_hotkey_conflicts
+from meeting_settings import MeetingSettings
 from meeting_library import AnnotationConflict, MeetingLibrary
 from meeting_retention import ConfirmationRequired, OperationRecoveryError
 from meeting_store import MeetingStore
@@ -334,11 +334,6 @@ class MeetingControllerTests(unittest.TestCase):
             self.controller._processing = False
         store.delete.assert_not_called()
 
-    def test_hotkeys_reject_subset_overlap_and_allow_independent_keys(self):
-        with self.assertRaises(ValueError):
-            validate_hotkey_conflicts({"meeting_hotkey": "ctrl+alt+shift+space"})
-        validate_hotkey_conflicts({"meeting_hotkey": "ctrl+alt+r"})
-
     def test_failed_inference_unload_keeps_reservation(self):
         from meeting_transcription import MeetingTranscriptionError
         with patch("meeting_transcription.transcribe_meeting",
@@ -348,10 +343,10 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.snapshot()["state"], "unavailable")
         self.voice.release_meeting.assert_not_called()
 
-    def test_enabled_automatic_transcription_then_summary_run_after_mixdown(self):
-        settings = MeetingSettings(auto_transcribe=True, auto_summary=True, voice_boost=True)
+    def test_installed_models_run_automatically_when_legacy_switches_are_false(self):
+        settings = MeetingSettings(voice_boost=True)
         with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
-                patch.object(self.controller, "_installed_summary_model", return_value="qwen3.5-2b-q4"), \
+                patch.object(self.controller, "_installed_summary_model", return_value="local-summary"), \
                 patch("meeting_transcription.transcribe_meeting") as transcribe, \
                 patch("meeting_summary.summarize_meeting") as summarize:
             self.assertTrue(self.controller.start(settings, title="Planning"))
@@ -364,26 +359,9 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertTrue(metadata["final_audio"]["voice_boost"])
         transcribe.assert_called_once()
         summarize.assert_called_once()
-        self.assertEqual(transcribe.call_args.args[1], session)
-        self.assertEqual(summarize.call_args.args[1], session)
-        self.assertEqual(self.controller.snapshot()["postprocess"], "Pós-processamento concluído")
-
-    def test_installed_models_run_automatically_when_legacy_switches_are_false(self):
-        settings = MeetingSettings()
-        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
-                patch.object(self.controller, "_installed_summary_model", return_value="local-summary"), \
-                patch("meeting_transcription.transcribe_meeting") as transcribe, \
-                patch("meeting_summary.summarize_meeting") as summarize:
-            self.assertTrue(self.controller.start(settings, title="Planning"))
-            self.assertTrue(self.capture.started.wait(2))
-            self.controller.stop()
-            self.controller._thread.join(3)
-
-        session = self.controller.snapshot()["session_id"]
-        transcribe.assert_called_once()
-        summarize.assert_called_once()
         self.assertEqual(transcribe.call_args.args[1:3], (session, "balanced"))
         self.assertEqual(summarize.call_args.args[1:3], (session, "local-summary"))
+        self.assertEqual(self.controller.snapshot()["postprocess"], "Pós-processamento concluído")
 
     def test_manual_transcription_refines_only_an_automatic_title(self):
         store = self.controller.store
@@ -697,15 +675,6 @@ class MeetingLibraryControllerWiringTests(unittest.TestCase):
         self.controller.stop()
         self.controller._thread.join(3)
         self.assertFalse((self.home / "library.sqlite").exists())
-
-    def test_controller_generation_cas_rejects_an_external_annotation_edit(self):
-        session = self.controller.store.begin({}, "Legacy")
-        self.controller.store.finish(session)
-        self.controller.get_session(session)
-        self.library.update_annotations(session, {"notes": "external"}, expected_generation=0)
-        with self.assertRaises(AnnotationConflict) as raised:
-            self.controller.update_notes(session, "Edited", "stale")
-        self.assertIn("mudou", str(raised.exception))
 
     def test_controller_annotation_helpers_keep_revision_scope_and_generation_cas(self):
         session = self.controller.store.begin({}, "Annotated")

@@ -84,14 +84,6 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(mp.check_permissions(), status(UNKNOWN, UNKNOWN))
         symbol.assert_not_called()
 
-    def test_microphone_is_not_part_of_expansion_onboarding(self):
-        self.assertNotIn(mp.MICROPHONE, mp.PERMISSIONS)
-        with mock.patch.object(mp, "IS_MAC", False):
-            self.assertEqual(mp.check_microphone(), mp.GRANTED)
-
-    def test_microphone_denial_does_not_open_expansion_onboarding(self):
-        self.assertFalse(mp.needs_onboarding(status()))
-
     def test_framework_symbol_survives_a_missing_library(self):
         with mock.patch.object(mp.ctypes.util, "find_library", return_value=None):
             self.assertIsNone(mp._framework_symbol("IOKit", "IOHIDCheckAccess"))
@@ -106,74 +98,6 @@ class DecisionTests(unittest.TestCase):
         self.assertFalse(mp.needs_onboarding(status(UNKNOWN, UNKNOWN)))
         self.assertTrue(mp.needs_onboarding(status(DENIED, GRANTED)))
         self.assertTrue(mp.needs_onboarding(status(GRANTED, DENIED)))
-
-    def test_denied_and_unknown_are_reported_separately(self):
-        report = status(DENIED, UNKNOWN)
-        self.assertEqual(mp.denied_permissions(report), [mp.INPUT_MONITORING])
-        self.assertEqual(mp.unknown_permissions(report), [mp.ACCESSIBILITY])
-
-    def test_an_absent_key_counts_as_unknown_not_granted(self):
-        self.assertEqual(mp.unknown_permissions({}), list(mp.PERMISSIONS))
-        self.assertEqual(mp.denied_permissions({}), [])
-
-    def test_input_monitoring_is_listed_before_accessibility(self):
-        listed = mp.denied_permissions(status(DENIED, DENIED))
-        self.assertEqual(listed, [mp.INPUT_MONITORING, mp.ACCESSIBILITY])
-
-    def test_the_prompt_names_only_what_is_missing(self):
-        message = mp.build_prompt_message(status(DENIED, GRANTED))
-        self.assertIn(mp.PERMISSION_LABELS[mp.INPUT_MONITORING], message)
-        self.assertNotIn(mp.PERMISSION_LABELS[mp.ACCESSIBILITY], message)
-        # The privacy claim from the module docstring must survive here: it is
-        # what makes granting a keylogger-shaped permission reasonable.
-        self.assertIn("não armazena nem envia", message)
-
-    def test_the_prompt_is_empty_when_nothing_is_missing(self):
-        self.assertEqual(mp.build_prompt_message(status()), "")
-        self.assertEqual(mp.build_tray_message(status()), "")
-
-    def test_the_tray_message_states_the_consequence(self):
-        message = mp.build_tray_message(status(DENIED, DENIED))
-        self.assertIn(mp.PERMISSION_LABELS[mp.ACCESSIBILITY], message)
-        self.assertIn("não vai funcionar", message)
-
-    def test_every_permission_has_a_pane_a_label_and_a_reason(self):
-        for name in mp.PERMISSIONS:
-            self.assertIn(name, mp.SETTINGS_PANE_URLS)
-            self.assertIn(name, mp.PERMISSION_LABELS)
-            self.assertIn(name, mp.PERMISSION_REASONS)
-
-    def test_the_panes_are_the_two_distinct_privacy_deep_links(self):
-        self.assertIn("Privacy_ListenEvent", mp.SETTINGS_PANE_URLS[mp.INPUT_MONITORING])
-        self.assertIn("Privacy_Accessibility", mp.SETTINGS_PANE_URLS[mp.ACCESSIBILITY])
-
-
-class RecheckTests(unittest.TestCase):
-    def test_a_full_grant_asks_for_a_restart_instead_of_claiming_it_works(self):
-        state, message = mp.recheck_outcome(status(DENIED, DENIED), status())
-        self.assertEqual(state, mp.RECHECK_RESOLVED)
-        self.assertIn("Reinicie", message)
-
-    def test_a_partial_grant_names_what_is_left(self):
-        state, message = mp.recheck_outcome(status(DENIED, DENIED), status(GRANTED, DENIED))
-        self.assertEqual(state, mp.RECHECK_PARTIAL)
-        self.assertIn(mp.PERMISSION_LABELS[mp.ACCESSIBILITY], message)
-        self.assertNotIn(mp.PERMISSION_LABELS[mp.INPUT_MONITORING], message)
-
-    def test_no_change_says_so(self):
-        state, message = mp.recheck_outcome(status(DENIED, GRANTED), status(DENIED, GRANTED))
-        self.assertEqual(state, mp.RECHECK_PENDING)
-        self.assertIn("Nada mudou", message)
-
-    def test_an_unreadable_recheck_is_never_reported_as_resolved(self):
-        # A probe that stopped answering is not a grant.
-        state, _ = mp.recheck_outcome(status(DENIED, DENIED), status(UNKNOWN, UNKNOWN))
-        self.assertEqual(state, mp.RECHECK_PENDING)
-
-    def test_a_permission_denied_only_on_the_recheck_is_picked_up(self):
-        state, message = mp.recheck_outcome(status(DENIED, GRANTED), status(GRANTED, DENIED))
-        self.assertEqual(state, mp.RECHECK_PENDING)
-        self.assertIn(mp.PERMISSION_LABELS[mp.ACCESSIBILITY], message)
 
 
 class OpenPaneTests(unittest.TestCase):

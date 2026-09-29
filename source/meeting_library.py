@@ -1765,66 +1765,6 @@ class MeetingLibrary:
             raise SchemaError(tr("A biblioteca não pôde ser enumerada.")) from error
         return sorted(values)
 
-    def preview_collection_delete(self, collection_id):
-        if not _valid_id(collection_id):
-            raise ValueError(tr("A coleção é inválida."))
-        workspace = self.read_workspace()
-        if not any(item.get("id") == collection_id for item in workspace["collections"]):
-            raise KeyError(tr("A coleção não existe."))
-        affected = []
-        for session_id in self._canonical_session_ids():
-            annotations = self.read_annotations(session_id)
-            if collection_id in annotations.get("collection_ids", []):
-                affected.append(session_id)
-        return {
-            "collection_id": collection_id,
-            "workspace_generation": workspace["generation"],
-            "session_ids": affected,
-        }
-
-    def delete_collection(self, collection_id, *, expected_generation, confirmed_session_ids):
-        preview = self.preview_collection_delete(collection_id)
-        if preview["workspace_generation"] != expected_generation:
-            raise WorkspaceConflict(expected_generation, preview["workspace_generation"])
-        if sorted(set(confirmed_session_ids)) != preview["session_ids"]:
-            raise ValueError(tr("A confirmação não corresponde à prévia atual da coleção."))
-        originals = {}
-        updated = []
-        try:
-            for session_id in preview["session_ids"]:
-                annotations = self.read_annotations(session_id)
-                originals[session_id] = annotations
-                memberships = [
-                    item for item in annotations["collection_ids"] if item != collection_id
-                ]
-                self.update_annotations(
-                    session_id,
-                    {"collection_ids": memberships},
-                    expected_generation=annotations["generation"],
-                )
-                updated.append(session_id)
-            workspace = self.read_workspace()
-            collections = [
-                item for item in workspace["collections"] if item.get("id") != collection_id
-            ]
-            self.update_workspace(
-                {"collections": collections}, expected_generation=expected_generation,
-            )
-        except Exception:
-            for session_id in reversed(updated):
-                original = originals[session_id]
-                current = self.read_annotations(session_id)
-                restore = {
-                    key: copy.deepcopy(value)
-                    for key, value in original.items()
-                    if key not in {"schema_version", "generation", "updated_at"}
-                }
-                self.update_annotations(
-                    session_id, restore, expected_generation=current["generation"],
-                )
-            raise
-        return {"collection_id": collection_id, "removed_from": preview["session_ids"]}
-
     # -- Catalog projection and compatibility fallback ------------------
 
     @staticmethod

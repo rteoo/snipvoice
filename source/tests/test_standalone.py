@@ -11,7 +11,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app_module import snipvoice as app
-import voice_models
 
 TMP = Path(__file__).resolve().parent / "tmp"
 TMP.mkdir(exist_ok=True)
@@ -144,14 +143,6 @@ class StandaloneTests(unittest.TestCase):
         mutex.assert_called_once_with()
         sleep.assert_not_called()
         move.assert_not_called()
-
-    def test_legacy_cache_overrides_are_ignored(self):
-        with mock.patch.dict(os.environ, {"SNIPTYPE_VOICE_CACHE": "legacy",
-                                          "TXT_XPANDER_VOICE_CACHE": "legacy2"}), \
-                mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": ""}):
-            path = voice_models.default_voice_cache_dir("windows")
-        self.assertIn("Snipvoice", path)
-        self.assertNotIn("legacy", path)
 
     def test_spoken_commands_insert_literal_text(self):
         command_file = Path(self.temp.name) / "commands.json"

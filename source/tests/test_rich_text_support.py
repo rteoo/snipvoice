@@ -3,14 +3,12 @@ import unittest
 
 from rich_text_support import (
     build_html_fragment,
-    build_rich_text_payload,
     build_rtf_document,
     extract_plain_text,
     get_clipboard_payload,
     is_rich_text_payload,
     normalize_rich_text_payload,
     normalize_style_spans,
-    rebuild_rich_text,
 )
 
 
@@ -131,13 +129,6 @@ class SpanNormalizationTests(unittest.TestCase):
             normalize_style_spans([span], 10),
         )
 
-    def test_bool_bounds_behave_as_their_integer_value(self):
-        # bool is a subclass of int, so True/False survive the isinstance
-        # check. Documented so a future change that rejects bools is a
-        # conscious decision. Observable effect: True behaves as offset 1.
-        html_fragment = build_rich_text_payload("hello", [{"tag": "bold", "start": True, "end": 3}])["html"]
-        self.assertEqual("<div>h<strong>el</strong>lo</div>", html_fragment)
-
 
 class HtmlGenerationTests(unittest.TestCase):
     def test_empty_text_yields_empty_div(self):
@@ -145,17 +136,6 @@ class HtmlGenerationTests(unittest.TestCase):
 
     def test_plain_text_is_wrapped_without_tags(self):
         self.assertEqual("<div>hello</div>", build_html_fragment("hello", []))
-
-    def test_produces_bare_fragment_without_cf_html_markers(self):
-        # This module emits only the <div> fragment; clipboard_support.py adds
-        # the CF_HTML header and StartFragment/EndFragment markers. Guard the
-        # contract so the two layers do not both inject markers.
-        fragment = build_html_fragment("hello", [{"tag": "bold", "start": 0, "end": 5}])
-        self.assertTrue(fragment.startswith("<div>"))
-        self.assertTrue(fragment.endswith("</div>"))
-        self.assertNotIn("StartFragment", fragment)
-        self.assertNotIn("<!--", fragment)
-        self.assertNotIn("<html>", fragment)
 
     def test_html_special_characters_are_escaped(self):
         fragment = build_html_fragment("<a> & \"x\" 'y'", [])
@@ -171,9 +151,6 @@ class HtmlGenerationTests(unittest.TestCase):
 
     def test_newline_becomes_break_tag(self):
         self.assertEqual("<div>a<br>b</div>", build_html_fragment("a\nb", []))
-
-    def test_trailing_newline_becomes_trailing_break(self):
-        self.assertEqual("<div>abc<br></div>", build_html_fragment("abc\n", []))
 
     def test_style_nesting_order_is_stable(self):
         # bold+italic always nests <strong><em>...; the fixed order guarantees a
@@ -198,14 +175,6 @@ class HtmlGenerationTests(unittest.TestCase):
         )
         self.assertEqual("<div><strong>abcdef</strong></div>", fragment)
         self.assertEqual(1, fragment.count("<strong>"))
-
-    def test_duplicate_spans_are_idempotent_in_html(self):
-        single = build_html_fragment("abc", [{"tag": "bold", "start": 0, "end": 3}])
-        duplicated = build_html_fragment(
-            "abc",
-            [{"tag": "bold", "start": 0, "end": 3}, {"tag": "bold", "start": 0, "end": 3}],
-        )
-        self.assertEqual(single, duplicated)
 
     def test_astral_span_uses_codepoint_offsets(self):
         # A span over an astral emoji works because Python string offsets are
@@ -245,12 +214,6 @@ class RtfGenerationTests(unittest.TestCase):
         rtf = build_rtf_document("豈", [])
         self.assertIn(r"\u-1792?", rtf)
 
-    def test_all_bmp_unicode_escapes_stay_in_signed_16_range(self):
-        rtf = build_rtf_document("é豈豈", [])
-        for value in _rtf_unicode_values(rtf):
-            self.assertGreaterEqual(value, _RTF_SIGNED_16_MIN)
-            self.assertLessEqual(value, _RTF_SIGNED_16_MAX)
-
     def test_style_control_words_present_for_each_bit(self):
         rtf = build_rtf_document(
             "abcde",
@@ -284,17 +247,17 @@ class RtfGenerationTests(unittest.TestCase):
 
 
 class BuildPayloadTests(unittest.TestCase):
-    def test_returns_plain_string_without_spans(self):
-        self.assertEqual("hello", build_rich_text_payload("hello", []))
-
     def test_builds_html_and_rtf_with_expected_nesting(self):
-        payload = build_rich_text_payload(
-            "hello world",
-            [
-                {"tag": "bold", "start": 0, "end": 5},
-                {"tag": "code", "start": 6, "end": 11},
-                {"tag": "strike", "start": 6, "end": 11},
-            ],
+        payload = normalize_rich_text_payload(
+            {
+                "__kind__": "rich_text",
+                "text": "hello world",
+                "spans": [
+                    {"tag": "bold", "start": 0, "end": 5},
+                    {"tag": "code", "start": 6, "end": 11},
+                    {"tag": "strike", "start": 6, "end": 11},
+                ],
+            }
         )
         self.assertTrue(is_rich_text_payload(payload))
         self.assertEqual("hello world", payload["text"])
@@ -303,26 +266,6 @@ class BuildPayloadTests(unittest.TestCase):
         self.assertIn(r"\b ", payload["rtf"])
         self.assertIn(r"\f1 ", payload["rtf"])
         self.assertIn(r"\strike ", payload["rtf"])
-
-    def test_out_of_range_spans_are_clipped_before_storage(self):
-        payload = build_rich_text_payload("hi", [{"tag": "bold", "start": 0, "end": 100}])
-        self.assertEqual([{"tag": "bold", "start": 0, "end": 2}], payload["spans"])
-        self.assertEqual("<div><strong>hi</strong></div>", payload["html"])
-
-    def test_span_entirely_beyond_text_returns_plain_string(self):
-        self.assertEqual("hi", build_rich_text_payload("hi", [{"tag": "bold", "start": 5, "end": 10}]))
-
-    def test_zero_length_span_returns_plain_string(self):
-        self.assertEqual("hi", build_rich_text_payload("hi", [{"tag": "bold", "start": 1, "end": 1}]))
-
-    def test_empty_text_returns_empty_string(self):
-        self.assertEqual("", build_rich_text_payload("", [{"tag": "bold", "start": 0, "end": 3}]))
-
-    def test_text_argument_may_be_a_rich_payload_and_is_unwrapped(self):
-        source = {"__kind__": "rich_text", "text": "abc", "spans": [], "html": "<div>abc</div>"}
-        payload = build_rich_text_payload(source, [{"tag": "bold", "start": 0, "end": 3}])
-        self.assertEqual("abc", payload["text"])
-        self.assertIn("<strong>abc</strong>", payload["html"])
 
 
 class NormalizePayloadTests(unittest.TestCase):
@@ -349,7 +292,7 @@ class NormalizePayloadTests(unittest.TestCase):
 
     def test_existing_html_is_trusted_and_not_recomputed(self):
         # normalize only backfills; it never re-derives a present html/rtf. A
-        # consumer that edits text must call rebuild_rich_text, not normalize.
+        # consumer that edits text must rebuild html/rtf itself, not normalize.
         payload = normalize_rich_text_payload(
             {
                 "__kind__": "rich_text",
@@ -395,11 +338,13 @@ class ClipboardPayloadTests(unittest.TestCase):
         self.assertEqual({"text": ""}, get_clipboard_payload(None))
 
     def test_rich_payload_includes_html_and_rtf(self):
-        rich_payload = build_rich_text_payload(
-            "abc",
-            [{"tag": "underline", "start": 0, "end": 3}, {"tag": "strike", "start": 0, "end": 3}],
+        payload = get_clipboard_payload(
+            {
+                "__kind__": "rich_text",
+                "text": "abc",
+                "spans": [{"tag": "underline", "start": 0, "end": 3}, {"tag": "strike", "start": 0, "end": 3}],
+            }
         )
-        payload = get_clipboard_payload(rich_payload)
         self.assertEqual("abc", payload["text"])
         self.assertIn("<u><s>abc</s></u>", payload["html"])
         self.assertIn("rtf", payload)
@@ -412,114 +357,7 @@ class ClipboardPayloadTests(unittest.TestCase):
         self.assertIn(r"\b ", payload["rtf"])
 
 
-class RebuildTests(unittest.TestCase):
-    def _bold_hello_world(self):
-        return build_rich_text_payload("hello world", [{"tag": "bold", "start": 0, "end": 5}])
-
-    def test_non_rich_original_returns_new_text(self):
-        self.assertEqual("new", rebuild_rich_text("old plain string", "new"))
-        self.assertEqual("new", rebuild_rich_text(None, "new"))
-
-    def test_shrink_clips_spans_and_regenerates_html_from_new_text(self):
-        rebuilt = rebuild_rich_text(self._bold_hello_world(), "hey")
-        self.assertTrue(is_rich_text_payload(rebuilt))
-        self.assertEqual("hey", rebuilt["text"])
-        self.assertEqual([{"tag": "bold", "start": 0, "end": 3}], rebuilt["spans"])
-        # html/rtf reflect the NEW text, not the stale original.
-        self.assertNotIn("hello", rebuilt["html"])
-        self.assertIn("<strong>hey</strong>", rebuilt["html"])
-
-    def test_shrink_that_removes_all_spans_returns_plain_string(self):
-        original = build_rich_text_payload("hello world", [{"tag": "bold", "start": 6, "end": 11}])
-        self.assertEqual("hey", rebuild_rich_text(original, "hey"))
-
-    def test_growth_leaves_span_end_unextended(self):
-        rebuilt = rebuild_rich_text(self._bold_hello_world(), "hello world!!!")
-        self.assertEqual([{"tag": "bold", "start": 0, "end": 5}], rebuilt["spans"])
-        self.assertIn("<strong>hello</strong>", rebuilt["html"])
-        self.assertIn("world!!!", rebuilt["html"])
-
-    def test_replacement_expands_span_for_wrapped_variable_token(self):
-        original = build_rich_text_payload(
-            "Hello %%name%%",
-            [{"tag": "bold", "start": 0, "end": len("Hello %%name%%")}],
-        )
-
-        rebuilt = rebuild_rich_text(original, "Hello Alexander")
-
-        self.assertEqual(
-            [{"tag": "bold", "start": 0, "end": len("Hello Alexander")}],
-            rebuilt["spans"],
-        )
-        self.assertIn("<strong>Hello Alexander</strong>", rebuilt["html"])
-
-    def test_replacement_shifts_span_after_changed_text(self):
-        original_text = "before %%name%% after"
-        after_start = original_text.index("after")
-        original = build_rich_text_payload(
-            original_text,
-            [{"tag": "italic", "start": after_start, "end": len(original_text)}],
-        )
-
-        rebuilt = rebuild_rich_text(original, "before Alexander after")
-
-        new_after_start = rebuilt["text"].index("after")
-        self.assertEqual(
-            [{"tag": "italic", "start": new_after_start, "end": len(rebuilt["text"])}],
-            rebuilt["spans"],
-        )
-        self.assertIn("<em>after</em>", rebuilt["html"])
-
-    def test_unchanged_text_preserves_span_boundaries(self):
-        original = build_rich_text_payload(
-            "keep these styles",
-            [
-                {"tag": "bold", "start": 0, "end": 4},
-                {"tag": "underline", "start": 5, "end": 10},
-            ],
-        )
-
-        rebuilt = rebuild_rich_text(original, original["text"])
-
-        self.assertEqual(original["spans"], rebuilt["spans"])
-
-    def test_insertion_shifts_following_span(self):
-        original = build_rich_text_payload(
-            "left right", [{"tag": "italic", "start": 5, "end": 10}]
-        )
-
-        rebuilt = rebuild_rich_text(original, "left  right")
-
-        self.assertEqual(
-            [{"tag": "italic", "start": 6, "end": 11}], rebuilt["spans"]
-        )
-
-    def test_deletion_shifts_following_span_and_drops_deleted_span(self):
-        original = build_rich_text_payload(
-            "left middle right",
-            [
-                {"tag": "bold", "start": 5, "end": 11},
-                {"tag": "italic", "start": 12, "end": 17},
-            ],
-        )
-
-        rebuilt = rebuild_rich_text(original, "left right")
-
-        self.assertEqual(
-            [{"tag": "italic", "start": 5, "end": 10}], rebuilt["spans"]
-        )
-
-    def test_rebuild_regenerates_rtf_for_new_text(self):
-        rebuilt = rebuild_rich_text(self._bold_hello_world(), "hey")
-        self.assertIn("hey", rebuilt["rtf"])
-        self.assertNotIn("hello", rebuilt["rtf"])
-
-
 class MalformedInputTests(unittest.TestCase):
-    def test_missing_and_wrong_type_text_is_not_a_rich_payload(self):
-        self.assertFalse(is_rich_text_payload({"__kind__": "rich_text"}))
-        self.assertFalse(is_rich_text_payload({"__kind__": "rich_text", "text": ["a"]}))
-
     def test_string_spans_are_ignored_gracefully(self):
         # A string is iterable; each char is a non-dict and is skipped.
         payload = normalize_rich_text_payload(
@@ -542,18 +380,6 @@ class MalformedInputTests(unittest.TestCase):
             {"__kind__": "rich_text", "text": "abc", "spans": 5}
         )
         self.assertEqual("abc", payload["text"])
-
-
-class ScaleTests(unittest.TestCase):
-    def test_large_text_with_many_spans_builds_without_error(self):
-        text = "x" * 2000
-        spans = [{"tag": "bold", "start": i, "end": i + 1} for i in range(0, 2000, 2)]
-        payload = build_rich_text_payload(text, spans)
-        self.assertTrue(is_rich_text_payload(payload))
-        self.assertEqual(2000, len(payload["text"]))
-        self.assertEqual(1000, len(payload["spans"]))
-        self.assertTrue(payload["html"].startswith("<div>"))
-        self.assertTrue(payload["rtf"].endswith("}"))
 
 
 if __name__ == "__main__":

@@ -10,7 +10,6 @@ app's worker-thread Tk root is not something AppKit permits at all.
 import os
 import sys
 import gc
-import inspect
 import tempfile
 import threading
 import time
@@ -875,13 +874,6 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertTrue(rebound)
         self.assertFalse(same, "reopen must register a new refresher")
         self.assertIn("Ditado", titles)
-
-
-class VoiceTabStructureTests(unittest.TestCase):
-    def test_voice_tab_does_not_render_removed_benefit_cards(self):
-        source = inspect.getsource(tx.Snipvoice._create_voice_tab)
-        for label in ("Fale naturalmente", "Texto pronto", "Em qualquer app"):
-            self.assertNotIn(label, source)
 
 
 def _ensure_voice(app):

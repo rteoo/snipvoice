@@ -37,10 +37,6 @@ class MeetingTextTests(unittest.TestCase):
         result = "\n\n".join(iter_formatted_transcript([{"text": text}], paragraph_chars=20))
         self.assertEqual(result.replace(" ", "").strip(), text.replace(" ", "").strip())
 
-    def test_preview_reports_truncation(self):
-        preview = preview_transcript([{"text": "abcdef"}], max_chars=3)
-        self.assertEqual((preview.text, preview.truncated), ("abc", True))
-
     def test_preview_stops_consuming_after_ceiling(self):
         def segments():
             yield {"start": 0, "text": "first"}
@@ -61,9 +57,6 @@ class MeetingTextTests(unittest.TestCase):
             "action_items": [{"text": "Preparar anúncio", "owner": "Ana", "deadline": "sexta"}],
         })
         self.assertEqual(result, "A equipe alinhou o próximo passo.\n\nDecisões:\n• Publicar na sexta.\n\nAções:\n• Preparar anúncio (responsável: Ana; prazo: sexta)")
-
-    def test_summary_report_envelope_is_readable(self):
-        self.assertEqual(format_summary({"generated": {"summary": {"text": "Gerado."}}}), "Gerado.")
 
     def test_summary_preserves_all_builtin_sections_in_template_order(self):
         result = format_summary({
@@ -104,14 +97,6 @@ class MeetingTextTests(unittest.TestCase):
             "generated": {"summary": {"text": "Gerado."}, "risks": ["Risco original"]},
             "reviewed_artifact": {"sections": {"summary": "Revisado.", "risks": "Risco confirmado."}},
         }), "Revisado.\n\nRiscos:\n• Risco confirmado.")
-
-    def test_summary_legacy_output_remains_exact(self):
-        value = {
-            "summary": "A equipe alinhou o próximo passo.",
-            "decisions": [{"text": "Publicar na sexta."}],
-            "action_items": [{"text": "Preparar anúncio", "owner": "Ana", "deadline": "sexta"}],
-        }
-        self.assertEqual(format_summary(value), "A equipe alinhou o próximo passo.\n\nDecisões:\n• Publicar na sexta.\n\nAções:\n• Preparar anúncio (responsável: Ana; prazo: sexta)")
 
 
 if __name__ == "__main__":

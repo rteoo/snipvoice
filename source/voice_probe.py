@@ -57,7 +57,7 @@ def _controller(transcript, tmp):
     )
     controller.bind_library(
         lambda: {"xadds": "hi"},
-        lambda: compile_trigger_index({"xadds": "hi"}, set()),
+        lambda: compile_trigger_index({"xadds": "hi"}),
     )
     return controller, inserted, expanded, forms, backend
 

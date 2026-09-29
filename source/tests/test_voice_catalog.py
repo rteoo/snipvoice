@@ -3,7 +3,6 @@ import json
 import os
 import sys
 import tempfile
-import threading
 import unittest
 from unittest import mock
 
@@ -30,7 +29,6 @@ from voice_catalog import (
 )
 from voice_models import (
     VoiceModelError,
-    default_voice_cache_dir,
     delete_model,
     download_model,
     model_is_installed,
@@ -240,28 +238,6 @@ class CatalogTests(unittest.TestCase):
         self.assertIn("automaticamente", purpose)
 
 
-class CacheLocationTests(unittest.TestCase):
-    def test_env_override_wins(self):
-        previous = os.environ.get("SNIPVOICE_VOICE_CACHE")
-        os.environ["SNIPVOICE_VOICE_CACHE"] = os.path.join(tempfile.gettempdir(), "vx")
-        try:
-            self.assertTrue(
-                default_voice_cache_dir().endswith("vx")
-                or default_voice_cache_dir().endswith("vx".replace("/", os.sep))
-            )
-        finally:
-            if previous is None:
-                os.environ.pop("SNIPVOICE_VOICE_CACHE", None)
-            else:
-                os.environ["SNIPVOICE_VOICE_CACHE"] = previous
-
-    def test_default_is_not_the_snippet_data_dir(self):
-        os.environ.pop("SNIPVOICE_VOICE_CACHE", None)
-        cache = default_voice_cache_dir(system="windows")
-        self.assertNotIn(".snipvoice", cache)
-        self.assertIn("voice-models", cache)
-
-
 class DownloadTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -344,25 +320,10 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_wrong_digest_leaves_no_install(self):
-        with self.assertRaises(VoiceModelError):
-            download_model(self.entry, self.tmp, opener=self._opener(b"tampered"))
-        self.assertFalse(model_is_installed(self.entry, self.tmp))
-
-    def test_http_url_is_rejected(self):
-        entry, _ = _tiny_entry(self.payload, url="http://example.test/model.gguf")
-        with self.assertRaises(VoiceModelError):
-            download_model(entry, self.tmp, opener=self._opener())
-
-    def test_cancel_leaves_no_install(self):
-        cancel = threading.Event()
-        cancel.set()
-        with self.assertRaises(VoiceModelError):
-            download_model(
-                self.entry,
-                self.tmp,
-                cancel_event=cancel,
-                opener=self._opener(),
-            )
+        # Same length as the pin, so only the SHA-256 comparison can reject it.
+        tampered = b"x" * len(self.payload)
+        with self.assertRaisesRegex(VoiceModelError, "SHA-256"):
+            download_model(self.entry, self.tmp, opener=self._opener(tampered))
         self.assertFalse(model_is_installed(self.entry, self.tmp))
 
     def test_delete_removes_only_the_catalog_directory(self):

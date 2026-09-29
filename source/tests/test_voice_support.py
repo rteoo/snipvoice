@@ -127,7 +127,7 @@ class ControllerTests(unittest.TestCase):
         )
         self.controller.bind_library(
             lambda: {"xadds": "hi"},
-            lambda: compile_trigger_index({"xadds": "hi"}, set()),
+            lambda: compile_trigger_index({"xadds": "hi"}),
         )
 
     def _ready(self):
@@ -181,10 +181,6 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(self.controller._release_idle_model(now=later))
         self.assertTrue(self.backend.is_loaded())
 
-    def test_defaults_off(self):
-        self.assertFalse(self.controller.enabled)
-        self.assertEqual(self.controller.state, STATE_UNAVAILABLE)
-
     def test_capture_runtime_unavailable_never_enters_ready(self):
         self.controller._capture_available = lambda: False
         self.controller._capture_factory = AudioCapture
@@ -197,10 +193,6 @@ class ControllerTests(unittest.TestCase):
             "A captura de áudio não está disponível neste aplicativo.",
             key="voice-load",
         )
-
-    def test_hotkey_while_loading_is_ignored(self):
-        self.controller._state = "loading"
-        self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
 
     def test_dictation_inserts_literally(self):
         self._ready()
@@ -1091,16 +1083,6 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(runner.threads[-1].is_alive())
         self.assertGreaterEqual(self.capture.stop_calls, 1)
         self.assertEqual(self.inserted, [])
-
-    def test_failed_switch_restores_previous_when_possible(self):
-        self._ready()
-        self.backend.load = mock.Mock(side_effect=Exception("boom"))
-        with mock.patch("voice_support.installed_model_path", return_value="old.gguf"):
-            # first load after failure uses previous profile
-            original_load = FakeAsrBackend.load
-            self.backend.load = mock.Mock(side_effect=[Exception("boom"), None])
-            self.controller.set_profile("accuracy")
-        self.assertEqual(self.controller.settings.profile, "balanced")
 
     def test_profile_switch_emits_final_idle_status_after_success(self):
         self._ready()

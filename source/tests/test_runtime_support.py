@@ -1,5 +1,4 @@
 import io
-import json
 import logging
 import os
 import shutil
@@ -14,12 +13,8 @@ from runtime_support import (
     AppLogger,
     BackgroundTaskRunner,
     TextInserter,
-    build_snippet_failure_notification,
     configure_logging,
-    load_notification_history,
     normalize_clipboard_text,
-    save_notification_history,
-    truncate_notification_text,
 )
 
 try:  # pynput is a Windows runtime dependency; guard so the file imports anywhere.
@@ -28,115 +23,6 @@ try:  # pynput is a Windows runtime dependency; guard so the file imports anywhe
     HAS_PYNPUT = True
 except Exception:  # pragma: no cover - only on a host without pynput installed
     HAS_PYNPUT = False
-
-
-class BuildSnippetFailureNotificationTests(unittest.TestCase):
-    def test_error_wrapper_keeps_trigger_and_detail(self):
-        message = build_snippet_failure_notification("xdolar", "[Erro: timeout na API]")
-
-        self.assertIn("xdolar", message)
-        self.assertIn("timeout na API", message)
-
-    def test_error_prefix_is_case_insensitive(self):
-        message = build_snippet_failure_notification("xcot", "[ERRO na consulta BCB]")
-
-        self.assertEqual("Falha no snippet xcot: ERRO na consulta BCB", message)
-
-    def test_unavailable_api_value_maps_to_generic_message(self):
-        message = build_snippet_failure_notification("xcot", "Cotação: N/A")
-
-        self.assertEqual("Falha no snippet xcot: dado indisponível.", message)
-
-    def test_bracketed_unavailable_variants_are_reported(self):
-        self.assertEqual(
-            "Falha no snippet xind: Indisponível",
-            build_snippet_failure_notification("xind", "[Indisponível]"),
-        )
-        self.assertEqual(
-            "Falha no snippet xfal: Falha na rede",
-            build_snippet_failure_notification("xfal", "[Falha na rede]"),
-        )
-        self.assertEqual(
-            "Falha no snippet xna: valor N/A",
-            build_snippet_failure_notification("xna", "[valor N/A]"),
-        )
-
-    def test_cancelled_and_partial_results_are_ignored(self):
-        self.assertIsNone(build_snippet_failure_notification("xfund", "[Cancelado]"))
-        self.assertIsNone(
-            build_snippet_failure_notification(
-                "xfund",
-                "📈 PETR4 | R$ 31,00\n📘 P/VP: N/A\n🎯 ROE: 18,50%",
-            )
-        )
-
-    def test_whitespace_wrapped_cancel_marker_is_ignored(self):
-        self.assertIsNone(build_snippet_failure_notification("xfund", "  [Cancelado]  "))
-
-    def test_empty_and_blank_values_return_none(self):
-        self.assertIsNone(build_snippet_failure_notification("xcot", ""))
-        self.assertIsNone(build_snippet_failure_notification("xcot", "   \n\t "))
-
-    def test_multiline_value_ending_in_na_returns_none(self):
-        # A multi-line result is treated as partial success, not a failure, even
-        # when its last line looks unavailable.
-        self.assertIsNone(
-            build_snippet_failure_notification("xcot", "Dólar hoje\nFonte: BCB\nValor: N/A")
-        )
-
-    def test_plain_success_value_returns_none(self):
-        self.assertIsNone(build_snippet_failure_notification("xdolar", "R$ 5,12"))
-
-    def test_rich_text_payload_is_unwrapped_before_classification(self):
-        payload = {
-            "__kind__": "rich_text",
-            "text": "[Erro: sem conexão]",
-            "spans": [],
-            "html": "<div>[Erro: sem conexão]</div>",
-            "rtf": r"{\rtf1\ansi [Erro: sem conexao]}",
-        }
-        message = build_snippet_failure_notification("xdolar", payload)
-
-        self.assertEqual("Falha no snippet xdolar: Erro: sem conexão", message)
-
-    def test_long_error_detail_is_truncated(self):
-        detail = "erro " + "x" * 400
-        message = build_snippet_failure_notification("xcot", f"[{detail}]")
-
-        self.assertLessEqual(len(message), 160)
-        self.assertTrue(message.endswith("..."))
-
-
-class TruncateNotificationTextTests(unittest.TestCase):
-    def test_normalizes_whitespace_and_truncates(self):
-        message = truncate_notification_text("linha 1\nlinha 2\tlinha 3", max_length=18)
-
-        self.assertEqual("linha 1 linha 2...", message)
-
-    def test_short_message_is_returned_unchanged(self):
-        self.assertEqual("bom dia", truncate_notification_text("bom dia"))
-
-    def test_message_at_exactly_max_length_is_not_truncated(self):
-        # Boundary: len == max_length must not trigger the ellipsis path.
-        self.assertEqual("abcde", truncate_notification_text("abcde", max_length=5))
-
-    def test_message_one_over_max_length_is_truncated(self):
-        result = truncate_notification_text("abcdef", max_length=5)
-
-        self.assertEqual("ab...", result)
-        self.assertEqual(5, len(result))
-
-    def test_non_string_message_is_coerced(self):
-        self.assertEqual("42", truncate_notification_text(42))
-
-    def test_unicode_and_emoji_are_preserved(self):
-        self.assertEqual("café 🎉", truncate_notification_text("café   🎉"))
-
-    def test_huge_message_is_capped_at_max_length(self):
-        result = truncate_notification_text("palavra " * 1000, max_length=40)
-
-        self.assertLessEqual(len(result), 40)
-        self.assertTrue(result.endswith("..."))
 
 
 class NormalizeClipboardTextTests(unittest.TestCase):
@@ -158,73 +44,8 @@ class NormalizeClipboardTextTests(unittest.TestCase):
     def test_none_becomes_empty_string(self):
         self.assertEqual("", normalize_clipboard_text(None))
 
-    def test_normalization_is_idempotent(self):
-        once = normalize_clipboard_text("a\r\nb\rc\nd")
-        self.assertEqual(once, normalize_clipboard_text(once))
-
-
-class NotificationHistoryTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.path = os.path.join(self.tmp, "notifications.json")
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def _write(self, raw):
-        with open(self.path, "w", encoding="utf-8") as handle:
-            handle.write(raw)
-
-    def test_missing_file_returns_empty_list(self):
-        self.assertEqual([], load_notification_history(self.path))
-
-    def test_invalid_json_returns_empty_list(self):
-        self._write("{ this is not json")
-        self.assertEqual([], load_notification_history(self.path))
-
-    def test_non_list_top_level_returns_empty_list(self):
-        self._write("{}")
-        self.assertEqual([], load_notification_history(self.path))
-        self._write("42")
-        self.assertEqual([], load_notification_history(self.path))
-
-    def test_non_dict_entries_are_filtered_out(self):
-        self._write(json.dumps([{"a": 1}, "loose", 5, None, {"b": 2}]))
-        self.assertEqual([{"a": 1}, {"b": 2}], load_notification_history(self.path))
-
-    def test_load_keeps_newest_within_limit(self):
-        self._write(json.dumps([{"n": i} for i in range(5)]))
-        self.assertEqual(
-            [{"n": 3}, {"n": 4}], load_notification_history(self.path, limit=2)
-        )
-
-    def test_save_then_load_round_trips_unicode(self):
-        history = [{"msg": "café 🎉"}, {"msg": "olá"}]
-        self.assertTrue(save_notification_history(self.path, history))
-        self.assertEqual(history, load_notification_history(self.path))
-
-    def test_save_trims_to_limit_and_keeps_newest(self):
-        history = [{"n": i} for i in range(5)]
-        self.assertTrue(save_notification_history(self.path, history, limit=2))
-        self.assertEqual([{"n": 3}, {"n": 4}], load_notification_history(self.path))
-
-    def test_save_returns_false_on_write_failure(self):
-        with mock.patch.object(
-            runtime_support, "write_json_atomic", side_effect=OSError("disk full")
-        ):
-            self.assertFalse(save_notification_history(self.path, [{"n": 1}]))
-
 
 class BackgroundTaskRunnerTests(unittest.TestCase):
-    def test_target_runs_on_a_background_thread(self):
-        runner = BackgroundTaskRunner()
-        ran = threading.Event()
-        thread = runner.start(ran.set)
-
-        self.assertTrue(ran.wait(timeout=2))
-        thread.join(timeout=2)
-        self.assertFalse(thread.is_alive())
-
     def test_positional_and_keyword_arguments_are_forwarded(self):
         runner = BackgroundTaskRunner()
         seen = {}

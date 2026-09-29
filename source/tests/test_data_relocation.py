@@ -314,8 +314,10 @@ class ModelsRelocationTests(unittest.TestCase):
         app_paths.write_location({"models_dir": self.dst})
         self.assertEqual(voice_models.voice_cache_dir(), os.path.join(self.dst, "voice-models"))
         self.assertEqual(summary_models.summary_cache_dir(), os.path.join(self.dst, "summary-models"))
-        with mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": self.root}):
+        with mock.patch.dict(os.environ, {"SNIPVOICE_VOICE_CACHE": self.root,
+                                          "SNIPVOICE_SUMMARY_CACHE": self.root}):
             self.assertEqual(voice_models.voice_cache_dir(), self.root)
+            self.assertEqual(summary_models.summary_cache_dir(), self.root)
 
 
 if __name__ == "__main__":

@@ -209,35 +209,6 @@ class Theme:
             colors["selectcolor"] = self.field
         return colors
 
-    def toolbar_frame_colors(self):
-        """``bg`` for the formatting-toolbar frame (and its stacked status row).
-
-        The toolbar belongs to the editor surface, so it always uses ``card``.
-        Toolbar buttons receive their own foreground and interaction colors,
-        avoiding the old Win32 white-on-white regression.
-        """
-        return {"bg": self.card}
-
-    def status_label_options(self):
-        """Font and foreground for the format-status label.
-
-        The status is secondary UI, so it shares the app's body family and
-        muted semantic color on every platform. The label's ``bg`` is passed
-        by the caller (the toolbar's own background).
-        """
-        return {"font": self.font(8), "fg": self.text_muted}
-
-    def toolbar_button_colors(self, bg):
-        """Colors for the flat glyph buttons in the formatting toolbar."""
-        if self.system == "darwin":
-            return {}
-        return {
-            "bg": bg,
-            "fg": self.text_native,
-            "activebackground": self.surface_hover,
-            "activeforeground": self.text_native,
-        }
-
     def nav_button_colors(self, bg, selected=False):
         """Colors for a section-navigation button sitting on ``bg``. Native on macOS."""
         if self.system == "darwin":

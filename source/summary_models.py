@@ -12,13 +12,6 @@ ENV_SUMMARY_CACHE = "SNIPVOICE_SUMMARY_CACHE"
 CACHE_DIR_NAME = "summary-models"
 
 
-def default_summary_cache_dir(system=None):
-    override = os.environ.get(ENV_SUMMARY_CACHE)
-    if override:
-        return os.path.abspath(os.path.expanduser(override))
-    return os.path.join(app_paths.default_models_dir(system), CACHE_DIR_NAME)
-
-
 def summary_cache_dir():
     """Active summary cache: env override, then the user-chosen model folder."""
     override = os.environ.get(ENV_SUMMARY_CACHE)
