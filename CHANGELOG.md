@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Name transcription and summary models by what they offer, such as "Equilibrado · Parakeet" and "Máxima qualidade · Gemma 4 E4B", instead of bare model codes.
+- List models from lowest to highest quality in Ditado, Configurações > Gravação, and Configurações > Modelos.
+
 ## 1.2.0 - 2026-09-28
 
 - Split Arquivos into the final audio and the original (raw) tracks, with the format and size of each. Download the final audio as saved, or each original track on its own as MP3.

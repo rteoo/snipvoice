@@ -72,17 +72,17 @@ INDEX_STATE_LABELS = {"ready": N_("pronto"), "stale": N_("desatualizado"), "rebu
                       "unavailable": N_("indisponível"), "incomplete": N_("incompleto"),
                       "compatibility": N_("modo de compatibilidade"), "cancelled": N_("cancelado"),
                       "failed": N_("falhou")}
-PROFILE_LABELS = {"balanced": N_("Equilibrado · Parakeet TDT"), "compact": N_("Compacto · Qwen 0.6B"),
-                  "accuracy": N_("Precisão · Qwen 1.7B"), "streaming": N_("Transcrição contínua"),
-                  "whisper-small": "Whisper Small", "whisper-turbo": "Whisper Large v3 Turbo",
-                  "whisper-large-v3": "Whisper Large v3"}
+PROFILE_LABELS = {"whisper-small": N_("Leve · Whisper Small"), "balanced": N_("Equilibrado · Parakeet"),
+                  "whisper-turbo": N_("Intermediário · Whisper Turbo"), "compact": N_("Preciso · Qwen 0.6B"),
+                  "accuracy": N_("Muito preciso · Qwen 1.7B"),
+                  "whisper-large-v3": N_("Máxima precisão · Whisper Large"),
+                  "streaming": N_("Transcrição contínua")}
 LANGUAGE_LABELS = {"auto": N_("Automático"), "pt-BR": N_("Português (Brasil)"),
                    "en-US": N_("Inglês (Estados Unidos)")}
 TRACK_LABELS = {N_("Microfone"): "microphone", N_("Sistema"): "system"}
 AUDIO_SOURCE_LABELS = {N_("Áudio final"): "final", **TRACK_LABELS}
 AUDIO_TRACK_LABELS = {track: label for label, track in AUDIO_SOURCE_LABELS.items()}
-SUMMARY_LABELS = {entry["id"]: f'{entry["name"]} · {entry["parameters"]}'
-                  for entry in summary_catalog()}
+SUMMARY_LABELS = {entry["id"]: entry["label"] for entry in summary_catalog()}
 
 
 def profile_display_label(profile):
@@ -960,7 +960,7 @@ class MeetingWindow:
         self.language_display = tk.StringVar(self.window, tr(LANGUAGE_LABELS[self.settings.language]))
         self.hotkey = tk.StringVar(self.window)
         self.summary_model = tk.StringVar(self.window, self.settings.summary_model)
-        self.summary_display = tk.StringVar(self.window, SUMMARY_LABELS[self.settings.summary_model])
+        self.summary_display = tk.StringVar(self.window, tr(SUMMARY_LABELS[self.settings.summary_model]))
         self.endpoint_vars = {track: tk.StringVar(self.window) for track in ("microphone", "system")}
         self.endpoint_boxes = {}
         defaults = self.recording_defaults_parent
@@ -987,7 +987,7 @@ class MeetingWindow:
         self.language_box.bind("<<ComboboxSelected>>", self._language_changed)
         self.summary_box = ttk.Combobox(
             defaults, textvariable=self.summary_display,
-            values=list(SUMMARY_LABELS.values()), state="readonly",
+            values=[tr(label) for label in SUMMARY_LABELS.values()], state="readonly",
         )
         self.summary_box.bind("<<ComboboxSelected>>", self._summary_display_changed)
         default_rows = [
@@ -1196,7 +1196,7 @@ class MeetingWindow:
             row.pack(fill="x", pady=2 if compact else self.ui.space_xs)
             copy = tk.Frame(row, bg=self.ui.card)
             copy.pack(side="left", fill="x", expand=True, padx=(0, 12))
-            self._label(copy, f'{entry["name"]} · {format_model_size(entry["size_bytes"])} · '
+            self._label(copy, f'{tr(entry["label"])} · {format_model_size(entry["size_bytes"])} · '
                         f'{entry["license_id"]}', anchor="w",
                         bg=self.ui.card, fg=self.ui.text_strong,
                         font=self.ui.font(weight="bold")).pack(fill="x")
@@ -1216,7 +1216,7 @@ class MeetingWindow:
 
     def _summary_display_changed(self, _event=None):
         self.summary_model.set(next(key for key, label in SUMMARY_LABELS.items()
-                                    if label == self.summary_display.get()))
+                                    if tr(label) == self.summary_display.get()))
 
     def _refresh_summary_models(self):
         for button in self.summary_model_buttons.values():
@@ -3154,7 +3154,7 @@ class MeetingWindow:
         self.language_display.set(tr(LANGUAGE_LABELS[settings.language]))
         self.hotkey.set(settings.hotkey)
         self.summary_model.set(settings.summary_model)
-        self.summary_display.set(SUMMARY_LABELS[settings.summary_model])
+        self.summary_display.set(tr(SUMMARY_LABELS[settings.summary_model]))
         self._profile_changed()
         self.options.clear()
         self._render_devices()

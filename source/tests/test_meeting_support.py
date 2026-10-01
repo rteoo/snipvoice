@@ -421,6 +421,14 @@ class MeetingControllerTests(unittest.TestCase):
             self.assertEqual(self.controller.import_audio("recording.wav", settings), "imported")
         process.assert_not_called()
 
+    def test_missing_preferred_voice_model_falls_back_to_default_before_catalog_order(self):
+        installed = {"whisper-small", "balanced"}
+        with patch("voice_models.model_is_installed",
+                   side_effect=lambda entry, _cache: entry["profile"] in installed):
+            self.assertEqual(self.controller._installed_voice_profile("accuracy"), "balanced")
+            installed.discard("balanced")
+            self.assertEqual(self.controller._installed_voice_profile("accuracy"), "whisper-small")
+
     def test_auto_transcription_resource_failure_keeps_lease_and_source_audio(self):
         from meeting_transcription import MeetingTranscriptionError
         settings = MeetingSettings(auto_transcribe=True)

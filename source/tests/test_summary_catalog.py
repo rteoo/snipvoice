@@ -19,6 +19,21 @@ class SummaryCatalogTests(unittest.TestCase):
             self.assertGreater(entry["size_bytes"], 500_000_000)
             self.assertLess(entry["size_bytes"], 5_200_000_000)
 
+    def test_catalog_runs_from_lowest_to_highest_quality(self):
+        self.assertEqual(
+            [entry["id"] for entry in summary_catalog()],
+            [
+                "qwen3.5-0.8b-q4",
+                "qwen3.5-2b-q4",
+                "gemma-4-e2b-q4",
+                "lfm2.5-2.6b-q4",
+                "qwen3.5-4b-q4",
+                "gemma-4-e4b-q4",
+            ],
+        )
+        labels = [entry["label"] for entry in summary_catalog()]
+        self.assertEqual(len(labels), len(set(labels)))
+
     def test_current_families_and_license_gate_are_explicit(self):
         entries = summary_catalog()
         self.assertEqual(
