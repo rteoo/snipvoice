@@ -306,6 +306,12 @@ Release Python dependencies are hash-locked in `requirements-release.lock` and
 and packaging requirements as inputs. Native OS packages and SDKs are separate
 build inputs; a lockfile alone does not make the whole binary reproducible.
 
+## Windows release preparation
+
+See [RELEASE-WINDOWS.md](RELEASE-WINDOWS.md) for the compliance precondition,
+dry run, native installer preparation, artifact verification, and remaining
+cross-platform release gates.
+
 ## License
 
 SnipVoice is released under the [MIT License](LICENSE). Packaged builds retain
