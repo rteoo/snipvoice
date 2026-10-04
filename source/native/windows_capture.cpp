@@ -33,10 +33,11 @@ using Microsoft::WRL::ComPtr;
 using Clock = std::chrono::steady_clock;
 constexpr size_t kMaxHeader = 64 * 1024;
 constexpr size_t kMaxPayload = 4 * 1024 * 1024;
-// ceiling: two seconds per track and 8 MiB total queued PCM; upgrade only with
+// ceiling: ten seconds per track and 16 MiB total queued PCM; upgrade only with
 // measured disk/pipe latency requirements. Overflow is a visible fatal gap.
-constexpr size_t kQueueBytes = 8 * 1024 * 1024;
-constexpr double kQueueSeconds = 2.0;
+constexpr size_t kQueueBytes = 16 * 1024 * 1024;
+constexpr double kQueueSeconds = 10.0;
+constexpr size_t kQueueEvents = 1024;
 
 struct ComScope {
     HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -202,7 +203,7 @@ struct Session {
         if (message.header.size() > kMaxHeader || message.payload.size() > kMaxPayload) return false;
         if (message.track >= 0 && (bytes + message.payload.size() > kQueueBytes
             || durations[message.track] + message.duration > kQueueSeconds
-            || queue.size() >= 128)) {
+            || queue.size() >= kQueueEvents)) {
             if (!overflow) {
                 overflow = true;
                 queue.push_back({prefix("gap") + ",\"track\":"
@@ -214,7 +215,7 @@ struct Session {
             changed.notify_all();
             return false;
         }
-        // ceiling: 128 queued source events/audio blocks, plus one terminal event.
+        // ceiling: 1024 queued source events/audio blocks, plus one terminal event.
         bytes += message.payload.size();
         if (message.track >= 0) durations[message.track] += message.duration;
         queue.push_back(std::move(message));
@@ -233,6 +234,52 @@ struct Session {
             + ",\"timestamp\":" + number(now()) + ",\"message\":" + quote(message), track);
     }
 };
+
+// Combine clock-contiguous WASAPI packets before sending them to durable storage.
+// Two 10 ms sources otherwise require roughly 400 fsync calls per second.
+struct AudioBatch {
+    Session& session;
+    int track;
+    unsigned rate, channels, frames = 0;
+    uint64_t& sequence;
+    double timestamp = 0;
+    std::vector<BYTE> payload;
+    unsigned maximum() const { return std::max(1u, rate / 10); }
+    void flush() {
+        if (!frames) return;
+        Message block;
+        block.track = track;
+        block.duration = static_cast<double>(frames) / rate;
+        block.payload = std::move(payload);
+        block.header = session.prefix("audio") + ",\"track\":"
+            + quote(track == 0 ? "microphone" : "system")
+            + ",\"rate\":" + std::to_string(rate)
+            + ",\"channels\":" + std::to_string(channels)
+            + ",\"frames\":" + std::to_string(frames)
+            + ",\"timestamp\":" + number(timestamp)
+            + ",\"sequence\":" + std::to_string(sequence++) + '}';
+        session.push(std::move(block));
+        frames = 0;
+        payload.clear();
+    }
+    void append(double stamp, unsigned count, const std::vector<BYTE>& pcm) {
+        // ceiling: 100 ms of PCM per source; only <=2 ms packet-clock jitter
+        // is normalized. Real gaps/overlaps, pause, errors and device changes flush.
+        if (frames && (frames + count > maximum()
+            || std::abs(stamp - (timestamp + static_cast<double>(frames) / rate)) > 0.002))
+            flush();
+        if (!frames) timestamp = stamp;
+        payload.insert(payload.end(), pcm.begin(), pcm.end());
+        frames += count;
+        if (frames >= maximum()) flush();
+    }
+};
+
+bool packetDiscontinuity(DWORD flags, bool havePacket) {
+    // The initial packet establishes the clock; there is no earlier audio to lose.
+    return havePacket && (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY);
+}
+
 void writer(Session& session) {
     HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
     for (;;) {
@@ -412,6 +459,25 @@ void selfTestLogic() {
     extended.Samples.wValidBitsPerSample = 24;
     require(Format(&extended.Format).sample(minimum) == -1.0f);
     require(quote("\"\\\n") == "\"\\\"\\\\\\u000a\"");
+    require(!packetDiscontinuity(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, false));
+    require(packetDiscontinuity(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, true));
+    Session buffered;
+    uint64_t sequence = 0;
+    AudioBatch batch{buffered, 0, 48000, 1, 0, sequence};
+    std::vector<BYTE> pcm(480 * sizeof(float), 1);
+    for (unsigned i = 0; i < 100; ++i) batch.append(i * 0.01, 480, pcm);
+    require(buffered.queue.size() == 10 && sequence == 10 && batch.frames == 0);
+    require(buffered.queue.front().payload.size() == 4800 * sizeof(float));
+    require(std::all_of(buffered.queue.front().payload.begin(),
+        buffered.queue.front().payload.end(), [](BYTE value) { return value == 1; }));
+    batch.append(1.0, 480, pcm);
+    batch.append(1.2, 480, pcm); // Preserve a real 190 ms source gap.
+    require(sequence == 11 && batch.frames == 480);
+    batch.flush(); // Pause/stop must preserve the short tail.
+    require(sequence == 12 && buffered.queue.back().duration == 0.01);
+    Session smallPackets;
+    for (unsigned i = 0; i < 200; ++i) smallPackets.push({"{}", std::vector<BYTE>(1920), 0, 0.01});
+    require(!smallPackets.overflow && smallPackets.queue.size() == 200);
 }
 
 void capture(Session& session, Selection selected) {
@@ -458,6 +524,8 @@ void capture(Session& session, Selection selected) {
             HRESULT failure = S_OK;
             double lastEnd = session.now();
             bool idleGap = false;
+            bool havePacket = false;
+            AudioBatch batch{session, selected.track, format.rate, format.channels, 0, sequence};
             auto drain = [&](bool tail) {
                 HRESULT result = S_OK;
                 UINT32 pending = 0;
@@ -478,7 +546,9 @@ void capture(Session& session, Selection selected) {
                     }
                     double timestamp = static_cast<double>(qpc100ns) / 10000000.0 - session.origin;
                     if ((bufferFlags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !std::isfinite(timestamp) || timestamp < 0) {
+                        batch.flush();
                         session.gap(selected.track, session.now(), "native_timestamp_error");
+                        havePacket = true;
                         // Never fabricate a device timestamp for unclocked samples.
                         result = input->ReleaseBuffer(frames);
                         if (FAILED(result)) break;
@@ -488,11 +558,17 @@ void capture(Session& session, Selection selected) {
                             idleGap = false;
                         }
                         lastEnd = timestamp + static_cast<double>(frames) / format.rate;
-                        if (bufferFlags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY)
+                        if (packetDiscontinuity(bufferFlags, havePacket)) {
+                            batch.flush();
                             session.gap(selected.track, timestamp, "native_discontinuity");
+                        }
+                        havePacket = true;
                         bool silent = (bufferFlags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
                         bool invalidBuffer = !silent && !raw;
-                        if (invalidBuffer) session.gap(selected.track, timestamp, "invalid_native_buffer");
+                        if (invalidBuffer) {
+                            batch.flush();
+                            session.gap(selected.track, timestamp, "invalid_native_buffer");
+                        }
                         // ceiling: each copied block is <=100 ms and <=4 MiB.
                         unsigned maximum = std::min<unsigned>(format.rate / 10,
                             static_cast<unsigned>(kMaxPayload / (format.channels * sizeof(float))));
@@ -509,15 +585,10 @@ void capture(Session& session, Selection selected) {
                                         + (static_cast<size_t>(offset) * format.channels + sample) * format.stride);
                                     std::memcpy(block.payload.data() + sample * sizeof(float), &value, sizeof(float));
                                 }
-                                block.header = session.prefix("audio") + ",\"track\":" + quote(selected.name())
-                                    + ",\"rate\":" + std::to_string(format.rate)
-                                    + ",\"channels\":" + std::to_string(format.channels)
-                                    + ",\"frames\":" + std::to_string(count)
-                                    + ",\"timestamp\":" + number(timestamp + static_cast<double>(offset) / format.rate)
-                                    + ",\"sequence\":" + std::to_string(sequence++) + '}';
-                                session.push(std::move(block));
+                                batch.append(timestamp + static_cast<double>(offset) / format.rate,
+                                    count, block.payload);
                             }
-                        } catch (...) { input->ReleaseBuffer(frames); throw; }
+                        } catch (...) { batch.flush(); input->ReleaseBuffer(frames); throw; }
                         result = input->ReleaseBuffer(frames);
                         if (FAILED(result)) break;
                     }
@@ -533,8 +604,10 @@ void capture(Session& session, Selection selected) {
                     if (running) {
                         check(client->Stop(), "Pause capture stream");
                         check(drain(true), "Preserve paused capture tail");
+                        batch.flush();
                         check(client->Reset(), "Reset paused capture stream");
                         running = false;
+                        havePacket = false;
                     }
                     session.gap(selected.track, session.now(), pause ? "paused" : "resumed");
                     lastEnd = session.now();
@@ -552,6 +625,7 @@ void capture(Session& session, Selection selected) {
                 if (running) {
                     failure = drain(false);
                     if (FAILED(failure)) break;
+                    if (session.now() - lastEnd > 0.1) batch.flush();
                     // A silent loopback engine may deliver no packets at all. Keep
                     // elapsed time explicit without inventing native clocked PCM.
                     if (!idleGap && session.now() - lastEnd > 0.5) {
@@ -569,6 +643,7 @@ void capture(Session& session, Selection selected) {
                 if (SUCCEEDED(failure)) failure = stopped;
                 if (SUCCEEDED(failure)) failure = drain(true);
             }
+            batch.flush();
             if (FAILED(failure)) {
                 if (selected.followsDefault() && failure == AUDCLNT_E_DEVICE_INVALIDATED) {
                     auto replacement = defaultId(devices.Get(), selected.flow(), selected.role());
@@ -657,7 +732,7 @@ int wmain(int argc, wchar_t** argv) {
             ExitProcess(3);
         }
         if (controlThread.joinable()) controlThread.join();
-        session.event("stopped", "");
+        session.event("stopped", session.overflow ? ",\"reason\":\"transport_overflow\"" : "");
         { std::lock_guard<std::mutex> lock(session.mutex); session.finished = true; }
         session.changed.notify_all();
         auto deadline = Clock::now() + std::chrono::seconds(2);

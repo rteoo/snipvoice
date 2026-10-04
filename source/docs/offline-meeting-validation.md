@@ -1,8 +1,8 @@
 # Offline meeting implementation and validation
 
-This document records the current local meeting implementation. It describes
-source-level behavior and focused checks; it does not certify physical Tk/tray
-interaction, native capture, packaged startup, or signing on this host.
+This document records the current local meeting implementation, source-level
+checks, and the explicitly dated Windows host checks below. It does not certify
+packaged startup, full tray integration, signing, or macOS physical capture.
 
 ## Implemented local behavior
 
@@ -62,6 +62,62 @@ an SSD is not forensic erasure; use disk encryption and account/device controls
 for that threat model.
 
 ## Source-level validation boundary
+
+### Windows recording transport
+
+Windows WASAPI commonly delivers one packet every 10 ms per source. The previous
+transport limited its queue to 128 events, so two sources could exhaust that
+queue after approximately 640 ms of consumer delay, even below the byte/time
+limits. Each packet also required a raw-track fsync and a journal fsync, roughly
+400 flushes per second for two sources. The Python reader separately failed
+after 250 ms with a full four-block queue.
+
+The Windows helper now groups clock-contiguous packets into at most 100 ms of
+PCM, preserving every sample. Only packet-clock jitter within 2 ms is normalized
+inside a batch; real clock gaps/overlaps and native discontinuities flush it.
+Pause, source changes and stop flush short tails. The first packet after start
+or an explicit reset establishes the source clock and does not flag an earlier
+audio loss. Subsequent discontinuity flags remain visible journal events.
+
+The helper queue is bounded by 10 seconds per source, 16 MiB of PCM, and 1,024
+events. The Python queue holds at most eight blocks (32 MiB at the protocol's
+maximum block size) and applies backpressure for up to 10 seconds. These are
+independent limits, not a guarantee for a particular stall duration or format.
+Raw-track and journal fsync ordering, append-only recovery, and atomic metadata
+remain unchanged. Exhaustion stops capture visibly rather than dropping audio
+silently; its terminal error now identifies disk/consumer backpressure.
+
+The recording overlay shares the dictation indicator and the sole Tk root. Its
+200 ms poll observes the controller independently of the manager window, so it
+continues while minimized or closed to the tray. Starting/saving, paused,
+partial, and interrupted states are distinct from active recording.
+
+Regression coverage exercises temporary and persistent consumer stalls, forced
+teardown with a full queue, actionable native overflow errors, packet batching
+and tail preservation in the native non-recording self-test, and overlay
+minimize/restore/dictation ownership. Desktop smoke checks include preserving
+the foreground window when showing the overlay. These checks do not certify a
+packaged release or macOS capture.
+
+### Windows host checks on 2026-10-03
+
+- The MSVC/Windows SDK helper build and its non-recording self-test passed.
+- The full desktop suite ran 1,187 tests successfully with 10 skips, including
+  unavailable PyAV/MP3 integration and platform-specific cases. Ruff 0.16.3 and
+  the diff formatting check passed. The final focused transport, overlay,
+  entrypoint, catalog, and native suites ran 40 tests successfully; a subsequent
+  real Tk minimize/restore smoke also passed.
+- A 12-minute microphone/system-output soak applied a five-second consumer
+  stall and a one-second pause/resume. Incoming device audio was discarded and
+  only synthetic silence was persisted in a temporary store. Capture stopped on
+  request with no transport overflow or source error. All 14,369 emitted audio
+  blocks survived durable-store readback with identical per-source frame totals
+  (approximately 718.16 seconds of system audio and 717.65 seconds of microphone
+  audio, after source startup and the explicit pause). The fixture was removed.
+- Windows reported 15 native discontinuity events during this load test, in
+  addition to four explicit pause/resume events. These remain visible source
+  warnings; continued recording is not proof of loss-free endpoint audio.
+  Installed-package operation, MP3 encoding, and macOS remain unverified.
 
 Focused unit coverage exists for canonical sidecars, report/profile validation,
 citation handling, Q&A save semantics, annotations, clips, organization,

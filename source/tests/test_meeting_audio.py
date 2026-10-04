@@ -3,7 +3,9 @@ import os
 import struct
 import subprocess
 import sys
+import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from meeting_audio import MAX_HEADER, MAX_PAYLOAD, MeetingAudioError, NativeCapture, encode_frame, read_frame
@@ -107,5 +109,69 @@ class MeetingAudioTests(unittest.TestCase):
         try:
             with self.assertRaises(MeetingAudioError):
                 capture.read_event(timeout=1)
+        finally:
+            capture.stop(force=True)
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_temporary_consumer_stall_preserves_all_events_and_stop(self):
+        capture = self.fake_helper("emit({'type':'ready','version':1,'generation':2})\n"
+                                   "for i in range(200): emit({'type':'gap','generation':2,'timestamp':i,'reason':'test'})\n"
+                                   "sys.stdin.readline()\nemit({'type':'stopped','generation':2})\n")
+        capture.start(MeetingSettings(), 2)
+        try:
+            time.sleep(0.6)  # Exceeds the former 250 ms queue-full failure deadline.
+            stamps = []
+            for _ in range(200):
+                event, _ = capture.read_event(timeout=2)
+                stamps.append(event["timestamp"])
+            self.assertEqual(stamps, list(range(200)))
+            capture.command("stop")
+            self.assertEqual(capture.read_event(timeout=2)[0]["type"], "stopped")
+            capture.stop()
+            self.assertFalse(capture._reader.is_alive())
+            self.assertFalse(capture._diagnostics.is_alive())
+        finally:
+            capture.stop(force=True)
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_persistent_stall_fails_visibly_and_force_stop_cancels_backpressure(self):
+        capture = self.fake_helper("emit({'type':'ready','version':1,'generation':2})\n"
+                                   "for i in range(200): emit({'type':'gap','generation':2,'timestamp':i})\n"
+                                   "time.sleep(20)\n")
+        with mock.patch("meeting_audio.QUEUE_STALL_SECONDS", 0.2):
+            capture.start(MeetingSettings(), 2)
+            try:
+                self.assertTrue(capture._done.wait(2))
+                self.assertIn("disco", str(capture._failure))
+            finally:
+                capture.stop(force=True)
+        self.assertFalse(capture._reader.is_alive())
+        self.assertIsNotNone(capture._process.poll())
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_native_overflow_retains_actionable_stop_reason(self):
+        capture = self.fake_helper("emit({'type':'ready','version':1,'generation':2})\n"
+                                   "sys.stdin.readline()\n"
+                                   "emit({'type':'stopped','generation':2,'reason':'transport_overflow'})\nsys.exit(3)\n")
+        capture.start(MeetingSettings(), 2)
+        try:
+            capture.command("stop")
+            capture.read_event(timeout=2)
+            with self.assertRaisesRegex(MeetingAudioError, "disco"):
+                capture.stop()
+        finally:
+            capture.stop(force=True)
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_force_stop_unblocks_reader_with_full_queue(self):
+        capture = self.fake_helper("emit({'type':'ready','version':1,'generation':2})\n"
+                                   "for i in range(200): emit({'type':'gap','generation':2,'timestamp':i})\n"
+                                   "time.sleep(20)\n")
+        capture.start(MeetingSettings(), 2)
+        try:
+            time.sleep(0.2)
+            capture.stop(force=True)
+            self.assertFalse(capture._reader.is_alive())
+            self.assertIsNotNone(capture._process.poll())
         finally:
             capture.stop(force=True)

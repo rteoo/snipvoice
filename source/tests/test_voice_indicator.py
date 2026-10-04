@@ -7,7 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from voice_indicator import VISIBLE_STATES, indicator_content, indicator_subtitle
+from voice_indicator import VISIBLE_STATES, indicator_content, indicator_subtitle, meeting_indicator_content
 
 
 MAIN_TK_AVAILABLE = (
@@ -39,6 +39,31 @@ class VoiceIndicatorContentTests(unittest.TestCase):
     def test_idle_is_hidden(self):
         self.assertIsNone(indicator_content("idle"))
         self.assertIsNone(indicator_content("unavailable"))
+
+    def test_meeting_elapsed_pause_and_partial_capture_are_distinct(self):
+        state, title, _, subtitle = meeting_indicator_content({"state": "recording", "elapsed": 3676})
+        self.assertEqual(state, "recording")
+        self.assertEqual(title, "Gravando · 01:01:16")
+        self.assertNotIn("Solte", subtitle)
+        self.assertIn("Pausado", meeting_indicator_content({"state": "paused"})[1])
+        content = meeting_indicator_content({"state": "recording", "partial": True})
+        self.assertIn("parcial", content[1])
+        self.assertIn("perdeu áudio", content[3])
+
+    def test_meeting_interruption_remains_visible_until_review(self):
+        for status in ("failed", "interrupted"):
+            content = meeting_indicator_content({"state": "idle", "last_status": status})
+            self.assertEqual(content[1], "Gravação interrompida")
+        self.assertEqual(meeting_indicator_content({"state": "idle", "last_status": "partial"})[1],
+                         "Gravação parcial salva")
+        self.assertIsNone(meeting_indicator_content({"state": "idle", "last_status": "completed"}))
+        self.assertIsNone(meeting_indicator_content({"state": "idle"}))
+
+    def test_meeting_starting_and_saving_do_not_claim_active_capture(self):
+        for state in ("starting", "stopping", "postprocessing"):
+            content = meeting_indicator_content({"state": state, "elapsed": float("nan")})
+            self.assertEqual(content[0], "transcribing")
+            self.assertNotIn("Gravando", content[1])
 
 
 class MacVoiceIndicatorRoutingTests(unittest.TestCase):
@@ -81,6 +106,12 @@ class VoiceIndicatorGuiSmokeTests(unittest.TestCase):
                     AppKit.NSApplicationActivationPolicyAccessory
                 )
             indicator = VoiceStatusIndicator(root)
+            if current_os() == "windows":
+                import ctypes
+                from ctypes import wintypes
+                user32 = _windows_user32()
+                user32.GetForegroundWindow.restype = wintypes.HWND
+                foreground = user32.GetForegroundWindow()
             indicator.update("recording", "dictation")
             root.update()
             if current_os() == "darwin":
@@ -95,12 +126,49 @@ class VoiceIndicatorGuiSmokeTests(unittest.TestCase):
                 widget_hwnd = indicator.window.winfo_id()
                 hwnd = user32.GetParent(widget_hwnd) or widget_hwnd
                 assert user32.GetWindowLongW(hwnd, _GWL_EXSTYLE) & _WS_EX_NOACTIVATE
+                assert user32.GetForegroundWindow() == foreground, "Overlay stole focus"
             indicator.update("idle")
             root.update()
             if current_os() == "darwin":
                 assert not indicator._mac_panel.is_visible()
             else:
                 assert indicator.window.state() == "withdrawn"
+            indicator.update_meeting({"state": "recording", "elapsed": 136})
+            root.update()
+            if current_os() == "darwin":
+                assert indicator._mac_panel.is_visible()
+            else:
+                assert indicator.title_label.cget("text") == "Gravando · 00:02:16"
+            indicator.update_meeting({"state": "paused", "elapsed": 136})
+            root.update()
+            indicator.update_meeting({"state": "idle", "last_status": "failed"})
+            root.update()
+            indicator.update_meeting({"state": "idle", "last_status": "completed"})
+            root.update()
+            if current_os() == "windows":
+                import sys
+                sys.path.insert(0, "tests")
+                from app_module import snipvoice
+                app = snipvoice.Snipvoice.__new__(snipvoice.Snipvoice)
+                app.voice_status_indicator = indicator
+                manager = tk.Toplevel(root)
+                app.manager_window = manager
+                manager.withdraw()
+                app._render_recording_indicator(root, {"state": "recording", "elapsed": 136})
+                root.update()
+                assert indicator.window.state() == "normal"
+                manager.deiconify()
+                root.update()
+                app._render_recording_indicator(root, {"state": "recording", "elapsed": 136})
+                assert indicator.window.state() == "withdrawn"
+                manager.iconify()
+                root.update()
+                assert manager.state() == "iconic"
+                app._render_recording_indicator(root, {"state": "recording", "elapsed": 136})
+                root.update()
+                assert indicator.window.state() == "normal"
+                manager.destroy()
+            indicator.destroy()
             root.destroy()
             """
         )
