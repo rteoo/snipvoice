@@ -634,7 +634,8 @@ class MeetingController:
                     capture.command(command)
                     self.store.add_event(session, {"type": command, "timestamp": time.monotonic() - self._started})
                     with self._lock:
-                        self._state = "paused" if command == "pause" else "recording"
+                        if not self._stop.is_set():
+                            self._state = "paused" if command == "pause" else "recording"
                 item = capture.read_event(timeout=0.1)
                 if item is None:
                     continue

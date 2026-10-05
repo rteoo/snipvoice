@@ -135,6 +135,7 @@ class AudioCapture:
         self._device = device
         self._resampler = None
         self._raw_sentinel = object()
+        self._normalizer_stop = threading.Event()
         self._expected_stop = None
 
     def set_journal(self, journal):
@@ -261,6 +262,7 @@ class AudioCapture:
                     samples,
                     journal,
                     session_issues,
+                    self._normalizer_stop,
                 ),
                 name="voice-audio-normalizer",
                 daemon=True,
@@ -360,6 +362,7 @@ class AudioCapture:
             self.__class__._normalizer_slot_owner = None
 
     def _reset_session(self):
+        self._normalizer_stop = threading.Event()
         self._source_frame_count = [0]
         self._samples = []
         self._issues = []
@@ -386,6 +389,9 @@ class AudioCapture:
     def _signal_worker(self):
         if self._worker is None:
             return
+        # A saturated queue may reject the wake-up marker. The independent
+        # stop event lets the worker exit once it drains accepted audio.
+        self._normalizer_stop.set()
         try:
             self._raw_queue.put(self._raw_sentinel, timeout=1.0)
         except queue.Full:
@@ -408,10 +414,16 @@ class AudioCapture:
         samples,
         journal,
         session_issues,
+        stop_event,
     ):
         try:
             while True:
-                item = raw_queue.get()
+                try:
+                    item = raw_queue.get(timeout=0.1)
+                except queue.Empty:
+                    if stop_event.is_set():
+                        break
+                    continue
                 if item is self._raw_sentinel:
                     break
                 chunk, _frame_count = item

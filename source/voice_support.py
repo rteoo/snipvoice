@@ -5,6 +5,7 @@ Hotkey callbacks only flip guarded state and enqueue work. Capture, download,
 inference, Tk, and disk stay off the keyboard threads.
 """
 
+from collections import deque
 import os
 import threading
 import time
@@ -65,6 +66,9 @@ _SHUTDOWN_JOIN_SECONDS = 2.0
 # ceiling: fixed 10 minutes; make it a setting if users ask for control.
 DICTATION_IDLE_UNLOAD_SECONDS = 10 * 60
 _IDLE_UNLOAD_CHECK_SECONDS = 30.0
+# ceiling: 64 pending shortcut events. A flooded queue cancels the gesture
+# instead of creating unbounded threads or losing a release silently.
+HOTKEY_QUEUE_LIMIT = 64
 
 
 class _TrackedWorker:
@@ -207,6 +211,10 @@ class VoiceController:
         self._load_error = None
         self._workers = []
         self._workers_lock = threading.Lock()
+        self._hotkey_lock = threading.Lock()
+        self._hotkey_events = deque()
+        self._hotkey_worker_active = False
+        self._hotkey_overflow = False
         self._unload_lock = threading.Lock()
         self._unload_pending = False
         self._unload_in_progress = False
@@ -1340,7 +1348,7 @@ class VoiceController:
                 generation,
             )
             return
-        if self._cancel.is_set() or self._shutdown.is_set():
+        if self._session_invalid(generation, STATE_TRANSCRIBING):
             self._cancel_recording_if_current(generation, recording)
             return
         try:
@@ -1922,12 +1930,16 @@ class VoiceController:
     def _stop_monitor(self):
         monitor = self._monitor
         self._monitor = None
+        with self._hotkey_lock:
+            self._hotkey_events.clear()
+            self._hotkey_overflow = False
         if monitor is not None:
             monitor.stop()
 
     def _start_worker(self, fn, *args, name=None):
         tracked = _TrackedWorker()
         with self._workers_lock:
+            self._workers = [worker for worker in self._workers if not worker.done.is_set()]
             self._workers.append(tracked)
 
         def run():
@@ -2049,20 +2061,75 @@ class VoiceController:
         ).start()
 
     def _hotkey_press_from_os(self, mode):
-        # OS callback: enqueue only.
-        if self._shutdown.is_set():
-            return
-        self._start_worker(self.handle_hotkey_press, mode, name="voice-press")
+        self._enqueue_hotkey(self.handle_hotkey_press, mode)
 
     def _hotkey_release_from_os(self, mode):
-        if self._shutdown.is_set():
-            return
-        self._start_worker(self.handle_hotkey_release, mode, name="voice-release")
+        self._enqueue_hotkey(self.handle_hotkey_release, mode)
 
     def _hotkey_escape_from_os(self):
-        if self._shutdown.is_set():
-            return
-        self._start_worker(self.cancel, name="voice-escape")
+        self._enqueue_hotkey(self.cancel)
+
+    def _enqueue_hotkey(self, handler, *args):
+        # Keyboard callbacks enqueue only; one worker preserves event order.
+        with self._hotkey_lock:
+            if self._shutdown.is_set() or self._hotkey_overflow:
+                return
+            if len(self._hotkey_events) >= HOTKEY_QUEUE_LIMIT:
+                self._hotkey_events.clear()
+                self._hotkey_overflow = True
+            else:
+                self._hotkey_events.append((handler, args))
+            if self._hotkey_worker_active:
+                return
+            self._hotkey_worker_active = True
+        try:
+            self._start_worker(self._drain_hotkeys, name="voice-hotkeys")
+        except Exception:
+            with self._hotkey_lock:
+                self._hotkey_worker_active = False
+                self._hotkey_events.clear()
+                self._hotkey_overflow = False
+            raise
+
+    def _drain_hotkeys(self):
+        try:
+            self._process_hotkeys()
+        except BaseException:
+            # An unexpected runner/reporter failure must permit a later retry.
+            with self._hotkey_lock:
+                self._hotkey_worker_active = False
+                self._hotkey_events.clear()
+                self._hotkey_overflow = False
+            raise
+
+    def _process_hotkeys(self):
+        while True:
+            with self._hotkey_lock:
+                if self._shutdown.is_set():
+                    self._hotkey_events.clear()
+                overflow = self._hotkey_overflow
+                self._hotkey_overflow = False
+                if overflow:
+                    handler, args = self.cancel, ()
+                elif self._hotkey_events:
+                    handler, args = self._hotkey_events.popleft()
+                else:
+                    self._hotkey_worker_active = False
+                    return
+            try:
+                handler(*args)
+                if overflow:
+                    self._notify(
+                        tr("Os atalhos de voz chegaram rápido demais. A gravação foi cancelada; tente novamente."),
+                        key="voice-hotkey",
+                    )
+            except Exception as exc:
+                self._warn(f"Voice shortcut processing failed: {type(exc).__name__}")
+                self.cancel()
+                self._notify(
+                    tr("Não foi possível processar o atalho de voz. Tente novamente."),
+                    key="voice-hotkey",
+                )
 
     def delete_active_model(self):
         """Disable voice, then remove only the catalog directory of the profile."""

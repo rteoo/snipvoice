@@ -1,6 +1,8 @@
 import math
 import os
+import queue
 import sys
+import threading
 import time
 import types
 import unittest
@@ -237,6 +239,44 @@ class AudioCaptureTests(unittest.TestCase):
             {issue for issue, _message in result.issues},
             {CaptureIssue.STOP, CaptureIssue.CLOSE},
         )
+
+    def test_failed_stop_marker_does_not_strand_the_normalizer_after_a_stall(self):
+        sounddevice, options, _stream = self._sounddevice()
+        capture = AudioCapture()
+        entered, proceed = threading.Event(), threading.Event()
+        journal = mock.Mock()
+
+        def write_chunk(_values):
+            entered.set()
+            if not proceed.wait(3):
+                raise RuntimeError("fixture journal timed out")
+
+        journal.write_chunk.side_effect = write_chunk
+        capture.set_journal(journal)
+        worker = None
+        with mock.patch.dict("sys.modules", {"sounddevice": sounddevice}):
+            try:
+                capture.start()
+                worker = capture._worker
+                options["callback"]([0.5], 1, None, None)
+                self.assertTrue(entered.wait(1))
+                options["callback"]([0.25], 1, None, None)
+                with mock.patch.object(capture._raw_queue, "put", side_effect=queue.Full), \
+                        mock.patch.object(capture, "_join_worker"):
+                    result = capture.stop()
+                self.assertIn(CaptureIssue.RAW_QUEUE, {issue for issue, _ in result.issues})
+                proceed.set()
+                worker.join(1)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(journal.write_chunk.call_args_list, [mock.call([0.5]), mock.call([0.25])])
+                capture.start()
+                self.assertTrue(capture.stop().ok)
+            finally:
+                proceed.set()
+                if worker is not None and worker.is_alive():
+                    capture._raw_queue.put_nowait(capture._raw_sentinel)
+                    worker.join(2)
+                capture.stop()
 
     def test_timed_out_worker_cannot_mutate_next_session(self):
         sounddevice, options, _stream = self._sounddevice()

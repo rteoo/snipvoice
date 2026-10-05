@@ -146,6 +146,8 @@ EN_US = {
     'Entrada por voz (baixando modelo…)': 'Voice input (downloading model…)',
     'Entrada por voz (baixando {percent}%)': 'Voice input (downloading {percent}%)',
     'A entrada por voz ainda está encerrando; tente ativá-la novamente em instantes.': 'Voice input is still shutting down; try turning it on again in a moment.',
+    'Os atalhos de voz chegaram rápido demais. A gravação foi cancelada; tente novamente.': 'Voice shortcuts arrived too quickly. Recording was canceled; try again.',
+    'Não foi possível processar o atalho de voz. Tente novamente.': 'Could not process the voice shortcut. Try again.',
     'Aguarde o download do modelo terminar antes de ativar a voz.': 'Wait for the model download to finish before turning on voice.',
     'Nenhum atalho corresponde ao que foi falado.': 'No command matches what was said.',
     'A gravação foi recuperada. O texto está na área de transferência.': 'The recording was recovered. The text is on the clipboard.',

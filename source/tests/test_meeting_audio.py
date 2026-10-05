@@ -1,8 +1,11 @@
 import io
+import hashlib
 import os
+from pathlib import Path
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -10,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from meeting_audio import MAX_HEADER, MAX_PAYLOAD, MeetingAudioError, NativeCapture, encode_frame, read_frame
 from meeting_settings import MeetingSettings
+from meeting_store import MeetingStore
 
 
 class FragmentedReader(io.BytesIO):
@@ -225,3 +229,57 @@ class MeetingAudioTests(unittest.TestCase):
             self.assertIsNotNone(capture._process.poll())
         finally:
             capture.stop(force=True)
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_dual_source_burst_with_stalls_has_exact_durable_pcm_readback(self):
+        blocks = 600
+        capture = self.fake_helper(
+            "emit({'type':'ready','version':1,'generation':2})\n"
+            f"for sequence in range({blocks}):\n"
+            " for track,rate,channels in [('microphone',16000,1),('system',48000,2)]:\n"
+            "  frames=rate//50; value=(sequence%13)/16; payload=struct.pack('<'+str(frames*channels)+'f',*([value]*(frames*channels)))\n"
+            "  emit({'type':'audio','generation':2,'track':track,'rate':rate,'channels':channels,'frames':frames,'timestamp':sequence/50,'sequence':sequence},payload)\n"
+            "sys.stdin.readline()\n"
+            "emit({'type':'stopped','generation':2})\n"
+        )
+        root = Path(__file__).parent / "tmp"
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as directory:
+            store = MeetingStore(directory)
+            session = store.begin(MeetingSettings().payload(), "Synthetic transport stress")
+            expected = {track: hashlib.sha256() for track in ("microphone", "system")}
+            counts = {track: 0 for track in expected}
+            try:
+                capture.start(MeetingSettings(), 2)
+                for index in range(blocks * 2):
+                    if index % 300 == 0:
+                        time.sleep(0.3)
+                    event, payload = capture.read_event(timeout=3)
+                    track = event["track"]
+                    self.assertEqual(event["sequence"], counts[track])
+                    self.assertEqual(event["generation"], 2)
+                    value = (counts[track] % 13) / 16
+                    reference = struct.pack("<" + str(event["frames"] * event["channels"]) + "f",
+                                            *([value] * (event["frames"] * event["channels"])))
+                    self.assertEqual(payload, reference)
+                    store.append_audio(session, event, payload)
+                    expected[track].update(reference)
+                    counts[track] += 1
+                capture.command("stop")
+                self.assertEqual(capture.read_event(timeout=3)[0]["type"], "stopped")
+                capture.stop()
+                store.finish(session)
+                actual = {track: hashlib.sha256() for track in expected}
+                persisted = {track: 0 for track in expected}
+                for event, payload in store.iter_audio(session):
+                    track = event["track"]
+                    self.assertEqual(event["sequence"], persisted[track])
+                    actual[track].update(payload)
+                    persisted[track] += 1
+                self.assertEqual(persisted, {"microphone": blocks, "system": blocks})
+                self.assertEqual({track: value.hexdigest() for track, value in actual.items()},
+                                 {track: value.hexdigest() for track, value in expected.items()})
+                self.assertFalse(capture._reader.is_alive())
+                self.assertFalse(capture._diagnostics.is_alive())
+            finally:
+                capture.stop(force=True)
