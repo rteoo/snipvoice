@@ -58,6 +58,22 @@ function Get-DeclaredVersion {
     }
     $declared = $Matches[1]
     if ($content -notmatch '(?m)^Channel: stable\r?$') { throw 'A stable release is required.' }
+    $installer = Get-Content -Raw -LiteralPath 'installer/snipvoice.iss'
+    $workflow = Get-Content -Raw -LiteralPath '.github/workflows/bundles.yml'
+    $checks = @(
+        @{ Text = $content; Pattern = '(?m)^APP_VERSION = "([^"]+)"'; Expected = $declared; Label = 'runtime version' },
+        @{ Text = $content; Pattern = '(?m)^RELEASE_CHANNEL = "([^"]+)"'; Expected = 'stable'; Label = 'runtime channel' },
+        @{ Text = $installer; Pattern = '(?m)^#define MyAppVersion "([^"]+)"'; Expected = $declared; Label = 'installer version' },
+        @{ Text = $installer; Pattern = '(?m)^#define MyAppChannel "([^"]+)"'; Expected = 'stable'; Label = 'installer channel' },
+        @{ Text = $workflow; Pattern = '(?m)^  SNIPVOICE_VERSION: "([^"]+)"'; Expected = $declared; Label = 'workflow version' },
+        @{ Text = $workflow; Pattern = '(?m)^  SNIPVOICE_CHANNEL: "([^"]+)"'; Expected = 'stable'; Label = 'workflow channel' },
+        @{ Text = $workflow; Pattern = '(?m)^  SNIPVOICE_RELEASE_LABEL: "([^"]+)"'; Expected = $declared; Label = 'release label' }
+    )
+    foreach ($check in $checks) {
+        if ($check.Text -notmatch $check.Pattern -or $Matches[1] -ne $check.Expected) {
+            throw "Release $($check.Label) does not match the declared stable version."
+        }
+    }
     return $declared
 }
 
