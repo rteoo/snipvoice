@@ -75,7 +75,11 @@ def _ancestors(widget):
 @unittest.skipUnless(TK_AVAILABLE, TK_SKIP_REASON)
 class ManagerGuiSmokeTests(unittest.TestCase):
     def setUp(self):
-        self.app = _make_app(tempfile.mkdtemp())
+        directory = os.path.join(os.path.dirname(__file__), "tmp")
+        os.makedirs(directory, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=directory)
+        self.addCleanup(temporary.cleanup)
+        self.app = _make_app(temporary.name)
         self.app.gui.ensure_started()
 
     def tearDown(self):
@@ -384,7 +388,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 if isinstance(widget, ttk.Combobox)
             ]
             self.assertGreaterEqual(len(combos), 2)
-            selected, language, _hotkey, _command = self.app._manager_voice_tk_vars
+            selected, language, _hotkey, _command, _activation = self.app._manager_voice_tk_vars
             before_state = (selected.get(), language.get())
             voice.settings.profile = "accuracy"
             voice.settings.language = "auto"
@@ -459,6 +463,187 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         persist.assert_called_once_with({"voice_replacements": {"Quen": "Qwen"}})
         self.assertEqual(constructor_calls, 0)
         self.assertEqual(voice.settings.voice_replacements, {"Quen": "Qwen"})
+
+    def _command_editor_widgets(self, shared_root):
+        dialog = self.app._show_voice_commands(shared_root)
+        widgets = list(_descendants(dialog))
+        return (
+            dialog,
+            next(widget for widget in widgets if isinstance(widget, tk.Entry)),
+            next(widget for widget in widgets if isinstance(widget, tk.Text)),
+            next(widget for widget in widgets if isinstance(widget, ttk.Treeview)),
+            {str(widget.cget("text")): widget for widget in widgets
+             if isinstance(widget, tk.Button)},
+        )
+
+    def test_voice_commands_are_accessible_inside_dictation_on_the_shared_root(self):
+        _ensure_voice(self.app)
+
+        def open_editor(shared_root):
+            frame = tk.Frame(shared_root)
+            self.app._create_voice_tab(frame, shared_root)
+            button = next(widget for widget in _descendants(frame)
+                          if isinstance(widget, tk.Button)
+                          and widget.cget("text") == "Configurar comandos…")
+            with mock.patch.object(tx.tk, "Tk", wraps=tx.tk.Tk) as constructor:
+                button.invoke()
+                dialog = next(child for child in shared_root.winfo_children()
+                              if isinstance(child, tk.Toplevel)
+                              and child.title() == "Comandos por voz")
+                self.assertEqual(dialog.master, shared_root)
+                self.assertEqual(constructor.call_count, 0)
+                dialog.destroy()
+
+        self._on_gui(open_editor)
+
+    def test_mode_selection_is_passed_to_the_controller_off_the_gui_thread(self):
+        voice = mock.Mock()
+        voice.is_enabled.return_value = True
+        voice.settings.profile = "balanced"
+        voice.settings.language = "auto"
+        voice.settings.hotkey = "ctrl+alt+space"
+        voice.settings.command_hotkey = "ctrl+alt+shift+space"
+        voice.settings.activation_mode = "hold"
+        voice.cache_dir = self.app.data_dir
+        voice.model_download_in_progress.return_value = False
+        self.app.voice = voice
+        applied = threading.Event()
+        threads = []
+
+        def apply(**_options):
+            threads.append(threading.current_thread())
+            applied.set()
+
+        voice.apply_options.side_effect = apply
+
+        def choose_and_save(shared_root):
+            frame = tk.Frame(shared_root)
+            self.app._create_voice_tab(frame, shared_root)
+            widgets = list(_descendants(frame))
+            choice = next(widget for widget in widgets if isinstance(widget, tk.Radiobutton)
+                          and widget.cget("value") == "toggle")
+            choice.invoke()
+            next(widget for widget in widgets if isinstance(widget, tk.Button)
+                 and widget.cget("text") == "Salvar e usar").invoke()
+            return threading.current_thread()
+
+        with mock.patch("voice_models.model_is_installed", return_value=True), \
+                mock.patch.object(self.app, "refresh_tray_menu"):
+            gui_thread = self._on_gui(choose_and_save)
+            self.assertTrue(applied.wait(2))
+        self.assertNotEqual(threads, [gui_thread])
+        self.assertEqual(voice.apply_options.call_args.kwargs["activation_mode"], "toggle")
+
+    def test_command_editor_adds_edits_and_saves_the_library_on_a_worker(self):
+        from voice_commands import load_commands
+        from voice_dispatch import match_voice_command
+
+        saved = threading.Event()
+        threads = []
+        original_save = self.app._save_commands
+
+        def persist(commands, expected):
+            threads.append(threading.current_thread())
+            original_save(commands, expected)
+            saved.set()
+
+        def edit(shared_root):
+            dialog, phrase, text, tree, buttons = self._command_editor_widgets(shared_root)
+            phrase.insert(0, " Quick   Greeting ")
+            text.insert("1.0", "First draft")
+            buttons["Aplicar comando"].invoke()
+            self.assertEqual(tree.get_children(), ("quick greeting",))
+            phrase.delete(0, tk.END)
+            phrase.insert(0, "final greeting")
+            text.delete("1.0", tk.END)
+            text.insert("1.0", "Hello!\nHow can I help?")
+            buttons["Salvar comandos"].invoke()
+            return dialog, threading.current_thread()
+
+        with mock.patch.object(self.app, "_save_commands", side_effect=persist):
+            dialog, gui_thread = self._on_gui(edit)
+            self.assertTrue(saved.wait(2))
+            self._on_gui(lambda _root: None)  # Drain the save completion on Tk.
+        library = {"final greeting": "Hello!\nHow can I help?"}
+        self.assertEqual(load_commands(os.path.join(self.app.data_dir, "commands.json")), library)
+        self.assertEqual(self.app.snippets, library)
+        self.assertEqual(match_voice_command("Final greeting", self.app.snippets,
+                                           self.app.trigger_index), "final greeting")
+        self.assertNotEqual(threads, [gui_thread])
+        self.assertFalse(self._on_gui(lambda _root: dialog.winfo_exists()))
+
+    def test_command_editor_removal_requires_confirmation_and_cancel_keeps_the_library(self):
+        library = {"greeting": "Hello!"}
+        self.app._save_commands(library, {})
+
+        def remove_and_cancel(shared_root):
+            dialog, _phrase, _text, tree, buttons = self._command_editor_widgets(shared_root)
+            tree.selection_set("greeting")
+            tree.event_generate("<<TreeviewSelect>>")
+            with mock.patch.object(tx.messagebox, "askyesno", return_value=False):
+                buttons["Remover"].invoke()
+                self.assertEqual(tree.get_children(), ("greeting",))
+            with mock.patch.object(tx.messagebox, "askyesno", return_value=True):
+                buttons["Remover"].invoke()
+                self.assertEqual(tree.get_children(), ())
+            buttons["Cancelar"].invoke()
+            self.assertFalse(dialog.winfo_exists())
+
+        self._on_gui(remove_and_cancel)
+        self.assertEqual(self.app.snippets, library)
+        self.app._load_commands()
+        self.assertEqual(self.app.snippets, library)
+
+    def test_failed_command_save_preserves_library_and_editable_draft(self):
+        library = {"greeting": "Hello!"}
+        self.app._save_commands(library, {})
+        error_shown = threading.Event()
+
+        def save_draft(shared_root):
+            dialog, phrase, text, _tree, buttons = self._command_editor_widgets(shared_root)
+            phrase.insert(0, "new command")
+            text.insert("1.0", "New text")
+            buttons["Salvar comandos"].invoke()
+            return dialog, text, buttons
+
+        with mock.patch.object(self.app, "_save_commands", side_effect=OSError("synthetic failure")), \
+                mock.patch.object(tx.messagebox, "showerror", side_effect=lambda *_args, **_kw: error_shown.set()):
+            dialog, text, buttons = self._on_gui(save_draft)
+            self.assertTrue(error_shown.wait(2))
+            exists, value, state = self._on_gui(
+                lambda _root: (dialog.winfo_exists(), text.get("1.0", "end-1c"),
+                               str(buttons["Salvar comandos"].cget("state"))),
+            )
+        self.assertTrue(exists)
+        self.assertEqual(value, "New text")
+        self.assertEqual(state, tk.NORMAL)
+        self.assertEqual(self.app.snippets, library)
+        self.app._load_commands()
+        self.assertEqual(self.app.snippets, library)
+
+    def test_saving_an_unchanged_legacy_command_preserves_its_phrase_and_empty_value(self):
+        library = {"Existing Phrase": ""}
+        self.app._save_commands(library, {})
+        saved = threading.Event()
+        original_save = self.app._save_commands
+
+        def persist(commands, expected):
+            original_save(commands, expected)
+            saved.set()
+
+        def select_and_save(shared_root):
+            _dialog, _phrase, _text, tree, buttons = self._command_editor_widgets(shared_root)
+            tree.selection_set("Existing Phrase")
+            tree.event_generate("<<TreeviewSelect>>")
+            buttons["Salvar comandos"].invoke()
+
+        with mock.patch.object(self.app, "_save_commands", side_effect=persist), \
+                mock.patch.object(tx.messagebox, "showerror") as showerror:
+            self._on_gui(select_and_save)
+            self.assertTrue(saved.wait(2))
+            self._on_gui(lambda _root: None)
+        showerror.assert_not_called()
+        self.assertEqual(self.app.snippets, library)
 
     def test_open_voice_settings_selects_the_manager_tab(self):
         _ensure_voice(self.app)
@@ -686,7 +871,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             language_box.set("Português (Brasil)")
             language_box.event_generate("<<ComboboxSelected>>")
             self.app.manager_window.update_idletasks()
-            selected, language, _hotkey, _command = self.app._manager_voice_tk_vars
+            selected, language, _hotkey, _command, _activation = self.app._manager_voice_tk_vars
             return (
                 settings_text,
                 profile_values,
