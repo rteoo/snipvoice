@@ -625,6 +625,60 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertTrue(runtime.closed)
         self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
 
+    def test_repeated_valid_report_citations_are_normalized(self):
+        def response(_prompt, evidence):
+            report = self._report(evidence)
+            report["segment_ids"] *= 2
+            report["action_items"][0]["segment_ids"] *= 2
+            return json.dumps(report)
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertEqual(result["segment_ids"], ["s1"])
+        self.assertEqual(result["action_items"][0]["segment_ids"], ["s1"])
+        self.assertEqual(self.store.get(self.session_id)["summary"], result)
+        self.assertTrue(runtime.closed)
+
+    def test_repeated_valid_citations_survive_hierarchical_report_reduction(self):
+        revision = self.store.begin_revision(self.session_id, "local", "pt")
+        for index in range(3):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"long-{index}", "track": "microphone",
+                "start": index * 5, "end": (index + 1) * 5,
+                "text": "Alice will review the report by Friday. " * 40,
+            })
+        self.store.finish_revision(self.session_id, revision)
+
+        def response(_prompt, evidence):
+            report = self._report(evidence)
+            report["segment_ids"] *= 2
+            report["action_items"][0]["segment_ids"] *= 2
+            return json.dumps(report)
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertGreater(result["chunks_processed"], 1)
+        self.assertGreater(len(runtime.calls), result["chunks_processed"])
+        self.assertEqual(result["segment_ids"], ["long-0"])
+        self.assertEqual(result["action_items"][0]["segment_ids"], ["long-0"])
+        self.assertTrue(runtime.closed)
+
+    def test_unknown_report_citations_are_not_dropped_with_valid_duplicates(self):
+        for field in ("report", "action"):
+            def response(_prompt, evidence):
+                report = self._report(evidence)
+                target = report if field == "report" else report["action_items"][0]
+                target["segment_ids"] = ["s1", "s1", "invented"]
+                return json.dumps(report)
+
+            with self.subTest(field=field):
+                intelligence, runtime = self._intelligence(response)
+                with self.assertRaisesRegex(ValueError, "segmentos"):
+                    intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+                self.assertEqual(self.store.get(self.session_id)["summary"],
+                                 {"summary": "Prior report"})
+                self.assertTrue(runtime.closed)
+
     def test_ask_this_meeting_is_memory_only_and_returns_citations_and_uncertainty(self):
         def answer(_prompt, evidence):
             identifier = evidence[0].get("id") or evidence[0].get("segment_ids", [])[0]

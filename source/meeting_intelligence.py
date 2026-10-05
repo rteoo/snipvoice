@@ -872,10 +872,11 @@ class MeetingIntelligence:
     def _references(value, allowed, *, required=True):
         if (not isinstance(value, list) or len(value) > MAX_CITATIONS
                 or (required and not value)
-                or any(not isinstance(item, str) or item not in allowed for item in value)
-                or len(set(value)) != len(value)):
+                or any(not isinstance(item, str) or item not in allowed for item in value)):
             raise ValueError(tr("O modelo citou segmentos ausentes ou inválidos; o resultado anterior foi preservado."))
-        return list(value)
+        # The native citation enum permits repeated valid IDs. Normalize them
+        # without accepting unknown IDs or weakening the input-size bound.
+        return list(dict.fromkeys(value))
 
     @staticmethod
     def _output_limit(budget):
