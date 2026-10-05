@@ -111,7 +111,17 @@ class VoiceIndicatorGuiSmokeTests(unittest.TestCase):
                 from ctypes import wintypes
                 user32 = _windows_user32()
                 user32.GetForegroundWindow.restype = wintypes.HWND
-                foreground = user32.GetForegroundWindow()
+                user32.GetActiveWindow.restype = wintypes.HWND
+                # Own the thread's active window; foreground activation belongs
+                # to the runner desktop and may be denied to a background process.
+                focus_target = tk.Toplevel(root)
+                focus_target.title("Overlay focus test")
+                root.update()
+                focus_target.focus_force()
+                root.update()
+                widget_hwnd = focus_target.winfo_id()
+                active_target = user32.GetParent(widget_hwnd) or widget_hwnd
+                assert user32.GetActiveWindow() == active_target, "Focus fixture did not activate"
             indicator.update("recording", "dictation")
             root.update()
             if current_os() == "darwin":
@@ -126,7 +136,8 @@ class VoiceIndicatorGuiSmokeTests(unittest.TestCase):
                 widget_hwnd = indicator.window.winfo_id()
                 hwnd = user32.GetParent(widget_hwnd) or widget_hwnd
                 assert user32.GetWindowLongW(hwnd, _GWL_EXSTYLE) & _WS_EX_NOACTIVATE
-                assert user32.GetForegroundWindow() == foreground, "Overlay stole focus"
+                assert user32.GetActiveWindow() == active_target, "Overlay stole focus"
+                assert user32.GetForegroundWindow() != hwnd, "Overlay became the foreground window"
             indicator.update("idle")
             root.update()
             if current_os() == "darwin":
@@ -168,6 +179,7 @@ class VoiceIndicatorGuiSmokeTests(unittest.TestCase):
                 root.update()
                 assert indicator.window.state() == "normal"
                 manager.destroy()
+                focus_target.destroy()
             indicator.destroy()
             root.destroy()
             """
