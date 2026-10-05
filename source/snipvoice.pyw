@@ -11,7 +11,6 @@ import ctypes
 import functools
 import gc
 import io
-import json
 import os
 import sys
 import threading
@@ -174,6 +173,7 @@ class Snipvoice:
         self._meeting_startup_status = N_("Preparando privacidade e recuperação local…")
         self._meeting_startup_error = ""
         self._settings_lock = threading.RLock()
+        self._commands_lock = threading.Lock()
         self.snippets = {}
         self.trigger_index = compile_trigger_index({})
         self._load_commands()
@@ -298,24 +298,28 @@ class Snipvoice:
             self.task_runner.start(self.meetings.stop, name="meeting-stop")
 
     def _load_commands(self):
+        from voice_commands import load_commands
+
         path = os.path.join(self.data_dir, "commands.json")
-        try:
-            with open(path, encoding="utf-8") as handle:
-                commands = json.load(handle)
-            if not isinstance(commands, dict) or any(
-                not isinstance(key, str) or not key.strip() or key.startswith("_")
-                or not isinstance(value, str) for key, value in commands.items()
-            ):
-                raise ValueError("Expected a dictionary of trigger names and literal text")
-        except FileNotFoundError:
-            commands = {}
-        except (OSError, ValueError) as exc:
-            self.logger.warning(f"Could not load spoken commands: {type(exc).__name__}")
-            self.notify_error(tr("Não foi possível ler commands.json. Os comandos anteriores foram preservados."))
-            return False
-        self.snippets = commands
-        self.trigger_index = compile_trigger_index(commands)
+        with self._commands_lock:
+            try:
+                commands = load_commands(path)
+            except (OSError, ValueError) as exc:
+                self.logger.warning(f"Could not load spoken commands: {type(exc).__name__}")
+                self.notify_error(tr("Não foi possível ler commands.json. Os comandos anteriores foram preservados."))
+                return False
+            self.snippets = commands
+            self.trigger_index = compile_trigger_index(commands)
         return True
+
+    def _save_commands(self, commands, expected):
+        from voice_commands import save_commands
+
+        with self._commands_lock:
+            index = compile_trigger_index(commands)
+            save_commands(os.path.join(self.data_dir, "commands.json"), commands, expected)
+            self.snippets = dict(commands)
+            self.trigger_index = index
 
     def reload_commands(self, icon=None, item=None):
         self.task_runner.start(self._load_commands, name="commands-load")
@@ -1245,6 +1249,180 @@ class Snipvoice:
         return dialog
 
 
+    def _show_voice_commands(self, owner):
+        """Edit a private draft on the shared Tk root; persist it off the GUI thread."""
+        from voice_commands import CommandConflictError, validate_command
+
+        ui = ui_theme.theme()
+        dialog = tk.Toplevel(owner)
+        dialog.title(tr("Comandos por voz"))
+        dialog.transient(owner)
+        dialog.geometry("680x570")
+        dialog.minsize(560, 510)
+        ui_theme.apply_window_chrome(dialog, ui)
+        container = tk.Frame(dialog, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
+        container.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            container, text=tr("Associe uma frase falada ao texto que deseja inserir. O comando deve corresponder à frase inteira."),
+            bg=ui.surface, fg=ui.text_muted, font=ui.font(), wraplength=620, justify="left",
+        ).pack(fill=tk.X, anchor="w", pady=(0, ui.space_md))
+        baseline = dict(self.snippets)
+        commands = dict(baseline)
+        original = None
+        saving = False
+        tree_frame = tk.Frame(container, bg=ui.surface)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(tree_frame, columns=("phrase", "text"), show="headings", height=4,
+                            selectmode="browse", style="Manager.Treeview")
+        tree.heading("phrase", text=tr("Frase falada"))
+        tree.heading("text", text=tr("Texto a inserir"))
+        tree.column("phrase", width=190, minwidth=120)
+        tree.column("text", width=360, minwidth=180)
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        empty_label = tk.Label(container, bg=ui.surface, fg=ui.text_muted, font=ui.font(9))
+        empty_label.pack(anchor="w", pady=(ui.space_xs, ui.space_sm))
+        tk.Label(container, text=tr("Frase falada"), bg=ui.surface, fg=ui.text,
+                 font=ui.font()).pack(anchor="w")
+        phrase = tk.Entry(container, font=ui.font(), **ui.entry_colors(), **ui.entry_chrome())
+        phrase.pack(fill=tk.X, pady=(ui.space_xs, ui.space_sm))
+        tk.Label(container, text=tr("Texto a inserir"), bg=ui.surface, fg=ui.text,
+                 font=ui.font()).pack(anchor="w")
+        text = tk.Text(container, height=5, wrap=tk.WORD, font=ui.font(),
+                       **ui.text_colors())
+        text.pack(fill=tk.BOTH, expand=True, pady=(ui.space_xs, ui.space_sm))
+
+        def redraw():
+            tree.delete(*tree.get_children())
+            for key, value in commands.items():
+                tree.insert("", tk.END, iid=key, values=(key, " ".join(value.split())[:100]))
+            empty_label.configure(text=tr("Nenhum comando. Adicione uma frase e o texto abaixo.")
+                                  if not commands else (tr("1 comando") if len(commands) == 1
+                                                        else tr("{count} comandos", count=len(commands))))
+
+        def clear_form():
+            nonlocal original
+            original = None
+            tree.selection_remove(*tree.selection())
+            phrase.delete(0, tk.END)
+            text.delete("1.0", tk.END)
+            phrase.focus_set()
+
+        def selected(_event=None):
+            nonlocal original
+            selection = tree.selection()
+            if saving or not selection or selection[0] not in commands:
+                return
+            original = selection[0]
+            phrase.delete(0, tk.END)
+            phrase.insert(0, original)
+            text.delete("1.0", tk.END)
+            text.insert("1.0", commands[original])
+
+        def apply_command():
+            nonlocal original
+            try:
+                key, value = validate_command(phrase.get(), text.get("1.0", "end-1c"),
+                                              commands, original)
+            except ValueError as exc:
+                messagebox.showerror(tr("Comando inválido"), str(exc), parent=dialog)
+                return False
+            if original is not None:
+                commands.pop(original)
+            commands[key] = value
+            original = key
+            redraw()
+            tree.selection_set(key)
+            selected()
+            return True
+
+        def remove_command():
+            if original is None or not messagebox.askyesno(
+                tr("Remover comando"), tr("Remover o comando selecionado?"), parent=dialog,
+            ):
+                return
+            commands.pop(original)
+            clear_form()
+            redraw()
+
+        actions = tk.Frame(container, bg=ui.surface)
+        actions.pack(fill=tk.X, pady=(0, ui.space_md))
+        controls = [phrase, text]
+        for label, callback in ((tr("Novo comando"), clear_form),
+                                (tr("Aplicar comando"), apply_command),
+                                (tr("Remover"), remove_command)):
+            button = tk.Button(actions, text=label, command=callback, font=ui.font(),
+                               **ui.button_colors(), **ui.button_chrome(compact=True))
+            button.pack(side=tk.LEFT, padx=(0, ui.space_sm))
+            controls.append(button)
+
+        def finish(error):
+            nonlocal saving
+            saving = False
+            if not dialog.winfo_exists():
+                return
+            if error is None:
+                dialog.destroy()
+                self._refresh_manager_voice_tab()
+                return
+            for control in controls:
+                control.configure(state=tk.NORMAL)
+            messagebox.showerror(tr("Falha ao salvar"), error, parent=dialog)
+
+        def save():
+            nonlocal saving
+            if saving:
+                return
+            current_phrase = phrase.get()
+            current_text = text.get("1.0", "end-1c")
+            edited = (current_phrase != original or current_text != commands.get(original))
+            has_input = bool(current_phrase.strip() or current_text)
+            if edited and (original is not None or has_input) and not apply_command():
+                return
+            saving = True
+            for control in controls:
+                control.configure(state=tk.DISABLED)
+            snapshot = dict(commands)
+
+            def persist():
+                error = None
+                try:
+                    self._save_commands(snapshot, baseline)
+                except CommandConflictError as exc:
+                    error = str(exc)
+                except (OSError, ValueError):
+                    error = tr("Não foi possível salvar os comandos. A biblioteca anterior foi preservada; revise o arquivo e tente novamente.")
+                self.gui.submit(lambda _root: finish(error))
+
+            try:
+                self.task_runner.start(persist, name="commands-save")
+            except RuntimeError:
+                finish(tr("Não foi possível salvar os comandos. A biblioteca anterior foi preservada; revise o arquivo e tente novamente."))
+
+        def close():
+            if not saving:
+                dialog.destroy()
+
+        footer = tk.Frame(container, bg=ui.surface)
+        footer.pack(fill=tk.X)
+        for label, callback, accent in ((tr("Salvar comandos"), save, True),
+                                         (tr("Cancelar"), close, False)):
+            button = tk.Button(footer, text=label, command=callback, font=ui.font(),
+                               **ui.button_colors(accent=accent), **ui.button_chrome())
+            button.pack(side=tk.RIGHT, padx=(ui.space_sm, 0))
+            controls.append(button)
+        tree.bind("<<TreeviewSelect>>", selected)
+        dialog.bind("<Escape>", lambda _event: close())
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        redraw()
+        center_on_screen(dialog)
+        dialog.lift()
+        phrase.focus_set()
+        return dialog
+
+
     def _build_voice_settings_controls(self, parent, owner, models_parent=None):
         """Build Ditado controls and, when supplied, the Configurações model inventory."""
         from voice_catalog import (
@@ -1255,6 +1433,7 @@ class Snipvoice:
             third_party_notices,
         )
         from voice_hotkey import parse_chord
+        from voice_settings import ACTIVATION_HOLD, ACTIVATION_TOGGLE
         import voice_models
 
         ui = ui_theme.theme()
@@ -1266,11 +1445,13 @@ class Snipvoice:
         command_hotkey = tk.StringVar(
             master=owner, value=self.voice.settings.command_hotkey
         )
+        activation_mode = tk.StringVar(master=owner, value=ACTIVATION_HOLD)
         self._manager_voice_tk_vars = [
             selected,
             language,
             hotkey,
             command_hotkey,
+            activation_mode,
         ]
         profile_labels = []
         download_buttons = []
@@ -1477,7 +1658,7 @@ class Snipvoice:
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_sm))
         tk.Label(
             shortcut_frame,
-            text=tr("Ditado (segure para falar):"),
+            text=tr("Ditado:"),
             bg=ui.card,
             fg=ui.text,
             font=ui.font(9),
@@ -1512,6 +1693,29 @@ class Snipvoice:
             fg=ui.text_muted,
             font=ui.font(8),
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        tk.Label(shortcut_frame, text=tr("Modo de gravação:"), bg=ui.card, fg=ui.text,
+                 font=ui.font(9)).grid(row=4, column=0, sticky="w", padx=(0, 12), pady=(8, 0))
+        mode_choices = tk.Frame(shortcut_frame, bg=ui.card)
+        mode_choices.grid(row=4, column=1, sticky="w", pady=(8, 0))
+        for label, value in ((tr("Segure para falar"), ACTIVATION_HOLD),
+                              (tr("Iniciar / Parar (mãos livres)"), ACTIVATION_TOGGLE)):
+            tk.Radiobutton(mode_choices, text=label, variable=activation_mode, value=value,
+                           font=ui.font(9), **ui.checkbutton_colors(ui.card)).pack(side=tk.LEFT)
+        tk.Label(
+            shortcut_frame,
+            text=tr("Mãos livres: pressione o atalho para iniciar e novamente para parar. Vale para os dois atalhos. Esc cancela."),
+            bg=ui.card, fg=ui.text_muted, font=ui.font(8), wraplength=wrap, justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+        commands_card = tk.Frame(parent, padx=ui.space_lg, pady=ui.space_md, **ui.card_options())
+        commands_card.pack(fill=tk.X, pady=(0, ui.space_md))
+        tk.Label(commands_card, text=tr("Comandos por voz"), bg=ui.card, fg=ui.text_strong,
+                 font=ui.font(11, "bold")).pack(side=tk.LEFT)
+        commands_count = tk.Label(commands_card, bg=ui.card, fg=ui.text_muted, font=ui.font(9))
+        commands_count.pack(side=tk.LEFT, padx=ui.space_sm)
+        tk.Button(commands_card, text=tr("Configurar comandos…"),
+                  command=lambda: self._show_voice_commands(owner), font=ui.font(),
+                  **ui.button_colors(), **ui.button_chrome(compact=True)).pack(side=tk.RIGHT)
 
         def refresh_form():
             refresh_profile_labels()
@@ -1522,6 +1726,11 @@ class Snipvoice:
             language.set(voice.settings.language)
             hotkey.set(voice.settings.hotkey)
             command_hotkey.set(voice.settings.command_hotkey)
+            configured_mode = getattr(voice.settings, "activation_mode", ACTIVATION_HOLD)
+            activation_mode.set(configured_mode if configured_mode in (ACTIVATION_HOLD, ACTIVATION_TOGGLE)
+                                else ACTIVATION_HOLD)
+            commands_count.configure(text=tr("1 comando") if len(self.snippets) == 1
+                                     else tr("{count} comandos", count=len(self.snippets)))
             update_language_options()
             model_display.set(
                 profile_display_labels.get(selected.get(), selected.get())
@@ -1576,24 +1785,26 @@ class Snipvoice:
                     tr("Baixar modelo de voz"), warning, parent=owner
                 ):
                     return
-            with self._settings_lock:
-                candidate = dict(self.settings, voice_hotkey=dictation_chord.spec,
-                                 voice_command_hotkey=command_chord.spec)
-                try:
-                    validate_hotkey_conflicts(candidate)
-                except ValueError as exc:
-                    messagebox.showerror(tr("Atalhos em conflito"), str(exc), parent=owner)
-                    return
-                self.voice.apply_options(
-                    profile=profile,
-                    language=language.get(),
-                    hotkey=dictation_chord.spec,
-                    command_hotkey=command_chord.spec,
-                )
-            if not self.voice.is_enabled():
-                self.voice.enable()
-            self.refresh_tray_menu()
-            self._refresh_manager_voice_tab()
+            candidate = dict(self.settings, voice_hotkey=dictation_chord.spec,
+                             voice_command_hotkey=command_chord.spec)
+            try:
+                validate_hotkey_conflicts(candidate)
+            except ValueError as exc:
+                messagebox.showerror(tr("Atalhos em conflito"), str(exc), parent=owner)
+                return
+            options = dict(profile=profile, language=language.get(),
+                           hotkey=dictation_chord.spec, command_hotkey=command_chord.spec,
+                           activation_mode=activation_mode.get())
+
+            def apply():
+                with self._settings_lock:
+                    self.voice.apply_options(**options)
+                if not self.voice.is_enabled():
+                    self.voice.enable()
+                self.refresh_tray_menu()
+                self.gui.submit(lambda _root: self._refresh_manager_voice_tab())
+
+            self.task_runner.start(apply, name="voice-settings")
 
         def download_model(entry):
             if voice_models.model_is_installed(entry, self.voice.cache_dir):

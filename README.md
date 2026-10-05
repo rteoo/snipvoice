@@ -127,15 +127,23 @@ The default dictation shortcut is `ctrl+alt+space`. SnipVoice captures the targe
 before opening the microphone, keeps capture and inference off the keyboard
 listener, and restores the target only after transcription completes.
 
-Optional spoken commands use `ctrl+alt+shift+space`. Create a private
-`commands.json` under the SnipVoice data directory, for example:
+In **Dictation**, choose **Hold to talk** (the default) or **Start / Stop
+(Handsfree)**, then **Save and use**. Handsfree starts recording on one shortcut
+press and transcribes on the next press; releasing the keys keeps recording.
+The mode applies to both voice shortcuts. **Esc** cancels either mode.
+
+Optional spoken commands use `ctrl+alt+shift+space`. Open **Dictation → Voice
+Commands → Configure commands…** to add, edit, or remove spoken phrases and
+their literal text, then **Save commands**. Commands apply immediately and are
+stored privately in `commands.json` under the SnipVoice data directory, for example:
 
 ```json
 {"hello": "Hello, how can I help?"}
 ```
 
-In **Ditado**, use **Recarregar comandos**, then hold the command shortcut and say the exact
-trigger. Values are inserted literally. Sniptype libraries and dynamic actions
+Say the exact phrase using the command shortcut and the selected recording mode.
+Values are inserted literally. If you edit the JSON file manually, use **More
+options → Reload commands** in Dictation. Sniptype libraries and dynamic actions
 are deliberately not imported.
 
 ## Meetings

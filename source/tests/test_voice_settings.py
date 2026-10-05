@@ -4,7 +4,12 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from voice_settings import resolve_voice_settings, voice_settings_payload
+from voice_settings import (
+    ACTIVATION_HOLD,
+    ACTIVATION_TOGGLE,
+    resolve_voice_settings,
+    voice_settings_payload,
+)
 from voice_text_support import apply_voice_replacements, validate_replacements
 
 
@@ -16,6 +21,22 @@ class VoiceSettingsTests(unittest.TestCase):
         self.assertEqual(settings.hotkey, "ctrl+alt+space")
         self.assertEqual(settings.command_hotkey, "ctrl+alt+shift+space")
         self.assertEqual(settings.voice_replacements, {})
+        self.assertEqual(settings.activation_mode, ACTIVATION_HOLD)
+
+    def test_activation_modes_survive_a_settings_round_trip(self):
+        for mode in (ACTIVATION_HOLD, ACTIVATION_TOGGLE):
+            with self.subTest(mode=mode):
+                settings = resolve_voice_settings({"voice_activation_mode": mode})
+                restored = resolve_voice_settings(voice_settings_payload(settings))
+                self.assertEqual(restored.activation_mode, mode)
+
+    def test_invalid_activation_modes_keep_hold_to_talk(self):
+        for mode in (None, True, [], {}, "handsfree", ""):
+            with self.subTest(mode=mode):
+                notes = []
+                settings = resolve_voice_settings({"voice_activation_mode": mode}, warnings=notes)
+                self.assertEqual(settings.activation_mode, ACTIVATION_HOLD)
+                self.assertTrue(any("voice_activation_mode" in note for note in notes))
 
     def test_warnings_for_bad_values(self):
         notes = []
@@ -45,6 +66,7 @@ class VoiceSettingsTests(unittest.TestCase):
                 "voice_language",
                 "voice_hotkey",
                 "voice_command_hotkey",
+                "voice_activation_mode",
                 "voice_replacements",
                 "voice_history_retention_days",
             },
