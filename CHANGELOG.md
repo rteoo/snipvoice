@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Batch contiguous native audio packets to reduce disk synchronization pressure while preserving gaps and pause/stop tails.
+- Show recording time, pause state, and partial/interrupted status in the floating indicator while the manager is minimized or hidden.
+- Preserve queued audio when stopping races the native helper's exit; continue reporting overflow and unexpected exits.
+- Reject inconsistent runtime, installer, or bundle version/channel metadata before Windows release preparation.
 - Name transcription and summary models by what they offer, such as "Equilibrado · Parakeet" and "Máxima qualidade · Gemma 4 E4B", instead of bare model codes.
 - List models from lowest to highest quality in Ditado, Configurações > Gravação, and Configurações > Modelos.
 
