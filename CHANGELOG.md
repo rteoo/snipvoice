@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 - 2026-10-05
 
+- Add a Voice Commands editor inside Dictation for managing literal spoken commands and their inserted text.
+- Choose Hold to talk or handsfree Start / Stop for dictation and voice-command shortcuts; press the shortcut again to stop in handsfree mode.
+- Preserve shortcut event order under load, reject obsolete inference, and cancel safely with a retry message when shortcut input exceeds the bounded queue.
+- Drain accepted dictation audio even when a saturated queue rejects its stop marker; preserve the stopping state across delayed pause commands and discard completed worker records.
+- Normalize repeated valid summary citations while continuing to reject unknown transcript references.
 - Batch contiguous native audio packets to reduce disk synchronization pressure while preserving gaps and pause/stop tails.
 - Show recording time, pause state, and partial/interrupted status in the floating indicator while the manager is minimized or hidden.
 - Preserve queued audio when stopping races the native helper's exit; continue reporting overflow and unexpected exits.

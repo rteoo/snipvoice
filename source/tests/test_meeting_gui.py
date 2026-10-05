@@ -1824,7 +1824,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.addCleanup(lambda: self.assertEqual(callback_errors, []))
         view, notebook = self._embedded_view(geometry="920x700")
         notebook.select(view.library_tab)
-        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        # Finish the initial empty-library response before installing a synthetic
+        # selection; a late response would hide the detail pane during assertions.
+        wait_for(lambda: (self.root.update(), view.settings_loaded and view.library_empty.get())[1])
         view._show_library_detail(True)
         view.selected = "synthetic-session"
         view.detail_ready = True
