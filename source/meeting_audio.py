@@ -9,14 +9,17 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 
 from i18n import tr
 
 VERSION = 1
 MAX_HEADER = 65536
 MAX_PAYLOAD = 4 * 1024 * 1024
-# ceiling: four maximum-sized native blocks (~16 MiB); disk stalls stop capture.
-QUEUE_BLOCKS = 4
+# ceiling: eight maximum-sized blocks (32 MiB), plus the helper's bounded queue.
+# A temporary disk stall can apply backpressure for ten seconds before failing.
+QUEUE_BLOCKS = 8
+QUEUE_STALL_SECONDS = 10.0
 
 
 class MeetingAudioError(RuntimeError):
@@ -94,6 +97,8 @@ class NativeCapture:
         self._reader = None
         self._diagnostics = None
         self._generation = 0
+        self._closing = threading.Event()
+        self._stop_reason = None
 
     def _spawn(self, arguments):
         if sys.platform not in ("win32", "darwin"):
@@ -127,11 +132,18 @@ class NativeCapture:
                         raise MeetingAudioError(tr("Versão ou inicialização do capturador incompatível."))
                     self._ready.set()
                     continue
-                try:
-                    self._queue.put((event, payload), timeout=0.25)
-                except queue.Full as exc:
-                    raise MeetingAudioError(tr("O disco não acompanhou a captura; o áudio parcial foi preservado.")) from exc
+                deadline = time.monotonic() + QUEUE_STALL_SECONDS
+                while not self._closing.is_set():
+                    try:
+                        self._queue.put((event, payload), timeout=0.1)
+                        break
+                    except queue.Full as exc:
+                        if time.monotonic() >= deadline:
+                            raise MeetingAudioError(tr("O disco não acompanhou a captura; o áudio parcial foi preservado.")) from exc
+                else:
+                    return
                 if event["type"] == "stopped":
+                    self._stop_reason = event.get("reason")
                     return
         except EOFError:
             self._failure = MeetingAudioError(tr("O capturador encerrou antes de confirmar a parada."))
@@ -184,6 +196,8 @@ class NativeCapture:
         process = self._process
         if process is None:
             return
+        if force:
+            self._closing.set()
         if not force and process.poll() is None:
             try:
                 self.command("stop")
@@ -194,6 +208,7 @@ class NativeCapture:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
+        self._closing.set()
         if self._reader is not None:
             self._reader.join(2)
             if self._reader.is_alive():
@@ -202,7 +217,13 @@ class NativeCapture:
         for stream in (process.stdin, process.stdout, process.stderr):
             if stream is not None:
                 stream.close()
+        if self._diagnostics is not None:
+            self._diagnostics.join(2)
+        if not force and self._failure is not None:
+            raise MeetingAudioError(str(self._failure)) from self._failure
         if process.returncode and not force:
+            if self._stop_reason == "transport_overflow":
+                raise MeetingAudioError(tr("O disco não acompanhou a captura; o áudio parcial foi preservado."))
             raise MeetingAudioError(tr("O capturador encerrou com erro; o áudio parcial foi preservado."))
 
     def _query(self, argument):

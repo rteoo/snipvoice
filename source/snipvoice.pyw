@@ -163,6 +163,7 @@ class Snipvoice:
         self._manager_recording_tab = None
         self._manager_library_tab = None
         self.voice_status_indicator = None
+        self._recording_indicator_after = None
         self._quitting = threading.Event()
         self._autostart_state = platform_support.AUTOSTART_ABSENT
         self._notification_lock = threading.Lock()
@@ -795,6 +796,7 @@ class Snipvoice:
             started = self.gui.ensure_started()
         if not started:
             raise RuntimeError("Could not start the shared GUI root")
+        self.gui.submit(self._poll_recording_indicator)
         if platform_support.tk_runs_on_main_thread():
             platform_support.hide_dock_icon()
         menu = pystray.Menu(
@@ -911,8 +913,37 @@ class Snipvoice:
     def _render_voice_status(self, root, snapshot):
         if self.voice_status_indicator is None:
             self.voice_status_indicator = VoiceStatusIndicator(root)
-        self.voice_status_indicator.update(snapshot["state"], snapshot["mode"])
+        meeting = self.meetings.snapshot()
+        if meeting.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}:
+            self._render_recording_indicator(root, meeting)
+        else:
+            self.voice_status_indicator.update(snapshot["state"], snapshot["mode"])
         self._refresh_manager_voice_tab()
+
+
+    def _render_recording_indicator(self, root, snapshot):
+        if self.voice_status_indicator is None:
+            self.voice_status_indicator = VoiceStatusIndicator(root)
+        window = self.manager_window
+        hidden = window is None or window.state() in {"withdrawn", "iconic"}
+        if hidden:
+            self.voice_status_indicator.update_meeting(snapshot)
+        else:
+            self.voice_status_indicator.hide()
+
+    def _poll_recording_indicator(self, root):
+        """Observe capture independently of manager lifetime, using only the Tk pump."""
+        self._recording_indicator_after = None
+        if self._quitting.is_set():
+            if self.voice_status_indicator is not None:
+                self.voice_status_indicator.hide()
+            return
+        snapshot = self.meetings.snapshot()
+        voice = self.voice.status_snapshot()
+        if (snapshot.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
+                or voice.get("state") not in {"recording", "transcribing", "routing"}):
+            self._render_recording_indicator(root, snapshot)
+        self._recording_indicator_after = root.after(200, lambda: self._poll_recording_indicator(root))
 
 
     def _refresh_manager_voice_tab(self):

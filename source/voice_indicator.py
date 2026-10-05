@@ -1,6 +1,7 @@
-"""Non-activating on-screen status for push-to-talk voice input."""
+"""Non-activating on-screen status for dictation and meeting recording."""
 
 import ctypes
+import math
 import tkinter as tk
 
 from i18n import tr
@@ -84,6 +85,33 @@ def indicator_subtitle(state, mode=None):
     return ""
 
 
+def meeting_indicator_content(snapshot):
+    """Persistent recording status, including capture loss while minimized."""
+    state = snapshot.get("state", "idle")
+    elapsed = snapshot.get("elapsed", 0)
+    if not isinstance(elapsed, (int, float)) or not math.isfinite(elapsed):
+        elapsed = 0
+    seconds = max(0, int(elapsed))
+    clock = f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+    if state == "recording":
+        title = tr("Gravando · {time}", time=clock)
+        subtitle = tr("Gravação local em andamento")
+        if snapshot.get("partial"):
+            title = tr("Gravação parcial · {time}", time=clock)
+            subtitle = tr("Uma fonte perdeu áudio · Abra Gravação")
+        return state, title, "warning", subtitle
+    if state == "paused":
+        return state, tr("Pausado · {time}", time=clock), "warning", tr("A gravação está pausada")
+    if state in {"starting", "stopping", "postprocessing"}:
+        title = tr("Preparando gravação…") if state == "starting" else tr("Salvando gravação…")
+        return "transcribing", title, "accent", tr("Processando localmente")
+    if snapshot.get("last_status") == "partial":
+        return "idle", tr("Gravação parcial salva"), "warning", tr("Áudio parcial salvo · Abra Gravação")
+    if snapshot.get("last_status") in {"failed", "interrupted"} or state == "unavailable":
+        return "idle", tr("Gravação interrompida"), "warning", tr("Abra Gravação para ver os detalhes")
+    return None
+
+
 class VoiceStatusIndicator:
     """Small bottom-center overlay owned by the shared Tk root."""
 
@@ -106,6 +134,16 @@ class VoiceStatusIndicator:
             self.hide()
             return
         title, accent_name = content
+        self._present(state, title, accent_name, indicator_subtitle(state, mode))
+
+    def update_meeting(self, snapshot):
+        content = meeting_indicator_content(snapshot)
+        if content is None:
+            self.hide()
+            return
+        self._present(*content)
+
+    def _present(self, state, title, accent_name, subtitle):
         if current_os() == "darwin":
             if self._mac_panel is None:
                 self._mac_panel = MacVoiceStatusPanel()
@@ -116,11 +154,14 @@ class VoiceStatusIndicator:
         ui = ui_theme.theme()
         accent = getattr(ui, accent_name)
         self.title_label.configure(text=title)
-        self.subtitle_label.configure(text=indicator_subtitle(state, mode))
+        self.subtitle_label.configure(text=subtitle)
         for item in self.waveform_bars:
             self.waveform.itemconfigure(item, fill=accent)
         self._state = state
-        self._start_animation()
+        if state in VISIBLE_STATES:
+            self._start_animation()
+        else:
+            self._stop_animation()
         self._show_without_activation()
 
     def hide(self):

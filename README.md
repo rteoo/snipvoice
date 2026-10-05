@@ -144,6 +144,11 @@ The **Gravação**, **Biblioteca**, **Ditado**, and **Configurações** tabs kee
 capture independent from dictation inside the main SnipVoice window. Recording
 works when dictation is disabled and before any model is installed.
 
+When the main window is minimized or closed to the tray, the floating indicator
+shows recording time, pause and saving states, and partial/interrupted capture.
+It uses the dictation indicator's non-activating window and leaves keyboard focus
+in the meeting application. Reopening the main window hides the recording overlay.
+
 | Capability | Behavior |
 | --- | --- |
 | Sources | Independently toggle microphone and speaker output; raw sources stay in separate native PCM tracks |
