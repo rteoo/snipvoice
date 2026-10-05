@@ -1,6 +1,7 @@
 import json
 import struct
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from meeting_settings import MeetingSettings
+from meeting_audio import NativeCapture
 from meeting_library import AnnotationConflict, MeetingLibrary
 from meeting_retention import ConfirmationRequired, OperationRecoveryError
 from meeting_store import MeetingStore
@@ -229,6 +231,46 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertIsNone(metadata["final_audio"])
         self.assertEqual(len(list(self.controller.store.iter_audio(snapshot["session_id"]))), 1)
         self.voice.release_meeting.assert_called_once_with("lease")
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_stop_racing_helper_exit_still_journals_buffered_audio(self):
+        script = (
+            "import json,struct,sys\n"
+            "generation=int(sys.argv[1])\n"
+            "def emit(event,payload=b''):\n"
+            " event['generation']=generation; data=json.dumps(event).encode(); "
+            "sys.stdout.buffer.write(struct.pack('<I',len(data))+data+struct.pack('<I',len(payload))+payload); sys.stdout.buffer.flush()\n"
+            "emit({'type':'ready','version':1})\n"
+            "sys.stdin.readline()\n"
+            "emit({'type':'audio','track':'system','rate':16000,'channels':1,'frames':2,"
+            "'timestamp':0,'sequence':0},struct.pack('<2f',.25,-.5))\n"
+            "emit({'type':'gap','track':'system','timestamp':.01,'reason':'transport_overflow'})\n"
+            "emit({'type':'stopped','reason':'transport_overflow'})\n"
+            "sys.exit(3)\n"
+        )
+        capture = NativeCapture(helper_path=sys.executable, popen=lambda argv, **options:
+            subprocess.Popen([sys.executable, "-u", "-c", script, argv[-1]], **options))
+        self.controller.capture_factory = lambda: capture
+        start = capture.start
+
+        def stop_after_exit(settings, generation):
+            start(settings, generation)
+            capture._process.stdin.write(b"exit\n")
+            capture._process.stdin.flush()
+            capture._process.wait(timeout=3)
+            self.controller.stop()
+
+        with patch.object(capture, "start", side_effect=stop_after_exit):
+            self.assertTrue(self.controller.start(MeetingSettings()))
+            self.controller._thread.join(4)
+        self.assertFalse(self.controller._thread.is_alive())
+        snapshot = self.controller.snapshot()
+        audio = list(self.controller.store.iter_audio(snapshot["session_id"]))
+        self.assertEqual([payload for _event, payload in audio], [struct.pack("<2f", .25, -.5)])
+        self.assertEqual(self.controller.store.get(snapshot["session_id"])["status"], "failed")
+        self.assertIn("disco", snapshot["error"])
+        self.voice.release_meeting.assert_called_once_with("lease")
+        self.assertFalse(capture._reader.is_alive())
 
     def test_snapshot_exposes_bounded_real_waveform_envelopes(self):
         values = [0.0, 0.25, -0.5, 0.1, 0.75, -0.2]

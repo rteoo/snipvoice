@@ -178,12 +178,21 @@ class NativeCapture:
             return None
 
     def command(self, command):
-        if self._process is None or self._process.poll() is not None:
+        process = self._process
+        if process is None:
+            raise MeetingAudioError(tr("O capturador de áudio não está ativo."))
+        if process.poll() is not None:
+            if command == "stop":
+                # The controller must drain queued PCM and inspect the terminal
+                # status even when the helper finished before the stop request.
+                return
             raise MeetingAudioError(tr("O capturador de áudio não está ativo."))
         try:
-            self._process.stdin.write((json.dumps({"command": command}) + "\n").encode())
-            self._process.stdin.flush()
+            process.stdin.write((json.dumps({"command": command}) + "\n").encode())
+            process.stdin.flush()
         except (OSError, ValueError) as exc:
+            if command == "stop" and process.poll() is not None:
+                return
             raise MeetingAudioError(tr("Não foi possível controlar a captura.")) from exc
 
     def pause(self):

@@ -55,10 +55,60 @@ class MeetingAudioTests(unittest.TestCase):
 
     def fake_helper(self, body):
         script = ("import json,struct,sys,time\n"
-                  "def emit(event):\n"
-                  " data=json.dumps(event).encode(); sys.stdout.buffer.write(struct.pack('<I',len(data))+data+struct.pack('<I',0)); sys.stdout.buffer.flush()\n" + body)
+                  "def emit(event, payload=b''):\n"
+                  " data=json.dumps(event).encode(); sys.stdout.buffer.write(struct.pack('<I',len(data))+data+struct.pack('<I',len(payload))+payload); sys.stdout.buffer.flush()\n" + body)
         return NativeCapture(helper_path=sys.executable, popen=lambda argv, **options:
                              subprocess.Popen([sys.executable, "-u", "-c", script], **options))
+
+    @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
+    def test_stop_after_helper_exit_preserves_buffered_audio_and_terminal_errors(self):
+        for exit_code, terminal in ((0, True), (3, True), (1, False)):
+            with self.subTest(exit_code=exit_code, terminal=terminal):
+                ending = ("emit({'type':'stopped','generation':2,'reason':'transport_overflow'})\n"
+                          if exit_code == 3 else "emit({'type':'stopped','generation':2})\n") if terminal else ""
+                capture = self.fake_helper(
+                    "emit({'type':'ready','version':1,'generation':2})\n"
+                    "sys.stdin.readline()\n"
+                    "emit({'type':'audio','generation':2,'track':'system','rate':16000,"
+                    "'channels':1,'frames':2,'timestamp':0,'sequence':0},struct.pack('<2f',.25,-.5))\n"
+                    + ending + f"sys.exit({exit_code})\n")
+                try:
+                    capture.start(MeetingSettings(), 2)
+                    capture._process.stdin.write(b"exit\n")
+                    capture._process.stdin.flush()
+                    capture._process.wait(timeout=3)
+                    self.assertTrue(capture._done.wait(2))
+                    capture.command("stop")
+                    event, payload = capture.read_event(timeout=2)
+                    self.assertEqual(event["type"], "audio")
+                    self.assertEqual(payload, struct.pack("<2f", .25, -.5))
+                    if terminal:
+                        self.assertEqual(capture.read_event(timeout=2)[0]["type"], "stopped")
+                    else:
+                        with self.assertRaises(MeetingAudioError):
+                            capture.read_event(timeout=.01)
+                    if exit_code:
+                        with self.assertRaises(MeetingAudioError):
+                            capture.stop()
+                    else:
+                        capture.stop()
+                finally:
+                    capture.stop(force=True)
+
+    def test_stop_tolerates_exit_during_pipe_write_but_reports_a_live_control_failure(self):
+        capture = NativeCapture()
+        process = mock.Mock()
+        capture._process = process
+        process.stdin.write.side_effect = BrokenPipeError("closed fixture pipe")
+        process.poll.side_effect = [None, 0]
+        capture.command("stop")
+        process.poll.side_effect = None
+        process.poll.return_value = None
+        with self.assertRaises(MeetingAudioError):
+            capture.command("stop")
+        process.poll.return_value = 0
+        with self.assertRaises(MeetingAudioError):
+            capture.command("pause")
 
     @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
     def test_stderr_flood_is_drained_and_stop_is_reaped(self):
