@@ -346,6 +346,49 @@ class MeetingControllerTests(unittest.TestCase):
         self.voice.release_meeting.assert_not_called()
         self.assertFalse(self.controller.start(MeetingSettings()))
 
+    def test_stop_during_a_slow_pause_command_keeps_the_stopping_state(self):
+        entered = threading.Event()
+        proceed = threading.Event()
+        pause_returned = threading.Event()
+        original_command = self.capture.command
+        original_read = self.capture.read_event
+
+        def command(value):
+            if value == "pause":
+                entered.set()
+                if not proceed.wait(3):
+                    raise RuntimeError("fixture pause timed out")
+            original_command(value)
+
+        def read(timeout):
+            if "pause" in self.capture.commands and "stop" not in self.capture.commands:
+                pause_returned.set()
+                self.controller._stop.wait(2)
+                if not proceed.wait(3):
+                    raise RuntimeError("fixture read timed out")
+                self.observed_state = self.controller.snapshot()["state"]
+            return original_read(timeout)
+
+        self.observed_state = None
+        with patch.object(self.capture, "command", side_effect=command), \
+                patch.object(self.capture, "read_event", side_effect=read):
+            try:
+                self.assertTrue(self.controller.start(MeetingSettings()))
+                self.assertTrue(self.capture.started.wait(2))
+                self.assertTrue(self.controller.pause())
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(self.controller.stop())
+                proceed.set()
+                self.assertTrue(pause_returned.wait(2))
+                self.controller._thread.join(3)
+                self.assertFalse(self.controller._thread.is_alive())
+                self.assertEqual(self.observed_state, "stopping")
+                self.assertEqual(self.controller.snapshot()["state"], "idle")
+            finally:
+                proceed.set()
+                self.controller.stop()
+                self.controller._thread.join(3)
+
     def test_reservation_failure_never_opens_capture(self):
         self.voice.reserve_for_meeting.side_effect = RuntimeError("busy")
         self.controller.start(MeetingSettings())

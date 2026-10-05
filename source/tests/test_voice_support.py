@@ -24,6 +24,7 @@ from voice_runtime import FakeAsrBackend, VoiceRuntimeError
 from voice_settings import ACTIVATION_HOLD, ACTIVATION_TOGGLE
 from voice_support import (
     DICTATION_IDLE_UNLOAD_SECONDS,
+    HOTKEY_QUEUE_LIMIT,
     STATE_IDLE,
     STATE_LOADING,
     STATE_RECORDING,
@@ -48,6 +49,21 @@ class ThreadRunner:
         self.threads.append(thread)
         thread.start()
         return thread
+
+
+class ReorderedRunner:
+    """Expose scheduling inversions without relying on thread timing."""
+
+    def __init__(self):
+        self.pending = []
+
+    def start(self, fn, *args, name=None):
+        self.pending.append((fn, args))
+
+    def drain(self):
+        while self.pending:
+            fn, args = self.pending.pop()
+            fn(*args)
 
 
 class FakeCapture:
@@ -1108,6 +1124,228 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.controller.state, STATE_RECORDING)
         self.assertTrue(self.capture.started)
         self.assertEqual(self.inserted, [])
+
+    def test_os_hotkey_pairs_keep_order_when_background_tasks_are_reordered(self):
+        self._ready()
+        for activation in (ACTIVATION_HOLD, ACTIVATION_TOGGLE):
+            with self.subTest(activation=activation):
+                self.controller.settings.activation_mode = activation
+                runner = ReorderedRunner()
+                self.controller.task_runner = runner
+                try:
+                    self.controller._hotkey_press_from_os(MODE_DICTATION)
+                    if activation == ACTIVATION_HOLD:
+                        self.controller._hotkey_release_from_os(MODE_DICTATION)
+                    else:
+                        self.controller._hotkey_press_from_os(MODE_DICTATION)
+                    runner.drain()
+                    self.assertEqual(self.controller.state, STATE_IDLE)
+                    self.assertFalse(self.capture.started)
+                finally:
+                    runner.drain()
+                    self.controller.task_runner = InlineRunner()
+                    if self.controller.state != STATE_IDLE:
+                        self.controller.cancel()
+        self.assertEqual(self.inserted, ["hello world", "hello world"])
+
+    def test_os_escape_then_press_starts_a_new_take_despite_runner_reordering(self):
+        self._ready()
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        previous = self.controller._session_generation
+        runner = ReorderedRunner()
+        self.controller.task_runner = runner
+        try:
+            self.controller._hotkey_escape_from_os()
+            self.controller._hotkey_press_from_os(MODE_DICTATION)
+            runner.drain()
+            self.assertEqual(self.controller.state, STATE_RECORDING)
+            self.assertGreater(self.controller._session_generation, previous)
+            self.assertTrue(self.capture.started)
+            self.assertEqual(self.inserted, [])
+        finally:
+            runner.drain()
+            self.controller.task_runner = InlineRunner()
+            self.controller.cancel()
+
+    def test_cancelled_finish_cannot_enter_inference_after_a_new_take_starts(self):
+        self._ready()
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        recording = self.controller._history_recording
+        finish = recording.finish_capture
+
+        def replace_take(*args, **kwargs):
+            finish(*args, **kwargs)
+            self.controller.cancel()
+            self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+
+        with mock.patch.object(recording, "finish_capture", side_effect=replace_take), \
+                mock.patch.object(self.backend, "transcribe", wraps=self.backend.transcribe) as transcribe:
+            self.controller.handle_hotkey_release(MODE_DICTATION)
+        transcribe.assert_not_called()
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertTrue(self.capture.started)
+        self.assertEqual(self.inserted, [])
+
+    def test_finished_worker_tracking_stays_bounded_under_repeated_launches(self):
+        for _ in range(200):
+            self.controller._start_worker(lambda: None)
+        self.assertLessEqual(len(self.controller._workers), 2)
+
+    def test_shortcut_flood_cancels_without_growing_workers_or_losing_stop(self):
+        self._ready()
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        runner = ReorderedRunner()
+        self.controller.task_runner = runner
+        try:
+            for _ in range(1000):
+                self.controller._hotkey_press_from_os(MODE_DICTATION)
+                self.controller._hotkey_release_from_os(MODE_DICTATION)
+            self.assertLessEqual(len(self.controller._hotkey_events), HOTKEY_QUEUE_LIMIT)
+            self.assertEqual(len(runner.pending), 1)
+            runner.drain()
+            self.assertEqual(self.controller.state, STATE_IDLE)
+            self.assertFalse(self.capture.started)
+            self.assertEqual(self.inserted, [])
+            self.assertFalse(self.controller._hotkey_worker_active)
+            self.assertEqual(self.notify.call_args.kwargs["key"], "voice-hotkey")
+        finally:
+            runner.drain()
+            self.controller.task_runner = InlineRunner()
+
+    def test_failed_hotkey_handler_reports_error_and_allows_the_next_gesture(self):
+        self._ready()
+        with mock.patch.object(self.controller, "handle_hotkey_press", side_effect=RuntimeError("fixture")):
+            self.controller._hotkey_press_from_os(MODE_DICTATION)
+        self.assertFalse(self.controller._hotkey_worker_active)
+        self.assertEqual(self.notify.call_args.kwargs["key"], "voice-hotkey")
+        self.controller._hotkey_press_from_os(MODE_DICTATION)
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertTrue(self.capture.started)
+
+    def test_failed_worker_launch_resets_a_concurrent_shortcut_flood(self):
+        self._ready()
+
+        def failed_start(*_args, **_kwargs):
+            for _ in range(HOTKEY_QUEUE_LIMIT + 1):
+                self.controller._hotkey_press_from_os(MODE_DICTATION)
+            raise RuntimeError("fixture worker unavailable")
+
+        self.controller.task_runner = mock.Mock(start=mock.Mock(side_effect=failed_start))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "worker unavailable"):
+                self.controller._hotkey_press_from_os(MODE_DICTATION)
+        finally:
+            self.controller.task_runner = InlineRunner()
+        self.controller._hotkey_press_from_os(MODE_DICTATION)
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertTrue(self.capture.started)
+
+    def test_failed_error_notification_does_not_strand_the_hotkey_worker(self):
+        self._ready()
+        handler = mock.Mock(side_effect=RuntimeError("fixture handler failed"))
+        self.controller._hotkey_events.append((handler, ()))
+        self.controller._hotkey_worker_active = True
+        with mock.patch.object(self.controller, "_notify", side_effect=RuntimeError("fixture notification failed")):
+            with self.assertRaisesRegex(RuntimeError, "notification failed"):
+                self.controller._drain_hotkeys()
+        self.assertFalse(self.controller._hotkey_worker_active)
+        self.controller._hotkey_press_from_os(MODE_DICTATION)
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+
+    def test_repeated_os_gestures_preserve_real_audio_journals_in_both_modes(self):
+        self._ready()
+        sounddevice = mock.Mock()
+        sounddevice.query_devices.return_value = {"default_samplerate": 16000, "max_input_channels": 1}
+        options = {}
+
+        def input_stream(**kwargs):
+            options.clear()
+            options.update(kwargs)
+            return mock.Mock()
+
+        sounddevice.InputStream.side_effect = input_stream
+        self.controller._capture_factory = AudioCapture
+        self.controller.task_runner = ThreadRunner()
+        recording, completed = threading.Event(), threading.Event()
+
+        def status_changed():
+            state = self.controller.state
+            if state == STATE_RECORDING:
+                recording.set()
+            elif state == STATE_IDLE:
+                completed.set()
+
+        self.controller._on_status_change = status_changed
+        samples = [0.25, -0.5] * 160
+        expected = samples * 8
+        with mock.patch.dict("sys.modules", {"sounddevice": sounddevice}):
+            for iteration in range(60):
+                with self.subTest(iteration=iteration):
+                    mode = MODE_COMMAND if iteration % 3 == 0 else MODE_DICTATION
+                    self.controller.settings.activation_mode = (
+                        ACTIVATION_TOGGLE if iteration % 2 else ACTIVATION_HOLD
+                    )
+                    self.backend.transcript = "xadds" if mode == MODE_COMMAND else "hello world"
+                    recording.clear()
+                    completed.clear()
+                    self.controller._hotkey_press_from_os(mode)
+                    self.assertTrue(recording.wait(2))
+                    record_id = self.controller._history_recording.record_id
+                    for _ in range(8):
+                        options["callback"](samples, len(samples), None, None)
+                    self.controller._hotkey_release_from_os(mode)
+                    if self.controller.settings.activation_mode == ACTIVATION_TOGGLE:
+                        self.controller._hotkey_press_from_os(mode)
+                    self.assertTrue(completed.wait(3))
+                    self.assertTrue(self.controller._join_workers(2))
+                    self.assertEqual(self.controller._history.load_samples(record_id), expected)
+                    self.assertEqual(self.controller.history_entry(record_id)["status"], "completed")
+                    self.assertLessEqual(len(self.controller._workers), 4)
+        self.assertEqual(self.inserted, ["hello world"] * 40)
+        self.assertEqual(self.expanded, ["xadds"] * 20)
+
+    def test_repeated_recording_handoffs_restore_dictation_without_losing_audio(self):
+        from meeting_settings import MeetingSettings
+        from meeting_support import MeetingController
+        from tests.test_meeting_support import FakeCapture as MeetingCapture
+
+        self._ready()
+        captures = []
+
+        def capture_factory():
+            capture = MeetingCapture()
+            captures.append(capture)
+            return capture
+
+        meeting = MeetingController(os.path.join(self.tmp, "meetings"), self.controller,
+                                    capture_factory=capture_factory)
+        self.addCleanup(meeting.shutdown)
+        with mock.patch.object(self.controller, "_start_monitor"), \
+                mock.patch("voice_support.model_is_installed", return_value=True), \
+                mock.patch("voice_support.installed_model_path", return_value="model.gguf"), \
+                mock.patch.object(meeting, "_postprocess_recording", return_value=([], False)):
+            for _ in range(20):
+                capture_index = len(captures)
+                self.assertTrue(meeting.start(MeetingSettings()))
+                deadline = time.monotonic() + 2
+                while len(captures) == capture_index and time.monotonic() < deadline:
+                    time.sleep(0.001)
+                self.assertEqual(len(captures), capture_index + 1)
+                self.assertTrue(captures[capture_index].started.wait(2))
+                self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
+                self.assertTrue(meeting.stop())
+                meeting._thread.join(3)
+                self.assertFalse(meeting._thread.is_alive())
+                snapshot = meeting.snapshot()
+                self.assertEqual(snapshot["state"], "idle")
+                self.assertEqual(meeting.store.get(snapshot["session_id"])["status"], "completed")
+                self.assertEqual(len(list(meeting.store.iter_audio(snapshot["session_id"]))), 1)
+                self.assertIsNone(self.controller._meeting_token)
+                self.assertEqual(self.controller.state, STATE_IDLE)
+                self.assertTrue(self.backend.is_loaded())
+                self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+                self.assertTrue(self.controller.handle_hotkey_release(MODE_DICTATION))
+        self.assertEqual(self.inserted, ["hello world"] * 20)
 
     def test_overflow_does_not_insert(self):
         self.capture.overflow = True
