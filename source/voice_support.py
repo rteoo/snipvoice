@@ -47,7 +47,7 @@ from voice_models import (
 )
 from voice_provider import create_provider
 from voice_runtime import VoiceRuntimeError
-from voice_settings import resolve_voice_settings, voice_settings_payload
+from voice_settings import ACTIVATION_TOGGLE, resolve_voice_settings, voice_settings_payload
 from voice_text_support import VoiceTextReplacements
 
 
@@ -547,6 +547,7 @@ class VoiceController:
         language=None,
         hotkey=None,
         command_hotkey=None,
+        activation_mode=None,
     ):
         """Persist voice options and apply only the runtime changes required."""
         warnings = []
@@ -559,6 +560,8 @@ class VoiceController:
             payload["voice_hotkey"] = hotkey
         if command_hotkey is not None:
             payload["voice_command_hotkey"] = command_hotkey
+        if activation_mode is not None:
+            payload["voice_activation_mode"] = activation_mode
         candidate = resolve_voice_settings(payload, warnings)
         for warning in warnings:
             self._log(warning)
@@ -573,6 +576,7 @@ class VoiceController:
             hotkeys_same = (
                 candidate.hotkey == previous.hotkey
                 and candidate.command_hotkey == previous.command_hotkey
+                and candidate.activation_mode == previous.activation_mode
             )
             self.settings = candidate
         if not hotkeys_same:
@@ -761,26 +765,37 @@ class VoiceController:
     def handle_hotkey_press(self, mode):
         if self._shutdown.is_set():
             return False
+        if mode not in (MODE_DICTATION, MODE_COMMAND):
+            mode = MODE_DICTATION
+        stop_generation = None
         with self._lock:
             if (
                 self._meeting_token is not None
                 or self._disable_requested
                 or not self.settings.enabled
-                or self._state != STATE_IDLE
-                or self._capture_starting
             ):
                 return False
-            if mode not in (MODE_DICTATION, MODE_COMMAND):
-                mode = MODE_DICTATION
-            form_apply = self._form_apply
-            form_apply_guarded = self._form_apply_guarded
-            self._form_guard_token = None
-            self._session_generation += 1
-            generation = self._session_generation
-            self._cancel.clear()
-            self._capture_starting = True
-            self._startup_generation = generation
-            self._last_model_use = time.monotonic()
+            if (
+                self.settings.activation_mode == ACTIVATION_TOGGLE
+                and self._active_mode == mode
+                and (self._state == STATE_RECORDING or self._capture_starting)
+            ):
+                stop_generation = self._session_generation
+            else:
+                if self._state != STATE_IDLE or self._capture_starting:
+                    return False
+                form_apply = self._form_apply
+                form_apply_guarded = self._form_apply_guarded
+                self._form_guard_token = None
+                self._session_generation += 1
+                generation = self._session_generation
+                self._cancel.clear()
+                self._capture_starting = True
+                self._startup_generation = generation
+                self._active_mode = mode
+                self._last_model_use = time.monotonic()
+        if stop_generation is not None:
+            return self._stop_hotkey_capture(mode, stop_generation)
         if self._microphone_status is not None:
             try:
                 status = self._microphone_status()
@@ -936,10 +951,23 @@ class VoiceController:
         return True
 
     def handle_hotkey_release(self, mode):
+        with self._lock:
+            if self.settings.activation_mode == ACTIVATION_TOGGLE:
+                return False
+        return self._stop_hotkey_capture(mode)
+
+    def _stop_hotkey_capture(self, mode, expected_generation=None):
+        """Finish the matching session without letting a stale stop affect its successor."""
         if self._shutdown.is_set():
             return False
         with self._lock:
-            if self._disable_requested or not self.settings.enabled:
+            if (
+                self._disable_requested
+                or not self.settings.enabled
+                or mode != self._active_mode
+                or (expected_generation is not None
+                    and expected_generation != self._session_generation)
+            ):
                 return False
             starting = self._capture_starting
             if not starting and self._state != STATE_RECORDING:

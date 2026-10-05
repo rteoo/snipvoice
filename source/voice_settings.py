@@ -15,6 +15,10 @@ from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY, parse
 from voice_text_support import validate_replacements
 
 
+ACTIVATION_HOLD = "hold"
+ACTIVATION_TOGGLE = "toggle"
+
+
 class VoiceSettings:
     """Normalized voice configuration used by the controller."""
 
@@ -24,6 +28,7 @@ class VoiceSettings:
         "language",
         "hotkey",
         "command_hotkey",
+        "activation_mode",
         "cache_dir",
         "voice_replacements",
         "history_retention_days",
@@ -39,12 +44,14 @@ class VoiceSettings:
         cache_dir,
         voice_replacements=None,
         history_retention_days=30,
+        activation_mode=ACTIVATION_HOLD,
     ):
         self.enabled = enabled
         self.profile = profile
         self.language = language
         self.hotkey = hotkey
         self.command_hotkey = command_hotkey
+        self.activation_mode = activation_mode
         self.cache_dir = cache_dir
         self.voice_replacements = voice_replacements or {}
         self.history_retention_days = history_retention_days
@@ -69,6 +76,11 @@ def resolve_voice_settings(settings, warnings=None):
     notes = warnings if warnings is not None else []
 
     enabled = _as_bool(data.get("voice_enabled", False))
+
+    activation_mode = data.get("voice_activation_mode", ACTIVATION_HOLD)
+    if activation_mode not in (ACTIVATION_HOLD, ACTIVATION_TOGGLE):
+        notes.append("voice_activation_mode inválido; usando hold.")
+        activation_mode = ACTIVATION_HOLD
 
     profile = data.get("voice_profile", DEFAULT_PROFILE)
     if not is_selectable_profile(profile):
@@ -134,6 +146,7 @@ def resolve_voice_settings(settings, warnings=None):
         language=language,
         hotkey=hotkey,
         command_hotkey=command_hotkey,
+        activation_mode=activation_mode,
         cache_dir=_as_optional_dir(data.get("voice_cache_dir")),
         voice_replacements=voice_replacements,
         history_retention_days=retention,
@@ -148,6 +161,7 @@ def voice_settings_payload(voice_settings):
         "voice_language": voice_settings.language,
         "voice_hotkey": voice_settings.hotkey,
         "voice_command_hotkey": voice_settings.command_hotkey,
+        "voice_activation_mode": voice_settings.activation_mode,
         "voice_replacements": dict(voice_settings.voice_replacements),
         "voice_history_retention_days": voice_settings.history_retention_days,
     }

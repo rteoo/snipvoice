@@ -177,6 +177,27 @@ class MonitorTests(unittest.TestCase):
             [("press", MODE_DICTATION), ("release", MODE_DICTATION)],
         )
 
+    def test_modifier_repress_and_key_repeat_require_a_fresh_final_key(self):
+        from pynput.keyboard import Key
+
+        events = []
+        monitor = VoiceHotkeyMonitor(
+            parse_chord("ctrl+alt+space"), parse_chord("ctrl+alt+shift+space"),
+            on_press=lambda mode: events.append(("press", mode)),
+            on_release=lambda mode: events.append(("release", mode)),
+        )
+        monitor._handle_press(Key.ctrl)
+        monitor._handle_press(Key.alt)
+        monitor._handle_press(Key.space)
+        monitor._handle_release(Key.alt)
+        monitor._handle_press(Key.alt)
+        monitor._handle_press(Key.space)
+        self.assertEqual(events, [("press", MODE_DICTATION), ("release", MODE_DICTATION)])
+        monitor._handle_release(Key.space)
+        monitor._handle_press(Key.space)
+        self.assertEqual(events[-1], ("press", MODE_DICTATION))
+        self.assertEqual(len(events), 3)
+
     def test_final_key_release_then_modifier_release_is_once(self):
         events = []
         monitor = VoiceHotkeyMonitor(

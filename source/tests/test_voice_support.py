@@ -21,6 +21,7 @@ from voice_dispatch import (
     VoiceTarget,
 )
 from voice_runtime import FakeAsrBackend, VoiceRuntimeError
+from voice_settings import ACTIVATION_HOLD, ACTIVATION_TOGGLE
 from voice_support import (
     DICTATION_IDLE_UNLOAD_SECONDS,
     STATE_IDLE,
@@ -101,7 +102,11 @@ class _ChunkCapture:
 
 class ControllerTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        directory = os.path.join(os.path.dirname(__file__), "tmp")
+        os.makedirs(directory, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=directory)
+        self.addCleanup(temporary.cleanup)
+        self.tmp = temporary.name
         self.inserted = []
         self.expanded = []
         self.notify = mock.Mock()
@@ -129,6 +134,7 @@ class ControllerTests(unittest.TestCase):
             lambda: {"xadds": "hi"},
             lambda: compile_trigger_index({"xadds": "hi"}),
         )
+        self.addCleanup(self.controller.shutdown)
 
     def _ready(self):
         with mock.patch("voice_support.model_is_installed", return_value=True), \
@@ -974,6 +980,134 @@ class ControllerTests(unittest.TestCase):
         self._ready()
         self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
         self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
+
+    def test_handsfree_release_keeps_recording_and_next_press_transcribes(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        target = mock.Mock(return_value=VoiceTarget("window", handle=1))
+        self.controller._capture_target = target
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+        self.assertFalse(self.controller.handle_hotkey_release(MODE_DICTATION))
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertTrue(self.capture.started)
+        self.assertEqual(self.inserted, [])
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+        self.assertFalse(self.capture.started)
+        self.assertEqual(self.inserted, ["hello world"])
+        self.assertEqual(self.controller.state, STATE_IDLE)
+        target.assert_called_once_with()
+        self.assertFalse(self.controller.handle_hotkey_release(MODE_DICTATION))
+
+    def test_handsfree_commands_expand_on_the_second_press(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        self.backend.transcript = "xadds"
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_COMMAND))
+        self.assertFalse(self.controller.handle_hotkey_release(MODE_COMMAND))
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_COMMAND))
+        self.assertEqual(self.expanded, ["xadds"])
+        self.assertEqual(self.inserted, [])
+
+    def test_other_shortcut_cannot_stop_a_handsfree_session(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+        self.assertFalse(self.controller.handle_hotkey_press(MODE_COMMAND))
+        self.assertFalse(self.controller.handle_hotkey_release(MODE_COMMAND))
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertEqual(self.inserted, [])
+
+    def test_handsfree_press_during_transcription_does_not_start_or_cancel_another_session(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        self.controller.task_runner = ThreadRunner()
+        entered = threading.Event()
+        proceed = threading.Event()
+
+        def transcribe(_samples, **_kwargs):
+            entered.set()
+            self.assertTrue(proceed.wait(2))
+            return "hello world"
+
+        with mock.patch.object(self.backend, "transcribe", side_effect=transcribe):
+            self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+            self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertEqual(self.controller.state, STATE_TRANSCRIBING)
+                self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
+                self.assertFalse(self.controller.handle_hotkey_release(MODE_DICTATION))
+                self.assertFalse(self.controller._cancel.is_set())
+            finally:
+                proceed.set()
+                self.assertTrue(self.controller._join_workers(2))
+        self.assertEqual(self.inserted, ["hello world"])
+        self.assertEqual(self.controller.state, STATE_IDLE)
+
+    def test_handsfree_escape_cancels_and_the_next_press_starts_fresh(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        self.controller._hotkey_escape_from_os()
+        self.assertFalse(self.capture.started)
+        self.assertEqual(self.controller.state, STATE_IDLE)
+        self.assertFalse(self.controller.handle_hotkey_release(MODE_DICTATION))
+        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertEqual(self.inserted, [])
+
+    def test_second_handsfree_press_during_startup_cancels_safely(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        started = threading.Event()
+        proceed = threading.Event()
+
+        def start():
+            started.set()
+            self.assertTrue(proceed.wait(2))
+            self.capture.started = True
+
+        with mock.patch.object(self.capture, "start", side_effect=start):
+            worker = threading.Thread(target=self.controller.handle_hotkey_press,
+                                      args=(MODE_DICTATION,))
+            worker.start()
+            try:
+                self.assertTrue(started.wait(2))
+                self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+                self.assertEqual(self.inserted, [])
+            finally:
+                proceed.set()
+                worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(self.capture.started)
+        self.assertEqual(self.controller.state, STATE_IDLE)
+        self.assertFalse(self.controller._capture_starting)
+
+    def test_changing_activation_mode_cancels_capture_without_reloading_the_model(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        with mock.patch.object(self.controller, "_start_monitor") as start_monitor, \
+                mock.patch.object(self.backend, "load") as load:
+            self.controller.apply_options(activation_mode=ACTIVATION_HOLD)
+        self.assertFalse(self.capture.started)
+        self.assertEqual(self.controller.state, STATE_IDLE)
+        self.assertEqual(self.controller.settings.activation_mode, ACTIVATION_HOLD)
+        self.assertEqual(self.inserted, [])
+        start_monitor.assert_called_once_with()
+        load.assert_not_called()
+
+    def test_stale_handsfree_stop_cannot_finish_a_new_recording(self):
+        self._ready()
+        self.controller.settings.activation_mode = ACTIVATION_TOGGLE
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        generation = self.controller._session_generation
+        self.controller.cancel()
+        self.controller.handle_hotkey_press(MODE_DICTATION)
+        self.assertFalse(self.controller._stop_hotkey_capture(MODE_DICTATION, generation))
+        self.assertEqual(self.controller.state, STATE_RECORDING)
+        self.assertTrue(self.capture.started)
+        self.assertEqual(self.inserted, [])
 
     def test_overflow_does_not_insert(self):
         self.capture.overflow = True

@@ -2,8 +2,8 @@
 
 The expansion listener stays listen-only and must never swallow keys. Voice
 uses a dedicated observer: OS filters suppress only the final key of a
-configured chord so it does not type into the target. Press and release are
-both required; auto-repeat is ignored by the controller, not here.
+configured chord so it does not type into the target. Each physical key press
+is reported once; the controller decides whether release ends the recording.
 """
 
 from pynput.keyboard import Key, KeyCode
@@ -265,6 +265,7 @@ class VoiceHotkeyMonitor:
         self._on_release = on_release
         self._on_escape = on_escape
         self._held = set()
+        self._pressed_keys = set()
         self._active_mode = None
         self._darwin_suppressed_key = None
         self._win32_suppressed_key = None
@@ -294,6 +295,7 @@ class VoiceHotkeyMonitor:
         listener = self._listener
         self._listener = None
         self._held.clear()
+        self._pressed_keys.clear()
         self._active_mode = None
         self._darwin_suppressed_key = None
         self._win32_suppressed_key = None
@@ -319,6 +321,10 @@ class VoiceHotkeyMonitor:
 
     def _handle_press(self, key):
         name = _key_name(key)
+        if name in {self.dictation_chord.key, self.command_chord.key, "esc", "escape"}:
+            if name in self._pressed_keys:
+                return
+            self._pressed_keys.add(name)
         if name in {"esc", "escape"}:
             if self._active_mode is None:
                 mode = self._mode_for_key("esc")
@@ -344,6 +350,7 @@ class VoiceHotkeyMonitor:
 
     def _handle_release(self, key):
         name = _key_name(key)
+        self._pressed_keys.discard(name)
         if name in _MODIFIER_ALIASES.values():
             self._held.discard(name)
             if (
