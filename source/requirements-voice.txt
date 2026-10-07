@@ -5,4 +5,9 @@ soxr==1.1.0
 # packaging/clean_audio_runtime.py. Never install the upstream binary wheel.
 transcribe-cpp==0.1.3
 transcribe-cpp-native==0.1.3
-llama-cpp-python==0.3.35
+# llama-cpp-python is supplied only by packaging/llama_runtime.py's hash-pinned
+# custom wheel. Upstream 0.3.36 lacks the required EmbeddingGemma 2 native revision.
+numpy==2.5.3
+diskcache==5.6.3
+jinja2==3.1.6
+typing-extensions==4.16.0

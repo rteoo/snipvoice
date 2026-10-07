@@ -242,9 +242,9 @@ def _spawn_worker():
 
 
 class _WorkerClient:
-    def __init__(self):
+    def __init__(self, *, spawn_worker=None):
         try:
-            self.process = _spawn_worker()
+            self.process = (spawn_worker or _spawn_worker)()
         except OSError as exc:
             raise RuntimeError(tr("Não foi possível iniciar o runtime local de resumo.")) from exc
         self.responses = queue.Queue()

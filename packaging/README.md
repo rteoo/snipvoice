@@ -59,6 +59,47 @@ python packaging\clean_audio_runtime.py `
   --compliance-dir build\clean-audio-compliance
 ```
 
+## Local summary and embedding runtime
+
+`llama_runtime.py` builds the approved Python wrapper/native pair from
+SHA-256-pinned source archives. The wrapper is 0.3.36 at
+`1652066e0af45f2313b339670ef9555e8a54e545`; llama.cpp is
+`4fbc76dec51d0add466f0210855c0596589b60d4`, which includes EmbeddingGemma 2.
+An upstream 0.3.36 installation has a different native revision and is rejected
+by the release preflight. Never replace just the DLLs in an older wrapper.
+
+The existing compiler and CMake are prerequisites. Windows uses Visual Studio
+2022; macOS uses its native compiler. The recipe locates bundled CMake in an
+existing Visual Studio installation and never installs host tooling. Native CPU
+tuning, CUDA, and OpenMP are disabled; disabling OpenMP avoids an additional
+Windows runtime DLL. macOS retains upstream's default Metal configuration.
+
+After installing application/native Python requirements and the hash-locked
+build toolchain, use a fresh wheel directory:
+
+```text
+python -m pip install -r source/requirements.txt -r source/requirements-voice.txt
+python -m pip install --require-hashes -r packaging/requirements-build.lock
+python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama-wheel --install
+python source/embedding_runtime_probe.py
+python source/summary_runtime_probe.py
+```
+
+The explicit `--install` action installs only the generated wheel into the
+selected interpreter, with `--no-index`, `--no-deps`, and its SHA-256 lock.
+It does not modify model caches or download model weights. Without `--install`,
+the recipe only produces a wheel and `requirements-llama.lock`; install that
+lock from its wheel directory. Temporary source/build trees are cleaned up on
+failure too; the verified source archives and completed wheel are retained.
+
+The wheel carries native MIT license text, exact source identities, build flags,
+and a native-library hash inventory. Source release preflights verify hashes
+before packaging. Frozen probes check identity, library inventory, and native
+ABI; they allow signing to change library bytes. macOS's existing final signature
+gate remains required. Both platform packagers run `--embedding-runtime-probe`
+before promotion alongside the summary/voice/capture probes. These model-free
+checks prove packaging/import compatibility, not model quality or capture.
+
 ## Microsoft Store (MSIX)
 
 `build_msix.py` packs `dist\Snipvoice` into an unsigned MSIX for Partner

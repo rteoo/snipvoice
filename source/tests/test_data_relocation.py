@@ -227,6 +227,7 @@ class ModelsRelocationTests(unittest.TestCase):
         _write(os.path.join(self.src, "voice-models", "parakeet", "parakeet.gguf"), "voice")
         _write(os.path.join(self.src, "voice-models", "parakeet", "manifest.json"), "{}")
         _write(os.path.join(self.src, "summary-models", "qwen", "qwen.gguf"), "summary")
+        _write(os.path.join(self.src, "embedding-models", "synthetic", "embedding.gguf"), "embedding")
         _write(os.path.join(self.src, app_paths.LOCATION_NAME), "{}")
         _write(os.path.join(self.dst, "lmstudio", "other.gguf"), "foreign")
         patches = [
@@ -241,9 +242,11 @@ class ModelsRelocationTests(unittest.TestCase):
     def _assert_moved(self):
         self.assertTrue(os.path.isfile(os.path.join(self.dst, "voice-models", "parakeet", "parakeet.gguf")))
         self.assertTrue(os.path.isfile(os.path.join(self.dst, "summary-models", "qwen", "qwen.gguf")))
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "embedding-models", "synthetic", "embedding.gguf")))
         self.assertTrue(os.path.isfile(os.path.join(self.dst, "lmstudio", "other.gguf")))
         self.assertFalse(os.path.exists(os.path.join(self.src, "voice-models")))
         self.assertFalse(os.path.exists(os.path.join(self.src, "summary-models")))
+        self.assertFalse(os.path.exists(os.path.join(self.src, "embedding-models")))
         self.assertTrue(os.path.isfile(os.path.join(self.src, app_paths.LOCATION_NAME)))
         self.assertEqual(app_paths.configured_models_dir(), self.dst)
 

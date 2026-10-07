@@ -30,6 +30,14 @@ logs, user data, and default cache belong to Snipvoice independently of Sniptype
 PyInstaller is pinned separately in `requirements-build.txt`; source-only installs
 do not need the packaging tool.
 
+Local summaries and semantic retrieval use a custom, source-pinned llama.cpp
+wheel. `requirements-voice.txt` installs its Python dependencies but deliberately
+does not resolve an upstream llama.cpp wheel. Build/install the approved wheel
+using the [runtime recipe](../../packaging/README.md#local-summary-and-embedding-runtime).
+CI and desktop bundle jobs use that same recipe. Both packagers verify the
+source runtime's hashes and run a staged `--embedding-runtime-probe` before
+promotion; native license and build identity stay inside the package.
+
 Live
 microphone-to-paste, cancellation, device-loss, final-word resampling, denied
 permissions, stale target, upgrade/uninstall, and macOS TCC/signing behavior need

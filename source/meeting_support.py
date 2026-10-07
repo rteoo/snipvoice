@@ -836,6 +836,25 @@ class MeetingController:
 
     search = search_library
 
+    def semantic_info(self):
+        return self.library.semantic_info()
+
+    def set_semantic_search(self, enabled):
+        return self.library.set_semantic_search(enabled)
+
+    def rebuild_semantic_index(self, *, cancel_event=None):
+        self.library.semantic.queue(cancel_event)
+        return {"state": "rebuilding"}
+
+    def cancel_semantic_index(self):
+        if self._library is not None and self._library._semantic is not None:
+            self._library._semantic.cancel_index()
+
+    def semantic_state(self):
+        if self._library is not None and self._library._semantic is not None:
+            return self._library._semantic.status
+        return "disabled"
+
     def resolve_search_result(self, result):
         return self.library.resolve_search_result(result)
 

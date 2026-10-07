@@ -56,6 +56,11 @@ python -m pip install -r requirements.txt -r requirements-voice.txt
 python snipvoice.pyw
 ```
 
+Local summaries and semantic meeting search additionally require the
+[approved custom llama.cpp wheel](packaging/README.md#local-summary-and-embedding-runtime).
+Build/install that wheel with the selected source interpreter; installing an
+upstream `llama-cpp-python` wheel does not provide the pinned embedding runtime.
+
 Compressed audio import additionally requires SnipVoice's clean PyAV/FFmpeg
 runtime. Build it using [`packaging/README.md`](packaging/README.md); official
 release bundles already include it. Do not substitute PyAV's upstream binary
@@ -312,7 +317,7 @@ build_installer.bat
 On macOS, run `./build_release_macos.sh`. Build tools must already be installed;
 the package workflow uses the pinned requirements in `source/requirements-build.txt`.
 Both packagers compile the native helper, bundle the local ASR and llama.cpp runtimes, stage the
-result, and run `--voice-runtime-probe`, `--summary-runtime-probe`, and `--meeting-capture-probe` before
+result, and run `--voice-runtime-probe`, `--summary-runtime-probe`, `--embedding-runtime-probe`, and `--meeting-capture-probe` before
 promotion. See the [development guide](source/docs/development.md) and
 [release validation](source/docs/offline-meeting-validation.md).
 

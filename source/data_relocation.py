@@ -259,7 +259,7 @@ def complete_pending_relocation():
     return tr("Dados movidos para {path}.", path=dst)
 
 
-MODEL_FOLDERS = ("voice-models", "summary-models")
+MODEL_FOLDERS = ("voice-models", "summary-models", "embedding-models")
 _MODEL_ENV_OVERRIDES = ("SNIPVOICE_VOICE_CACHE", "SNIPVOICE_SUMMARY_CACHE")
 
 
@@ -271,7 +271,7 @@ def validate_models_target(current, target):
     """Return the normalized model root, or raise RelocationError.
 
     Unlike the data folder, the model root may be a shared folder that already
-    holds other files: only the ``voice-models`` and ``summary-models``
+    holds other files: only the ``voice-models``, ``summary-models`` and ``embedding-models``
     subfolders are ever written there.
     """
     if models_env_locked():

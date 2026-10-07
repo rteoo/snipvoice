@@ -2,6 +2,8 @@
 
 
 def probe_summary_runtime():
+    from llama_runtime import verify_llama_runtime
+    verify_llama_runtime()
     from llama_cpp import Llama
     if not callable(Llama):
         raise RuntimeError("llama_cpp.Llama is unavailable")
