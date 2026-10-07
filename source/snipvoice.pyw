@@ -53,6 +53,14 @@ def run_sqlite_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+if "--embedding-worker" in sys.argv[1:]:
+    from embedding_runtime_worker import main as embedding_worker_main
+    raise SystemExit(embedding_worker_main())
+
+if "--embedding-runtime-probe" in sys.argv[1:]:
+    from embedding_runtime_probe import main as embedding_probe_main
+    raise SystemExit(embedding_probe_main())
+
 run_summary_worker_if_requested()
 run_voice_runtime_probe_if_requested()
 run_summary_runtime_probe_if_requested()

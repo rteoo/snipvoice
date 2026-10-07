@@ -1382,6 +1382,21 @@ class MeetingWindow:
         search.bind("<Return>", lambda _event: self.search())
         self._placeholder(search, self.query, tr("Buscar gravações e transcrições"))
         self._button(search_row, tr("Buscar"), self.search, accent=True).pack(side="left", padx=(6, 0))
+        semantic_row = tk.Frame(toolbar, bg=self.ui.card)
+        semantic_row.pack(fill="x", pady=(4, 0))
+        self.semantic_enabled = tk.BooleanVar(self.window, False)
+        self.semantic_cancel = None
+        tk.Checkbutton(semantic_row, text=tr("Busca semântica local"), variable=self.semantic_enabled,
+                       command=self.toggle_semantic_search, font=self.ui.font(),
+                       **self.ui.checkbutton_colors(self.ui.card)).pack(side="left")
+        semantic_controls = tk.Frame(toolbar, bg=self.ui.card)
+        semantic_controls.pack(fill="x")
+        self._button(semantic_controls, tr("Instalar modelo…"), self.install_embedding_model).pack(side="left")
+        self._button(semantic_controls, tr("Reindexar"), self.rebuild_semantic_index).pack(side="left", padx=(4, 0))
+        self._button(semantic_controls, tr("Cancelar"), self.cancel_semantic_operation).pack(side="left", padx=(4, 0))
+        self.semantic_status = tk.StringVar(self.window, tr("Busca por palavras ativa."))
+        self._wrap_label(toolbar, "", textvariable=self.semantic_status, bg=self.ui.card,
+                         fg=self.ui.text_muted).pack(fill="x")
         action_row = tk.Frame(toolbar, bg=self.ui.card)
         action_row.pack(fill="x", pady=(self.ui.space_sm, 0))
         self.cross_toggle = self._button(
@@ -3668,6 +3683,9 @@ class MeetingWindow:
                     candidate = searcher(query, limit=MAX_SEARCH_RESULTS, **filters, status=status)
                     if isinstance(candidate, (list, tuple)):
                         search_results = list(candidate)[:MAX_SEARCH_RESULTS]
+            info = getattr(self.controller, "semantic_info", None)
+            if callable(info):
+                page["semantic_info"] = info()
             return page, search_results, generation
         self._submit("library", read, self._library_loaded)
 
@@ -3695,6 +3713,13 @@ class MeetingWindow:
             items = list(islice(page.get("items", []) or [], PAGE_SIZE))
             self.library_next_cursor = page.get("next_cursor")
             index_state = page.get("index_state")
+            info = page.get("semantic_info")
+            if isinstance(info, dict) and hasattr(self, "semantic_enabled"):
+                self.semantic_enabled.set(info.get("enabled", False))
+                state = info.get("state", "disabled")
+                self.semantic_status.set(tr("Busca semântica: {state}",
+                    state=tr(INDEX_STATE_LABELS.get(state, state))) if info.get("enabled")
+                    else tr("Busca por palavras ativa."))
         else:
             items = list(islice(sessions or [], PAGE_SIZE))
             self.library_next_cursor = None
@@ -4124,6 +4149,65 @@ class MeetingWindow:
         self.trash_status.set(message)
         self.refresh_trash()
         self.refresh_library()
+
+    def toggle_semantic_search(self):
+        enabled = self.semantic_enabled.get()
+        self.library_filter_generation += 1
+        self.semantic_status.set(tr("Salvando opção de busca…"))
+        def finished(_value, error):
+            if error:
+                self.semantic_status.set(tr("Não foi possível salvar a opção de busca semântica."))
+            self.search()
+        self._submit("semantic_settings", lambda: self.controller.set_semantic_search(enabled), finished)
+
+    def install_embedding_model(self):
+        if self.semantic_cancel is not None:
+            return
+        from embedding_models import MODEL, download_embedding_model
+        if not messagebox.askyesno(tr("Baixar modelo local"),
+                tr("Baixar {name} ({size})?\nLicença: {license}\nO arquivo será verificado por SHA-256. "
+                   "A busca semântica exige um runtime local compatível.", name=MODEL["name"],
+                   size=format_model_size(MODEL["size_bytes"]), license=MODEL["license_id"]), parent=self.window):
+            return
+        self.semantic_cancel = threading.Event()
+        event = self.semantic_cancel
+        self.semantic_status.set(tr("Baixando modelo com verificação SHA-256…"))
+        if not self._submit("semantic_model", lambda: download_embedding_model(cancel_event=event),
+                            self._semantic_operation_finished):
+            self.semantic_cancel = None
+            self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
+
+    def rebuild_semantic_index(self):
+        if self.semantic_cancel is not None:
+            return
+        if not self.semantic_enabled.get():
+            self.semantic_status.set(tr("Ative a busca semântica antes de reindexar."))
+            return
+        self.semantic_cancel = threading.Event()
+        event = self.semantic_cancel
+        self.semantic_status.set(tr("Indexando transcrições localmente…"))
+        if not self._submit("semantic_rebuild", lambda: self.controller.rebuild_semantic_index(cancel_event=event),
+                            self._semantic_operation_finished):
+            self.semantic_cancel = None
+            self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
+
+    def cancel_semantic_operation(self):
+        if self.semantic_cancel is not None:
+            self.semantic_cancel.set()
+        cancel = getattr(self.controller, "cancel_semantic_index", None)
+        if callable(cancel):
+            cancel()
+        self.semantic_status.set(tr("Cancelamento solicitado; busca por palavras disponível."))
+
+    def _semantic_operation_finished(self, value, error):
+        self.semantic_cancel = None
+        if error:
+            self.semantic_status.set(tr("Operação semântica cancelada ou indisponível. Busca por palavras disponível."))
+        elif isinstance(value, dict) and value.get("state") == "rebuilding":
+            self.semantic_status.set(tr("Indexando transcrições localmente…"))
+        else:
+            self.semantic_status.set(tr("Operação semântica concluída."))
+            self.search()
 
     def rebuild_index(self):
         if self.rebuild_cancel is not None:
@@ -5341,6 +5425,17 @@ class MeetingWindow:
             return
         try:
             self.bridge.drain()
+            semantic_state = getattr(self.controller, "semantic_state", None)
+            if (callable(semantic_state) and hasattr(self, "semantic_enabled")
+                    and self.semantic_enabled.get() and self.semantic_cancel is None):
+                state = semantic_state()
+                if isinstance(state, str):
+                    previous = getattr(self, "last_semantic_state", None)
+                    self.last_semantic_state = state
+                    self.semantic_status.set(tr("Busca semântica: {state}",
+                        state=tr(INDEX_STATE_LABELS.get(state, state))))
+                    if previous == "rebuilding" and state == "ready":
+                        self.refresh_library()
             with self.summary_progress_lock:
                 progress = self.summary_progress
             if progress is not None:
@@ -5475,7 +5570,7 @@ class MeetingWindow:
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:
             self.summary_download_cancel.set()
-        for name in ("rebuild_cancel",):
+        for name in ("rebuild_cancel", "semantic_cancel"):
             event = getattr(self, name, None)
             if event is not None:
                 event.set()

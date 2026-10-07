@@ -393,6 +393,7 @@ class MeetingLibrary:
         self._index_pending = set()
         self._index_closed = False
         self._index_stale = False
+        self._semantic = None
         self._catalog_lock = threading.RLock()
         if _has_link_component(self.home_root) or _has_link_component(self.meetings_root):
             raise PathSafetyError(tr("As raízes da biblioteca não podem conter links ou junctions."))
@@ -423,6 +424,32 @@ class MeetingLibrary:
             return self.index.state
         except Exception:
             return "unavailable"
+
+    @property
+    def semantic(self):
+        with self._index_lock:
+            if self._semantic is None:
+                from meeting_semantic import SemanticLibrary
+                self._semantic = SemanticLibrary(self)
+            return self._semantic
+
+    def semantic_info(self):
+        from embedding_models import embedding_model_path
+        enabled = self.read_workspace().get("semantic_search", False)
+        if enabled and self._semantic is None:
+            self.semantic.queue()
+        return {"enabled": enabled,
+                "installed": embedding_model_path() is not None,
+                "state": self._semantic.status if self._semantic is not None else "disabled"}
+
+    def set_semantic_search(self, enabled):
+        if not isinstance(enabled, bool):
+            raise ValueError(tr("A opção de busca semântica é inválida."))
+        self.update_workspace({"semantic_search": enabled})
+        if not enabled:
+            self.semantic.cancel_index()
+        self.semantic.queue()
+        return self.semantic_info()
 
     # -- Canonical path and JSON helpers ---------------------------------
 
@@ -569,6 +596,8 @@ class MeetingLibrary:
         # read-only errors.
         self._validate_privacy_defaults(value.get("privacy_defaults", {}))
         self._validate_retention_defaults(value.get("retention_defaults", {}))
+        if "semantic_search" in value and not isinstance(value["semantic_search"], bool):
+            raise SchemaError(tr("A opção de busca semântica do workspace é inválida."))
         _, size = _copy_json(value, "workspace.json")
         if size > MAX_WORKSPACE_BYTES:
             raise SchemaError(tr("O workspace excede o limite permitido; o arquivo foi preservado."))
@@ -1941,6 +1970,30 @@ class MeetingLibrary:
     list_sessions_cursor = list_sessions_page
 
     def search(self, query, *, limit=50, offset=0, **filters):
+        from meeting_index import _query_parts
+        _query_parts(query)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 500:
+            raise ValueError(tr("O limite da busca é inválido."))
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError(tr("O deslocamento da busca é inválido."))
+        if not query.strip() or not limit:
+            return []
+        if not self.read_workspace().get("semantic_search", False):
+            return self._keyword_search(query, limit=limit, offset=offset, **filters)
+        if filters.get("collection") is None and "collection_id" in filters:
+            filters["collection"] = filters.pop("collection_id")
+        if filters.get("series") is None and "series_id" in filters:
+            filters["series"] = filters.pop("series_id")
+        self._catalog_filters(**filters)
+        # ceiling: fusion ranks the top 500 sources. Deeper keyword pages keep
+        # their existing behavior; expand only after measuring larger libraries.
+        if offset + limit > 500:
+            self.semantic.status = tr("Página além do limite semântico. Busca por palavras ativa.")
+            return self._keyword_search(query, limit=limit, offset=offset, **filters)
+        keyword = self._keyword_search(query, limit=500, offset=0, **filters)
+        return self.semantic.search(query, keyword, limit=limit, offset=offset, **filters)
+
+    def _keyword_search(self, query, *, limit=50, offset=0, **filters):
         if filters.get("collection") is None and "collection_id" in filters:
             filters["collection"] = filters.pop("collection_id")
         if filters.get("series") is None and "series_id" in filters:
@@ -2633,7 +2686,10 @@ class MeetingLibrary:
             return
 
     def project_session(self, session_id):
-        return self._project_after_canonical_write(session_id)
+        result = self._project_after_canonical_write(session_id)
+        if self._semantic is not None:
+            self._semantic.queue()
+        return result
 
     def on_session_trashed(self, session_id):
         """Remove a moved bundle from the disposable catalog, if present.
@@ -2679,6 +2735,8 @@ class MeetingLibrary:
         # explicit rebuild or user-facing indexed operation creates it.
         if self._index_closed:
             return None
+        if self._semantic is not None:
+            self._semantic.queue()
         if (
             not os.path.lexists(index_path)
             and (self._index is None or self._index.state == "unavailable")
@@ -2798,6 +2856,8 @@ class MeetingLibrary:
 
     def shutdown(self, timeout=12):
         """Join all queued projection workers before their bundle roots close."""
+        if self._semantic is not None:
+            self._semantic.shutdown(timeout)
         with self._index_lock:
             self._index_closed = True
             workers = list(self._index_workers)

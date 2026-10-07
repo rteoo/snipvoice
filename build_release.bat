@@ -73,9 +73,11 @@ REM separate processes so Windows does not reuse one runtime's loaded DLLs for t
 python -c "import llama_cpp" >nul 2>&1
 if errorlevel 1 (
     echo Local summary dependencies are missing.
-    echo Install them with: python -m pip install -r source\requirements-voice.txt
+    echo Build and install packaging\llama_runtime.py as documented in packaging\README.md.
     goto cleanup_and_fail
 )
+python "%REPO_DIR%\source\embedding_runtime_probe.py"
+if errorlevel 1 goto cleanup_and_fail
 set "VOICE_COLLECT_ARGS=--collect-all av --collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native --collect-all llama_cpp"
 
 call "%REPO_DIR%\source\native\build_windows_capture.bat"
@@ -102,6 +104,12 @@ if errorlevel 1 (
 start "" /wait "%STAGING_DIR%\Snipvoice.exe" --summary-runtime-probe
 if errorlevel 1 (
     echo Packaging failed: the staged llama.cpp summary runtime probe did not pass.
+    goto cleanup_and_fail
+)
+
+start "" /wait "%STAGING_DIR%\Snipvoice.exe" --embedding-runtime-probe
+if errorlevel 1 (
+    echo Packaging failed: the staged embedding runtime probe did not pass.
     goto cleanup_and_fail
 )
 

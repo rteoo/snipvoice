@@ -92,6 +92,7 @@ if ! "$PYTHON" -c "import av, sounddevice, soxr, transcribe_cpp, transcribe_cpp_
     exit 1
 fi
 VOICE_COLLECT_ARGS=(--collect-all av --collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native --collect-all llama_cpp)
+"$PYTHON" "$REPO_DIR/source/embedding_runtime_probe.py"
 sh "$REPO_DIR/source/native/build_macos_capture.sh"
 "$PYTHON" -m PyInstaller --noconfirm --clean --windowed --onedir \
     --distpath "$STAGING_ROOT" \
@@ -204,6 +205,11 @@ fi
 
 if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --summary-runtime-probe; then
     echo "The staged llama.cpp summary runtime probe failed. dist left unchanged." >&2
+    exit 1
+fi
+
+if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --embedding-runtime-probe; then
+    echo "The staged embedding runtime probe failed. dist left unchanged." >&2
     exit 1
 fi
 

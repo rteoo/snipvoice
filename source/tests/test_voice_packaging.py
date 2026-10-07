@@ -213,6 +213,7 @@ class PackagingExcludeTests(unittest.TestCase):
             self.assertIn("--voice-runtime-probe", text)
             self.assertIn("--collect-all llama_cpp", text)
             self.assertIn("--summary-runtime-probe", text)
+            self.assertIn("--embedding-runtime-probe", text)
 
     def test_release_bundles_the_application_license(self):
         windows = os.path.join(ROOT, "build_release.bat")
@@ -280,7 +281,10 @@ class PackagingExcludeTests(unittest.TestCase):
                 "soxr==1.1.0",
                 "transcribe-cpp==0.1.3",
                 "transcribe-cpp-native==0.1.3",
-                "llama-cpp-python==0.3.35",
+                "numpy==2.5.3",
+                "diskcache==5.6.3",
+                "jinja2==3.1.6",
+                "typing-extensions==4.16.0",
             },
         )
 
@@ -366,6 +370,7 @@ class PackagingExcludeTests(unittest.TestCase):
             requirements,
             {
                 "setuptools==84.0.0", "Cython==3.3.0", "wheel==0.48.0",
+                "scikit-build-core==1.1.1",
                 'delvewheel==1.13.0; sys_platform == "win32"',
                 'delocate==0.13.0; sys_platform == "darwin"',
             },
