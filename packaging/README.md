@@ -68,10 +68,12 @@ SHA-256-pinned source archives. The wrapper is 0.3.36 at
 An upstream 0.3.36 installation has a different native revision and is rejected
 by the release preflight. Never replace just the DLLs in an older wrapper.
 
-The existing compiler and CMake are prerequisites. Windows uses Visual Studio
-2022; macOS uses its native compiler. The recipe locates bundled CMake in an
-existing Visual Studio installation and never installs host tooling. Native CPU
-tuning, CUDA, and OpenMP are disabled; disabling OpenMP avoids an additional
+The existing compiler and CMake are prerequisites. Windows discovers the latest
+Visual Studio installation with MSVC C++ tools and selects the matching generator
+advertised by CMake (including Visual Studio 2022 and 2026); macOS uses its native
+compiler. The recipe locates bundled CMake when it is absent from PATH and never
+installs host tooling. CMake must support the installed Visual Studio major.
+Native CPU tuning, CUDA, and OpenMP are disabled; disabling OpenMP avoids an additional
 Windows runtime DLL. macOS retains upstream's default Metal configuration.
 
 After installing application/native Python requirements and the hash-locked
@@ -96,7 +98,10 @@ The wheel carries native MIT license text, exact source identities, build flags,
 and a native-library hash inventory. Source release preflights verify hashes
 before packaging. Frozen probes check identity, library inventory, and native
 ABI; they allow signing to change library bytes. macOS's existing final signature
-gate remains required. Both platform packagers run `--embedding-runtime-probe`
+gate remains required. Frozen macOS probes read the sealed manifest directly from
+`Contents/Resources/llama_cpp`, alongside libraries in `Contents/Frameworks/llama_cpp`,
+so PyInstaller's data cross-links do not trigger source-install symlink guards.
+Both platform packagers run `--embedding-runtime-probe`
 before promotion alongside the summary/voice/capture probes. These model-free
 checks prove packaging/import compatibility, not model quality or capture.
 

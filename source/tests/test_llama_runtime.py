@@ -79,6 +79,38 @@ class LlamaRuntimeTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 llama_runtime.verify_manifest(self.package, check_hashes=False)
 
+    def test_macos_frozen_manifest_uses_sealed_resources_and_framework_libraries(self):
+        contents = self.root / "Synthetic.app/Contents"
+        executable = contents / "MacOS/Synthetic"
+        executable.parent.mkdir(parents=True)
+        executable.touch()
+        framework = contents / "Frameworks/llama_cpp"
+        resources = contents / "Resources/llama_cpp"
+        (framework / "lib").mkdir(parents=True)
+        resources.mkdir(parents=True)
+        (framework / "lib/llama.dll").write_bytes(self.library.read_bytes())
+        (resources / llama_runtime.MANIFEST_NAME).write_text(json.dumps(self.manifest), encoding="utf-8")
+        with mock.patch.object(llama_runtime.sys, "frozen", True, create=True), \
+             mock.patch.object(llama_runtime.sys, "platform", "darwin"), \
+             mock.patch.object(llama_runtime.sys, "executable", str(executable)):
+            manifest_root = llama_runtime._macos_manifest_root(framework)
+            self.assertEqual(manifest_root, resources)
+            self.assertEqual(llama_runtime.verify_manifest(framework, check_hashes=False,
+                                                           manifest_root=manifest_root), self.manifest)
+            with self.assertRaisesRegex(RuntimeError, "bundle layout"):
+                llama_runtime._macos_manifest_root(self.package)
+        with self.assertRaises(FileNotFoundError):
+            llama_runtime.verify_manifest(framework)
+
+    def test_source_and_windows_frozen_runtime_keep_package_manifest(self):
+        for frozen, platform in ((False, "darwin"), (True, "win32")):
+            with mock.patch.object(llama_runtime.sys, "frozen", frozen, create=True), \
+                 mock.patch.object(llama_runtime.sys, "platform", platform):
+                self.assertIsNone(llama_runtime._macos_manifest_root(self.package))
+        with mock.patch.object(Path, "is_symlink", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "Invalid custom llama.cpp runtime manifest"):
+                llama_runtime.verify_manifest(self.package, check_hashes=False)
+
     def test_source_cache_hash_is_verified_on_every_build(self):
         archive = self.root / "source.tar.gz"
         archive.write_bytes(b"synthetic archive")
@@ -106,6 +138,70 @@ class LlamaRuntimeTests(unittest.TestCase):
                 recipe.acquire("https://example.invalid/source", destination, "0" * 64)
         self.assertFalse(destination.exists())
         self.assertEqual(list(self.root.iterdir()), [self.package])
+
+    def windows_toolchain(self, version, *, bundled=False, generators=None):
+        vswhere = self.root / "Microsoft Visual Studio/Installer/vswhere.exe"
+        vswhere.parent.mkdir(parents=True, exist_ok=True)
+        vswhere.touch()
+        installation = self.root / "Visual Studio"
+        cmake = installation / "Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+        if bundled:
+            cmake.parent.mkdir(parents=True, exist_ok=True)
+            cmake.touch()
+        installed = [{"installationPath": str(installation), "installationVersion": version}]
+        capabilities = {"generators": [{"name": name} for name in (generators or [
+            "Visual Studio 17 2022", "Visual Studio 18 2026", "Ninja"])]}
+        calls = [json.dumps(installed), json.dumps(capabilities)]
+        lookup = [None, str(cmake)] if bundled else ["cmake.exe", "cmake.exe"]
+        with mock.patch.dict(recipe.os.environ, {"ProgramFiles(x86)": str(self.root), "PATH": "synthetic-path",
+                                                "CMAKE_GENERATOR": "Visual Studio 17 2022",
+                                                "CMAKE_GENERATOR_INSTANCE": "stale-instance"}, clear=True), \
+             mock.patch.object(recipe.platform, "system", return_value="Windows"), \
+             mock.patch.object(recipe.shutil, "which", side_effect=lookup), \
+             mock.patch.object(recipe.subprocess, "check_output", side_effect=calls) as output:
+            environment = recipe.build_environment()
+        self.assertIn("Microsoft.VisualStudio.Component.VC.Tools.x86.x64", output.call_args_list[0].args[0])
+        self.assertEqual(output.call_args_list[1].args[0][-2:], ["-E", "capabilities"])
+        self.assertEqual(environment["CMAKE_GENERATOR_INSTANCE"], str(installation))
+        self.assertEqual(environment["CMAKE_ARGS"], recipe.CMAKE_ARGS)
+        if bundled:
+            self.assertEqual(environment["PATH"], str(cmake.parent) + recipe.os.pathsep + "synthetic-path")
+        else:
+            self.assertEqual(environment["PATH"], "synthetic-path")
+        return environment
+
+    def test_windows_2026_compiler_matches_generator_with_cmake_on_path(self):
+        self.assertEqual(self.windows_toolchain("18.1.0")["CMAKE_GENERATOR"], "Visual Studio 18 2026")
+
+    def test_windows_2022_compiler_uses_existing_bundled_cmake(self):
+        self.assertEqual(self.windows_toolchain("17.14.0", bundled=True)["CMAKE_GENERATOR"],
+                         "Visual Studio 17 2022")
+
+    def test_windows_compiler_requires_matching_cmake_generator(self):
+        with self.assertRaisesRegex(RuntimeError, "does not support installed Visual Studio major 18"):
+            self.windows_toolchain("18.1.0", generators=["Visual Studio 17 2022", "Ninja"])
+
+    def test_windows_missing_cpp_toolchain_fails_before_build(self):
+        vswhere = self.root / "Microsoft Visual Studio/Installer/vswhere.exe"
+        vswhere.parent.mkdir(parents=True)
+        vswhere.touch()
+        with mock.patch.dict(recipe.os.environ, {"ProgramFiles(x86)": str(self.root)}, clear=True), \
+             mock.patch.object(recipe.platform, "system", return_value="Windows"), \
+             mock.patch.object(recipe.subprocess, "check_output", return_value="[]"):
+            with self.assertRaisesRegex(RuntimeError, "with MSVC C\\+\\+ tools is required"):
+                recipe.build_environment()
+
+    def test_non_windows_keeps_native_generator_and_requires_existing_cmake(self):
+        with mock.patch.dict(recipe.os.environ, {"PATH": "synthetic-path"}, clear=True), \
+             mock.patch.object(recipe.platform, "system", return_value="Darwin"), \
+             mock.patch.object(recipe.shutil, "which", return_value="cmake"), \
+             mock.patch.object(recipe.subprocess, "check_output") as output:
+            self.assertNotIn("CMAKE_GENERATOR", recipe.build_environment())
+            output.assert_not_called()
+        with mock.patch.object(recipe.platform, "system", return_value="Linux"), \
+             mock.patch.object(recipe.shutil, "which", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "CMake installation is required"):
+                recipe.build_environment()
 
     def test_sealed_wheel_record_covers_provenance_license_and_native_files(self):
         wheel = self.root / "llama_cpp_python.whl"

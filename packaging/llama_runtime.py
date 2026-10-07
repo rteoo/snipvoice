@@ -72,21 +72,36 @@ def build_environment():
     environment["CMAKE_BUILD_PARALLEL_LEVEL"] = "4"
     # Existing platform tools only. Missing compilers/build tools are a host
     # prerequisite; this recipe never installs or updates global tooling.
-    if not shutil.which("cmake") and platform.system() == "Windows":
+    installation = None
+    if platform.system() == "Windows":
         vswhere = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / (
             "Microsoft Visual Studio/Installer/vswhere.exe")
-        if vswhere.is_file():
-            installation = subprocess.check_output(
-                [str(vswhere), "-latest", "-products", "*", "-requires",
-                 "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
-                text=True).strip()
-            cmake = Path(installation) / "Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin"
+        if not vswhere.is_file():
+            raise RuntimeError("Visual Studio Installer with MSVC C++ tools is required")
+        installations = json.loads(subprocess.check_output(
+            [str(vswhere), "-latest", "-products", "*", "-requires",
+             "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-format", "json"], text=True))
+        if not installations:
+            raise RuntimeError("An existing Visual Studio installation with MSVC C++ tools is required")
+        installation = installations[0]
+        if not shutil.which("cmake", path=environment.get("PATH")):
+            cmake = Path(installation["installationPath"]) / "Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin"
             if (cmake / "cmake.exe").is_file():
                 environment["PATH"] = str(cmake) + os.pathsep + environment.get("PATH", "")
-    if not shutil.which("cmake", path=environment.get("PATH")):
+    cmake = shutil.which("cmake", path=environment.get("PATH"))
+    if not cmake:
         raise RuntimeError("An existing CMake installation is required")
-    if platform.system() == "Windows":
-        environment["CMAKE_GENERATOR"] = "Visual Studio 17 2022"
+    if installation is not None:
+        # Runner images can change Visual Studio majors. Match CMake's advertised
+        # generator to the discovered compiler, even when CMake is already on PATH.
+        capabilities = json.loads(subprocess.check_output([cmake, "-E", "capabilities"], text=True))
+        major = int(installation["installationVersion"].split(".")[0])
+        generators = [item["name"] for item in capabilities["generators"]
+                      if item["name"].startswith(f"Visual Studio {major} ")]
+        if len(generators) != 1:
+            raise RuntimeError(f"Existing CMake does not support installed Visual Studio major {major}")
+        environment["CMAKE_GENERATOR"] = generators[0]
+        environment["CMAKE_GENERATOR_INSTANCE"] = installation["installationPath"]
     return environment
 
 

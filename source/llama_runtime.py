@@ -13,9 +13,9 @@ NATIVE_REVISION = "4fbc76dec51d0add466f0210855c0596589b60d4"
 MANIFEST_NAME = "snipvoice-native.json"
 
 
-def verify_manifest(root, *, check_hashes=True):
+def verify_manifest(root, *, check_hashes=True, manifest_root=None):
     root = Path(root)
-    manifest_path = root / MANIFEST_NAME
+    manifest_path = Path(manifest_root or root) / MANIFEST_NAME
     if manifest_path.is_symlink() or manifest_path.stat().st_size > 64000:
         raise RuntimeError("Invalid custom llama.cpp runtime manifest")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -46,6 +46,24 @@ def verify_manifest(root, *, check_hashes=True):
     return manifest
 
 
+def _macos_manifest_root(root):
+    if not getattr(sys, "frozen", False) or sys.platform != "darwin":
+        return None
+    executable = Path(sys.executable).resolve()
+    contents = executable.parent.parent
+    framework = contents / "Frameworks/llama_cpp"
+    resources = contents / "Resources/llama_cpp"
+    if (executable.parent.name != "MacOS" or contents.name != "Contents"
+            or contents.parent.suffix != ".app" or root.resolve() != framework.resolve()
+            or not framework.resolve().is_relative_to(contents)
+            or not resources.resolve().is_relative_to(contents)):
+        raise RuntimeError("Invalid custom llama.cpp application bundle layout")
+    # PyInstaller cross-links package data from Frameworks to Resources. Read
+    # the sealed resource directly; keep rejecting symlinks in source installs
+    # and in the actual resource/native library files.
+    return resources
+
+
 def verify_llama_runtime():
     specification = importlib.util.find_spec("llama_cpp")
     if specification is None or not specification.origin:
@@ -55,8 +73,9 @@ def verify_llama_runtime():
     # boundary is required. Signing changes native bytes; the source preflight
     # verifies hashes before packaging; frozen probes verify inventory/ABI and
     # release scripts independently verify the final bundle signature.
-    manifest = verify_manifest(Path(specification.origin).parent,
-                               check_hashes=not getattr(sys, "frozen", False))
+    root = Path(specification.origin).parent
+    manifest = verify_manifest(root, check_hashes=not getattr(sys, "frozen", False),
+                               manifest_root=_macos_manifest_root(root))
     import llama_cpp
     if llama_cpp.__version__ != WRAPPER_VERSION or not callable(llama_cpp.llama_model_n_embd_out):
         raise RuntimeError("Custom llama.cpp wrapper API is incompatible")
