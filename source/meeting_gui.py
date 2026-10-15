@@ -4341,8 +4341,7 @@ class MeetingWindow:
         self.playback_seek.configure(to=max(1.0, self.playback_duration))
         self.playback_position.set(0.0)
         self.playback_clock.set(f"{format_time(0)} / {format_time(self.playback_duration)}")
-        state = tr(STATE_LABELS.get(metadata.get("status"), N_("Gravação")))
-        self.audio_overview.set(f"{format_time(self.playback_duration)} · {state}")
+        self.audio_overview.set(format_time(self.playback_duration))
         self.audio_sizes = metadata.get("audio_sizes") or {}
         self._set_audio_capabilities(metadata.get("tracks", {}), metadata.get("final_available", False))
         self.detail_ready = True

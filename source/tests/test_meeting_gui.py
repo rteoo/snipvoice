@@ -1779,6 +1779,18 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             "synthetic-session", "final", start=5.0,
         )
 
+    def test_playback_overview_displays_duration_for_capture_with_diagnostics(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view.selected = "synthetic-session"
+        metadata = {"status": "partial", "duration": 41, "final_available": True,
+                    "tracks": {}, "summary": ""}
+        view._detail_loaded("synthetic-session", (metadata, []), None)
+        self.root.update()
+        self.assertEqual(view.audio_overview.get(), "00:00:41")
+        self.assertEqual(metadata["status"], "partial")
+
     def test_chat_send_button_keeps_conversation_and_composer_visible(self):
         callback_errors = []
         previous_reporter = self.root.report_callback_exception
