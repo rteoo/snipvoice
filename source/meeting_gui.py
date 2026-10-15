@@ -5285,9 +5285,11 @@ class MeetingWindow:
         if selected and stage in {"preparing", "encoding", "finalizing", "failed", "cancelled"}:
             self.final_audio_status.set(export["label"])
         if selected and hasattr(self, "export_audio_button"):
+            audio_stage_active = stage in {"preparing", "encoding", "finalizing"}
             self.export_audio_button.configure(
-                state="normal" if not self.snapshot.get("processing")
-                and getattr(self, "final_available", False) else "disabled",
+                state="disabled" if audio_stage_active else (
+                    "normal" if getattr(self, "final_available", False) else "disabled"
+                ),
             )
         if selected and hasattr(self, "recover_audio_button"):
             self.recover_audio_button.configure(

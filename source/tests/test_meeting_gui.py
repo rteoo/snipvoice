@@ -803,6 +803,51 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._sync_audio_export_progress()
         self.assertEqual(view.audio_export_progress.start.call_count, 2)
 
+    def test_final_audio_download_stays_enabled_while_summary_finishes(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.detail_ready = True
+        view.final_available = True
+        view.audio_export_progress = mock.Mock()
+        view.final_audio_progress = mock.Mock()
+        for bar in (view.audio_export_progress, view.final_audio_progress):
+            bar.cget.return_value = "determinate"
+        view.final_audio_status = Variable()
+        view.export_audio_button = mock.Mock()
+        view.recover_audio_button = mock.Mock()
+        view.refresh_outputs = mock.Mock()
+        view.snapshot = {"processing": True, "audio_export": {
+            "session_id": "session", "stage": "completed", "percent": 100,
+            "label": "Áudio final concluído",
+        }}
+
+        view._sync_audio_export_progress()
+
+        view.export_audio_button.configure.assert_called_with(state="normal")
+
+    def test_terminal_audio_stage_keeps_existing_file_downloadable(self):
+        for stage in ("failed", "cancelled"):
+            view = MeetingWindow.__new__(MeetingWindow)
+            view.selected = "session"
+            view.detail_ready = True
+            view.final_available = True
+            view.audio_export_progress = mock.Mock()
+            view.final_audio_progress = mock.Mock()
+            for bar in (view.audio_export_progress, view.final_audio_progress):
+                bar.cget.return_value = "determinate"
+            view.final_audio_status = Variable()
+            view.export_audio_button = mock.Mock()
+            view.recover_audio_button = mock.Mock()
+            view.refresh_outputs = mock.Mock()
+            view.snapshot = {"processing": True, "audio_export": {
+                "session_id": "session", "stage": stage, "percent": None,
+                "label": "Audio operation failed",
+            }}
+
+            view._sync_audio_export_progress()
+
+            view.export_audio_button.configure.assert_called_with(state="normal")
+
     def test_empty_destination_has_a_clear_local_default_label(self):
         self.assertEqual(destination_display(""), "Pasta local padrão (recordings)")
         self.assertEqual(destination_display(r"C:\\Audio"), r"C:\\Audio")
