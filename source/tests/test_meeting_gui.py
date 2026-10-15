@@ -752,6 +752,17 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIn("Criando áudio final · 42%", status)
         self.assertNotIn("Processando localmente", status)
 
+    def test_recording_status_reports_recovery_without_native_error_text(self):
+        snapshot = {"state": "recording", "elapsed": 15, "capture_health": {
+            "system": {"state": "recovering", "reason": "HRESULT synthetic-native-detail"}}}
+        status = format_recording_status(snapshot)
+        self.assertIn("Reconectando áudio", status)
+        self.assertNotIn("HRESULT", status)
+        snapshot["capture_health"]["system"]["state"] = "receiving"
+        self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
+        snapshot["capture_health"]["system"]["state"] = "quiet"
+        self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
+
     def test_export_progress_is_scoped_to_selection_and_refreshes_final_before_asr_finishes(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "session"

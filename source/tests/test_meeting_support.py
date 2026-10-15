@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import wave
 from pathlib import Path
@@ -450,6 +451,44 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(next(store.iter_events(session))["type"], "source_changed")
         self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
         self.assertEqual(Path(metadata["final_audio"]["path"]).suffix, ".mp3")
+
+    def test_capture_health_is_visible_and_recovery_evidence_survives_saved_mp3(self):
+        pending = [
+            {"type": "capture_health", "track": "system", "state": "recovering",
+             "reason": "synthetic same-device reconnect", "packets": 0, "frames": 0,
+             "last_packet_age": 3.0, "recovery_attempt": 1, "timestamp": 3.0},
+            {"type": "gap", "track": "system", "timestamp": 3.0,
+             "reason": "capture_interruption_reopening"},
+            {"type": "capture_health", "track": "system", "state": "receiving",
+             "reason": "packet_watchdog", "packets": 1, "frames": 2,
+             "last_packet_age": 0.0, "recovery_attempt": 1, "timestamp": 3.1},
+        ]
+        original = self.capture.read_event
+        def read_event(timeout):
+            if pending:
+                return dict(pending.pop(0), generation=self.capture.generation), b""
+            return original(timeout)
+        self.capture.read_event = read_event
+        self.assertTrue(self.controller.start(MeetingSettings(sources="system")))
+        self.assertTrue(self.capture.started.wait(2))
+        deadline = time.monotonic() + 2
+        while self.controller.snapshot()["capture_health"].get("system", {}).get("state") != "receiving":
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.005)
+        snapshot = self.controller.snapshot()
+        snapshot["capture_health"]["system"]["state"] = "mutated"
+        self.assertEqual(self.controller.snapshot()["capture_health"]["system"]["state"], "receiving")
+        self.controller.stop()
+        self.controller._thread.join(3)
+        self.assertFalse(self.controller._thread.is_alive())
+        session = self.controller.snapshot()["session_id"]
+        store = MeetingStore(self.temp.name)
+        events = list(store.iter_events(session))
+        self.assertEqual([event["state"] for event in events if event["type"] == "capture_health"],
+                         ["recovering", "receiving"])
+        self.assertTrue(any(event.get("reason") == "capture_interruption_reopening" for event in events))
+        self.assertTrue(Path(store.get(session)["final_audio"]["path"]).is_file())
+        self.assertTrue(self.controller.snapshot()["partial"], "Never erase evidence of an actual interruption")
 
     def test_missing_mp3_encoder_preserves_recording_and_releases_capture(self):
         self.final_export.side_effect = RuntimeError("MP3 encoder unavailable")

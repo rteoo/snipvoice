@@ -1642,6 +1642,8 @@ EN_US = {
     'Informe após quantos dias mover gravações para a lixeira.': 'Enter after how many days to move recordings to the trash.',
     'Igual ao ditado': 'Same as dictation',
     'Gravando · {time}': 'Recording · {time}',
+    'Reconectando áudio': 'Reconnecting audio',
+    'Estado de saúde da captura inválido.': 'Invalid capture health state.',
     'Gravação local em andamento': 'Local recording in progress',
     'Pausado · {time}': 'Paused · {time}',
     'A gravação está pausada': 'Recording is paused',

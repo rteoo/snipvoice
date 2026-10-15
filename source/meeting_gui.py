@@ -270,6 +270,11 @@ def format_recording_status(snapshot):
         export = snapshot.get("audio_export") or {}
         parts.append(export["label"] if export.get("stage") in {"preparing", "encoding", "finalizing"}
                      else tr("Processando localmente"))
+    if state in {"starting", "recording", "paused", "stopping"} and any(
+        value.get("state") == "recovering"
+        for value in (snapshot.get("capture_health") or {}).values() if isinstance(value, dict)
+    ):
+        parts.append(tr("Reconectando áudio"))
     if snapshot.get("final_audio"):
         parts.append(tr("Gravação preservada"))
     if snapshot.get("error"):

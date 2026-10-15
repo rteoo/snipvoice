@@ -59,6 +59,7 @@ class WindowsCaptureTests(unittest.TestCase):
             ("--capture", "--generation", "-1"),
             ("--capture", "--generation", "1extra"),
             ("--capture", "--generation"),
+            ("--capture", "--fault-script", "invalidate-once"),
         ):
             with self.subTest(args=args):
                 result = self.run_helper(*args)

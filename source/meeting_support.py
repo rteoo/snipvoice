@@ -217,6 +217,7 @@ class MeetingController:
         self._recording_consent_granted = False
         self._last_status = ""
         self._source_errors = set()
+        self._capture_health = {}
         self._annotation_generations = {}
         self._index_rebuild_lock = threading.Lock()
         self._index_rebuild_cancel = threading.Event()
@@ -446,6 +447,7 @@ class MeetingController:
                     "elapsed": max(0.0, time.monotonic() - self._started)
                     if self._state in {"starting", "recording", "paused", "stopping"} else self._elapsed,
                     "levels": dict(self._levels),
+                    "capture_health": {track: dict(value) for track, value in self._capture_health.items()},
                     "previewing": self._previewing,
                     "waveforms": {track: list(values) for track, values in self._waveforms.items()},
                     "final_audio": self._output_path,
@@ -562,6 +564,7 @@ class MeetingController:
             self._generation += 1
             self._state, self._error = "starting", ""
             self._source_errors.clear()
+            self._capture_health.clear()
             self._elapsed = 0.0
             self._output_path = ""
             self._postprocess = ""
@@ -664,8 +667,14 @@ class MeetingController:
                         self._waveforms[event["track"]].extend(envelope)
                 else:
                     self.store.add_event(session, event)
+                    if event["type"] == "capture_health" and event.get("track") in ("microphone", "system"):
+                        with self._lock:
+                            self._capture_health[event["track"]] = {
+                                key: event[key] for key in ("state", "reason", "packets", "frames",
+                                                           "last_packet_age", "recovery_attempt")
+                            }
                     loss = event["type"] == "gap" and any(word in str(event.get("reason", ""))
-                        for word in ("overflow", "invalid", "discontinuity", "timestamp_error"))
+                        for word in ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption"))
                     if event["type"] == "source_error" or loss:
                         with self._lock:
                             first_loss = event.get("track", "unknown") not in self._source_errors

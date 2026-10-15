@@ -44,6 +44,20 @@ class MeetingAudioTests(unittest.TestCase):
         with self.assertRaises(MeetingAudioError):
             read_frame(io.BytesIO(encode_frame({"type": "ready"}, b"audio")))
 
+    def test_capture_health_round_trip_and_invalid_observations(self):
+        health = {"type": "capture_health", "generation": 2, "track": "system",
+                  "state": "recovering", "reason": "synthetic reconnect", "packets": 12,
+                  "frames": 5760, "last_packet_age": 3.0, "recovery_attempt": 1,
+                  "timestamp": 4.0}
+        actual, payload = read_frame(FragmentedReader(encode_frame(health)))
+        self.assertEqual(actual, health)
+        self.assertEqual(payload, b"")
+        for changes in ({"state": "completed"}, {"frames": True}, {"packets": -1},
+                        {"last_packet_age": -1}, {"timestamp": "4"},
+                        {"recovery_attempt": 7}, {"reason": "x" * 4097}, {"track": "other"}):
+            with self.subTest(changes=changes), self.assertRaises(MeetingAudioError):
+                read_frame(io.BytesIO(encode_frame(dict(health, **changes))))
+
     def test_oversized_header_rejected_before_allocation(self):
         with self.assertRaises(MeetingAudioError):
             read_frame(io.BytesIO(struct.pack("<I", MAX_HEADER + 1)))

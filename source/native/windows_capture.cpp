@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <ks.h>
 #include <ksmedia.h>
@@ -28,6 +29,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "capture_health.h"
 
 using Microsoft::WRL::ComPtr;
 using Clock = std::chrono::steady_clock;
@@ -103,6 +105,17 @@ std::string nativePacketFields(DWORD flags, UINT32 frames, unsigned rate,
     else out << "null";
     return out.str();
 }
+struct AudioFailure : std::runtime_error {
+    HRESULT result;
+    AudioFailure(HRESULT value, const std::string& message)
+        : std::runtime_error(message), result(value) {}
+};
+bool recoverable(HRESULT result) {
+    return result == AUDCLNT_E_DEVICE_INVALIDATED
+        || result == AUDCLNT_E_RESOURCES_INVALIDATED
+        || result == AUDCLNT_E_SERVICE_NOT_RUNNING
+        || result == HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
 void check(HRESULT hr, const char* action) {
     if (SUCCEEDED(hr)) return;
     std::ostringstream message;
@@ -110,7 +123,7 @@ void check(HRESULT hr, const char* action) {
             << static_cast<unsigned long>(hr)
             << "). Check the selected endpoint, Windows microphone privacy access, "
                "and the Windows Audio service; refresh device selection and retry.";
-    throw std::runtime_error(message.str());
+    throw AudioFailure(hr, message.str());
 }
 ComPtr<IMMDeviceEnumerator> enumerator() {
     ComPtr<IMMDeviceEnumerator> out;
@@ -208,6 +221,12 @@ struct Session {
     bool finished = false;
     bool overflow = false;
     std::atomic<bool> writerDone{false}, controlDone{false};
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+    // Explicit private test builds only. Official bundles contain no fault
+    // arguments or injection behavior.
+    std::wstring faultScript;
+    bool faultInjected = false;
+#endif
     double now() const {
         LARGE_INTEGER counter, frequency;
         QueryPerformanceCounter(&counter);
@@ -402,6 +421,49 @@ struct Selection {
     EDataFlow flow() const { return track == 0 ? eCapture : eRender; }
     const char* name() const { return track == 0 ? "microphone" : "system"; }
 };
+void healthEvent(Session& session, const Selection& selected,
+                 const capture_health::Watchdog& health,
+                 const capture_health::RecoveryBudget& recovery,
+                 const char* state, const char* reason) {
+    session.event("capture_health", ",\"track\":" + quote(selected.name())
+        + ",\"timestamp\":" + number(session.now())
+        + ",\"state\":" + quote(state) + ",\"reason\":" + quote(reason)
+        + ",\"packets\":" + std::to_string(health.packets)
+        + ",\"frames\":" + std::to_string(health.frames)
+        + ",\"last_packet_age\":" + number(std::max(0.0, session.now() - health.lastPacket))
+        + ",\"recovery_attempt\":" + std::to_string(recovery.attempts), selected.track);
+}
+void recoveryWait(Session& session, int milliseconds) {
+    std::unique_lock<std::mutex> lock(session.mutex);
+    session.changed.wait_for(lock, std::chrono::milliseconds(milliseconds), [&] {
+        return session.stop.load();
+    });
+}
+template<typename Attempt, typename Wait>
+void recoverSource(Session& session, const Selection& selected,
+                   capture_health::RecoveryBudget& recovery,
+                   capture_health::Watchdog& health, Attempt attempt, Wait wait) {
+    while (!session.stop) {
+        // A paused recording must not spend its reconnect budget while the
+        // user is intentionally away from the endpoint.
+        while (session.paused && !session.stop) wait(100);
+        if (session.stop) return;
+        try {
+            if (!attempt()) return;
+        } catch (const AudioFailure& error) {
+            if (session.stop) return;
+            if (!recoverable(error.result)) throw;
+            int delay = recovery.nextDelay();
+            if (delay < 0) {
+                healthEvent(session, selected, health, recovery, "failed", "recovery_exhausted");
+                throw std::runtime_error("Audio source recovery exhausted six attempts; reconnect the selected device and start a new recording. Saved audio was preserved.");
+            }
+            session.gap(selected.track, session.now(), "capture_interruption_reopening");
+            healthEvent(session, selected, health, recovery, "recovering", error.what());
+            wait(delay);
+        }
+    }
+}
 struct Format {
     unsigned rate, channels, bits, validBits, stride;
     bool floating;
@@ -455,7 +517,130 @@ struct Format {
     }
 };
 
+void healthSelfTest() {
+    auto require = [](bool valid, const char* scenario) {
+        if (!valid) throw std::runtime_error(std::string("Capture health self-test: ") + scenario);
+    };
+    capture_health::Watchdog quiet;
+    quiet.reset(0);
+    for (unsigned i = 1; i <= 240; ++i) {
+        require(!quiet.inspect(i * 0.5, true, true, true, 0), "quiet loopback must not restart");
+        require(!quiet.inspect(i * 0.5, true, false, false, 0), "unknown loopback is not proof of starvation");
+    }
+    require(quiet.packets == 0 && quiet.frames == 0, "quiet loopback must not fabricate PCM");
+    capture_health::Watchdog race;
+    race.reset(0);
+    race.emptyAdvertised(0.1);
+    race.noPending();
+    require(!race.inspect(5, true, false, false, 0), "one empty-buffer race is harmless");
+    capture_health::Watchdog empty;
+    empty.reset(0);
+    const char* reason = nullptr;
+    for (unsigned i = 0; i <= 6; ++i) {
+        empty.emptyAdvertised(i * 0.5);
+        reason = empty.inspect(i * 0.5, true, false, false, 0);
+        if (i < 6) require(!reason, "zero-frame grace must be honored");
+    }
+    require(reason && std::string(reason) == "capture_interruption_zero_frames", "persistent zero-frame failure");
+    capture_health::Watchdog microphone;
+    microphone.reset(0);
+    microphone.inspect(1, false, true, false, 0);
+    microphone.inspect(2, false, true, false, 0);
+    require(microphone.inspect(3, false, true, false, 0) != nullptr, "microphone clock without packets");
+    microphone.reset(300);
+    require(!microphone.inspect(300.5, false, true, false, 0), "resume grants a new watchdog grace");
+    microphone.packet(303, 480);
+    require(!microphone.inspect(303, false, true, true, 0), "silent nonzero packets are healthy");
+    capture_health::Watchdog render;
+    render.reset(0);
+    require(!render.inspect(2, true, true, true, .1f), "one meter spike is insufficient");
+    require(!render.inspect(2.5, true, true, true, .1f), "sustained activity grace");
+    reason = render.inspect(3, true, true, true, .1f);
+    require(reason && std::string(reason) == "capture_interruption_render_starvation", "active render without captured packets");
+    capture_health::Watchdog spike;
+    spike.reset(0);
+    spike.inspect(3, true, true, true, .1f);
+    require(!spike.inspect(3.5, true, true, true, 0), "meter silence clears activity suspicion");
+    require(!spike.inspect(4, true, false, true, .1f), "unavailable stream clock is not corroboration");
+
+    Session recovered;
+    Selection same{1, L"synthetic-fixed-endpoint"};
+    capture_health::Watchdog health;
+    capture_health::RecoveryBudget budget;
+    std::vector<int> waits;
+    unsigned opens = 0;
+    uint64_t sequence = 0;
+    std::vector<BYTE> pcm(480 * sizeof(float), 17);
+    recoverSource(recovered, same, budget, health, [&]() {
+        ++opens;
+        AudioBatch batch{recovered, 1, 48000, 1, 0, sequence};
+        batch.append(opens * .01, 480, pcm);
+        batch.flush();
+        if (opens == 1) throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic same-device reconnect");
+        return false;
+    }, [&](int delay) { waits.push_back(delay); });
+    require(opens == 2 && waits == std::vector<int>{250}, "same endpoint retries without changing selection");
+    require(sequence == 2 && recovered.queue.front().payload == pcm
+        && recovered.queue.back().payload == pcm, "recovery preserves both PCM batches and sequence");
+    require(recovered.queue[1].header.find("capture_interruption_reopening") != std::string::npos
+        && recovered.queue[2].header.find("recovering") != std::string::npos,
+        "recovery interruption and health evidence are retained");
+
+    Session failed;
+    capture_health::RecoveryBudget exhausted;
+    waits.clear();
+    opens = 0;
+    bool terminal = false;
+    try {
+        recoverSource(failed, same, exhausted, health, [&]() -> bool {
+            ++opens;
+            throw AudioFailure(AUDCLNT_E_RESOURCES_INVALIDATED, "synthetic persistent failure");
+        }, [&](int delay) { waits.push_back(delay); });
+    } catch (const std::runtime_error& error) {
+        terminal = std::string(error.what()).find("exhausted six attempts") != std::string::npos;
+    }
+    require(terminal && opens == 7 && waits == std::vector<int>({250, 500, 1000, 2000, 4000, 4000}),
+        "persistent failures stop after six bounded retries");
+    require(!failed.stop && failed.queue.back().header.find("recovery_exhausted") != std::string::npos,
+        "exhaustion remains visible without stopping the other source");
+
+    Session denied;
+    capture_health::RecoveryBudget permanent;
+    bool deniedRaised = false;
+    try {
+        recoverSource(denied, same, permanent, health, []() -> bool {
+            throw AudioFailure(E_ACCESSDENIED, "synthetic permission failure");
+        }, [&](int) { require(false, "permission errors must not retry"); });
+    } catch (const AudioFailure& error) { deniedRaised = error.result == E_ACCESSDENIED; }
+    require(deniedRaised && permanent.attempts == 0, "permanent errors remain actionable");
+    capture_health::RecoveryBudget stable;
+    require(stable.nextDelay() == 250, "first recovery delay");
+    stable.packet(1, 480, 48000);
+    require(stable.nextDelay() == 500, "one packet cannot reset retry budget");
+    for (unsigned i = 0; i <= 3001; ++i) stable.packet(2 + i * .01, 480, 48000);
+    require(stable.attempts == 0 && stable.nextDelay() == 250, "stable capture restores retry budget");
+    Session cancelled;
+    capture_health::RecoveryBudget cancelledBudget;
+    opens = 0;
+    recoverSource(cancelled, same, cancelledBudget, health, [&]() -> bool {
+        ++opens;
+        throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic cancellation");
+    }, [&](int) { cancelled.stop = true; });
+    require(opens == 1 && cancelledBudget.attempts == 1, "stop prevents another reopen during backoff");
+    Session interruptedWait;
+    auto began = Clock::now();
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        interruptedWait.stop = true;
+        interruptedWait.changed.notify_all();
+    });
+    recoveryWait(interruptedWait, 4000);
+    stopper.join();
+    require(Clock::now() - began < std::chrono::seconds(1), "stop interrupts the real backoff wait");
+}
+
 void selfTestLogic() {
+    healthSelfTest();
     auto require = [](bool valid) {
         if (!valid) throw std::runtime_error("Native non-recording self-test failed");
     };
@@ -585,10 +770,15 @@ void capture(Session& session, Selection selected) {
         auto devices = enumerator();
         uint64_t sequence = 0;
         std::wstring previous;
-        while (!session.stop) {
+        capture_health::RecoveryBudget recovery;
+        capture_health::Watchdog health;
+        auto publishHealth = [&](const char* state, const char* reason) {
+            healthEvent(session, selected, health, recovery, state, reason);
+        };
+        auto attempt = [&]() {
             std::wstring id = selected.followsDefault()
                 ? defaultId(devices.Get(), selected.flow(), selected.role()) : selected.value;
-            if (id.empty()) throw std::runtime_error("No active OS default endpoint; connect a device and start a new recording");
+            if (id.empty()) throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "No active OS default endpoint");
             ComPtr<IMMDevice> device;
             check(devices->GetDevice(id.c_str(), device.GetAddressOf()), "Open selected endpoint");
             ComPtr<IMMEndpoint> endpoint;
@@ -598,7 +788,8 @@ void capture(Session& session, Selection selected) {
             if (flow != selected.flow()) throw std::runtime_error("Selected endpoint has the wrong source direction; refresh devices");
             DWORD state = 0;
             check(device->GetState(&state), "Inspect selected endpoint state");
-            if (!(state & DEVICE_STATE_ACTIVE)) throw std::runtime_error("Selected endpoint is disconnected or disabled; refresh devices");
+            if (!(state & DEVICE_STATE_ACTIVE))
+                throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "Selected endpoint is disconnected or disabled");
             ComPtr<IAudioClient> client;
             check(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                 reinterpret_cast<void**>(client.GetAddressOf())), "Activate WASAPI endpoint");
@@ -610,15 +801,26 @@ void capture(Session& session, Selection selected) {
                 wave.value, nullptr), "Initialize shared capture stream");
             ComPtr<IAudioCaptureClient> input;
             check(client->GetService(IID_PPV_ARGS(input.GetAddressOf())), "Open WASAPI capture service");
+            ComPtr<IAudioClock> audioClock;
+            // Optional observations never prevent otherwise usable capture.
+            client->GetService(IID_PPV_ARGS(audioClock.GetAddressOf()));
+            ComPtr<IAudioMeterInformation> meter;
+            device->Activate(__uuidof(IAudioMeterInformation), CLSCTX_ALL, nullptr,
+                reinterpret_cast<void**>(meter.GetAddressOf()));
             session.event("source_changed", ",\"track\":" + quote(selected.name())
                 + ",\"endpoint_id\":" + quote(utf8(id))
                 + ",\"timestamp\":" + number(session.now()), selected.track);
-            if (!previous.empty()) session.gap(selected.track, session.now(), "default_endpoint_changed");
+            if (!previous.empty() && previous != id)
+                session.gap(selected.track, session.now(), "default_endpoint_changed");
             previous = id;
             bool running = !session.paused;
             if (running) check(client->Start(), "Start capture stream");
             unsigned epoch = session.pauseEpoch;
             auto nextDefaultCheck = Clock::now() + std::chrono::milliseconds(500);
+            auto nextHealthCheck = Clock::now() + std::chrono::milliseconds(500);
+            auto nextHealthReport = Clock::now();
+            health.reset(session.now());
+            std::string healthState;
             bool reopen = false;
             HRESULT failure = S_OK;
             double lastEnd = session.now();
@@ -632,6 +834,16 @@ void capture(Session& session, Selection selected) {
                 UINT32 pending = 0;
                 result = input->GetNextPacketSize(&pending);
                 if (FAILED(result)) return result;
+                if (!pending) health.noPending();
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+                if (!tail && pending && selected.track == 1 && !session.faultInjected
+                        && session.now() >= 3.0
+                        && (session.faultScript == L"zero-once" || session.faultScript == L"empty-once")) {
+                    health.emptyAdvertised(session.now());
+                    if (session.faultScript == L"empty-once") session.faultInjected = true;
+                    return AUDCLNT_S_BUFFER_EMPTY;
+                }
+#endif
                 // Drain available packets before the next bounded polling wait.
                 while (pending && (tail || !session.stop)) {
                     BYTE* raw = nullptr;
@@ -640,7 +852,13 @@ void capture(Session& session, Selection selected) {
                     UINT64 devicePosition = 0, qpc100ns = 0;
                     result = input->GetBuffer(&raw, &frames, &bufferFlags, &devicePosition, &qpc100ns);
                     if (FAILED(result)) break;
-                    if (!frames) break;
+                    if (!frames) {
+                        // BUFFER_EMPTY can race GetNextPacketSize. Microsoft
+                        // permits omitting ReleaseBuffer for a zero-size packet.
+                        // Only persistent advertised-but-empty reads are faults.
+                        health.emptyAdvertised(session.now());
+                        break;
+                    }
                     if (frames > format.rate * 2u) {
                         input->ReleaseBuffer(frames);
                         throw std::runtime_error("Native packet exceeds the two-second safety limit");
@@ -656,9 +874,11 @@ void capture(Session& session, Selection selected) {
                     // handling from holding the endpoint buffer while the
                     // bounded queue is locked or flushed.
                     if (!invalidBuffer && !silent) {
-                        packet = copyAndRelease(raw, static_cast<size_t>(frames)
-                            * format.channels * format.stride,
-                            [&] { return input->ReleaseBuffer(frames); });
+                        try {
+                            packet = copyAndRelease(raw, static_cast<size_t>(frames)
+                                * format.channels * format.stride,
+                                [&] { return input->ReleaseBuffer(frames); });
+                        } catch (...) { batch.flush(); throw; }
                     } else {
                         result = input->ReleaseBuffer(frames);
                         if (FAILED(result)) break;
@@ -713,13 +933,20 @@ void capture(Session& session, Selection selected) {
                                 batch.append(timestamp + static_cast<double>(offset) / format.rate,
                                     count, block.payload);
                             }
+                            if (!invalidBuffer) {
+                                double observed = session.now();
+                                health.packet(observed, frames);
+                                recovery.packet(observed, frames, format.rate);
+                            }
                         } catch (...) { batch.flush(); throw; }
                     }
                     result = input->GetNextPacketSize(&pending);
                     if (FAILED(result)) break;
+                    if (!pending) health.noPending();
                 }
                 return result;
             };
+            try {
             while (!session.stop && !reopen) {
                 if (session.pauseEpoch != epoch || running == session.paused.load()) {
                     unsigned currentEpoch = session.pauseEpoch;
@@ -735,11 +962,12 @@ void capture(Session& session, Selection selected) {
                     }
                     session.gap(selected.track, session.now(), pause ? "paused" : "resumed");
                     lastEnd = session.now();
+                    health.reset(session.now());
                     idleGap = false;
                     if (!pause) { check(client->Start(), "Resume capture stream"); running = true; }
                     epoch = currentEpoch;
                 }
-                if (selected.followsDefault() && Clock::now() >= nextDefaultCheck) {
+                if (running && selected.followsDefault() && Clock::now() >= nextDefaultCheck) {
                     if (defaultId(devices.Get(), selected.flow(), selected.role()) != id) {
                         reopen = true;
                         break;
@@ -747,6 +975,15 @@ void capture(Session& session, Selection selected) {
                     nextDefaultCheck = Clock::now() + std::chrono::milliseconds(500);
                 }
                 if (running) {
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+                    if (selected.track == 1 && session.now() >= 3.0
+                            && (session.faultScript == L"invalidate-persistent"
+                                || (session.faultScript == L"invalidate-once" && !session.faultInjected))) {
+                        session.faultInjected = true;
+                        failure = AUDCLNT_E_DEVICE_INVALIDATED;
+                        break;
+                    }
+#endif
                     failure = drain(false);
                     if (FAILED(failure)) break;
                     if (session.now() - lastEnd > 0.1) batch.flush();
@@ -756,6 +993,48 @@ void capture(Session& session, Selection selected) {
                         session.gap(selected.track, lastEnd, "no_native_packets");
                         idleGap = true;
                     }
+                }
+                if (!running && (healthState != "paused" || Clock::now() >= nextHealthReport)) {
+                    publishHealth("paused", "packet_watchdog");
+                    healthState = "paused";
+                    nextHealthReport = Clock::now() + std::chrono::seconds(5);
+                }
+                if (running && Clock::now() >= nextHealthCheck) {
+                    check(device->GetState(&state), "Inspect capture endpoint health");
+                    if (!(state & DEVICE_STATE_ACTIVE))
+                        throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "Capture endpoint disconnected");
+                    UINT64 clockPosition = 0;
+                    HRESULT clockResult = audioClock
+                        ? audioClock->GetPosition(&clockPosition, nullptr) : E_NOINTERFACE;
+                    float peak = 0;
+                    HRESULT meterResult = meter ? meter->GetPeakValue(&peak) : E_NOINTERFACE;
+                    bool meterValid = SUCCEEDED(meterResult) && std::isfinite(peak) && peak >= 0 && peak <= 1;
+                    if (FAILED(clockResult) && recoverable(clockResult))
+                        check(clockResult, "Read capture stream clock");
+                    if (FAILED(meterResult) && recoverable(meterResult))
+                        check(meterResult, "Read endpoint meter");
+                    double observed = session.now();
+                    if (running) {
+                        const char* reason = health.inspect(observed, selected.track == 1,
+                            SUCCEEDED(clockResult), meterValid, peak);
+                        if (reason) {
+                            session.gap(selected.track, observed, reason);
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+                            if (session.faultScript == L"zero-once") session.faultInjected = true;
+#endif
+                            throw AudioFailure(AUDCLNT_E_RESOURCES_INVALIDATED, reason);
+                        }
+                    }
+                    std::string current = !running ? "paused"
+                        : observed - health.lastPacket < 0.5 ? "receiving"
+                        : selected.track == 1 && meterValid
+                            && peak <= capture_health::kActivePeak ? "quiet" : "waiting";
+                    if (current != healthState || Clock::now() >= nextHealthReport) {
+                        publishHealth(current.c_str(), "packet_watchdog");
+                        healthState = current;
+                        nextHealthReport = Clock::now() + std::chrono::seconds(5);
+                    }
+                    nextHealthCheck = Clock::now() + std::chrono::milliseconds(500);
                 }
                 std::unique_lock<std::mutex> lock(session.mutex);
                 session.changed.wait_for(lock, std::chrono::milliseconds(10), [&] {
@@ -769,14 +1048,21 @@ void capture(Session& session, Selection selected) {
             }
             batch.flush();
             if (FAILED(failure)) {
-                if (selected.followsDefault() && failure == AUDCLNT_E_DEVICE_INVALIDATED) {
-                    auto replacement = defaultId(devices.Get(), selected.flow(), selected.role());
-                    if (!replacement.empty() && replacement != id) { reopen = true; continue; }
-                }
                 check(failure, "Read selected source (recording on other sources continues)");
             }
-            if (!reopen) break;
-        }
+            } catch (...) {
+                // Preserve the last sub-100ms batch before abandoning this
+                // client. Never drain a client after a failed buffer operation.
+                batch.flush();
+                if (running) client->Stop();
+                throw;
+            }
+            if (reopen)
+                throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "System default audio endpoint changed");
+            return false;
+        };
+        recoverSource(session, selected, recovery, health, attempt,
+            [&](int delay) { recoveryWait(session, delay); });
     } catch (const std::exception& error) {
         session.error(selected.track, error.what());
     }
@@ -787,6 +1073,9 @@ void capture(Session& session, Selection selected) {
 int wmain(int argc, wchar_t** argv) {
     try {
         bool selfTest = false, list = false, record = false;
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+        std::wstring faultScript;
+#endif
         std::wstring sources = L"both", microphone = L"default:multimedia", system = L"default:multimedia";
         int64_t generation = 0;
         for (int i = 1; i < argc; ++i) {
@@ -794,6 +1083,14 @@ int wmain(int argc, wchar_t** argv) {
             if (option == L"--self-test") selfTest = true;
             else if (option == L"--list") list = true;
             else if (option == L"--capture") record = true;
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+            else if (option == L"--fault-script" && i + 1 < argc) {
+                faultScript = argv[++i];
+                if (faultScript != L"invalidate-once" && faultScript != L"invalidate-persistent"
+                        && faultScript != L"zero-once" && faultScript != L"empty-once")
+                    throw std::runtime_error("Unknown test fault script");
+            }
+#endif
             else if ((option == L"--sources" || option == L"--microphone" || option == L"--system"
                       || option == L"--generation") && i + 1 < argc) {
                 std::wstring value(argv[++i]);
@@ -809,6 +1106,10 @@ int wmain(int argc, wchar_t** argv) {
         }
         if (static_cast<int>(selfTest) + static_cast<int>(list) + static_cast<int>(record) != 1)
             throw std::runtime_error("Choose exactly one of --self-test, --list, or --capture");
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+        if (!faultScript.empty() && !record)
+            throw std::runtime_error("Test fault scripts require capture mode");
+#endif
         HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
         if (selfTest) {
             // No COM, endpoint enumeration, or audio activation in package probes.
@@ -821,6 +1122,9 @@ int wmain(int argc, wchar_t** argv) {
             throw std::runtime_error("Sources must be both, microphone, or system");
         if (microphone.empty() || system.empty()) throw std::runtime_error("Endpoint selection cannot be empty");
         Session session;
+#ifdef SNIPVOICE_CAPTURE_FAULT_TESTS
+        session.faultScript = faultScript;
+#endif
         session.generation = generation;
         LARGE_INTEGER counter, frequency;
         if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
