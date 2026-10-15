@@ -387,6 +387,31 @@ class MeetingFilesTests(unittest.TestCase):
         self.assertNotIn(str(self.root), content)
         self.assertEqual(list(self.root.glob(".report.md-*.tmp")), [])
 
+    def test_report_export_renders_detailed_notes_and_keeps_json_projection(self):
+        report = {
+            "id": "report-notes", "kind": "report", "profile_id": "general",
+            "profile_version": 1, "session_id": "session-1",
+            "transcript_revision": "revision-1",
+            "generated": {"summary": {"text": "Overview", "citations": ["s1"]},
+                          "detailed_notes": [
+                              {"start": 61, "end": 64, "text": "Meio\nlinha", "segment_ids": ["s2"]},
+                              {"start": 0, "end": 2, "text": "Início", "segment_ids": ["s1"]},
+                          ]},
+        }
+        for fmt in ("plain", "markdown"):
+            destination = self.root / f"notes.{fmt}"
+            export_report(report, destination, fmt)
+            content = destination.read_text(encoding="utf-8")
+            self.assertIn("00:00:00–00:00:02", content)
+            self.assertIn("00:01:01–00:01:04", content)
+            self.assertIn("Meio\nlinha", content)
+            self.assertIn("s2", content)
+        destination = self.root / "notes.json"
+        export_report(report, destination, "json")
+        document = json.loads(destination.read_text(encoding="utf-8"))
+        self.assertEqual(len(document["sections"]["detailed_notes"]), 2)
+        self.assertEqual(document["sections"]["detailed_notes"][0]["text"], "Meio\nlinha")
+
     def test_export_failure_keeps_previous_destination(self):
         sid = self.session()
         path = self.root / "export.md"

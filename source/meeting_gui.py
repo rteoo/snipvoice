@@ -17,7 +17,7 @@ import i18n
 from i18n import N_, tr
 from meeting_files import report_export_projection
 from meeting_chat import MeetingChat
-from meeting_text import format_summary
+from meeting_text import format_detailed_notes, format_summary
 from meeting_titles import safe_filename_stem
 from meeting_settings import (
     FOLLOW_DICTATION, EndpointSelection, dictation_profile, resolve_meeting_settings,
@@ -58,6 +58,7 @@ REPORT_HISTORY_LIMIT = 500
 MAX_RETENTION_PREVIEW_ITEMS = 64
 MAX_TRASH_ITEMS = 256
 MAX_RETENTION_TEXT = 800
+MAX_REPORT_REVIEW_CHARS = 65536
 RETENTION_POLICY_LABELS = {
     "keep": N_("Manter indefinidamente"),
     "whole_meeting": N_("Excluir reunião após o prazo"),
@@ -2768,10 +2769,16 @@ class MeetingWindow:
         self._render_report_section()
 
     def _render_report_section(self):
-        value = self.report_sections.get(self.report_section_choice.get(), "")
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+        section = self.report_section_choice.get()
+        value = self.report_sections.get(section, "")
+        if section == "detailed_notes":
+            text = format_detailed_notes(value)
+            # Validated notes are capped below this UI ceiling; retain the
+            # complete readable presentation instead of the old 64 KiB slice.
+        else:
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
         self.report_editor.delete("1.0", "end")
-        self.report_editor.insert("1.0", str(text)[:65536])
+        self.report_editor.insert("1.0", str(text) if section == "detailed_notes" else str(text)[:MAX_REPORT_REVIEW_CHARS])
 
     @staticmethod
     def _citation_ids(value):
@@ -2826,7 +2833,10 @@ class MeetingWindow:
         if not report_id or report_id == "legacy-summary" or not section:
             self.status.set(tr("O resumo legado não aceita revisão por seção; gere um relatório novo."))
             return
-        text = self.report_editor.get("1.0", "end-1c")[:65536]
+        text = self.report_editor.get("1.0", "end-1c")
+        if len(text) > MAX_REPORT_REVIEW_CHARS:
+            self.status.set(tr("Esta revisão é longa demais para salvar. Exporte a seção completa."))
+            return
         artifact = self.selected_report.get("reviewed_artifact")
         expected = artifact.get("generation", 0) if isinstance(artifact, dict) else 0
         session_id = self.selected

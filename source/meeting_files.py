@@ -15,6 +15,7 @@ import tempfile
 import wave
 
 from i18n import tr
+from meeting_text import format_detailed_notes
 
 
 # ceiling: 1,024 frames per playback write and 8,192 per import; raise only after cancellation/memory profiling.
@@ -935,8 +936,13 @@ def export_report(report, path, format="markdown", *, section=None, cancel_event
                  tr("Revisão de transcrição: {revision}",
                     revision=projection.get('transcript_revision')), ""]
         for name, value in projection["sections"].items():
-            lines.append(("## " if format == "markdown" else "") + str(name))
-            if isinstance(value, str):
+            label = tr("Notas detalhadas") if name == "detailed_notes" else str(name)
+            lines.append(("## " if format == "markdown" else "") + label)
+            if name == "detailed_notes":
+                rendered = format_detailed_notes(value, markdown=format == "markdown")
+                if rendered:
+                    lines.append(rendered)
+            elif isinstance(value, str):
                 lines.append(value)
             else:
                 lines.append(json.dumps(value, ensure_ascii=False, indent=2))

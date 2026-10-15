@@ -429,6 +429,79 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             library.save_report(self.session_id, reports[0])
 
+    def test_multichunk_notes_preserve_every_leaf_when_overview_discards_details(self):
+        revision = self.store.begin_revision(self.session_id, "local", "en-US")
+        for index in range(20):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"point-{index}", "track": "final", "start": index * 60,
+                "end": index * 60 + 30, "text": f"Confirmed point {index}.",
+            })
+        self.store.finish_revision(self.session_id, revision)
+
+        def response(_prompt, evidence):
+            source = next(item for item in evidence if item.get("id") or item.get("segment_ids"))
+            identifier = source.get("id") or source["segment_ids"][0]
+            return json.dumps({
+                "summary": source.get("text", "Concise overview."),
+                "segment_ids": [identifier], "decisions": [], "action_items": [],
+            })
+
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                intelligence, runtime = self._intelligence(response)
+                intelligence.library = MeetingLibrary(self.store, workspace_root=self.temp.name)
+                with mock.patch.object(intelligence, "_chunks", side_effect=lambda segments, _budget:
+                                       ([segment] for segment in segments)):
+                    result = intelligence.generate_report(
+                        self.session_id, DEFAULT_SUMMARY_MODEL, revision=revision, legacy=legacy,
+                    )
+                notes = result["detailed_notes"]
+                self.assertEqual(len(notes), 20)
+                self.assertEqual(result["segment_ids"], ["point-0"])
+                for index, note in enumerate(notes):
+                    self.assertEqual(note["text"], f"Confirmed point {index}.")
+                    self.assertEqual(note["segment_ids"], [f"point-{index}"])
+                    self.assertEqual((note["start"], note["end"]), (index * 60, index * 60 + 30))
+                if legacy:
+                    reopened = self.store.get(self.session_id)["summary"]
+                else:
+                    reopened = intelligence.library.get_report(self.session_id, result["report_id"])["generated"]
+                self.assertEqual(reopened["detailed_notes"], notes)
+                self.assertTrue(runtime.closed)
+                self.assertTrue(all("detailed_notes" not in item
+                                    for call in runtime.calls for item in call[1]))
+
+    def test_note_ceiling_or_cancellation_preserves_previous_report(self):
+        revision = self.store.begin_revision(self.session_id, "local", "en-US")
+        for index in range(3):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"ceiling-{index}", "track": "final", "start": index,
+                "end": index + 1, "text": "Confirmed point.",
+            })
+        self.store.finish_revision(self.session_id, revision)
+        for ceiling in ("MAX_DETAILED_NOTES", "MAX_DETAILED_NOTES_BYTES", "MAX_DETAILED_NOTE_BYTES"):
+            with self.subTest(ceiling=ceiling):
+                intelligence, runtime = self._intelligence()
+                with mock.patch.object(intelligence, "_chunks", side_effect=lambda segments, _budget:
+                                       ([segment] for segment in segments)), \
+                        mock.patch("meeting_intelligence." + ceiling, 2):
+                    with self.assertRaises(ValueError):
+                        intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+                self.assertTrue(runtime.closed)
+                self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+
+        cancel = threading.Event()
+        def cancelled_response(_prompt, evidence):
+            cancel.set()
+            return json.dumps(self._report(evidence))
+        intelligence, runtime = self._intelligence(cancelled_response)
+        with mock.patch.object(intelligence, "_chunks", side_effect=lambda segments, _budget:
+                               ([segment] for segment in segments)):
+            with self.assertRaises(RuntimeError):
+                intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL, cancel_event=cancel)
+        self.assertTrue(runtime.closed)
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+
     def test_explicit_answer_save_is_a_qa_report_and_memory_answer_stays_unwritten(self):
         library = MeetingLibrary(self.store, workspace_root=self.temp.name)
         intelligence, _runtime = self._intelligence(lambda _prompt, evidence: json.dumps({

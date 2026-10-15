@@ -17,6 +17,8 @@ import time
 import uuid
 
 from i18n import N_, tr
+from meeting_library import MAX_DETAILED_NOTE_BYTES, MAX_DETAILED_NOTES, MAX_DETAILED_NOTES_BYTES
+from meeting_text import format_summary
 from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
 from summary_runtime import SummaryOutputLimitError, SummaryRuntime
@@ -1122,8 +1124,8 @@ class MeetingIntelligence:
         metadata = self._metadata(session_id)
         selected = self._revision(session_id, metadata, revision)
         selected_profile = self._profile(profile, language)
-        segments = self._segments(session_id, selected)
-        first = next((candidate for candidate in segments if candidate["text"].strip()), None)
+        source_segments = self._segments(session_id, selected)
+        first = next((candidate for candidate in source_segments if candidate["text"].strip()), None)
         if first is None:
             raise ValueError(tr("A transcrição não contém texto para resumir."))
         entry, model_file, context, budget = self._model(model)
@@ -1135,10 +1137,13 @@ class MeetingIntelligence:
         evidence_budget = self._evidence_budget(
             budget, guidance
         )
-        segments = itertools.chain((first,), segments)
+        segments = itertools.chain((first,), source_segments)
         runtime = self.runtime_factory(model_file, context)
         levels = []
         chunks_processed = 0
+        detailed_notes = []
+        detailed_notes_bytes = 2
+        chunks = None
         try:
             def reduce_pair(left, right):
                 left_document, left_sources = left
@@ -1158,8 +1163,12 @@ class MeetingIntelligence:
                 return document, self._cited_source_map(document, sources)
 
             def process_chunk(chunk, *, output_limit=None):
-                nonlocal chunks_processed
+                nonlocal chunks_processed, detailed_notes_bytes
                 self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
+                # ceiling: 2,048 notes and 768 KiB per report. Larger recordings
+                # need a paged report contract before this bound can increase.
+                if len(detailed_notes) >= MAX_DETAILED_NOTES:
+                    raise ValueError(tr("As notas detalhadas excedem o limite do relatório local."))
                 source_text_by_id = {}
                 for item in chunk:
                     source_text_by_id.setdefault(item["id"], []).append(item["text"])
@@ -1168,6 +1177,22 @@ class MeetingIntelligence:
                     {item["id"] for item in chunk}, evidence_budget, cancel_event,
                     source_text_by_id, payload_budget, focus_evidence, output_limit,
                 )
+                self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
+                # Reductions intentionally compress their input. Preserve every
+                # validated leaf separately so the saved report also retains
+                # supported details that its concise overview no longer cites.
+                note = {
+                    "start": min(item["start"] for item in chunk),
+                    "end": max(item["end"] for item in chunk),
+                    "text": format_summary(document),
+                    "segment_ids": sorted(self._ids(document)),
+                }
+                note_bytes = len(json.dumps(note, ensure_ascii=False).encode("utf-8"))
+                detailed_notes_bytes += note_bytes + (2 if detailed_notes else 0)
+                if (len(note["text"].encode("utf-8")) > MAX_DETAILED_NOTE_BYTES
+                        or detailed_notes_bytes > MAX_DETAILED_NOTES_BYTES):
+                    raise ValueError(tr("As notas detalhadas excedem o limite do relatório local."))
+                detailed_notes.append(note)
                 current = (document, self._cited_source_map(document, source_text_by_id))
                 chunks_processed += 1
                 self._reduce(levels, current, reduce_pair)
@@ -1218,8 +1243,21 @@ class MeetingIntelligence:
                 )
             self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         finally:
-            runtime.close()
+            try:
+                if chunks is not None:
+                    close_chunks = getattr(chunks, "close", None)
+                    if callable(close_chunks):
+                        close_chunks()
+            finally:
+                try:
+                    close_source = getattr(source_segments, "close", None)
+                    if callable(close_source):
+                        close_source()
+                finally:
+                    runtime.close()
         final = final[0]
+        if detailed_notes:
+            final = dict(final, detailed_notes=detailed_notes)
         self._cancel(cancel_event, tr("O resumo foi cancelado; o resultado anterior foi preservado."))
         result = dict(final,
                       model=model,

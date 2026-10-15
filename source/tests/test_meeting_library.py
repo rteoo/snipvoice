@@ -651,6 +651,51 @@ class MeetingLibrarySidecarTests(unittest.TestCase):
             with self.assertRaises(SchemaError):
                 self.library.save_report("fixture-meeting-v1", invalid)
 
+    def test_detailed_notes_round_trip_and_bounds(self):
+        envelope = {
+            "schema_version": 1, "id": "detailed-notes-report", "kind": "report",
+            "profile_id": "meeting_notes", "profile_version": 1,
+            "session_id": "fixture-meeting-v1", "transcript_revision": "revision-1",
+            "model": {"id": "local-model", "sha256": "1" * 64, "runtime": "llama.cpp"},
+            "generated": {"summary": "Generated", "detailed_notes": [
+                {"start": 0.0, "end": 3.0, "text": "First note", "segment_ids": ["segment-1"]},
+                {"start": 2.0, "end": 6.0, "text": "Second note", "segment_ids": ["segment-2"]},
+            ]},
+            "created_at": "2026-09-16T12:30:00Z",
+        }
+        with mock.patch.object(self.library.store, "get_transcript",
+                               return_value=[{"id": "segment-1"}, {"id": "segment-2"}]):
+            saved = self.library.save_report("fixture-meeting-v1", envelope)
+            self.assertEqual(len(self.library.get_report("fixture-meeting-v1", saved["id"])["generated"]["detailed_notes"]), 2)
+            invalid = dict(envelope, id="detailed-notes-invalid")
+            invalid["generated"] = dict(envelope["generated"], detailed_notes=[
+                {"start": 4, "end": 3, "text": "bad", "segment_ids": ["segment-1"]},
+            ])
+            with self.assertRaises(SchemaError):
+                self.library.save_report("fixture-meeting-v1", invalid)
+
+    def test_detailed_notes_reject_invalid_citations_ranges_and_overflow(self):
+        note = {"start": 0, "end": 3, "text": "Résumé", "segment_ids": ["segment-1"]}
+        invalid = [None, "text", [dict(note, start=True)], [dict(note, end=float("nan"))],
+                   [dict(note, start=-1)], [dict(note, text=" \n ")],
+                   [dict(note, segment_ids=[])], [dict(note, segment_ids=[["segment-1"]])],
+                   [dict(note, segment_ids=["segment-1", "segment-1"])],
+                   [dict(note, segment_ids=["unknown"])], [dict(note, extra="unrecognized")]]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(SchemaError):
+                self.library._validate_detailed_notes({"detailed_notes": value}, {"segment-1"})
+        for constant, limit, value in (
+                ("MAX_DETAILED_NOTES", 2, [note] * 3),
+                ("MAX_DETAILED_NOTE_BYTES", len(note["text"]), [note]),
+                ("MAX_DETAILED_NOTES_BYTES", len(json.dumps([note], ensure_ascii=False).encode("utf-8")) - 1, [note])):
+            with self.subTest(constant=constant), mock.patch("meeting_library." + constant, limit):
+                with self.assertRaises(SchemaError):
+                    self.library._validate_detailed_notes({"detailed_notes": value}, {"segment-1"})
+        with self.assertRaises(SchemaError):
+            self.library._report_citations({"summary": {"detailed_notes": {
+                "segment_ids": [f"segment-{index}" for index in range(17)],
+            }}})
+
     def test_memory_only_policy_blocks_qa_at_canonical_save_boundary(self):
         self.library.update_workspace(
             {"privacy_defaults": {"qa_mode": "memory_only"}},

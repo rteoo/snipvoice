@@ -181,6 +181,7 @@ _SUMMARY_SECTION_LABELS = {
     "action_items": N_("Ações"),
     "follow_up_email": N_("E-mail de acompanhamento"),
 }
+_DETAILED_NOTES_LABEL = N_("Notas detalhadas")
 
 
 def _summary_payload(value):
@@ -235,6 +236,40 @@ def _summary_items(value, section) -> list[str]:
     return lines
 
 
+def format_detailed_notes(value, *, markdown=False) -> str:
+    """Render chronological chunk notes without dropping text or citations."""
+    if isinstance(value, str):
+        text = value.strip()
+        return text
+    if not isinstance(value, list):
+        return ""
+    lines = []
+    ordered = sorted(
+        enumerate(value),
+        key=lambda pair: (float(pair[1].get("start", 0))
+                          if isinstance(pair[1], Mapping) and isinstance(
+                              pair[1].get("start", 0), (int, float)) else float("inf"),
+                          pair[0]),
+    )
+    for _index, note in ordered:
+        if not isinstance(note, Mapping):
+            continue
+        text = _value(note.get("text"))
+        if not text:
+            continue
+        start = _timestamp(note.get("start", 0))
+        end = _timestamp(note.get("end", note.get("start", 0)))
+        citations = note.get("segment_ids")
+        citation_text = ""
+        if isinstance(citations, list):
+            valid = [str(item) for item in citations if isinstance(item, str) and item]
+            if valid:
+                citation_text = f" [{tr('citações')}: {', '.join(valid)}]"
+        prefix = f"{start}–{end}{citation_text}"
+        lines.append((f"- {prefix}: " if markdown else f"{prefix}: ") + text)
+    return "\n".join(lines)
+
+
 def format_summary(value) -> str:
     """Render a generated summary in readable prose instead of raw JSON."""
     if isinstance(value, str):
@@ -266,4 +301,7 @@ def format_summary(value) -> str:
             sections.append("\n".join([f"{label}:"] + [f"• {line}" for line in lines])
                             if section != "follow_up_email" else
                             "\n".join([f"{label}:"] + lines))
+    detailed = format_detailed_notes(value.get("detailed_notes"))
+    if detailed:
+        sections.append("\n".join([f"{tr(_DETAILED_NOTES_LABEL)}:", detailed]))
     return "\n\n".join(sections)

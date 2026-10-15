@@ -825,6 +825,56 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
         view.export_audio_button.configure.assert_called_with(state="normal")
 
+    def test_detailed_notes_editor_keeps_first_middle_and_last_notes(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.report_sections = {"detailed_notes": [
+            {"start": 0, "end": 1, "text": "FIRST-" + "a" * 22000, "segment_ids": ["s1"]},
+            {"start": 60, "end": 61, "text": "MIDDLE-" + "b" * 22000, "segment_ids": ["s2"]},
+            {"start": 120, "end": 121, "text": "LAST-" + "c" * 22000, "segment_ids": ["s3"]},
+        ]}
+        view.report_section_choice = Variable("detailed_notes")
+        view.report_editor = mock.Mock()
+
+        view._render_report_section()
+
+        rendered = view.report_editor.insert.call_args.args[1]
+        self.assertIn("FIRST-", rendered)
+        self.assertIn("MIDDLE-", rendered)
+        self.assertIn("LAST-", rendered)
+        self.assertGreater(len(rendered), 65536)
+
+    def test_oversized_report_review_is_rejected_without_truncation(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.selected_report = {"id": "report", "reviewed_artifact": {"generation": 2}}
+        view.report_section_choice = Variable("summary")
+        view.report_editor = mock.Mock()
+        view.report_editor.get.return_value = "x" * 65537
+        view.status = Variable()
+        view._action = mock.Mock()
+
+        view.save_report_review()
+
+        self.assertIn("Exporte a seção completa", view.status.get())
+        view._action.assert_not_called()
+
+    def test_short_report_review_still_saves_in_full(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.selected_report = {"id": "report", "reviewed_artifact": {"generation": 2}}
+        view.report_section_choice = Variable("summary")
+        view.report_editor = mock.Mock()
+        view.report_editor.get.return_value = "Reviewed text"
+        view.status = Variable()
+        view._action = mock.Mock()
+
+        view.save_report_review()
+
+        view._action.assert_called_once_with(
+            "review_report", "session", "report", {"summary": "Reviewed text"},
+            expected_generation=2, callback=mock.ANY,
+        )
+
     def test_terminal_audio_stage_keeps_existing_file_downloadable(self):
         for stage in ("failed", "cancelled"):
             view = MeetingWindow.__new__(MeetingWindow)
