@@ -238,6 +238,157 @@ class MeetingControllerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             controller.export_final_audio(session, Path(store.root) / "inside.wav")
 
+    def test_saved_audio_download_preserves_running_inference_state_and_cancellation(self):
+        controller, _store, session, previous, _payload = self._quiet_recording()
+        controller._processing = True
+        controller._processing_session = session
+        progress = {"session_id": session, "stage": "completed", "percent": 100}
+        controller._audio_export_progress = progress
+        controller._cancel.set()
+        target = Path(self.temp.name) / "during-summary.wav"
+        try:
+            self.assertEqual(controller.export_final_audio(session, target), str(target.absolute()))
+            self.assertEqual(target.read_bytes(), previous.read_bytes())
+            self.assertTrue(controller._processing)
+            self.assertEqual(controller._processing_session, session)
+            self.assertIs(controller._audio_export_progress, progress)
+            self.assertTrue(controller._cancel.is_set())
+            self.assertFalse(controller._final_copy_active)
+            self.assertTrue(controller._final_copy_done.is_set())
+        finally:
+            controller._processing = False
+
+    def test_final_copy_lease_blocks_mutation_and_shutdown_waits_for_copy(self):
+        controller, _store, session, previous, _payload = self._quiet_recording()
+        target = Path(self.temp.name) / "leased-copy.wav"
+        entered, release, shutdown_done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        def controlled_copy(source, destination):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("synthetic copy was not released")
+            Path(destination).write_bytes(Path(source).read_bytes())
+        def copy():
+            try:
+                controller.export_final_audio(session, target)
+            except BaseException as error:
+                errors.append(error)
+        def close():
+            try:
+                controller.shutdown()
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                shutdown_done.set()
+        copier = threading.Thread(target=copy)
+        closer = threading.Thread(target=close)
+        with patch("meeting_support.shutil.copyfile", side_effect=controlled_copy):
+            try:
+                copier.start()
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(controller.is_busy())
+                self.assertFalse(controller.start({"microphone": False, "system": True}))
+                self.assertFalse(controller.regenerate_final_audio(session))
+                with self.assertRaises(RuntimeError):
+                    controller._begin_retention()
+                with self.assertRaises(RuntimeError):
+                    controller.export_final_audio(session, Path(self.temp.name) / "second.wav")
+                closer.start()
+                self.assertFalse(shutdown_done.wait(.05))
+            finally:
+                release.set()
+                copier.join(5)
+                if closer.ident is not None:
+                    closer.join(5)
+        self.assertFalse(copier.is_alive())
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(target.read_bytes(), previous.read_bytes())
+        self.assertFalse(controller._final_copy_active)
+        self.assertTrue(controller._final_copy_done.is_set())
+
+    def test_final_copy_failure_releases_lease_and_keeps_existing_destination(self):
+        controller, _store, session, previous, _payload = self._quiet_recording()
+        target = Path(self.temp.name) / "preserved-copy.wav"
+        target.write_bytes(b"prior destination")
+        with patch("meeting_support.shutil.copyfile", side_effect=OSError("synthetic copy failure")):
+            with self.assertRaises(OSError):
+                controller.export_final_audio(session, target)
+        self.assertEqual(target.read_bytes(), b"prior destination")
+        self.assertFalse(controller._final_copy_active)
+        self.assertTrue(controller._final_copy_done.is_set())
+        self.assertEqual(list(target.parent.glob(".preserved-copy.wav-*.tmp")), [])
+        self.assertEqual(controller.export_final_audio(session, target), str(target.absolute()))
+        self.assertEqual(target.read_bytes(), previous.read_bytes())
+
+    def test_final_copy_rejects_audio_export_before_saved_completion(self):
+        controller, _store, session, _previous, _payload = self._quiet_recording()
+        target = Path(self.temp.name) / "too-early.wav"
+        for stage in ("preparing", "encoding", "finalizing"):
+            controller._audio_export_progress = {"session_id": session, "stage": stage}
+            with self.subTest(stage=stage), self.assertRaises(RuntimeError):
+                controller.export_final_audio(session, target)
+        self.assertFalse(target.exists())
+        self.assertFalse(controller._final_copy_active)
+        self.assertTrue(controller._final_copy_done.is_set())
+
+    def test_queued_audio_writer_waits_for_already_admitted_copy(self):
+        controller, _store, session, previous, _payload = self._quiet_recording()
+        target = Path(self.temp.name) / "queued-reader.wav"
+        entered, release, preparing = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        def controlled_copy(source, destination):
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("synthetic copy was not released")
+            Path(destination).write_bytes(Path(source).read_bytes())
+        original_wait = controller._final_copy_done.wait
+        def observed_wait(timeout):
+            preparing.set()
+            return original_wait(timeout)
+        def copy():
+            try:
+                controller.export_final_audio(session, target)
+            except BaseException as error:
+                errors.append(error)
+        def write():
+            try:
+                controller._export_audio(session, Path(previous).with_suffix(".mp3"), save_final=True)
+            except BaseException as error:
+                errors.append(error)
+        copier, writer = threading.Thread(target=copy), threading.Thread(target=write)
+        self.final_export.reset_mock()
+        with patch("meeting_support.shutil.copyfile", side_effect=controlled_copy), \
+                patch.object(controller._final_copy_done, "wait", side_effect=observed_wait):
+            try:
+                copier.start()
+                self.assertTrue(entered.wait(2))
+                writer.start()
+                self.assertTrue(preparing.wait(2))
+                self.assertEqual(controller._audio_export_progress["stage"], "preparing")
+                self.final_export.assert_not_called()
+            finally:
+                release.set()
+                copier.join(5)
+                if writer.ident is not None:
+                    writer.join(5)
+        self.assertFalse(copier.is_alive())
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(errors, [])
+        self.final_export.assert_called_once()
+        self.assertEqual(target.read_bytes(), previous.read_bytes())
+
+    def test_queued_audio_writer_timeout_preserves_saved_audio_without_encoding(self):
+        controller, store, session, previous, _payload = self._quiet_recording()
+        previous_bytes = previous.read_bytes()
+        self.final_export.reset_mock()
+        with patch.object(controller._final_copy_done, "wait", return_value=False):
+            with self.assertRaises(RuntimeError):
+                controller._export_audio(session, previous.with_suffix(".mp3"), save_final=True)
+        self.final_export.assert_not_called()
+        self.assertEqual(store.get(session)["final_audio"]["path"], str(previous))
+        self.assertEqual(previous.read_bytes(), previous_bytes)
+
     def test_track_download_exports_only_that_source(self):
         controller, _store, session, _previous, _payload = self._quiet_recording()
         target = Path(self.temp.name) / "microphone.mp3"

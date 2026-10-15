@@ -188,6 +188,9 @@ class MeetingController:
         self._cancel = threading.Event()
         self._file_done = threading.Event()
         self._file_done.set()
+        self._final_copy_done = threading.Event()
+        self._final_copy_done.set()
+        self._final_copy_active = False
         self._commands = queue.Queue(maxsize=16)
         self._stop = threading.Event()
         self._closed = False
@@ -346,6 +349,8 @@ class MeetingController:
                 return True
             if self._processing:
                 return True
+            if self._final_copy_active:
+                return True
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
                 return True
         return False
@@ -382,6 +387,8 @@ class MeetingController:
                 raise RuntimeError(tr("Aguarde a gravação terminar antes da retenção."))
             if self._processing:
                 raise RuntimeError(tr("Aguarde o processamento terminar antes da retenção."))
+            if self._final_copy_active:
+                raise RuntimeError(tr("Aguarde a cópia do áudio final terminar antes da retenção."))
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
                 raise RuntimeError(tr("Aguarde a reprodução terminar antes da retenção."))
             self._retention_active = True
@@ -536,7 +543,8 @@ class MeetingController:
         if isinstance(settings, dict):
             settings = resolve_meeting_settings(settings)
         with self._lock:
-            if self._closed or self._retention_active or self._processing or self._state != "idle":
+            if (self._closed or self._retention_active or self._processing
+                    or self._final_copy_active or self._state != "idle"):
                 return False
             if self._play_thread and self._play_thread.is_alive():
                 return False
@@ -1314,7 +1322,8 @@ class MeetingController:
 
     def _launch_processing(self, function, session_id=None):
         with self._lock:
-            if self._closed or self._retention_active or self._processing or self._state != "idle":
+            if (self._closed or self._retention_active or self._processing
+                    or self._final_copy_active or self._state != "idle"):
                 return False
             self._processing = True
             self._processing_session = session_id
@@ -1558,6 +1567,10 @@ class MeetingController:
             verification.update(verify_mp3_file(temporary, expected_duration=duration, cancel_event=self._cancel))
 
         try:
+            # A writer admitted just before a copy may reach this point later.
+            # Preparing blocks new copies; drain the admitted reader first.
+            if not self._final_copy_done.wait(12):
+                raise RuntimeError(tr("Uma cópia do áudio final ainda está encerrando."))
             if save_final:
                 self.store.save_processing_state(session_id, "audio", "processing")
             output = export_mixdown(self.store, session_id, path,
@@ -1629,7 +1642,25 @@ class MeetingController:
                     os.unlink(temporary)
                 raise
             return str(destination)
-        return self._file_work(work, session_id=session_id)
+        # A saved-file copy can overlap inference. Its own lease protects it
+        # from retention/shutdown without changing inference cancellation.
+        with self._lock:
+            if (self._closed or self._retention_active or self._state != "idle"
+                    or self._playback_active or (self._play_thread and self._play_thread.is_alive())
+                    or self._final_copy_active):
+                raise RuntimeError(tr("Aguarde a gravação, reprodução ou outra cópia terminar."))
+            progress = self._audio_export_progress or {}
+            if (progress.get("stage") in {"preparing", "encoding", "finalizing"}
+                    and progress.get("session_id") == session_id):
+                raise RuntimeError(tr("Aguarde a preparação do áudio final terminar."))
+            self._final_copy_active = True
+            self._final_copy_done.clear()
+        try:
+            return work()
+        finally:
+            with self._lock:
+                self._final_copy_active = False
+                self._final_copy_done.set()
 
     def audio_inventory(self, session_id):
         """Bytes of the final audio and each raw source; None where absent."""
@@ -1690,7 +1721,8 @@ class MeetingController:
     def _file_work(self, operation, session_id=None):
         # Caller is an IO worker; reserve admission without another nested thread.
         with self._lock:
-            if (self._closed or self._retention_active or self._processing or self._state != "idle"
+            if (self._closed or self._retention_active or self._processing
+                    or self._final_copy_active or self._state != "idle"
                     or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
                 raise RuntimeError(tr("Aguarde a gravação, reprodução ou processamento terminar."))
             self._processing = True
@@ -1990,6 +2022,8 @@ class MeetingController:
         self.stop_playback()
         if not self._file_done.wait(12):
             raise RuntimeError(tr("Uma operação de arquivo de reunião ainda está encerrando."))
+        if not self._final_copy_done.wait(12):
+            raise RuntimeError(tr("Uma cópia do áudio final ainda está encerrando."))
         for worker in (self._thread, self._processing_thread, self._play_thread):
             if worker and worker is not threading.current_thread():
                 worker.join(12)
