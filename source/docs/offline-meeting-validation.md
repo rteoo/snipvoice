@@ -49,6 +49,9 @@ shows preparation, encoding percentage, finalization, and saved output. The
 controller publishes 100% only after validation, atomic publication, and the
 metadata commit. Processing failures/cancellation are persisted separately from
 capture health. Imports now create the final MP3 before inference begins.
+Library completion messages use the selected recording's persisted processing
+stages, so a retained capture diagnostic cannot falsely report a failed summary.
+Capture diagnostics remain accessible through Recording details.
 
 Native Windows capture copies and releases every acquired WASAPI packet before
 gap diagnostics, batch flushing, conversion, or queue work. This reduces buffer

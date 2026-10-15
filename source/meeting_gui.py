@@ -246,6 +246,19 @@ def _append_detail_once(details, value):
         details.append(value)
 
 
+def _processing_failure_details(metadata):
+    """Keep retained capture diagnostics separate from persisted processing failures."""
+    stages = metadata.get("processing")
+    if not isinstance(stages, dict):
+        return ""
+    details = []
+    for name in ("audio", "capture_cleanup", "transcription", "summary"):
+        stage = stages.get(name)
+        if isinstance(stage, dict) and stage.get("status") in {"failed", "cancelled"}:
+            details.append(f"{name}: {str(stage.get('error') or stage['status'])[:1024]}")
+    return "; ".join(details)
+
+
 def format_recording_status(snapshot):
     """Return bounded user-facing state without exposing paths or native errors."""
     state = snapshot.get("state", "idle")
@@ -259,7 +272,7 @@ def format_recording_status(snapshot):
     if snapshot.get("final_audio"):
         parts.append(tr("Gravação preservada"))
     if snapshot.get("error"):
-        parts.append(tr("Não foi possível concluir uma etapa"))
+        parts.append(tr("Ver detalhes"))
     return " · ".join(parts)
 
 
@@ -4269,6 +4282,7 @@ class MeetingWindow:
         def read():
             raw = self.controller.get_session(session_id)
             metadata = {key: raw.get(key) for key in ("id", "title", "status", "duration", "error")}
+            metadata["processing_details"] = _processing_failure_details(raw)
             final = raw.get("final_audio")
             final_path = final.get("path") if isinstance(final, dict) else None
             metadata["final_available"] = bool(isinstance(final_path, str) and os.path.isfile(final_path))
@@ -4323,6 +4337,9 @@ class MeetingWindow:
             self.status.set(tr("Não foi possível carregar a gravação. Veja os detalhes na aba Gravação."))
             return
         metadata, segments = data
+        self.operation_details = ""
+        if metadata.get("processing_details") or metadata.get("error"):
+            self._remember_operation_error(metadata.get("processing_details") or metadata["error"])
         self.loading = True
         self.title.set(metadata.get("title") or "")
         self.transcript_revision = metadata.get("transcript_revision")
@@ -4363,7 +4380,8 @@ class MeetingWindow:
             self.pending_search_resolution = None
             self._apply_search_resolution(pending_search, self.search_request)
         self.status.set(tr("Gravação carregada · página de transcrição com {count} trechos.", count=len(segments))
-                         + (" · " + tr("Uma etapa anterior não foi concluída.") if metadata.get("error") else ""))
+                         + (" · " + tr("Uma etapa anterior não foi concluída.")
+                            if metadata.get("processing_details") else ""))
 
     def _set_audio_capabilities(self, tracks, final_available=False):
         # Keep these projections for legacy metadata and controller doubles;
@@ -5090,7 +5108,7 @@ class MeetingWindow:
             path = final.get("path") if isinstance(final, dict) else None
             final_available = bool(isinstance(path, str) and os.path.isfile(path))
             return (summary, page, annotations_for_revision(annotations, current_revision),
-                    raw.get("tracks", {}), final_available)
+                    raw.get("tracks", {}), final_available, _processing_failure_details(raw))
         def loaded(data, error):
             if self.selected != session_id or not self.detail_ready:
                 return
@@ -5098,7 +5116,9 @@ class MeetingWindow:
                 self._remember_operation_error(error)
                 self.status.set(tr("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação."))
                 return
-            summary, page, annotations, tracks, final_available = data
+            summary, page, annotations, tracks, final_available, processing_details = data
+            if processing_details:
+                self._remember_operation_error(processing_details)
             self._set_audio_capabilities(tracks, final_available)
             if getattr(self, "_adjusted_audio_target", None) == session_id:
                 self._adjusted_audio_target = None
@@ -5125,7 +5145,7 @@ class MeetingWindow:
             self.refresh_reports(session_id)
             self.status.set(
                 tr("Resultados disponíveis atualizados; uma etapa não foi concluída. Veja os detalhes na aba Gravação.")
-                if getattr(self, "snapshot", {}).get("error") else
+                if processing_details else
                 tr("Resultado local atualizado. Revise a transcrição e o resumo.")
             )
         self._submit("outputs", read, loaded)
@@ -5376,14 +5396,12 @@ class MeetingWindow:
                 target, self.processing_target = self.processing_target, None
                 if error:
                     self._adjusted_audio_target = None
-                    self._remember_operation_error(error)
-                    self.status.set(
-                        tr("O processamento local não foi concluído. "
-                           "Veja os detalhes na aba Gravação.")
-                    )
-                else:
+                    if target == self.selected:
+                        self._remember_operation_error(error)
+                elif target == self.selected:
                     self.operation_details = ""
-                    self.status.set(tr("Processamento local finalizado."))
+                if target == self.selected:
+                    self.status.set(tr("Atualizando…"))
                 if target:
                     self.refresh_outputs(target)
         except Exception:

@@ -739,7 +739,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(
             status,
             "Pronto · 00:00:31 · "
-            "Gravação preservada · Não foi possível concluir uma etapa",
+            "Gravação preservada · Ver detalhes",
         )
         self.assertNotIn("opaque-id", status)
         self.assertNotIn("HRESULT", status)
@@ -1219,6 +1219,41 @@ class MeetingGuiLogicTests(unittest.TestCase):
             callback(operation(), None)
         self.assertEqual(view.audio_source.get(), "Áudio final")
         self.assertIsNone(view._adjusted_audio_target)
+
+    def test_output_footer_uses_selected_processing_stages_not_capture_error(self):
+        for stage_status, incomplete in (("completed", False), ("skipped", False),
+                                         ("failed", True), ("cancelled", True)):
+            with self.subTest(stage_status=stage_status):
+                view = MeetingWindow.__new__(MeetingWindow)
+                view.selected = "meeting-1"
+                view.detail_ready = True
+                view.transcript_revision = "revision-1"
+                view.transcript_offset = 0
+                view.status = Variable()
+                view.snapshot = {"error": "native_discontinuity" if not incomplete else ""}
+                view.controller = mock.Mock()
+                view.controller.get_session.return_value = {
+                    "processing": {"summary": {"status": stage_status, "error": "model unavailable"}},
+                    "error": "native_discontinuity",
+                }
+                view._read_transcript_page = mock.Mock(return_value={"segments": []})
+                for name in ("_set_audio_capabilities", "_show_summary", "_render_transcript",
+                             "_render_annotations", "_update_transcript_paging_controls",
+                             "_load_transcript_document", "refresh_reports", "_submit",
+                             "_remember_operation_error"):
+                    setattr(view, name, mock.Mock())
+                view.refresh_outputs("meeting-1")
+                operation, callback = view._submit.call_args.args[1:]
+                callback(operation(), None)
+                self.assertEqual("uma etapa não foi concluída" in view.status.get(), incomplete)
+                if incomplete:
+                    view._remember_operation_error.assert_called_once_with("summary: model unavailable")
+                else:
+                    view._remember_operation_error.assert_not_called()
+                view.selected = "meeting-2"
+                view.status.set("Selected another recording")
+                callback(operation(), None)
+                self.assertEqual(view.status.get(), "Selected another recording")
 
     def test_recording_finished_opens_clean_new_recording_and_tracks_processing(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1785,11 +1820,36 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
         view.selected = "synthetic-session"
         metadata = {"status": "partial", "duration": 41, "final_available": True,
-                    "tracks": {}, "summary": ""}
+                    "tracks": {}, "summary": "", "error": "native_discontinuity",
+                    "processing_details": ""}
         view._detail_loaded("synthetic-session", (metadata, []), None)
         self.root.update()
         self.assertEqual(view.audio_overview.get(), "00:00:41")
         self.assertEqual(metadata["status"], "partial")
+        self.assertNotIn("Uma etapa anterior", view.status.get())
+        self.assertIn("native_discontinuity", view.operation_details)
+        metadata["processing_details"] = "summary: model unavailable"
+        view._detail_loaded("synthetic-session", (metadata, []), None)
+        self.assertIn("Uma etapa anterior não foi concluída", view.status.get())
+        self.assertIn("summary: model unavailable", view.operation_details)
+
+    def test_processing_completion_preserves_another_selected_recordings_details(self):
+        view, _notebook = self._embedded_view()
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        view.selected = "new-recording"
+        view.processing_target = "old-recording"
+        view.previous_processing = False
+        view.operation_details = "Selected recording details"
+        view.status.set("Selected another recording")
+        view.controller.snapshot.return_value["error"] = "Old recording capture diagnostic"
+        with mock.patch.object(view, "_remember_operation_error") as remember:
+            view._poll()
+        self.assertIsNone(view.processing_target)
+        remember.assert_not_called()
+        self.assertEqual(view.operation_details, "Selected recording details")
+        self.assertEqual(view.status.get(), "Selected another recording")
 
     def test_chat_send_button_keeps_conversation_and_composer_visible(self):
         callback_errors = []
