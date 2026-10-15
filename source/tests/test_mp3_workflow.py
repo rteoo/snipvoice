@@ -119,6 +119,28 @@ class Mp3WorkflowTests(unittest.TestCase):
             self.assertEqual((stream.codec_context.sample_rate, stream.codec_context.channels), (48000, 2))
             self.assertEqual(sum(frame.samples for frame in container.decode(stream)), 96000)
 
+    def test_six_channel_capture_downmixes_to_stereo_and_preserves_duration(self):
+        sid = self.store.begin({}, "Synthetic multichannel capture")
+        values = (0.0, 0.0, 0.6, 0.0, 0.0, 0.0)
+        payload = struct.pack("<6f", *values) * 48000
+        for sequence in range(2):
+            self.store.append_audio(sid, {
+                "type": "audio", "generation": 1, "track": "system", "rate": 48000,
+                "channels": 6, "frames": 48000, "timestamp": sequence, "sequence": sequence,
+            }, payload)
+        self.store.finish(sid)
+        path = self.root / "multichannel.mp3"
+        proof = {}
+        export_mixdown(self.store, sid, path,
+                       validate_output=lambda temporary, duration:
+                       proof.update(verify_mp3_file(temporary, duration, self.cancel)))
+        self.assertAlmostEqual(proof["duration"], 2, delta=.05)
+        import av
+        with av.open(str(path)) as container:
+            stream = container.streams.audio[0]
+            self.assertEqual((stream.codec_context.sample_rate, stream.codec_context.channels), (48000, 2))
+            self.assertAlmostEqual(sum(frame.samples for frame in container.decode(stream)), 96000, delta=1152)
+
     def test_validation_failure_preserves_previous_mp3_and_capture(self):
         sid, path, _proof = self.recording()
         previous = path.read_bytes()

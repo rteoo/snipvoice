@@ -69,7 +69,7 @@ def _validate_event(event, payload, track):
     frames = event.get("frames")
     timestamp = event.get("timestamp")
     if (not isinstance(rate, int) or isinstance(rate, bool) or not 1 <= rate <= 192000
-            or not isinstance(channels, int) or isinstance(channels, bool) or channels not in (1, 2)
+            or not isinstance(channels, int) or isinstance(channels, bool) or not 1 <= channels <= 8
             or not isinstance(frames, int) or isinstance(frames, bool) or frames <= 0
             or not isinstance(timestamp, (int, float)) or isinstance(timestamp, bool)
             or not math.isfinite(float(timestamp)) or timestamp < 0):
@@ -160,6 +160,10 @@ class _Track:
                 following = data[np.minimum(index + 1, frames - 1)]
                 interpolated = value + (following - value) * fraction
                 value = np.where((index + 1 < frames)[:, None], interpolated, value)
+                # ceiling: output supports at most stereo until capture
+                # persists a channel mask. Averaging includes center/surround
+                # samples without inventing speaker positions, at the cost
+                # of spatial placement and reduced per-channel level.
                 if self.channels < output_channels:
                     value = np.repeat(value, output_channels, axis=1)
                 elif self.channels > output_channels:
@@ -420,7 +424,10 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
     # A common highest-rate clock preserves the native timing and lets lower
     # rate sources use bounded linear interpolation during rendering.
     rate = max(track.rate for track in tracks) if output_rate is None else output_rate
-    output_channels = max(track.channels for track in tracks) if output_channels is None else output_channels
+    if output_channels is None:
+        # Native endpoints may expose up to eight channels; final MP3/WAV is
+        # intentionally mono or stereo until a channel-mask policy exists.
+        output_channels = min(2, max(track.channels for track in tracks))
     if (not isinstance(rate, int) or isinstance(rate, bool) or not 1 <= rate <= 192000
             or not isinstance(output_channels, int) or isinstance(output_channels, bool)
             or output_channels not in (1, 2)):
@@ -538,9 +545,9 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
                  and 1 <= segment.get("rate") <= 192000]
         channels = [segment.get("channels") for segment in formats
                     if isinstance(segment.get("channels"), int) and not isinstance(segment.get("channels"), bool)
-                    and segment.get("channels") in (1, 2)]
+                    and 1 <= segment.get("channels") <= 8]
         output_rate = max(rates, default=None)
-        output_channels = max(channels, default=None)
+        output_channels = min(2, max(channels, default=1)) if channels else None
     if progress is not None:
         metadata = metadata or store.get(session_id, include_events=False)
         ends = [segment.get("end") for track in tracks

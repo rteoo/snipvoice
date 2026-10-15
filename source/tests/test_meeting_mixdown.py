@@ -290,6 +290,15 @@ class MeetingMixdownTests(unittest.TestCase):
         self.assertEqual((rate, channels), (4, 1))
         self.assertEqual(struct.unpack("<4h", raw), (3277, 3277, 9830, 22937))
 
+    def test_six_channel_source_is_averaged_to_stereo_without_dropping_center(self):
+        source = [_event("system", [0.0, 0.0, 0.6, 0.0, 0.0, 0.0,
+                                     0.0, 0.0, 0.3, 0.0, 0.0, 0.0],
+                         rate=4, channels=6)]
+        mixdown_tracks({"system": source}, self.destination, chunk_frames=2)
+        rate, channels, raw = _read(self.destination)
+        self.assertEqual((rate, channels), (4, 2))
+        self.assertEqual(struct.unpack("<4h", raw), (3277, 3277, 1638, 1638))
+
     def test_export_uses_metadata_max_format_for_endpoint_handoff(self):
         source = [
             _event("system", [0.1, 0.1], rate=4, channels=1, timestamp=0.0),

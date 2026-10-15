@@ -56,6 +56,14 @@ hold time; the historical device discontinuities alone do not establish their
 cause. The helper's executable self-test checks copying, release ordering, and
 exactly one release on the failure path.
 
+Hierarchical summaries use a compact grammar for intermediate reports whose
+budget is at most 2 KiB: one supported item per section, one citation per item,
+and text bounded to 128 characters. This aligns the model contract with the
+pairwise reduction budget before generation. The final synthesis retains the
+requested profile and its larger report allowance. One bounded regeneration
+attempt remains available for oversized or token-limited output. The worker
+retains the model for that recoverable condition; failures preserve prior reports.
+
 Verified local checks using the existing clean PyAV 18.1.0 codec:
 
 - Three hours of synthetic 48 kHz stereo audio encoded and fully decoded:
@@ -63,6 +71,12 @@ Verified local checks using the existing clean PyAV 18.1.0 codec:
   329 seconds of processing. The temporary output was cleaned after validation.
 - MP3-only compaction, transcription input/retry, clip export, and import passed
   with stereo 48 kHz and mono 16/8 kHz fixtures.
+- Native PCM blocks with one through eight channels are accepted at the
+  mixdown boundary. Final MP3/WAV output stays mono or stereo; sources above
+  two channels are averaged across all channels because no native channel mask
+  is persisted. This includes center/surround samples but loses spatial
+  placement and reduces their level. The six-channel codec fixture checks
+  duration and stereo output.
 - Windows synthesized an approximately eight-second test sentence. After MP3
   publication and capture compaction, the installed Whisper Small model
   transcribed the final MP3 and matched all four expected phrase checks.

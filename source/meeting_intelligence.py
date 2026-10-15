@@ -18,7 +18,7 @@ import uuid
 from i18n import N_, tr
 from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
-from summary_runtime import SummaryRuntime
+from summary_runtime import SummaryOutputLimitError, SummaryRuntime
 
 
 MAX_CONTEXT = 4096
@@ -769,6 +769,7 @@ class MeetingIntelligence:
             "sections": list(profile["sections"]),
             "max_items": profile["max_items"],
             "max_section_chars": profile["max_section_chars"],
+            "max_citations": profile.get("max_citations", MAX_CITATIONS),
             "language": profile["language"],
             "instructions": profile["instructions"],
         }
@@ -873,8 +874,8 @@ class MeetingIntelligence:
         return document
 
     @staticmethod
-    def _references(value, allowed, *, required=True):
-        if (not isinstance(value, list) or len(value) > MAX_CITATIONS
+    def _references(value, allowed, *, required=True, max_items=MAX_CITATIONS):
+        if (not isinstance(value, list) or len(value) > max_items
                 or (required and not value)
                 or any(not isinstance(item, str) or item not in allowed for item in value)):
             raise ValueError(tr("O modelo citou segmentos ausentes ou inválidos; o resultado anterior foi preservado."))
@@ -894,7 +895,8 @@ class MeetingIntelligence:
         expected = {"segment_ids", *profile["sections"]}
         if set(document) != expected:
             raise ValueError(tr("O modelo retornou um relatório sem a estrutura exigida; o resultado anterior foi preservado."))
-        citations = self._references(document["segment_ids"], allowed)
+        citation_limit = profile.get("max_citations", MAX_CITATIONS)
+        citations = self._references(document["segment_ids"], allowed, max_items=citation_limit)
         normalized = {"segment_ids": citations}
         for section in profile["sections"]:
             value = document[section]
@@ -917,7 +919,7 @@ class MeetingIntelligence:
                 normalized[section] = {
                     "subject": value["subject"].strip(),
                     "body": value["body"].strip(),
-                    "segment_ids": self._references(value["segment_ids"], allowed),
+                    "segment_ids": self._references(value["segment_ids"], allowed, max_items=citation_limit),
                 }
                 continue
             if not isinstance(value, list) or len(value) > profile["max_items"]:
@@ -933,7 +935,7 @@ class MeetingIntelligence:
                 if not isinstance(text, str) or not text.strip() or len(text) > profile["max_section_chars"]:
                     raise ValueError(tr("O modelo retornou um item de relatório inválido."))
                 item_value = {"text": text.strip(),
-                              "segment_ids": self._references(item["segment_ids"], allowed)}
+                              "segment_ids": self._references(item["segment_ids"], allowed, max_items=citation_limit)}
                 if section == "action_items":
                     for key in ("owner", "deadline"):
                         owner_or_deadline = item[key]
@@ -982,12 +984,22 @@ class MeetingIntelligence:
                                   focus_evidence=None, output_limit=None):
         self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         limit = self._output_limit(budget) if output_limit is None else output_limit
-        guidance = [self._profile_evidence(profile, limit)]
-        if focus_evidence is not None:
-            guidance.append(focus_evidence)
         def generate(compact=False):
+            compact = compact or limit <= 2048
+            attempt_profile = dict(profile)
+            if compact:
+                # Small reduction budgets need a tighter schema from the
+                # first call; the same bounds apply on the one repair attempt.
+                # The model selects concise supported points without any
+                # post-generation truncation or item removal.
+                attempt_profile["max_items"] = 1
+                attempt_profile["max_section_chars"] = min(128, profile["max_section_chars"])
+                attempt_profile["max_citations"] = 1
+            attempt_guidance = [self._profile_evidence(attempt_profile, limit)]
+            if focus_evidence is not None:
+                attempt_guidance.append(focus_evidence)
             payload = self._payload(
-                evidence, guidance,
+                evidence, attempt_guidance,
                 budget if payload_budget is None else payload_budget,
             )
             prompt = self._prompt(profile)
@@ -1000,11 +1012,11 @@ class MeetingIntelligence:
             raw = runtime.generate(prompt, payload, cancel_event=cancel_event,
                                    disable_thinking=entry.get("disable_thinking", False))
             document = self._json_response(raw, N_("relatório"))
-            return self._validate_report(document, profile, allowed, evidence, budget,
+            return self._validate_report(document, attempt_profile, allowed, evidence, budget,
                                          source_text_by_id, limit)
         try:
             return generate()
-        except _ReportTooLarge:
+        except (_ReportTooLarge, SummaryOutputLimitError):
             # One bounded repair gives compliant local models a chance to
             # compress their own content while preserving citations and
             # evidence. Never truncate or silently discard generated items.

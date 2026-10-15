@@ -24,6 +24,7 @@ from meeting_intelligence import (
 from meeting_store import MeetingStore
 from meeting_library import MeetingLibrary
 from summary_catalog import DEFAULT_SUMMARY_MODEL
+from summary_runtime import SummaryOutputLimitError
 
 
 class MeetingIntelligenceProfileTests(unittest.TestCase):
@@ -293,7 +294,8 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         )
         self.assertEqual(result["summary"], "Short supported summary.")
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(calls[0][:-1], calls[1][:-1])
+        self.assertLess(calls[1][-1]["max_items"], calls[0][-1]["max_items"])
 
     def test_oversized_report_retries_once_then_preserves_previous(self):
         def response(_prompt, evidence):
@@ -310,6 +312,17 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
             intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes")
         self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
         self.assertEqual(len(runtime.calls), 2)
+
+    def test_runtime_output_limit_retries_once_then_surfaces_second_limit(self):
+        def response(_prompt, _evidence):
+            raise SummaryOutputLimitError("generation limit")
+
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(SummaryOutputLimitError):
+            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL,
+                                         profile="meeting_notes")
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
 
     def test_cancellation_between_oversized_attempts_prevents_retry(self):
         cancel = threading.Event()
@@ -689,8 +702,10 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
     def test_repeated_valid_report_citations_are_normalized(self):
         def response(_prompt, evidence):
             report = self._report(evidence)
-            report["segment_ids"] *= 2
-            report["action_items"][0]["segment_ids"] *= 2
+            profile = next(item for item in evidence if item.get("kind") == "profile")
+            if profile.get("max_citations", 16) > 1:
+                report["segment_ids"] *= 2
+                report["action_items"][0]["segment_ids"] *= 2
             return json.dumps(report)
 
         intelligence, runtime = self._intelligence(response)
@@ -712,8 +727,10 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
 
         def response(_prompt, evidence):
             report = self._report(evidence)
-            report["segment_ids"] *= 2
-            report["action_items"][0]["segment_ids"] *= 2
+            profile = next(item for item in evidence if item.get("kind") == "profile")
+            if profile.get("max_citations", 16) > 1:
+                report["segment_ids"] *= 2
+                report["action_items"][0]["segment_ids"] *= 2
             return json.dumps(report)
 
         intelligence, runtime = self._intelligence(response)
