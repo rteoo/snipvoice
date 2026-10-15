@@ -582,7 +582,7 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         if context is not None:
             self.assertLessEqual(len(json.dumps(context).encode("utf-8")), MAX_HISTORY_BYTES)
 
-    def test_action_owner_and_deadline_must_appear_in_each_item_citation(self):
+    def test_action_owner_and_deadline_outside_item_citation_become_unknown(self):
         # The revision is already completed; use a fresh completed revision so
         # the added evidence is part of the selected immutable transcript.
         revision = self.store.begin_revision(self.session_id, "local", "pt")
@@ -602,6 +602,26 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
                 "decisions": [], "action_items": [{
                     "text": "Review the report", "owner": "Alice", "deadline": "Friday",
                     "segment_ids": ["s2"],
+                }],
+            })
+
+        intelligence, runtime = self._intelligence(invalid)
+        with self.assertLogs("meeting_intelligence", level="INFO") as audit:
+            result = intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertIsNone(result["action_items"][0]["owner"])
+        self.assertIsNone(result["action_items"][0]["deadline"])
+        self.assertEqual([record.field for record in audit.records], ["owner", "deadline"])
+        self.assertNotIn("Alice", " ".join(audit.output))
+        self.assertNotIn("Friday", " ".join(audit.output))
+        self.assertTrue(runtime.closed)
+
+    def test_action_owner_and_deadline_malformed_values_are_rejected(self):
+        def invalid(_prompt, _evidence):
+            return json.dumps({
+                "summary": "An agenda task exists.", "segment_ids": ["s1"],
+                "decisions": [], "action_items": [{
+                    "text": "Review the report", "owner": "x" * 201, "deadline": None,
+                    "segment_ids": ["s1"],
                 }],
             })
 
@@ -634,17 +654,21 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
                         "segment_ids": [identifier],
                     }],
                 })
+            identifier = next((item["id"] for item in evidence if "id" in item),
+                              evidence[0].get("segment_ids", ["s2"])[0])
+            owner, deadline = ("Alice", "Friday") if identifier == "s1" else ("Bob", "Monday")
             return json.dumps({
-                "summary": "A task exists.", "segment_ids": ["s2"],
+                "summary": "A task exists.", "segment_ids": [identifier],
                 "decisions": [], "action_items": [{
-                    "text": "Review the report", "owner": "Alice", "deadline": "Friday",
-                    "segment_ids": ["s2"],
+                    "text": "Review the report", "owner": owner, "deadline": deadline,
+                    "segment_ids": [identifier],
                 }],
             })
 
         intelligence, runtime = self._intelligence(invalid_reduction)
-        with self.assertRaises(ValueError):
-            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        result = intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertEqual(result["action_items"][0]["owner"], "Alice")
+        self.assertEqual(result["action_items"][0]["deadline"], "Friday")
         self.assertGreater(len(runtime.calls), 2)
         self.assertTrue(runtime.closed)
 

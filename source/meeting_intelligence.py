@@ -9,6 +9,7 @@ import copy
 import hashlib
 import itertools
 import json
+import logging
 import math
 import re
 import threading
@@ -19,6 +20,9 @@ from i18n import N_, tr
 from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
 from summary_runtime import SummaryOutputLimitError, SummaryRuntime
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 MAX_CONTEXT = 4096
@@ -942,16 +946,22 @@ class MeetingIntelligence:
                         if owner_or_deadline is not None and (
                                 not isinstance(owner_or_deadline, str)
                                 or not owner_or_deadline.strip()
-                                or len(owner_or_deadline) > 200
-                                or owner_or_deadline.casefold() not in self._cited_text(
-                                    item["segment_ids"], source_text_by_id, evidence
-                                ).casefold()):
+                                or len(owner_or_deadline) > 200):
                             raise ValueError(
                                 tr("O modelo atribuiu responsável ou prazo ausente na evidência; "
                                    "valores desconhecidos devem ser nulos.")
                             )
-                        item_value[key] = (owner_or_deadline.strip()
-                                           if isinstance(owner_or_deadline, str) else None)
+                        if owner_or_deadline is not None:
+                            owner_or_deadline = owner_or_deadline.strip()
+                            if owner_or_deadline.casefold() not in self._cited_text(
+                                    item["segment_ids"], source_text_by_id, evidence
+                            ).casefold():
+                                LOGGER.info(
+                                    "report_attribution_normalized field=%s reason=not_in_cited_evidence", key,
+                                    extra={"field": key, "reason": "not_in_cited_evidence"},
+                                )
+                                owner_or_deadline = None
+                        item_value[key] = owner_or_deadline
                 items.append(item_value)
             normalized[section] = items
         size = len(json.dumps(normalized, ensure_ascii=False).encode("utf-8"))

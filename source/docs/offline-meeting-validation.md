@@ -64,6 +64,11 @@ requested profile and its larger report allowance. One bounded regeneration
 attempt remains available for oversized or token-limited output. The worker
 retains the model for that recoverable condition; failures preserve prior reports.
 
+Report validation preserves cited owner and deadline values only when the
+canonical cited transcript contains them. A well-typed but unsupported value
+is recorded as unknown (`null`) and logged with a generic field/reason audit
+event; malformed values and oversized strings remain validation errors.
+
 Verified local checks using the existing clean PyAV 18.1.0 codec:
 
 - Three hours of synthetic 48 kHz stereo audio encoded and fully decoded:
