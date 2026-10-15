@@ -69,7 +69,7 @@ def _chunks(segments, budget):
         identifier, text = segment.get("id"), segment.get("text")
         if (not isinstance(identifier, str) or not identifier or len(identifier) > 128
                 or any(ord(character) < 32 for character in identifier) or not isinstance(text, str)
-                or segment.get("track") not in {"microphone", "system"}
+                or segment.get("track") not in {"microphone", "system", "final"}
                 or any(not isinstance(segment.get(key), (int, float)) or isinstance(segment[key], bool)
                        or not math.isfinite(segment[key]) or segment[key] < 0 for key in ("start", "end"))
                 or segment["end"] < segment["start"]):

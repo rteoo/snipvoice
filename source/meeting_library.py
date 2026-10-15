@@ -1048,6 +1048,11 @@ class MeetingLibrary:
 
     @staticmethod
     def _session_duration(metadata, track=None):
+        if track == "final":
+            final = metadata.get("final_audio") or {}
+            verified = final.get("verification") or {}
+            if _finite_number(verified.get("duration")):
+                return max(0.0, float(verified["duration"]))
         duration = metadata.get("duration", 0.0)
         duration = float(duration) if _finite_number(duration) else 0.0
         tracks = metadata.get("tracks", {})
@@ -1083,7 +1088,9 @@ class MeetingLibrary:
             raise SchemaError(tr("O intervalo de um destaque é inválido; o arquivo foi preservado."))
         track = highlight.get("track")
         tracks = metadata.get("tracks", {})
-        if track not in {"microphone", "system"} or not isinstance(tracks, dict) or track not in tracks:
+        if (track not in {"microphone", "system", "final"}
+                or (track == "final" and not isinstance(metadata.get("final_audio"), dict))
+                or (track != "final" and (not isinstance(tracks, dict) or track not in tracks))):
             raise SchemaError(tr("A fonte de um destaque é inválida; o arquivo foi preservado."))
         segment_ids = highlight.get("segment_ids", highlight.get("segments", []))
         if (
@@ -1213,7 +1220,7 @@ class MeetingLibrary:
                 raise SchemaError(tr("A nota do rótulo de locutor é inválida; o arquivo foi preservado."))
             if "track" in record:
                 track = record["track"]
-                if track not in {"microphone", "system"} or (
+                if track not in {"microphone", "system", "final"} or (
                     segment.get("track") not in {None, track}
                 ):
                     raise SchemaError(tr("A fonte do rótulo de locutor é inválida; o arquivo foi preservado."))

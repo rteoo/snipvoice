@@ -449,7 +449,7 @@ class MeetingStore:
                 self._active[session_id] = metadata
             return copy.deepcopy(value)
 
-    def save_final_audio(self, session_id, path, voice_boost=False):
+    def save_final_audio(self, session_id, path, voice_boost=False, *, verification=None):
         """Record the derived playback file without changing the source tracks."""
         if not isinstance(path, (str, os.PathLike)):
             raise ValueError(tr("O caminho do áudio final é inválido."))
@@ -463,6 +463,11 @@ class MeetingStore:
             "voice_boost": voice_boost,
             "created_at": _utc_timestamp(),
         }
+        if verification is not None:
+            if not isinstance(verification, dict) or verification.get("sha256") is None:
+                raise ValueError("Final audio verification is invalid.")
+            value["verification"] = {key: copy.deepcopy(item) for key, item in verification.items()
+                                     if key != "path"}
         with self._lock:
             current = self._active_metadata(session_id)
             metadata = copy.deepcopy(current)
@@ -472,6 +477,56 @@ class MeetingStore:
             if session_id in self._active:
                 self._active[session_id] = metadata
             return copy.deepcopy(value)
+
+    def save_processing_state(self, session_id, stage, status, error=None):
+        """Persist processing outcomes independently of capture health."""
+        if stage not in {"audio", "transcription", "summary", "capture_cleanup"}:
+            raise ValueError("Unknown recording processing stage.")
+        if status not in {"pending", "processing", "completed", "failed", "cancelled", "skipped"}:
+            raise ValueError("Unknown recording processing status.")
+        if error is not None and (not isinstance(error, str) or len(error) > 4096):
+            raise ValueError("Recording processing error is invalid.")
+        with self._lock:
+            metadata = copy.deepcopy(self._active_metadata(session_id))
+            stages = metadata.setdefault("processing", {})
+            stages[stage] = {"status": status, "error": error, "updated_at": _utc_timestamp()}
+            self._checkpoint_session(session_id, metadata)
+            if session_id in self._active:
+                self._active[session_id] = metadata
+
+    def commit_capture_compaction(self, session_id, tracks, evidence, operation_id):
+        """Commit the journaled transition from working capture files to verified MP3."""
+        if (not isinstance(tracks, (list, tuple)) or not tracks or len(tracks) > 2
+                or len(set(tracks)) != len(tracks) or any(track not in _TRACKS for track in tracks)):
+            raise ValueError("Capture compaction tracks are invalid.")
+        if not isinstance(evidence, dict) or not self._valid_id(operation_id):
+            raise ValueError("Capture compaction evidence is invalid.")
+        digest = evidence.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("Capture compaction requires verified MP3 evidence.")
+        with self._lock:
+            metadata = copy.deepcopy(self._active_metadata(session_id))
+            final = metadata.get("final_audio") or {}
+            if metadata.get("status") == "recording" or session_id in self._active:
+                raise ValueError("Capture compaction is blocked while recording.")
+            if (not final.get("path") or os.path.abspath(final["path"]) != os.path.abspath(evidence.get("path", ""))
+                    or not os.path.isfile(final["path"])):
+                raise ValueError("The verified MP3 changed before capture compaction.")
+            for track in tracks:
+                value = metadata.get("tracks", {}).get(track)
+                if not isinstance(value, dict):
+                    raise ValueError("Capture compaction track is missing.")
+                value["available"] = False
+                value["raw_removed"] = True
+                for segment in value.get("segments", []):
+                    segment["available"] = False
+                    segment["raw_removed"] = True
+            proof = {key: copy.deepcopy(evidence[key]) for key in (
+                "path", "sha256", "size", "mtime_ns", "duration", "frames", "source_end", "tolerance",
+            ) if key in evidence}
+            metadata["capture_storage"] = {**proof, "format": "mp3", "state": "compacted",
+                                           "operation_id": operation_id}
+            self._checkpoint_session(session_id, metadata)
 
     def begin_revision(self, session_id, profile, language, status="processing"):
         if not isinstance(profile, str) or not isinstance(language, str):

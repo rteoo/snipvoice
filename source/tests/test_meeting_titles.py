@@ -1,10 +1,25 @@
 import time
 import unittest
 
-from meeting_titles import initial_recording_title, refine_recording_title
+from meeting_titles import initial_recording_title, refine_recording_title, safe_filename_stem
 
 
 class MeetingTitleTests(unittest.TestCase):
+    def test_filename_stems_preserve_unicode_and_bound_invalid_titles(self):
+        self.assertEqual(safe_filename_stem("Reunião 14/10\\2026"), "Reunião 14-10-2026")
+        self.assertEqual(safe_filename_stem("Reunião – orçamento"), "Reunião – orçamento")
+        self.assertEqual(safe_filename_stem("<>:\x00\n"), "recording")
+        self.assertEqual(safe_filename_stem("...", fallback=""), "")
+        self.assertEqual(safe_filename_stem("x" * 119 + ".tail"), "x" * 119)
+        self.assertEqual(len(safe_filename_stem("x" * 400)), 120)
+
+    def test_filename_stems_do_not_use_windows_device_names(self):
+        for title in ("CON", "con.txt", "PRN", "AUX", "NUL", "COM1", "LPT9", "CON .txt"):
+            with self.subTest(title=title):
+                self.assertEqual(safe_filename_stem(title), "_" + title)
+        self.assertEqual(safe_filename_stem("Conference"), "Conference")
+        self.assertEqual(safe_filename_stem("COM10"), "COM10")
+
     def test_empty_title_gets_local_timestamp_and_three_word_placeholder(self):
         stamp = time.mktime((2026, 9, 15, 14, 7, 0, 0, 0, -1))
         self.assertEqual(

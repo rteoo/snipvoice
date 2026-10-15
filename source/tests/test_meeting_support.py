@@ -1,3 +1,4 @@
+import hashlib
 import json
 import struct
 import shutil
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import wave
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -15,8 +17,9 @@ from meeting_settings import MeetingSettings
 from meeting_audio import NativeCapture
 from meeting_library import AnnotationConflict, MeetingLibrary
 from meeting_retention import ConfirmationRequired, OperationRecoveryError
-from meeting_store import MeetingStore
+from meeting_store import MeetingStore, TrackUnavailableError
 from meeting_mixdown import MixdownCancelled, export_mixdown
+from meeting_storage import compact_capture
 from meeting_support import (
     MeetingController, REPORT_HISTORY_LIMIT, WAVEFORM_POINTS, _amplitude_envelope,
     _final_audio_path,
@@ -85,6 +88,15 @@ class MeetingControllerTests(unittest.TestCase):
         encoder = patch("meeting_support.export_mixdown", side_effect=synthetic_mixdown)
         self.final_export = encoder.start()
         self.addCleanup(encoder.stop)
+        def synthetic_verification(path, expected_duration=None, **_options):
+            path = Path(path)
+            value = path.stat()
+            return {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "size": value.st_size, "mtime_ns": value.st_mtime_ns,
+                    "duration": expected_duration or .000125, "frames": 2, "tolerance": .05}
+        verifier = patch("meeting_support.verify_mp3_file", side_effect=synthetic_verification)
+        verifier.start()
+        self.addCleanup(verifier.stop)
 
     def tearDown(self):
         if self.controller.snapshot()["state"] != "unavailable":
@@ -99,6 +111,74 @@ class MeetingControllerTests(unittest.TestCase):
                 "session", "model", profile="meeting_notes", focus="Priorize decisões.",
             )
         self.assertEqual(intelligence.generate_report.call_args.kwargs["focus"], "Priorize decisões.")
+
+    def test_final_export_reaches_100_only_after_file_and_metadata_are_saved(self):
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
+        seen = []
+
+        def encode(_store, _session, path, *, progress, **_kwargs):
+            progress("preparing", 0, 60)
+            progress("encoding", 30, 60)
+            snap = self.controller.snapshot()
+            self.assertEqual(snap["audio_export"]["percent"], 50)
+            snap["audio_export"]["percent"] = -1
+            self.assertEqual(self.controller.snapshot()["audio_export"]["percent"], 50)
+            progress("encoding", 60, 60)
+            self.assertEqual(self.controller.snapshot()["audio_export"]["percent"], 99)
+            Path(path).write_bytes(b"synthetic encoded audio")
+            progress("completed", 60, 60)
+            return str(path)
+
+        original = self.controller.store.save_final_audio
+
+        def save(*args, **kwargs):
+            seen.append(self.controller.snapshot()["audio_export"])
+            self.assertTrue(Path(args[1]).exists())
+            self.assertEqual(seen[-1]["stage"], "finalizing")
+            self.assertEqual(seen[-1]["percent"], 99)
+            return original(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory(dir=Path(self.temp.name).parent) as folder, \
+                patch("meeting_support.export_mixdown", side_effect=encode), \
+                patch.object(self.controller.store, "save_final_audio", side_effect=save):
+            output = self.controller._export_audio(session, Path(folder) / "final.mp3", save_final=True)
+            snap = self.controller.snapshot()
+            self.assertEqual(snap["audio_export"]["stage"], "completed")
+            self.assertEqual(snap["audio_export"]["percent"], 100)
+            self.assertEqual(snap["final_audio"], output)
+            self.assertEqual(self.controller.store.get(session)["final_audio"]["path"], output)
+        self.assertEqual(len(seen), 1)
+
+    def test_failed_and_cancelled_exports_never_leave_active_or_completed_progress(self):
+        for error, stage in ((OSError("disk write failed"), "failed"),
+                             (MixdownCancelled("cancelled"), "cancelled")):
+            with self.subTest(stage=stage), patch("meeting_support.export_mixdown", side_effect=error):
+                with self.assertRaises(type(error)):
+                    self.controller.export_mixdown("session", "final.mp3")
+                snap = self.controller.snapshot()
+                self.assertEqual(snap["audio_export"]["stage"], stage)
+                self.assertIsNone(snap["audio_export"]["percent"])
+                self.assertFalse(snap["processing"])
+
+    def test_metadata_save_failure_never_claims_final_audio_is_saved(self):
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
+        with patch.object(self.controller.store, "save_final_audio", side_effect=OSError("metadata failed")):
+            with self.assertRaisesRegex(OSError, "metadata failed"):
+                self.controller._export_audio(session, Path(self.temp.name) / "final.mp3", save_final=True)
+        self.assertEqual(self.controller.snapshot()["audio_export"]["stage"], "failed")
+        self.assertEqual(self.controller.snapshot()["final_audio"], "")
+
+    def test_processing_state_write_failure_stops_export_progress(self):
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
+        with patch.object(self.controller.store, "save_processing_state", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.controller._export_audio(session, Path(self.temp.name) / "final.mp3", save_final=True)
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot["audio_export"]["stage"], "failed")
+        self.assertIsNone(snapshot["audio_export"]["percent"])
 
     def _quiet_recording(self):
         root = Path(self.temp.name) / "adjustment"
@@ -212,7 +292,10 @@ class MeetingControllerTests(unittest.TestCase):
             metadata["title"],
             r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-Gravacao-sem-transcricao$",
         )
-        self.assertEqual(len(list(store.iter_audio(session))), 1)
+        with self.assertRaises(TrackUnavailableError):
+            list(store.iter_audio(session))
+        self.assertEqual(metadata["capture_storage"]["state"], "compacted")
+        self.assertEqual(metadata["processing"]["audio"]["status"], "completed")
         self.assertEqual(next(store.iter_events(session))["type"], "source_changed")
         self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
         self.assertEqual(Path(metadata["final_audio"]["path"]).suffix, ".mp3")
@@ -231,6 +314,33 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertIsNone(metadata["final_audio"])
         self.assertEqual(len(list(self.controller.store.iter_audio(snapshot["session_id"]))), 1)
         self.voice.release_meeting.assert_called_once_with("lease")
+
+    def test_persistence_failure_during_postprocess_settles_capture_admission(self):
+        from meeting_transcription import MeetingTranscriptionError
+        original = self.controller.store.save_processing_state
+
+        def persist(sid, stage, status, error=None):
+            if stage == "transcription" and status == "failed":
+                raise OSError("disk full")
+            return original(sid, stage, status, error)
+
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch("meeting_transcription.transcribe_meeting",
+                      side_effect=MeetingTranscriptionError("resource still live", resource_live=True)), \
+                patch.object(self.controller.store, "save_processing_state", side_effect=persist):
+            self.assertTrue(self.controller.start(MeetingSettings()))
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(3)
+        snapshot = self.controller.snapshot()
+        self.assertTrue(self.capture.closed)
+        self.assertFalse(snapshot["processing"])
+        self.assertEqual(snapshot["state"], "unavailable")
+        self.assertIn("disk full", snapshot["error"])
+        self.voice.release_meeting.assert_not_called()
+        metadata = self.controller.store.get(snapshot["session_id"])
+        self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
+        self.assertEqual(metadata["capture_storage"]["state"], "compacted")
 
     @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
     def test_stop_racing_helper_exit_still_journals_buffered_audio(self):
@@ -421,11 +531,33 @@ class MeetingControllerTests(unittest.TestCase):
 
     def test_failed_inference_unload_keeps_reservation(self):
         from meeting_transcription import MeetingTranscriptionError
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
         with patch("meeting_transcription.transcribe_meeting",
                    side_effect=MeetingTranscriptionError("still live", resource_live=True)):
-            self.assertTrue(self.controller.transcribe("test-session", "balanced", "auto"))
+            self.assertTrue(self.controller.transcribe(session, "balanced", "auto"))
             self.controller._processing_thread.join(2)
         self.assertEqual(self.controller.snapshot()["state"], "unavailable")
+        self.voice.release_meeting.assert_not_called()
+
+    def test_inference_resource_failure_survives_error_persistence_failure(self):
+        from meeting_transcription import MeetingTranscriptionError
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
+        original = self.controller.store.save_processing_state
+
+        def persist(sid, stage, status, error=None):
+            if status == "failed":
+                raise OSError("disk full")
+            return original(sid, stage, status, error)
+
+        with patch("meeting_transcription.transcribe_meeting",
+                   side_effect=MeetingTranscriptionError("resource still live", resource_live=True)), \
+                patch.object(self.controller.store, "save_processing_state", side_effect=persist):
+            self.assertTrue(self.controller.transcribe(session, "balanced", "auto"))
+            self.controller._processing_thread.join(2)
+        self.assertEqual(self.controller.snapshot()["state"], "unavailable")
+        self.assertFalse(self.controller.snapshot()["processing"])
         self.voice.release_meeting.assert_not_called()
 
     def test_installed_models_run_automatically_when_legacy_switches_are_false(self):
@@ -480,31 +612,132 @@ class MeetingControllerTests(unittest.TestCase):
         )
 
     def test_direct_summary_uses_installed_fallback_and_rejects_missing_models(self):
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
         with patch.object(self.controller, "_installed_summary_model", return_value="fallback"), \
                 patch("meeting_summary.summarize_meeting") as summarize:
-            self.assertTrue(self.controller.summarize("session", "preferred"))
+            self.assertTrue(self.controller.summarize(session, "preferred"))
             self.controller._processing_thread.join(2)
         summarize.assert_called_once()
         with patch.object(self.controller, "_installed_summary_model", return_value=None):
-            self.assertTrue(self.controller.summarize("session", "preferred"))
+            self.assertTrue(self.controller.summarize(session, "preferred"))
             self.controller._processing_thread.join(2)
         self.assertIn("Nenhum modelo de resumo instalado", self.controller.snapshot()["error"])
 
     def test_imported_audio_enters_automatic_transcription_workflow(self):
         settings = MeetingSettings()
         with patch("meeting_files.import_audio", return_value="imported"), \
+                patch.object(self.controller, "_prepare_mp3") as prepare, \
                 patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
                 patch.object(self.controller, "_transcribe_and_summarize") as process:
             self.assertEqual(self.controller.import_audio("recording.wav", settings), "imported")
         process.assert_called_once_with("imported", "balanced", settings.language, settings.summary_model)
+        prepare.assert_called_once_with("imported", settings=settings)
 
     def test_imported_audio_without_installed_voice_model_skips_inference(self):
         settings = MeetingSettings()
         with patch("meeting_files.import_audio", return_value="imported"), \
+                patch.object(self.controller, "_prepare_mp3") as prepare, \
                 patch.object(self.controller, "_installed_voice_profile", return_value=None), \
                 patch.object(self.controller, "_transcribe_and_summarize") as process:
             self.assertEqual(self.controller.import_audio("recording.wav", settings), "imported")
         process.assert_not_called()
+        prepare.assert_called_once_with("imported", settings=settings)
+
+    def test_import_wav_publishes_and_compacts_before_transcription(self):
+        wav_path = Path(self.temp.name) / "import.wav"
+        with wave.open(str(wav_path), "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(8000)
+            writer.writeframes(struct.pack("<4h", 100, -100, 200, -200))
+        settings = MeetingSettings()
+        order = []
+        def process(*args):
+            self.assertEqual(self.controller.store.get(args[0])["capture_storage"]["state"], "compacted")
+            order.append("asr")
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_transcribe_and_summarize", side_effect=process), \
+                patch.object(self.controller, "_prepare_mp3", wraps=self.controller._prepare_mp3) as prepare:
+            session = self.controller.import_audio(str(wav_path), settings)
+        metadata = self.controller.store.get(session, include_events=False)
+        self.assertEqual(metadata["capture_storage"]["state"], "compacted")
+        self.assertEqual(metadata["processing"]["audio"]["status"], "completed")
+        self.assertTrue(metadata["final_audio"]["path"].endswith(".mp3"))
+        self.assertTrue(order)
+        prepare.assert_called_once()
+
+    def test_import_export_failure_persists_audio_failure_and_keeps_source(self):
+        wav_path = Path(self.temp.name) / "failed-import.wav"
+        with wave.open(str(wav_path), "wb") as writer:
+            writer.setnchannels(1)
+            writer.setsampwidth(2)
+            writer.setframerate(8000)
+            writer.writeframes(struct.pack("<4h", 100, -100, 200, -200))
+        self.final_export.side_effect = OSError("encoder failed")
+        with self.assertRaises(OSError):
+            self.controller.import_audio(str(wav_path), MeetingSettings())
+        sessions = self.controller.store.list_sessions(limit=10)
+        self.assertEqual(len(sessions), 1)
+        session = sessions[0]["id"]
+        metadata = self.controller.store.get(session, include_events=False)
+        self.assertEqual(metadata["processing"]["audio"]["status"], "failed")
+        self.assertIsNone(metadata["final_audio"])
+        self.assertTrue(list(self.controller.store.iter_audio(session, "microphone")))
+
+    def test_startup_recovery_reconciles_staged_capture_after_restart(self):
+        store = self.controller.store
+        session = store.begin({})
+        store.append_audio(session, {"type": "audio", "track": "microphone", "rate": 4,
+                                     "channels": 1, "frames": 8, "timestamp": 0.0,
+                                     "sequence": 0, "generation": 0}, struct.pack("<8f", *([.2] * 8)))
+        store.finish(session)
+        final = Path(self.temp.name) / "restart.mp3"
+        final.write_bytes(b"verified")
+        evidence = {"path": str(final), "sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+                    "size": final.stat().st_size, "mtime_ns": final.stat().st_mtime_ns,
+                    "duration": 2.0, "frames": 8, "source_end": 2.0, "tolerance": .05}
+        store.save_final_audio(session, final, verification=evidence)
+        class SimulatedCrash(BaseException):
+            pass
+        with self.assertRaises(SimulatedCrash):
+            compact_capture(store, session, evidence,
+                            fault_injector=lambda stage: (_ for _ in ()).throw(SimulatedCrash())
+                            if stage == "after_stage_microphone" else None)
+        restarted = MeetingController(self.temp.name, self.voice)
+        self.addCleanup(restarted.shutdown)
+        restarted.recover_retention_operations()
+        metadata = restarted.store.get(session, include_events=False)
+        self.assertEqual(metadata["capture_storage"]["state"], "compacted")
+        self.assertTrue(final.is_file())
+        with self.assertRaises(TrackUnavailableError):
+            list(restarted.store.iter_audio(session, "microphone"))
+
+    def test_startup_recovery_preserves_staged_capture_when_final_changed(self):
+        store = self.controller.store
+        session = store.begin({})
+        store.append_audio(session, {"type": "audio", "track": "microphone", "rate": 4,
+                                     "channels": 1, "frames": 8, "timestamp": 0.0,
+                                     "sequence": 0, "generation": 0}, struct.pack("<8f", *([.2] * 8)))
+        store.finish(session)
+        final = Path(self.temp.name) / "corrupt-restart.mp3"
+        final.write_bytes(b"verified")
+        evidence = {"path": str(final), "sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+                    "size": final.stat().st_size, "mtime_ns": final.stat().st_mtime_ns,
+                    "duration": 2.0, "frames": 8, "source_end": 2.0, "tolerance": .05}
+        store.save_final_audio(session, final, verification=evidence)
+        with self.assertRaises(BaseException):
+            compact_capture(store, session, evidence,
+                            fault_injector=lambda stage: (_ for _ in ()).throw(KeyboardInterrupt())
+                            if stage == "after_commit" else None)
+        final.write_bytes(b"tampered")
+        restarted = MeetingController(self.temp.name, self.voice)
+        self.addCleanup(restarted.shutdown)
+        with self.assertRaises(Exception):
+            restarted.recover_retention_operations()
+        metadata = restarted.store.get(session, include_events=False)
+        self.assertEqual(metadata.get("capture_storage", {}).get("state"), "compacted")
+        self.assertTrue(list(Path(store._session_dir(session)).glob(".capture-compaction-*")))
 
     def test_missing_preferred_voice_model_falls_back_to_default_before_catalog_order(self):
         installed = {"whisper-small", "balanced"}
@@ -548,7 +781,7 @@ class MeetingControllerTests(unittest.TestCase):
 
         summarize.assert_not_called()
         snapshot = self.controller.snapshot()
-        self.assertEqual(snapshot["postprocess"], "Pós-processamento parcial")
+        self.assertEqual(snapshot["postprocess"], "Processamento interrompido; tente novamente.")
         self.assertIn("cancelado", snapshot["error"])
 
     def test_transcript_pages_are_bounded_and_navigable_past_the_legacy_limit(self):
@@ -980,7 +1213,7 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
         metadata["final_audio"] = {"path": str(final), "created_at": "2026-09-16T12:04:00Z"}
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
-    def test_raw_sweep_removes_original_tracks_only_when_enabled(self):
+    def test_legacy_raw_policy_never_removes_unverified_recovery_data(self):
         self._with_final_audio()
         self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
         self.library.update_workspace(
@@ -988,9 +1221,9 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
             expected_generation=0,
         )
         result = self.controller.sweep_retention()
-        self.assertEqual((result["raw_removed"], result["errors"]), (1, []))
+        self.assertEqual((result["raw_removed"], result["errors"]), (0, []))
         tracks = self.controller.store.get("fixture-meeting-v1")["tracks"]
-        self.assertTrue(all(value.get("available") is False for value in tracks.values()))
+        self.assertTrue(all(value.get("available") is not False for value in tracks.values()))
         self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
 
     def test_retention_sweep_moves_old_recordings_to_restorable_trash(self):
@@ -1005,7 +1238,7 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
         self.controller.restore_session("fixture-meeting-v1")
         self.assertTrue((self.home / "meetings" / "fixture-meeting-v1").exists())
 
-    def test_raw_sweep_waits_for_age_and_skips_while_busy(self):
+    def test_legacy_raw_policy_is_inactive_while_busy(self):
         self._with_final_audio()
         self.library.update_workspace(
             {"retention_defaults": {"raw_audio": {"mode": "raw_tracks", "after_days": 3650, "tracks": []}}},
@@ -1014,7 +1247,7 @@ class MeetingControllerRetentionPrivacyTests(unittest.TestCase):
         self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
         self.controller._processing = True
         try:
-            self.assertTrue(self.controller.sweep_retention().get("busy"))
+            self.assertEqual(self.controller.sweep_retention()["raw_removed"], 0)
         finally:
             self.controller._processing = False
 

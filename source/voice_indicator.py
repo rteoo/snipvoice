@@ -97,18 +97,22 @@ def meeting_indicator_content(snapshot):
         title = tr("Gravando · {time}", time=clock)
         subtitle = tr("Gravação local em andamento")
         if snapshot.get("partial"):
-            title = tr("Gravação parcial · {time}", time=clock)
-            subtitle = tr("Uma fonte perdeu áudio · Abra Gravação")
+            subtitle = tr("Abra Gravação para ver os detalhes")
         return state, title, "warning", subtitle
     if state == "paused":
         return state, tr("Pausado · {time}", time=clock), "warning", tr("A gravação está pausada")
+    export = snapshot.get("audio_export") or {}
+    if snapshot.get("processing") and export.get("stage") in {"preparing", "encoding", "finalizing"}:
+        return "transcribing", export["label"], "accent", tr("Os áudios originais estão preservados")
     if state in {"starting", "stopping", "postprocessing"}:
         title = tr("Preparando gravação…") if state == "starting" else tr("Salvando gravação…")
+        if state == "postprocessing":
+            title = snapshot.get("postprocess") or tr("Processando localmente")
         return "transcribing", title, "accent", tr("Processando localmente")
-    if snapshot.get("last_status") == "partial":
-        return "idle", tr("Gravação parcial salva"), "warning", tr("Áudio parcial salvo · Abra Gravação")
     if snapshot.get("last_status") in {"failed", "interrupted"} or state == "unavailable":
         return "idle", tr("Gravação interrompida"), "warning", tr("Abra Gravação para ver os detalhes")
+    if snapshot.get("error"):
+        return "idle", tr("Verifique a gravação"), "warning", tr("Abra Gravação para ver os detalhes")
     return None
 
 

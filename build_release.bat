@@ -116,6 +116,12 @@ if errorlevel 1 (
 start "" /wait "%STAGING_DIR%\Snipvoice.exe" --meeting-capture-probe
 if errorlevel 1 goto cleanup_and_fail
 
+start "" /wait "%STAGING_DIR%\Snipvoice.exe" --meeting-audio-probe
+if errorlevel 1 (
+    echo Packaging failed: the staged meeting MP3 workflow probe did not pass.
+    goto cleanup_and_fail
+)
+
 REM Snipvoice reads and writes user data only in its independent data directory.
 
 call :promote_staged_release

@@ -54,6 +54,10 @@ MAX_CROSS_CANONICAL_SCAN = 4_096
 MAX_CROSS_CONCURRENT_JOBS = 1
 _CROSS_QA_GATE = threading.BoundedSemaphore(MAX_CROSS_CONCURRENT_JOBS)
 
+
+class _ReportTooLarge(ValueError):
+    """The model produced a valid report whose serialized form exceeded its bound."""
+
 SUPPORTED_SECTIONS = frozenset(
     {
         "summary",
@@ -604,7 +608,7 @@ class MeetingIntelligence:
                     or any(ord(character) < 32 for character in identifier)
                     or identifier in seen):
                 raise ValueError(tr("A transcrição contém identificadores de segmento inválidos."))
-            if track not in {"microphone", "system"}:
+            if track not in {"microphone", "system", "final"}:
                 raise ValueError(tr("A transcrição contém uma fonte de áudio inválida."))
             if (not isinstance(text, str) or len(text) > MAX_SEGMENT_TEXT_CHARS
                     or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -951,7 +955,7 @@ class MeetingIntelligence:
         size = len(json.dumps(normalized, ensure_ascii=False).encode("utf-8"))
         limit = self._output_limit(budget) if output_limit is None else output_limit
         if size > limit:
-            raise ValueError(tr("O modelo retornou um relatório grande demais para a redução local."))
+            raise _ReportTooLarge(tr("O modelo retornou um relatório grande demais para a redução local."))
         return normalized
 
     def _validate_answer(self, document, allowed, budget):
@@ -981,15 +985,31 @@ class MeetingIntelligence:
         guidance = [self._profile_evidence(profile, limit)]
         if focus_evidence is not None:
             guidance.append(focus_evidence)
-        payload = self._payload(
-            evidence, guidance,
-            budget if payload_budget is None else payload_budget,
-        )
-        raw = runtime.generate(self._prompt(profile), payload, cancel_event=cancel_event,
-                               disable_thinking=entry.get("disable_thinking", False))
-        document = self._json_response(raw, N_("relatório"))
-        return self._validate_report(document, profile, allowed, evidence, budget,
-                                     source_text_by_id, limit)
+        def generate(compact=False):
+            payload = self._payload(
+                evidence, guidance,
+                budget if payload_budget is None else payload_budget,
+            )
+            prompt = self._prompt(profile)
+            if compact:
+                prompt += (
+                    "\nThe previous report exceeded its byte limit. Rewrite substantially shorter: "
+                    "keep only the most important supported points, preserve valid citation IDs, "
+                    "emit the exact schema, and never omit required sections."
+                )
+            raw = runtime.generate(prompt, payload, cancel_event=cancel_event,
+                                   disable_thinking=entry.get("disable_thinking", False))
+            document = self._json_response(raw, N_("relatório"))
+            return self._validate_report(document, profile, allowed, evidence, budget,
+                                         source_text_by_id, limit)
+        try:
+            return generate()
+        except _ReportTooLarge:
+            # One bounded repair gives compliant local models a chance to
+            # compress their own content while preserving citations and
+            # evidence. Never truncate or silently discard generated items.
+            self._cancel(cancel_event, tr("O resumo foi cancelado; o resultado anterior foi preservado."))
+            return generate(compact=True)
 
     def _generate_answer(self, runtime, entry, question, evidence, allowed, budget, cancel_event,
                          payload_budget=None, question_evidence=None):

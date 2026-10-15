@@ -53,6 +53,15 @@ def run_sqlite_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+def run_meeting_audio_probe_if_requested(argv=None):
+    """Run the model-free MP3 capture/storage diagnostic before app startup."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--meeting-audio-probe" not in arguments:
+        return False
+    from meeting_audio_probe import main as probe_main
+    raise SystemExit(probe_main())
+
+
 if "--embedding-worker" in sys.argv[1:]:
     from embedding_runtime_worker import main as embedding_worker_main
     raise SystemExit(embedding_worker_main())
@@ -65,6 +74,7 @@ run_summary_worker_if_requested()
 run_voice_runtime_probe_if_requested()
 run_summary_runtime_probe_if_requested()
 run_sqlite_runtime_probe_if_requested()
+run_meeting_audio_probe_if_requested()
 
 if "--meeting-capture-probe" in sys.argv[1:]:
     from meeting_audio import NativeCapture
@@ -926,7 +936,9 @@ class Snipvoice:
         if self.voice_status_indicator is None:
             self.voice_status_indicator = VoiceStatusIndicator(root)
         meeting = self.meetings.snapshot()
-        if meeting.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}:
+        if (meeting.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
+                or meeting.get("processing") and (meeting.get("audio_export") or {}).get("stage")
+                in {"preparing", "encoding", "finalizing"}):
             self._render_recording_indicator(root, meeting)
         else:
             self.voice_status_indicator.update(snapshot["state"], snapshot["mode"])
@@ -953,6 +965,8 @@ class Snipvoice:
         snapshot = self.meetings.snapshot()
         voice = self.voice.status_snapshot()
         if (snapshot.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
+                or snapshot.get("processing") and (snapshot.get("audio_export") or {}).get("stage")
+                in {"preparing", "encoding", "finalizing"}
                 or voice.get("state") not in {"recording", "transcribing", "routing"}):
             self._render_recording_indicator(root, snapshot)
         self._recording_indicator_after = root.after(200, lambda: self._poll_recording_indicator(root))

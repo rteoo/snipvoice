@@ -270,6 +270,67 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
         self.assertTrue(runtime.closed)
 
+    def test_oversized_model_report_gets_one_bounded_compaction_retry(self):
+        calls = []
+
+        def response(prompt, evidence):
+            calls.append(evidence)
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            compact = "exceeded its byte limit" in prompt
+            return json.dumps({
+                "summary": "Short supported summary.",
+                "key_points": ([{"text": "Key point.", "segment_ids": [identifier]}]
+                               if compact else
+                               [{"text": "Long supported point. " * 45, "segment_ids": [identifier]}
+                                for _ in range(8)]),
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(
+            self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+        )
+        self.assertEqual(result["summary"], "Short supported summary.")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+
+    def test_oversized_report_retries_once_then_preserves_previous(self):
+        def response(_prompt, evidence):
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            return json.dumps({
+                "summary": "Short supported summary.",
+                "key_points": [{"text": "Long supported point. " * 45,
+                                 "segment_ids": [identifier]} for _ in range(8)],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(ValueError):
+            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes")
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+        self.assertEqual(len(runtime.calls), 2)
+
+    def test_cancellation_between_oversized_attempts_prevents_retry(self):
+        cancel = threading.Event()
+        calls = []
+        def response(_prompt, evidence):
+            calls.append(True)
+            cancel.set()
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            return json.dumps({
+                "summary": "Short supported summary.",
+                "key_points": [{"text": "Long supported point. " * 45,
+                                 "segment_ids": [identifier]} for _ in range(8)],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(RuntimeError):
+            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL,
+                                         profile="meeting_notes", cancel_event=cancel)
+        self.assertEqual(len(calls), 1)
+
     def test_multichunk_final_synthesis_is_outside_pairwise_reduction(self):
         revision = self.store.begin_revision(self.session_id, "local", "pt")
         for index in range(3):

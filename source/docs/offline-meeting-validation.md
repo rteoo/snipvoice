@@ -8,22 +8,23 @@ packaged startup, full tray integration, signing, or macOS physical capture.
 
 The meeting workspace preserves Snipvoice's capture and recovery boundary:
 
-- microphone and selected speaker-output sources remain independent native PCM
-  tracks, with append-only segments, CRC journaling, atomic metadata, explicit
-  gaps, pause/resume, and interrupted-session recovery;
+- microphone and selected speaker-output sources use temporary independent PCM
+  capture segments, CRC journaling, atomic metadata, explicit gaps, pause/resume,
+  and interrupted-session recovery until a final MP3 has been verified;
 - transcription and summaries run automatically with installed models,
   sequentially and with preserved revisions. Transcription is bounded by
   audio chunks; unavailable models are skipped and acquisition remains an
   explicit settings action;
-- final audio is a derived atomic MP3 mixdown; WAV remains an export option and
-  existing WAV recordings remain playable. Original raw tracks remain the
-  model input and recovery source. Optional microphone volume adjustment
-  measures the raw track in bounded memory and applies capped gain and a limiter
-  only to the final playback file. It does not hard-gate quiet speech or perform spectral
-  denoising or acoustic echo cancellation;
+- final audio is an atomic MP3 mixdown, decoded to EOF and checked against the
+  rendered duration before publication. Playback, transcription, retries, and
+  clips use that MP3. A journaled compaction removes temporary capture segments
+  only after verified publication and the canonical metadata commit. Existing
+  WAV recordings remain readable for compatibility. Optional capture-time
+  microphone gain affects the final mix and does not perform acoustic echo
+  cancellation;
 - the shared Tk root, controller workers, meeting hotkey, and tray actions keep
   capture, inference, disk work, and playback off keyboard/Tk callbacks;
-- startup loads privacy defaults and reconciles interrupted retention journals
+- startup loads privacy defaults and reconciles interrupted retention/compaction journals
   before admitting the meeting hotkey or destructive actions.
 
 The first seven local meeting-memory features are implemented through the
@@ -33,11 +34,60 @@ canonical-bundle/disposable-index architecture:
 | --- | --- |
 | 1. Report profiles | Built-in and custom versioned profiles; bounded local reports with model and transcript provenance; immutable report history and separate review. |
 | 2. Post-meeting artifacts | Decisions, actions, questions, risks, objections, feedback, and follow-up drafts are reviewable, cited, and exportable without sending or mutating external systems. |
-| 3. Transcript interaction | Full text with paragraphs by default, switchable timestamps, complete text export, and bounded previews; advanced labels, highlights, navigation and source-track clips remain available. Timings remain chunk-level. |
+| 3. Transcript interaction | Full text with paragraphs by default, switchable timestamps, complete text export, and bounded previews; advanced labels, highlights, navigation and final-MP3 clips remain available. Timings remain chunk-level. |
 | 4. Single-meeting Q&A | Local `Ask this meeting` with bounded answers, validated transcript citations, uncertainty, and explicit save-to-QA-report behavior. |
 | 5. Organization | Existing canonical collections, tags, people, and series metadata is preserved; manual categorization and filter controls are removed from the library interface. |
 | 6. Search and cross-meeting Q&A | SQLite/FTS5 projection, provenance snippets, safe query handling, rebuild/repair, and cited local answers across recordings. |
-| 7. Privacy and retention | Visible consent reminder/settings, memory-only or explicit-save Q&A policy, retention previews, same-root trash/restore, journaled raw-track staging, and separately confirmed permanent purge. |
+| 7. Privacy and retention | Visible consent reminder/settings, memory-only or explicit-save Q&A policy, whole-meeting retention, same-root trash/restore, verified capture compaction, and separately confirmed permanent purge. |
+
+## MP3 workflow validation, 2026-10-15
+
+The library no longer displays a Completed/Partial status column or source-file
+download/removal controls. Capture-health diagnostics remain in the private
+journal; a device fault cannot be repaired by changing its label. Export progress
+shows preparation, encoding percentage, finalization, and saved output. The
+controller publishes 100% only after validation, atomic publication, and the
+metadata commit. Processing failures/cancellation are persisted separately from
+capture health. Imports now create the final MP3 before inference begins.
+
+Native Windows capture copies and releases every acquired WASAPI packet before
+gap diagnostics, batch flushing, conversion, or queue work. This reduces buffer
+hold time; the historical device discontinuities alone do not establish their
+cause. The helper's executable self-test checks copying, release ordering, and
+exactly one release on the failure path.
+
+Verified local checks using the existing clean PyAV 18.1.0 codec:
+
+- Three hours of synthetic 48 kHz stereo audio encoded and fully decoded:
+  518,400,000 decoded frames, 10,800 seconds, 259,201,197 output bytes, about
+  329 seconds of processing. The temporary output was cleaned after validation.
+- MP3-only compaction, transcription input/retry, clip export, and import passed
+  with stereo 48 kHz and mono 16/8 kHz fixtures.
+- Windows synthesized an approximately eight-second test sentence. After MP3
+  publication and capture compaction, the installed Whisper Small model
+  transcribed the final MP3 and matched all four expected phrase checks.
+- Failure injection covers pre-publication validation failure, destination
+  preservation, cancellation, stage/commit crashes, restart recovery, modified
+  final files, lock contention, and path traversal in recovery journals.
+
+`tests/test_mp3_workflow.py` requires the provisioned codec and skips explicitly
+when it is unavailable. The local codec smoke used an existing Python 3.12
+runtime and NumPy 2.5.2; the regular development suite used Python 3.14. These
+checks do not replace the release's pinned dependency/build gates. No dependency
+was installed for these initial checks, which preceded packaging and installation.
+A rebuilt Windows package and a live endpoint soak are separate gates before
+claiming the installed recording workflow has been validated. Synthetic
+long-file processing cannot certify uninterrupted Windows/device capture or
+perfect recognition of arbitrary speech. Private incident evidence stays
+outside the public repository.
+
+The Windows/macOS packagers also run `--meeting-audio-probe` before promotion.
+This isolated, model-free probe exercises actual MP3 export, pre-publication
+validation, capture compaction, and final-file transcription input in the frozen
+executable. It cleans its synthetic data and never opens the user's library.
+Oversized generated reports receive one compact-output retry with unchanged
+evidence; the repair adds no evidence-payload bytes. A second invalid response
+still preserves prior results and surfaces a bounded failure.
 
 ## Offline and privacy boundary
 
@@ -90,7 +140,8 @@ silently; its terminal error now identifies disk/consumer backpressure.
 The recording overlay shares the dictation indicator and the sole Tk root. Its
 200 ms poll observes the controller independently of the manager window, so it
 continues while minimized or closed to the tray. Starting/saving, paused,
-partial, and interrupted states are distinct from active recording.
+and interrupted states are distinct from active recording; actionable errors
+remain available without a library capture-health status column.
 
 Regression coverage exercises temporary and persistent consumer stalls, forced
 teardown with a full queue, actionable native overflow errors, packet batching

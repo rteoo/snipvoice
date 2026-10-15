@@ -218,6 +218,11 @@ if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --meeting-capture-probe; then
     exit 1
 fi
 
+if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --meeting-audio-probe; then
+    echo "The staged meeting MP3 workflow probe failed. dist left unchanged." >&2
+    exit 1
+fi
+
 # --- Promote --------------------------------------------------------------
 mkdir -p "$DIST_ROOT"
 rm -rf "$PREVIOUS_APP"

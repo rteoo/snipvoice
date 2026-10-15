@@ -22,6 +22,7 @@ DEFAULT_PAUSE_SECONDS = 4.0
 _TRACK_LABELS = {
     "microphone": N_("Microfone"),
     "system": N_("Áudio do sistema"),
+    "final": N_("Áudio final"),
 }
 
 

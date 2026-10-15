@@ -275,6 +275,20 @@ struct AudioBatch {
     }
 };
 
+template <typename Release>
+std::vector<BYTE> copyAndRelease(const BYTE* raw, size_t bytes, Release release) {
+    std::vector<BYTE> packet;
+    try {
+        packet.assign(raw, raw + bytes);
+    } catch (...) {
+        // The caller still owns the WASAPI buffer when copying fails.
+        release();
+        throw;
+    }
+    check(release(), "Release capture buffer");
+    return packet;
+}
+
 bool packetDiscontinuity(DWORD flags, bool havePacket) {
     // The initial packet establishes the clock; there is no earlier audio to lose.
     return havePacket && (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY);
@@ -478,6 +492,25 @@ void selfTestLogic() {
     Session smallPackets;
     for (unsigned i = 0; i < 200; ++i) smallPackets.push({"{}", std::vector<BYTE>(1920), 0, 0.01});
     require(!smallPackets.overflow && smallPackets.queue.size() == 200);
+    BYTE source[] = {1, 2, 3, 4};
+    bool released = false;
+    auto packet = copyAndRelease(source, sizeof(source), [&] {
+        released = true;
+        return S_OK;
+    });
+    require(released && packet.size() == sizeof(source)
+        && std::equal(packet.begin(), packet.end(), source));
+    unsigned releaseCalls = 0;
+    bool releaseFailed = false;
+    try {
+        copyAndRelease(source, sizeof(source), [&] {
+            ++releaseCalls;
+            return E_FAIL;
+        });
+    } catch (const std::runtime_error&) {
+        releaseFailed = true;
+    }
+    require(releaseFailed && releaseCalls == 1);
 }
 
 void capture(Session& session, Selection selected) {
@@ -545,13 +578,26 @@ void capture(Session& session, Selection selected) {
                         throw std::runtime_error("Native packet exceeds the two-second safety limit");
                     }
                     double timestamp = static_cast<double>(qpc100ns) / 10000000.0 - session.origin;
+                    bool silent = (bufferFlags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
+                    bool invalidBuffer = !silent && !raw;
+                    std::vector<BYTE> packet;
+                    // Release WASAPI's buffer before any diagnostic event,
+                    // conversion, or transport work. This keeps discontinuity
+                    // handling from holding the endpoint buffer while the
+                    // bounded queue is locked or flushed.
+                    if (!invalidBuffer && !silent) {
+                        packet = copyAndRelease(raw, static_cast<size_t>(frames)
+                            * format.channels * format.stride,
+                            [&] { return input->ReleaseBuffer(frames); });
+                    } else {
+                        result = input->ReleaseBuffer(frames);
+                        if (FAILED(result)) break;
+                    }
                     if ((bufferFlags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !std::isfinite(timestamp) || timestamp < 0) {
                         batch.flush();
                         session.gap(selected.track, session.now(), "native_timestamp_error");
                         havePacket = true;
                         // Never fabricate a device timestamp for unclocked samples.
-                        result = input->ReleaseBuffer(frames);
-                        if (FAILED(result)) break;
                     } else {
                         if (idleGap) {
                             session.gap(selected.track, timestamp, "native_packets_resumed");
@@ -563,8 +609,6 @@ void capture(Session& session, Selection selected) {
                             session.gap(selected.track, timestamp, "native_discontinuity");
                         }
                         havePacket = true;
-                        bool silent = (bufferFlags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
-                        bool invalidBuffer = !silent && !raw;
                         if (invalidBuffer) {
                             batch.flush();
                             session.gap(selected.track, timestamp, "invalid_native_buffer");
@@ -581,16 +625,14 @@ void capture(Session& session, Selection selected) {
                                 block.duration = static_cast<double>(count) / format.rate;
                                 block.payload.resize(static_cast<size_t>(count) * format.channels * sizeof(float));
                                 for (size_t sample = 0; sample < static_cast<size_t>(count) * format.channels; ++sample) {
-                                    float value = silent ? 0.0f : format.sample(raw
+                                    float value = silent ? 0.0f : format.sample(packet.data()
                                         + (static_cast<size_t>(offset) * format.channels + sample) * format.stride);
                                     std::memcpy(block.payload.data() + sample * sizeof(float), &value, sizeof(float));
                                 }
                                 batch.append(timestamp + static_cast<double>(offset) / format.rate,
                                     count, block.payload);
                             }
-                        } catch (...) { batch.flush(); input->ReleaseBuffer(frames); throw; }
-                        result = input->ReleaseBuffer(frames);
-                        if (FAILED(result)) break;
+                        } catch (...) { batch.flush(); throw; }
                     }
                     result = input->GetNextPacketSize(&pending);
                     if (FAILED(result)) break;
