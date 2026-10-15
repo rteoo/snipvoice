@@ -77,6 +77,27 @@ class MeetingStoreTests(unittest.TestCase):
         self.assertEqual(item["events"][1]["type"], "gap")
         self.assertEqual(item["duration"], 2.5)
 
+    def test_native_position_diagnostics_survive_journal_reopening(self):
+        position = 2**63 + 480
+        diagnostics = [
+            {"type": "gap", "track": "system", "timestamp": 1.0,
+             "reason": "native_discontinuity", "buffer_flags": 1,
+             "packet_frames": 480, "sample_rate": 48000,
+             "device_position": position, "expected_device_position": position - 480},
+            {"type": "gap", "track": "system", "timestamp": 2.0,
+             "reason": "native_timestamp_error", "buffer_flags": 4,
+             "packet_frames": 480, "sample_rate": 48000,
+             "device_position": None, "expected_device_position": None},
+        ]
+        for event in diagnostics:
+            self.store.add_event(self.session, event)
+        self.store.finish(self.session)
+
+        reopened = MeetingStore(self.temp.name)
+
+        self.assertEqual(list(reopened.iter_events(self.session)), diagnostics)
+        self.assertEqual(reopened.get(self.session)["events"], diagnostics)
+
     def test_start_offset_filters_audio_without_loading_everything(self):
         payload = b"\0" * 16
         self.store.append_audio(self.session, self.event(sequence=0, timestamp=0), payload)

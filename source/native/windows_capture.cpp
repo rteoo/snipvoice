@@ -83,6 +83,26 @@ std::string number(double n) {
     out << std::setprecision(15) << n;
     return out.str();
 }
+bool nextExpectedDevicePosition(UINT64 devicePosition, UINT32 frames, UINT64& next) {
+    if (devicePosition > std::numeric_limits<UINT64>::max() - frames) return false;
+    next = devicePosition + frames;
+    return true;
+}
+std::string nativePacketFields(DWORD flags, UINT32 frames, unsigned rate,
+                               UINT64 devicePosition, bool haveExpected,
+                               UINT64 expectedDevicePosition, bool positionsValid) {
+    std::ostringstream out;
+    out << ",\"buffer_flags\":" << flags
+        << ",\"packet_frames\":" << frames
+        << ",\"sample_rate\":" << rate
+        << ",\"device_position\":";
+    if (positionsValid) out << devicePosition;
+    else out << "null";
+    out << ",\"expected_device_position\":";
+    if (positionsValid && haveExpected) out << expectedDevicePosition;
+    else out << "null";
+    return out.str();
+}
 void check(HRESULT hr, const char* action) {
     if (SUCCEEDED(hr)) return;
     std::ostringstream message;
@@ -228,6 +248,12 @@ struct Session {
     void gap(int track, double timestamp, const char* reason) {
         event("gap", ",\"track\":" + quote(track == 0 ? "microphone" : "system")
             + ",\"timestamp\":" + number(timestamp) + ",\"reason\":" + quote(reason), track);
+    }
+    void nativeGap(int track, double timestamp, const char* reason,
+                   const std::string& packetFields) {
+        event("gap", ",\"track\":" + quote(track == 0 ? "microphone" : "system")
+            + ",\"timestamp\":" + number(timestamp) + ",\"reason\":" + quote(reason)
+            + packetFields, track);
     }
     void error(int track, const std::string& message) {
         event("source_error", ",\"track\":" + quote(track == 0 ? "microphone" : "system")
@@ -475,6 +501,46 @@ void selfTestLogic() {
     require(quote("\"\\\n") == "\"\\\"\\\\\\u000a\"");
     require(!packetDiscontinuity(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, false));
     require(packetDiscontinuity(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, true));
+    auto continuous = nativePacketFields(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
+        480, 48000, 1000, true, 1000, true);
+    require(continuous.find("\"buffer_flags\":1") != std::string::npos);
+    require(continuous.find("\"device_position\":1000") != std::string::npos);
+    require(continuous.find("\"expected_device_position\":1000") != std::string::npos);
+    auto jump = nativePacketFields(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
+        480, 48000, 1010, true, 1000, true);
+    require(jump.find("\"device_position\":1010") != std::string::npos);
+    require(jump.find("\"expected_device_position\":1000") != std::string::npos);
+    auto reset = nativePacketFields(0, 480, 48000, 2000, false, 0, true);
+    require(reset.find("\"expected_device_position\":null") != std::string::npos);
+    auto silent = nativePacketFields(AUDCLNT_BUFFERFLAGS_SILENT,
+        480, 48000, 3000, true, 3000, true);
+    require(silent.find("\"buffer_flags\":2") != std::string::npos);
+    require(silent.find("\"device_position\":3000") != std::string::npos);
+    auto timestampInvalid = nativePacketFields(AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR,
+        480, 48000, 4000, true, 4000, false);
+    require(timestampInvalid.find("\"buffer_flags\":4") != std::string::npos);
+    require(timestampInvalid.find("\"device_position\":null") != std::string::npos);
+    require(timestampInvalid.find("\"expected_device_position\":null") != std::string::npos);
+    UINT64 expectedPosition = 0;
+    require(nextExpectedDevicePosition(1000, 480, expectedPosition) && expectedPosition == 1480);
+    require(nextExpectedDevicePosition(expectedPosition, 480, expectedPosition) && expectedPosition == 1960);
+    require(nextExpectedDevicePosition(3000, 480, expectedPosition) && expectedPosition == 3480);
+    require(!nextExpectedDevicePosition(std::numeric_limits<UINT64>::max(), 1, expectedPosition));
+    bool haveTrackedPosition = false;
+    auto trackPacket = [&](bool validTimestamp, UINT64 position, UINT32 packetFrames) {
+        bool hadPrevious = haveTrackedPosition;
+        if (!validTimestamp || !nextExpectedDevicePosition(position, packetFrames, expectedPosition))
+            haveTrackedPosition = false;
+        else
+            haveTrackedPosition = true;
+        return hadPrevious;
+    };
+    require(!trackPacket(true, 1000, 480));
+    require(trackPacket(true, 1480, 480));
+    trackPacket(false, 0, 480);
+    require(!haveTrackedPosition);
+    require(!trackPacket(true, 5000, 480));
+    require(haveTrackedPosition && expectedPosition == 5480);
     Session buffered;
     uint64_t sequence = 0;
     AudioBatch batch{buffered, 0, 48000, 1, 0, sequence};
@@ -558,6 +624,8 @@ void capture(Session& session, Selection selected) {
             double lastEnd = session.now();
             bool idleGap = false;
             bool havePacket = false;
+            bool haveExpectedDevicePosition = false;
+            UINT64 expectedNextDevicePosition = 0;
             AudioBatch batch{session, selected.track, format.rate, format.channels, 0, sequence};
             auto drain = [&](bool tail) {
                 HRESULT result = S_OK;
@@ -580,6 +648,8 @@ void capture(Session& session, Selection selected) {
                     double timestamp = static_cast<double>(qpc100ns) / 10000000.0 - session.origin;
                     bool silent = (bufferFlags & AUDCLNT_BUFFERFLAGS_SILENT) != 0;
                     bool invalidBuffer = !silent && !raw;
+                    bool haveExpectedBefore = haveExpectedDevicePosition;
+                    UINT64 expectedBefore = expectedNextDevicePosition;
                     std::vector<BYTE> packet;
                     // Release WASAPI's buffer before any diagnostic event,
                     // conversion, or transport work. This keeps discontinuity
@@ -593,12 +663,21 @@ void capture(Session& session, Selection selected) {
                         result = input->ReleaseBuffer(frames);
                         if (FAILED(result)) break;
                     }
-                    if ((bufferFlags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !std::isfinite(timestamp) || timestamp < 0) {
+                    bool timestampInvalid = (bufferFlags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)
+                        || !std::isfinite(timestamp) || timestamp < 0;
+                    if (timestampInvalid) {
+                        haveExpectedDevicePosition = false;
                         batch.flush();
-                        session.gap(selected.track, session.now(), "native_timestamp_error");
+                        session.nativeGap(selected.track, session.now(), "native_timestamp_error",
+                            nativePacketFields(bufferFlags, frames, format.rate, devicePosition,
+                                haveExpectedBefore, expectedBefore, false));
                         havePacket = true;
                         // Never fabricate a device timestamp for unclocked samples.
                     } else {
+                        if (!nextExpectedDevicePosition(devicePosition, frames, expectedNextDevicePosition))
+                            haveExpectedDevicePosition = false;
+                        else
+                            haveExpectedDevicePosition = true;
                         if (idleGap) {
                             session.gap(selected.track, timestamp, "native_packets_resumed");
                             idleGap = false;
@@ -606,7 +685,9 @@ void capture(Session& session, Selection selected) {
                         lastEnd = timestamp + static_cast<double>(frames) / format.rate;
                         if (packetDiscontinuity(bufferFlags, havePacket)) {
                             batch.flush();
-                            session.gap(selected.track, timestamp, "native_discontinuity");
+                            session.nativeGap(selected.track, timestamp, "native_discontinuity",
+                                nativePacketFields(bufferFlags, frames, format.rate, devicePosition,
+                                    haveExpectedBefore, expectedBefore, true));
                         }
                         havePacket = true;
                         if (invalidBuffer) {
@@ -650,6 +731,7 @@ void capture(Session& session, Selection selected) {
                         check(client->Reset(), "Reset paused capture stream");
                         running = false;
                         havePacket = false;
+                        haveExpectedDevicePosition = false;
                     }
                     session.gap(selected.track, session.now(), pause ? "paused" : "resumed");
                     lastEnd = session.now();
