@@ -280,6 +280,43 @@ class MeetingMixdownTests(unittest.TestCase):
         self.assertEqual(rate, 8)
         self.assertEqual(struct.unpack("<4h", raw), (0, 8192, 16384, 16384))
 
+    def test_source_format_change_is_resampled_and_channels_are_downmixed(self):
+        source = [
+            _event("system", [0.1, 0.1], rate=4, channels=1, timestamp=0.0),
+            _event("system", [0.2, 0.4, 0.6, 0.8], rate=4, channels=2, timestamp=0.5, sequence=1),
+        ]
+        mixdown_tracks({"system": source}, self.destination, chunk_frames=2)
+        rate, channels, raw = _read(self.destination)
+        self.assertEqual((rate, channels), (4, 1))
+        self.assertEqual(struct.unpack("<4h", raw), (3277, 3277, 9830, 22937))
+
+    def test_export_uses_metadata_max_format_for_endpoint_handoff(self):
+        source = [
+            _event("system", [0.1, 0.1], rate=4, channels=1, timestamp=0.0),
+            _event("system", [0.2, 0.4, 0.6, 0.8], rate=8, channels=2, timestamp=0.5, sequence=1),
+        ]
+        store = _Store({"system": source})
+        store.get = mock.Mock(return_value={
+            "tracks": {"system": {"segments": [
+                {"rate": 4, "channels": 1, "end": 0.5},
+                {"rate": 8, "channels": 2, "end": 0.75},
+            ]}},
+        })
+        export_mixdown(store, "session", self.destination, tracks=("system",), chunk_frames=2)
+        rate, channels, raw = _read(self.destination)
+        self.assertEqual((rate, channels), (8, 2))
+        self.assertEqual(struct.unpack("<12h", raw),
+                         (3277, 3277) * 4 + (6553, 13107, 19660, 26214))
+
+    def test_invalid_output_format_preserves_existing_destination(self):
+        self.destination.write_bytes(b"existing")
+        for options in ({"output_rate": 0}, {"output_rate": True}, {"output_rate": 192001},
+                        {"output_channels": 0}, {"output_channels": True}, {"output_channels": 3}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                mixdown_tracks({"system": [_event("system", [0.1], rate=4)]},
+                               self.destination, **options)
+            self.assertEqual(self.destination.read_bytes(), b"existing")
+
     def test_fractional_native_timestamp_is_preserved(self):
         source = [_event("microphone", [0.25, 0.25], rate=4, timestamp=0.125)]
         mixdown_tracks({"microphone": source}, self.destination, chunk_frames=2)

@@ -98,6 +98,27 @@ class Mp3WorkflowTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             export_highlight_clip(self.store, sid, {"track": "final", "start": .5, "end": 1.5}, clip, self.cancel)
 
+    def test_device_format_handoff_preserves_mp3_duration_and_stereo(self):
+        sid = self.store.begin({}, "Synthetic format handoff")
+        for sequence, (rate, channels) in enumerate(((48000, 1), (16000, 2))):
+            payload = struct.pack("<" + "f" * channels, *([.15, .05][:channels])) * rate
+            self.store.append_audio(sid, {
+                "type": "audio", "generation": 1, "track": "system", "rate": rate,
+                "channels": channels, "frames": rate, "timestamp": sequence, "sequence": sequence,
+            }, payload)
+        self.store.finish(sid)
+        path = self.root / "handoff.mp3"
+        proof = {}
+        export_mixdown(self.store, sid, path,
+                       validate_output=lambda temporary, duration:
+                       proof.update(verify_mp3_file(temporary, duration, self.cancel)))
+        self.assertAlmostEqual(proof["duration"], 2, delta=.05)
+        import av
+        with av.open(str(path)) as container:
+            stream = container.streams.audio[0]
+            self.assertEqual((stream.codec_context.sample_rate, stream.codec_context.channels), (48000, 2))
+            self.assertEqual(sum(frame.samples for frame in container.decode(stream)), 96000)
+
     def test_validation_failure_preserves_previous_mp3_and_capture(self):
         sid, path, _proof = self.recording()
         previous = path.read_bytes()

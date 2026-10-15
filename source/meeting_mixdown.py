@@ -108,15 +108,10 @@ class _Track:
             self._current = None
             return
         rate, channels, frames, timestamp, raw = _validate_event(event, payload, self.name)
-        if self.rate is None:
-            self.rate, self.channels = rate, channels
-        elif (rate, channels) != (self.rate, self.channels):
-            raise ValueError(
-                tr("A fonte {track} altera o formato ({old_rate} Hz/{old_channels} canais "
-                   "para {rate} Hz/{channels} canais); converta-a antes da mixagem.",
-                   track=self.name, old_rate=self.rate, old_channels=self.channels,
-                   rate=rate, channels=channels)
-            )
+        # Native default-endpoint handoff can change a source format between
+        # segments. Keep each block's format; the renderer resamples and maps
+        # channels into the stable output format selected by the caller.
+        self.rate, self.channels = rate, channels
         start = timestamp
         end = start + frames / rate
         if start < self._last_end:
@@ -165,6 +160,10 @@ class _Track:
                 following = data[np.minimum(index + 1, frames - 1)]
                 interpolated = value + (following - value) * fraction
                 value = np.where((index + 1 < frames)[:, None], interpolated, value)
+                if self.channels < output_channels:
+                    value = np.repeat(value, output_channels, axis=1)
+                elif self.channels > output_channels:
+                    value = np.mean(value, axis=1, keepdims=True)
                 rows = target.reshape(-1, output_channels)
                 # A mono value broadcasts to every output channel.
                 rows[overlap_start - first_frame:overlap_end - first_frame] += value
@@ -383,7 +382,8 @@ def _encoded_output(handle, rate, channels, format, cancel_event):
 def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
                    microphone_gain=1.5,
                    cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES,
-                   progress=None, duration=None, validate_output=None):
+                   progress=None, duration=None, validate_output=None,
+                   output_rate=None, output_channels=None):
     """Mix timestamped tracks into an atomic MP3 or WAV selected by extension.
 
     ``track_sources`` is a mapping whose values yield ``(event, float32
@@ -419,8 +419,12 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
         raise ValueError(tr("Pelo menos uma fonte deve conter áudio."))
     # A common highest-rate clock preserves the native timing and lets lower
     # rate sources use bounded linear interpolation during rendering.
-    rate = max(track.rate for track in tracks)
-    output_channels = max(track.channels for track in tracks)
+    rate = max(track.rate for track in tracks) if output_rate is None else output_rate
+    output_channels = max(track.channels for track in tracks) if output_channels is None else output_channels
+    if (not isinstance(rate, int) or isinstance(rate, bool) or not 1 <= rate <= 192000
+            or not isinstance(output_channels, int) or isinstance(output_channels, bool)
+            or output_channels not in (1, 2)):
+        raise ValueError(tr("O formato de saída do áudio é incompatível."))
     destination = Path(destination).absolute()
     format = destination.suffix.lower().lstrip(".")
     if format not in {"mp3", "wav"}:
@@ -522,8 +526,23 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
     if inside_library:
         raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
     duration = None
-    if progress is not None:
+    output_rate = output_channels = None
+    metadata = None
+    if hasattr(store, "get"):
         metadata = store.get(session_id, include_events=False)
+        formats = [segment for track in tracks
+                   for segment in metadata.get("tracks", {}).get(track, {}).get("segments", [])
+                   if isinstance(segment, dict)]
+        rates = [segment.get("rate") for segment in formats
+                 if isinstance(segment.get("rate"), int) and not isinstance(segment.get("rate"), bool)
+                 and 1 <= segment.get("rate") <= 192000]
+        channels = [segment.get("channels") for segment in formats
+                    if isinstance(segment.get("channels"), int) and not isinstance(segment.get("channels"), bool)
+                    and segment.get("channels") in (1, 2)]
+        output_rate = max(rates, default=None)
+        output_channels = max(channels, default=None)
+    if progress is not None:
+        metadata = metadata or store.get(session_id, include_events=False)
         ends = [segment.get("end") for track in tracks
                 for segment in metadata.get("tracks", {}).get(track, {}).get("segments", [])]
         duration = max((float(end) for end in ends
@@ -549,6 +568,8 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         progress=progress,
         duration=duration,
         validate_output=validate_output,
+        output_rate=output_rate,
+        output_channels=output_channels,
     )
 
 

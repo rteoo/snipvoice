@@ -1605,7 +1605,7 @@ EN_US = {
     'O modelo local de resumo é inválido.': 'The local summary model is invalid.',
     'Não foi possível abrir o modelo local de resumo.': "Couldn't open the local summary model.",
     'O runtime local não conseguiu gerar o resumo.': "The local runtime couldn't create the summary.",
-    'A fonte {track} altera o formato ({old_rate} Hz/{old_channels} canais para {rate} Hz/{channels} canais); converta-a antes da mixagem.': 'The {track} source changes format ({old_rate} Hz/{old_channels} channels to {rate} Hz/{channels} channels); convert it before mixing.',
+    'O formato de saída do áudio é incompatível.': 'The audio output format is unsupported.',
     'Exportar texto': 'Export text',
     'Selecione uma gravação.': 'Select a recording.',
     'Baixar áudio final…': 'Download final audio…',
