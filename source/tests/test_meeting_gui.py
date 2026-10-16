@@ -338,6 +338,26 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.recover_audio_button.configure.assert_called_with(
             text="Verificar e otimizar áudio", state="normal")
 
+    def test_play_starts_final_audio_in_the_english_ui(self):
+        import i18n
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.snapshot = {"state": "idle"}
+        view.playback_status = Variable()
+        view.playback_position = Variable(0.0)
+        view.playback_duration = 10.0
+        view._action = mock.Mock()
+        i18n.set_language("en-US")
+        try:
+            view.playback_choices = playback_sources({}, True)
+            view.play_selected_recording()
+        finally:
+            i18n.set_language(i18n.DEFAULT_LANGUAGE)
+        view._action.assert_called_once_with(
+            "seek_playback", "meeting-1", "final", start=0.0,
+            urgent=True, callback=view._replay_started)
+
     def test_missing_final_audio_enables_recovery_action(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.play_button = mock.Mock()

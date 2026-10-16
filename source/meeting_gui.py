@@ -4943,7 +4943,7 @@ class MeetingWindow:
         if self.snapshot.get("state") in ("starting", "recording", "paused", "stopping"):
             self.playback_status.set(tr("Finalize a captura antes de reproduzir uma gravação."))
             return
-        if "Áudio final" not in self.playback_choices:
+        if not self.playback_choices:
             self.playback_status.set(tr("O áudio desta gravação não está disponível."))
             return
         position = min(self.playback_duration, max(0.0, self.playback_position.get()))
