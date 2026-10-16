@@ -766,6 +766,7 @@ class MeetingController:
         """
         errors = []
         resource_live = False
+        audio_saved = False
         try:
             with self._lock:
                 self._postprocess = tr("Gerando o áudio final")
@@ -774,14 +775,10 @@ class MeetingController:
                 session_id, destination, save_final=True,
                 enhance_microphone=settings.voice_boost,
             )
+            audio_saved = True
         except Exception as exc:
+            # The raw tracks stay canonical; transcription reads them instead.
             errors.append(tr("não foi possível gerar o áudio final: {error}", error=exc))
-            return errors, resource_live
-
-        try:
-            self._compact_capture(session_id)
-        except Exception as exc:
-            errors.append(tr("não foi possível liberar os arquivos temporários: {error}", error=exc))
 
         transcription_profile = self._installed_voice_profile(settings.profile)
         transcription_ready = False
@@ -827,6 +824,18 @@ class MeetingController:
                 self.store.save_processing_state(session_id, "summary",
                                                 "cancelled" if self._cancel.is_set() else "failed", str(exc)[:4096])
                 errors.append(tr("o resumo automático falhou: {error}", error=exc))
+
+        # Raw capture is the fallback for every step above, so it is removed
+        # only after the verified MP3 and all automatic processing succeeded.
+        if audio_saved and not errors and not self._cancel.is_set():
+            try:
+                self._compact_capture(session_id)
+            except Exception as exc:
+                errors.append(tr("não foi possível liberar os arquivos temporários: {error}", error=exc))
+        elif audio_saved:
+            self.store.save_processing_state(
+                session_id, "capture_cleanup", "skipped",
+                "Raw capture was kept because automatic processing did not complete.")
         with self._lock:
             self._postprocess = tr("Pós-processamento concluído") if not errors else tr("Processamento interrompido; tente novamente.")
         return errors, resource_live

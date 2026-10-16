@@ -17,8 +17,11 @@ The meeting workspace preserves Snipvoice's capture and recovery boundary:
   explicit settings action;
 - final audio is an atomic MP3 mixdown, decoded to EOF and checked against the
   rendered duration before publication. Playback, transcription, retries, and
-  clips use that MP3. A journaled compaction removes temporary capture segments
-  only after verified publication and the canonical metadata commit. Existing
+  clips use that MP3. Raw capture segments remain the fallback: if the MP3
+  cannot be produced, transcription and summaries read them instead. A
+  journaled compaction removes them only after verified publication, every
+  automatic processing step succeeding, every payload having been readable,
+  and the canonical metadata commit. Existing
   WAV recordings remain readable for compatibility. Optional capture-time
   microphone gain affects the final mix and does not perform acoustic echo
   cancellation;

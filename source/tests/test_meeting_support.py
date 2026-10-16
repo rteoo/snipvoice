@@ -606,7 +606,53 @@ class MeetingControllerTests(unittest.TestCase):
         self.voice.release_meeting.assert_not_called()
         metadata = self.controller.store.get(snapshot["session_id"])
         self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
-        self.assertEqual(metadata["capture_storage"]["state"], "compacted")
+        self.assertNotIn("capture_storage", metadata)
+        self.assertTrue(list(self.controller.store.iter_audio(snapshot["session_id"])))
+
+    def test_failed_mp3_still_transcribes_raw_and_keeps_it(self):
+        self.final_export.side_effect = RuntimeError("MP3 encoder unavailable")
+        sources = []
+
+        def transcribe(store, session, *_args, **_kwargs):
+            sources.append(len(list(store.iter_audio(session))))
+            store.save_processing_state(session, "transcription", "processing")
+
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_installed_summary_model", return_value=None), \
+                patch("meeting_transcription.transcribe_meeting", side_effect=transcribe):
+            self.assertTrue(self.controller.start(MeetingSettings()))
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(3)
+        snapshot = self.controller.snapshot()
+        metadata = self.controller.store.get(snapshot["session_id"])
+        self.assertEqual(sources, [1])
+        self.assertEqual(metadata["processing"]["transcription"]["status"], "completed")
+        self.assertIsNone(metadata["final_audio"])
+        self.assertNotIn("capture_storage", metadata)
+        self.assertIn("MP3 encoder unavailable", snapshot["error"])
+
+    def test_raw_capture_is_cleaned_only_after_every_step_succeeds(self):
+        for failure, compacted in ((None, True), (RuntimeError("synthetic ASR failure"), False)):
+            self.capture = FakeCapture()
+            with self.subTest(failure=failure), \
+                    patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                    patch.object(self.controller, "_installed_summary_model", return_value=None), \
+                    patch("meeting_transcription.transcribe_meeting", side_effect=failure):
+                self.assertTrue(self.controller.start(MeetingSettings()))
+                self.assertTrue(self.capture.started.wait(2))
+                self.controller.stop()
+                self.controller._thread.join(3)
+                session = self.controller.snapshot()["session_id"]
+                metadata = self.controller.store.get(session)
+                self.assertTrue(Path(metadata["final_audio"]["path"]).is_file())
+                if compacted:
+                    self.assertEqual(metadata["capture_storage"]["state"], "compacted")
+                    self.assertEqual(metadata["processing"]["capture_cleanup"]["status"], "completed")
+                else:
+                    self.assertNotIn("capture_storage", metadata)
+                    self.assertEqual(metadata["processing"]["capture_cleanup"]["status"], "skipped")
+                    self.assertTrue(list(self.controller.store.iter_audio(session)))
 
     @unittest.skipUnless(sys.platform in ("win32", "darwin"), "supported capture host required")
     def test_stop_racing_helper_exit_still_journals_buffered_audio(self):
