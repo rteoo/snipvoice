@@ -314,21 +314,25 @@ class SummaryRuntimeTests(unittest.TestCase):
                 self.stdin = io.StringIO()
                 self.stdout = io.StringIO(
                     '{"ok":true}\n'
-                    '{"ok":false,"error_code":"output_limit","error":"too long"}\n'
+                    '{"ok":false,"error_code":"output_limit","error":"O runtime local retornou uma '
+                    'resposta maior que o limite permitido."}\n'
                     '{"ok":true,"text":"{\\"summary\\":\\"ok\\"}"}\n'
                 )
                 self.terminated = False
             def poll(self): return None if not self.terminated else 0
             def terminate(self): self.terminated = True
             def wait(self, timeout=None): return 0
+        import i18n
         process = FakeProcess()
         with mock.patch("summary_runtime._spawn_worker", return_value=process):
             runtime = SummaryRuntime("local.gguf")
+            i18n.set_language("en-US")
             try:
-                with self.assertRaises(SummaryOutputLimitError):
+                with self.assertRaisesRegex(SummaryOutputLimitError, "larger than the allowed limit"):
                     runtime.generate("system", [])
                 self.assertEqual(json.loads(runtime.generate("compact", [])), {"summary": "ok"})
             finally:
+                i18n.set_language(i18n.DEFAULT_LANGUAGE)
                 runtime.close()
 
     def test_real_local_worker_keeps_native_import_out_of_parent(self):

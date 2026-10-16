@@ -308,9 +308,11 @@ class _WorkerClient:
                 raise RuntimeError(tr("O runtime local de resumo retornou uma resposta inválida."))
             if not value["ok"]:
                 if value.get("error_code") == "output_limit":
-                    raise SummaryOutputLimitError(
-                        value.get("error") or tr("O resumo atingiu o limite de geração antes de terminar; o resultado anterior foi preservado.")
-                    )
+                    # The worker sends untranslated msgids; translate here
+                    # like every other worker error.
+                    raise SummaryOutputLimitError(tr(
+                        value.get("error") or N_("O resumo atingiu o limite de geração antes de terminar; o resultado anterior foi preservado.")
+                    ))
                 raise RuntimeError(tr(value.get("error") or N_("O runtime local de resumo falhou.")))
             return value
 
