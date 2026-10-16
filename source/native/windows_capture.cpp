@@ -141,8 +141,11 @@ std::string nativePacketFields(DWORD flags, UINT32 frames, unsigned rate,
 }
 struct AudioFailure : std::runtime_error {
     HRESULT result;
-    AudioFailure(HRESULT value, const std::string& message)
-        : std::runtime_error(message), result(value) {}
+    // The endpoint is absent or inactive: no audio can arrive until the user
+    // reconnects it (or, for a default source, until a new default exists).
+    bool endpointMissing;
+    AudioFailure(HRESULT value, const std::string& message, bool missing = false)
+        : std::runtime_error(message), result(value), endpointMissing(missing) {}
 };
 bool recoverable(HRESULT result) {
     return result == AUDCLNT_E_DEVICE_INVALIDATED
@@ -485,10 +488,17 @@ void recoveryWait(Session& session, int milliseconds) {
         return session.stop.load();
     });
 }
-template<typename Attempt, typename Wait>
+// attempt() returns true to reopen at once (a followed default changed),
+// false when capture ended normally. switched() reports a different default
+// endpoint that is ready now; following it is a device change rather than an
+// interruption, so it spends no retry and records no loss.
+template<typename Attempt, typename Switched, typename Wait>
 void recoverSource(Session& session, const Selection& selected,
                    capture_health::RecoveryBudget& recovery,
-                   capture_health::Watchdog& health, Attempt attempt, Wait wait) {
+                   capture_health::Watchdog& health, Attempt attempt,
+                   Switched switched, Wait wait) {
+    bool missing = false;
+    uint64_t packetsAtFailure = 0;
     while (!session.stop) {
         // A paused recording must not spend its reconnect budget while the
         // user is intentionally away from the endpoint.
@@ -501,13 +511,16 @@ void recoverSource(Session& session, const Selection& selected,
         } catch (const AudioFailure& error) {
             if (session.stop) return;
             if (!recoverable(error.result)) throw;
+            if (switched()) continue;
             int delay = recovery.nextDelay();
-            if (delay < 0) {
-                healthEvent(session, selected, health, recovery, "failed", "recovery_exhausted");
-                throw std::runtime_error("Audio source recovery exhausted six attempts; reconnect the selected device and start a new recording. Saved audio was preserved.");
-            }
-            session.gap(selected.track, session.now(), "capture_interruption_reopening");
-            healthEvent(session, selected, health, recovery, "recovering", error.what());
+            // Waiting on an absent endpoint is one interruption, however
+            // many reconnect polls it takes.
+            if (!missing || health.packets != packetsAtFailure)
+                session.gap(selected.track, session.now(), "capture_interruption_reopening");
+            missing = error.endpointMissing;
+            packetsAtFailure = health.packets;
+            healthEvent(session, selected, health, recovery,
+                missing ? "disconnected" : "recovering", error.what());
             wait(delay);
         }
     }
@@ -626,7 +639,7 @@ void healthSelfTest() {
         batch.flush();
         if (opens == 1) throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic same-device reconnect");
         return false;
-    }, [&](int delay) { waits.push_back(delay); });
+    }, [] { return false; }, [&](int delay) { waits.push_back(delay); });
     require(opens == 2 && waits == std::vector<int>{250}, "same endpoint retries without changing selection");
     require(sequence == 2 && recovered.queue.front().payload == pcm
         && recovered.queue.back().payload == pcm, "recovery preserves both PCM batches and sequence");
@@ -634,23 +647,56 @@ void healthSelfTest() {
         && recovered.queue[2].header.find("recovering") != std::string::npos,
         "recovery interruption and health evidence are retained");
 
-    Session failed;
-    capture_health::RecoveryBudget exhausted;
+    Session persistent;
+    capture_health::RecoveryBudget unlimited;
     waits.clear();
     opens = 0;
-    bool terminal = false;
-    try {
-        recoverSource(failed, same, exhausted, health, [&]() -> bool {
-            ++opens;
-            throw AudioFailure(AUDCLNT_E_RESOURCES_INVALIDATED, "synthetic persistent failure");
-        }, [&](int delay) { waits.push_back(delay); });
-    } catch (const std::runtime_error& error) {
-        terminal = std::string(error.what()).find("exhausted six attempts") != std::string::npos;
+    recoverSource(persistent, same, unlimited, health, [&]() -> bool {
+        ++opens;
+        throw AudioFailure(AUDCLNT_E_RESOURCES_INVALIDATED, "synthetic persistent failure");
+    }, [] { return false; }, [&](int delay) {
+        waits.push_back(delay);
+        if (waits.size() == 9) persistent.stop = true;
+    });
+    require(opens == 9 && waits == std::vector<int>({250, 500, 1000, 2000, 4000, 4000, 4000, 4000, 4000})
+        && unlimited.attempts == 6, "persistent failures keep a bounded four-second cadence");
+    require(persistent.queue.back().header.find("\"recovery_attempt\":6") != std::string::npos,
+        "the reported attempt saturates at six");
+
+    Session unplugged;
+    capture_health::RecoveryBudget unpluggedBudget;
+    capture_health::Watchdog unpluggedHealth;
+    opens = 0;
+    recoverSource(unplugged, same, unpluggedBudget, unpluggedHealth, [&]() -> bool {
+        ++opens;
+        if (opens == 4) {
+            unpluggedHealth.packet(1, 480);
+            throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic second unplug", true);
+        }
+        if (opens == 6) return false;
+        throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic missing endpoint", true);
+    }, [] { return false; }, [](int) {});
+    unsigned unpluggedGaps = 0, disconnectedEvents = 0;
+    for (const auto& message : unplugged.queue) {
+        if (message.header.find("capture_interruption_reopening") != std::string::npos) ++unpluggedGaps;
+        if (message.header.find("\"disconnected\"") != std::string::npos) ++disconnectedEvents;
     }
-    require(terminal && opens == 7 && waits == std::vector<int>({250, 500, 1000, 2000, 4000, 4000}),
-        "persistent failures stop after six bounded retries");
-    require(!failed.stop && failed.queue.back().header.find("recovery_exhausted") != std::string::npos,
-        "exhaustion remains visible without stopping the other source");
+    require(opens == 6 && unpluggedGaps == 2 && disconnectedEvents == 5 && !unplugged.stop,
+        "a missing endpoint is one interruption per outage and keeps waiting");
+
+    Session followed;
+    capture_health::RecoveryBudget followedBudget;
+    waits.clear();
+    opens = 0;
+    unsigned switches = 0;
+    recoverSource(followed, same, followedBudget, health, [&]() -> bool {
+        ++opens;
+        if (opens == 1) return true; // the followed default changed while running
+        if (opens == 2) throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic default removed");
+        return false;
+    }, [&] { return ++switches == 1; }, [&](int delay) { waits.push_back(delay); });
+    require(opens == 3 && switches == 1 && waits.empty() && followedBudget.attempts == 0
+        && followed.queue.empty(), "following a new default spends no retry and records no loss");
 
     Session denied;
     capture_health::RecoveryBudget permanent;
@@ -658,7 +704,7 @@ void healthSelfTest() {
     try {
         recoverSource(denied, same, permanent, health, []() -> bool {
             throw AudioFailure(E_ACCESSDENIED, "synthetic permission failure");
-        }, [&](int) { require(false, "permission errors must not retry"); });
+        }, [] { return false; }, [&](int) { require(false, "permission errors must not retry"); });
     } catch (const AudioFailure& error) { deniedRaised = error.result == E_ACCESSDENIED; }
     require(deniedRaised && permanent.attempts == 0, "permanent errors remain actionable");
     capture_health::RecoveryBudget stable;
@@ -673,7 +719,7 @@ void healthSelfTest() {
     recoverSource(cancelled, same, cancelledBudget, health, [&]() -> bool {
         ++opens;
         throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "synthetic cancellation");
-    }, [&](int) { cancelled.stop = true; });
+    }, [] { return false; }, [&](int) { cancelled.stop = true; });
     require(opens == 1 && cancelledBudget.attempts == 1, "stop prevents another reopen during backoff");
     Session interruptedWait;
     auto began = Clock::now();
@@ -851,12 +897,31 @@ void capture(Session& session, Selection selected) {
         auto publishHealth = [&](const char* state, const char* reason) {
             healthEvent(session, selected, health, recovery, state, reason);
         };
+        std::wstring switchTarget;
+        auto switched = [&]() {
+            if (!selected.followsDefault()) return false;
+            std::wstring id;
+            try {
+                id = defaultId(devices.Get(), selected.flow(), selected.role());
+            } catch (const AudioFailure&) {
+                return false;
+            }
+            // Each new default gets one immediate open; if that open fails
+            // too, the normal backoff applies instead of a tight loop.
+            if (id.empty() || id == previous || id == switchTarget) return false;
+            switchTarget = id;
+            return true;
+        };
         auto attempt = [&]() {
             std::wstring id = selected.followsDefault()
                 ? defaultId(devices.Get(), selected.flow(), selected.role()) : selected.value;
-            if (id.empty()) throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "No active OS default endpoint");
+            if (id.empty())
+                throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "No active OS default endpoint", true);
             ComPtr<IMMDevice> device;
-            check(devices->GetDevice(id.c_str(), device.GetAddressOf()), "Open selected endpoint");
+            HRESULT opened = devices->GetDevice(id.c_str(), device.GetAddressOf());
+            if (opened == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) || opened == E_NOTFOUND)
+                throw AudioFailure(opened, "Selected endpoint is not connected", true);
+            check(opened, "Open selected endpoint");
             ComPtr<IMMEndpoint> endpoint;
             check(device.As(&endpoint), "Inspect endpoint direction");
             EDataFlow flow;
@@ -865,7 +930,7 @@ void capture(Session& session, Selection selected) {
             DWORD state = 0;
             check(device->GetState(&state), "Inspect selected endpoint state");
             if (!(state & DEVICE_STATE_ACTIVE))
-                throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "Selected endpoint is disconnected or disabled");
+                throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "Selected endpoint is disconnected or disabled", true);
             ComPtr<IAudioClient> client;
             check(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                 reinterpret_cast<void**>(client.GetAddressOf())), "Activate WASAPI endpoint");
@@ -1088,7 +1153,7 @@ void capture(Session& session, Selection selected) {
                 if (running && Clock::now() >= nextHealthCheck) {
                     check(device->GetState(&state), "Inspect capture endpoint health");
                     if (!(state & DEVICE_STATE_ACTIVE))
-                        throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "Capture endpoint disconnected");
+                        throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "Capture endpoint disconnected", true);
                     UINT64 clockPosition = 0;
                     HRESULT clockResult = audioClock
                         ? audioClock->GetPosition(&clockPosition, nullptr) : E_NOINTERFACE;
@@ -1143,11 +1208,9 @@ void capture(Session& session, Selection selected) {
                 if (running) client->Stop();
                 throw;
             }
-            if (reopen)
-                throw AudioFailure(AUDCLNT_E_DEVICE_INVALIDATED, "System default audio endpoint changed");
-            return false;
+            return reopen;
         };
-        recoverSource(session, selected, recovery, health, attempt,
+        recoverSource(session, selected, recovery, health, attempt, switched,
             [&](int delay) { recoveryWait(session, delay); });
     } catch (const std::exception& error) {
         session.error(selected.track, error.what());

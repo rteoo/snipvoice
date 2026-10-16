@@ -73,10 +73,11 @@ struct RecoveryBudget {
     double stableAudio = 0;
 
     int nextDelay() {
-        // ceiling: six retries between thirty seconds of healthy packets.
-        // Revisit only with measured reconnect latency; never retry forever.
-        if (attempts >= 6) return -1;
-        int delay = 250 << std::min(attempts++, 4u);
+        // A recording outlives an unplugged or failing endpoint: after the
+        // backoff reaches four seconds it keeps that cadence until the source
+        // returns or the user stops. The reported attempt saturates at six.
+        int delay = 250 << std::min(attempts, 4u);
+        attempts = std::min(attempts + 1, 6u);
         stableSince = lastPacket = -1;
         stableAudio = 0;
         return delay;

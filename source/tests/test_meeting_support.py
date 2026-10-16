@@ -531,6 +531,41 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertTrue(Path(store.get(session)["final_audio"]["path"]).is_file())
         self.assertTrue(self.controller.snapshot()["partial"], "Never erase evidence of an actual interruption")
 
+    def test_disconnected_source_alerts_once_per_outage_and_recording_continues(self):
+        def health(state, attempt=1):
+            return {"type": "capture_health", "track": "microphone", "state": state,
+                    "reason": "synthetic", "packets": 0, "frames": 0, "last_packet_age": 3.0,
+                    "recovery_attempt": attempt, "timestamp": 3.0}
+        pending = [
+            {"type": "gap", "track": "microphone", "timestamp": 3.0,
+             "reason": "capture_interruption_reopening"},
+            health("disconnected"), health("disconnected", 2), health("disconnected", 3),
+            health("receiving"),
+            health("recovering", 6),
+            health("receiving"),
+        ]
+        original = self.capture.read_event
+        def read_event(timeout):
+            if pending:
+                return dict(pending.pop(0), generation=self.capture.generation), b""
+            return original(timeout)
+        self.capture.read_event = read_event
+        self.controller.notify = Mock()
+        self.assertTrue(self.controller.start(MeetingSettings(sources="microphone")))
+        self.assertTrue(self.capture.started.wait(2))
+        deadline = time.monotonic() + 2
+        while pending:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.005)
+        self.assertEqual(self.controller.snapshot()["state"], "recording")
+        self.controller.stop()
+        self.controller._thread.join(3)
+        messages = [call.args[0] for call in self.controller.notify.call_args_list]
+        alerts = [message for message in messages if "não está recebendo áudio do microfone" in message]
+        self.assertEqual(len(alerts), 2)
+        self.assertFalse(any("Verifique a captura" in message for message in messages))
+        self.assertTrue(self.controller.snapshot()["partial"])
+
     def test_missing_mp3_encoder_preserves_recording_and_releases_capture(self):
         self.final_export.side_effect = RuntimeError("MP3 encoder unavailable")
         self.assertTrue(self.controller.start(MeetingSettings()))

@@ -97,8 +97,9 @@ def scenario(helper, endpoint, name, signal):
               "elapsed_seconds": round(time.monotonic() - started, 3)}
     assert stopped and sequence_breaks == 0, "capture did not stop cleanly or sequence broke"
     if name == "invalidate-persistent":
-        assert health["recovering"] == 6 and health["failed"] == 1
-        assert counters["source_error"] == 1 and frames > 0
+        # The source keeps retrying at the capped cadence until stop.
+        assert health["recovering"] >= 6 and health["failed"] == 0
+        assert counters["source_error"] == 0 and frames > 0
     else:
         assert counters["source_error"] == 0 and health["failed"] == 0
         if name in {"invalidate-once", "zero-once"}:

@@ -71,7 +71,7 @@ def read_frame(stream):
         raise MeetingAudioError(tr("Evento de controle contém áudio inesperado."))
     elif event["type"] == "capture_health":
         if (event.get("track") not in ("microphone", "system")
-                or event.get("state") not in {"receiving", "quiet", "waiting", "paused", "recovering", "failed"}
+                or event.get("state") not in {"receiving", "quiet", "waiting", "paused", "recovering", "disconnected", "failed"}
                 or not isinstance(event.get("reason"), str) or len(event["reason"]) > 4096
                 or any(isinstance(event.get(key), bool) or not isinstance(event.get(key), int)
                        or event[key] < 0 for key in ("packets", "frames", "recovery_attempt"))

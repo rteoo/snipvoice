@@ -61,6 +61,8 @@ class MeetingAudioTests(unittest.TestCase):
         actual, payload = read_frame(FragmentedReader(encode_frame(health)))
         self.assertEqual(actual, health)
         self.assertEqual(payload, b"")
+        disconnected = dict(health, state="disconnected", recovery_attempt=6)
+        self.assertEqual(read_frame(io.BytesIO(encode_frame(disconnected)))[0], disconnected)
         for changes in ({"state": "completed"}, {"frames": True}, {"packets": -1},
                         {"last_packet_age": -1}, {"timestamp": "4"},
                         {"recovery_attempt": 7}, {"reason": "x" * 4097}, {"track": "other"}):

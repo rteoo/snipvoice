@@ -1643,6 +1643,12 @@ EN_US = {
     'Igual ao ditado': 'Same as dictation',
     'Gravando · {time}': 'Recording · {time}',
     'Reconectando áudio': 'Reconnecting audio',
+    'Sem áudio de uma fonte': 'No audio from a source',
+    'A gravação não está recebendo áudio do {source}. Reconecte o dispositivo; a gravação continua e retoma quando ele voltar.':
+        "The recording isn't receiving audio from the {source}. Reconnect the device; recording continues and "
+        'resumes when it returns.',
+    'microfone': 'microphone',
+    'sistema': 'system output',
     'Estado de saúde da captura inválido.': 'Invalid capture health state.',
     'Gravação local em andamento': 'Local recording in progress',
     'Pausado · {time}': 'Paused · {time}',

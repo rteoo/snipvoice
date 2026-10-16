@@ -782,6 +782,10 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
         snapshot["capture_health"]["system"]["state"] = "quiet"
         self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
+        snapshot["capture_health"]["system"]["state"] = "disconnected"
+        status = format_recording_status(snapshot)
+        self.assertIn("Sem áudio de uma fonte", status)
+        self.assertNotIn("Reconectando áudio", status)
 
     def test_export_progress_is_scoped_to_selection_and_refreshes_final_before_asr_finishes(self):
         view = MeetingWindow.__new__(MeetingWindow)

@@ -218,6 +218,7 @@ class MeetingController:
         self._last_status = ""
         self._source_errors = set()
         self._capture_health = {}
+        self._no_audio_alerted = set()
         self._annotation_generations = {}
         self._index_rebuild_lock = threading.Lock()
         self._index_rebuild_cancel = threading.Event()
@@ -565,6 +566,7 @@ class MeetingController:
             self._state, self._error = "starting", ""
             self._source_errors.clear()
             self._capture_health.clear()
+            self._no_audio_alerted.clear()
             self._elapsed = 0.0
             self._output_path = ""
             self._postprocess = ""
@@ -668,20 +670,41 @@ class MeetingController:
                 else:
                     self.store.add_event(session, event)
                     if event["type"] == "capture_health" and event.get("track") in ("microphone", "system"):
+                        track = event["track"]
                         with self._lock:
-                            self._capture_health[event["track"]] = {
+                            self._capture_health[track] = {
                                 key: event[key] for key in ("state", "reason", "packets", "frames",
                                                            "last_packet_age", "recovery_attempt")
                             }
-                    loss = event["type"] == "gap" and any(word in str(event.get("reason", ""))
+                            # Alert once per outage: an absent endpoint, or a
+                            # reopen that keeps failing at the capped cadence.
+                            silent = (event["state"] == "disconnected"
+                                      or (event["state"] == "recovering" and event["recovery_attempt"] >= 6))
+                            alert = silent and track not in self._no_audio_alerted
+                            if alert:
+                                self._no_audio_alerted.add(track)
+                                self._error = tr(
+                                    "A gravação não está recebendo áudio do {source}. Reconecte o dispositivo; "
+                                    "a gravação continua e retoma quando ele voltar.",
+                                    source=tr("microfone") if track == "microphone" else tr("sistema"))
+                            elif event["state"] == "receiving":
+                                self._no_audio_alerted.discard(track)
+                        if alert:
+                            self.notify(self._error)
+                    reason = str(event.get("reason", ""))
+                    loss = event["type"] == "gap" and any(word in reason
                         for word in ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption"))
                     if event["type"] == "source_error" or loss:
                         with self._lock:
                             first_loss = event.get("track", "unknown") not in self._source_errors
                             self._source_errors.add(event.get("track", "unknown"))
-                            detail = str(event.get("message") or event.get("reason") or tr("Uma fonte foi interrompida."))[:1024]
-                            self._error = tr("Verifique a captura de áudio: {detail}", detail=detail)
-                        if first_loss:
+                            # A reopen keeps the recording going; its health
+                            # events decide whether the user must act.
+                            reopening = event["type"] == "gap" and "capture_interruption" in reason
+                            if not reopening:
+                                detail = str(event.get("message") or reason or tr("Uma fonte foi interrompida."))[:1024]
+                                self._error = tr("Verifique a captura de áudio: {detail}", detail=detail)
+                        if first_loss and not reopening:
                             self.notify(self._error)
         except Exception as exc:
             # Never log native buffers, transcript contents, or helper diagnostics.

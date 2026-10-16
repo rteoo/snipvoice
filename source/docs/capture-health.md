@@ -28,23 +28,33 @@ packets, not independently verified durable disk writes. The controller journals
 the observations before publishing them to the UI. An active recovery adds
 “Reconnecting audio” to recording feedback without exposing native error text.
 
-## Bounded recovery
+## Recovery
+
+A source that follows the OS default switches to the new default as soon as
+it changes, whether it is polled while running or found after the old default
+was removed. The switch records `default_endpoint_changed`, spends no retry and
+is not audio loss. Each new default gets one immediate open; if that fails,
+the normal backoff applies.
 
 Device/resource invalidation, an unavailable selected device, temporary audio
 service unavailability, and watchdog-confirmed starvation reopen the selected
-endpoint. A manual endpoint remains pinned to its original ID. Default-device
-changes use the same retry budget, including transitions through no default.
+endpoint. A manual endpoint remains pinned to its original ID. While it is
+absent (or no default exists at all), the source reports `disconnected`, the
+controller alerts that the recording is receiving no audio from that source,
+and the source keeps waiting for the endpoint to return. One outage records one
+`capture_interruption_reopening` gap, so the session ends `partial`.
 
-There are six retries with delays of 250, 500, 1000, 2000, 4000 and 4000 ms.
-Stop interrupts these waits. Thirty seconds of continuous healthy packet timing
-and captured sample duration restore the budget; a single packet cannot reset
-it. Permission, format and other permanent errors are not retried.
+Retry delays are 250, 500, 1000, 2000 and then 4000 ms until the source
+returns or the user stops; the reported attempt saturates at six. Stop
+interrupts these waits. Thirty seconds of continuous healthy packet timing and
+captured sample duration restore the short delays; a single packet cannot. A
+recording never ends because a source is missing. Permission, format and other
+permanent errors are not retried and remain source errors.
 
 Valid buffered tails are flushed before abandoning a client. Failed clients
 are not drained again. Sequence numbering continues across successful reopens.
-Exhaustion emits a failed health event and a source error while the other source
-can continue. Existing capture gaps and source-error metadata remain available
-for diagnosis; successful recovery is not a claim that absent samples returned.
+Existing capture gaps and source-error metadata remain available for diagnosis;
+successful recovery is not a claim that absent samples returned.
 
 Native COM calls retain their platform blocking behavior. The existing helper
 process shutdown bounds remain the final containment for an unresponsive driver.
