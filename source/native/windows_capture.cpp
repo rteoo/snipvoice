@@ -430,7 +430,8 @@ void controls(Session& session) {
     while (!session.stop) {
         DWORD read = 0;
         if (!ReadFile(input, buffer, sizeof(buffer), &read, nullptr) || !read) {
-            session.stop = true;
+            { std::lock_guard<std::mutex> lock(session.mutex); session.stop = true; }
+            session.changed.notify_all();
             break;
         }
         for (DWORD i = 0; i < read; ++i) {
@@ -438,11 +439,16 @@ void controls(Session& session) {
                 auto command = oversized ? std::string() : parseCommand(line);
                 line.clear();
                 oversized = false;
-                if (command == "stop") session.stop = true;
-                else if (command == "pause") {
-                    if (!session.paused.exchange(true)) ++session.pauseEpoch;
-                } else if (command == "resume") {
-                    if (session.paused.exchange(false)) ++session.pauseEpoch;
+                {
+                    // Waiters test these flags under the mutex; changing them
+                    // outside it can lose the wakeup for a full backoff delay.
+                    std::lock_guard<std::mutex> lock(session.mutex);
+                    if (command == "stop") session.stop = true;
+                    else if (command == "pause") {
+                        if (!session.paused.exchange(true)) ++session.pauseEpoch;
+                    } else if (command == "resume") {
+                        if (session.paused.exchange(false)) ++session.pauseEpoch;
+                    }
                 }
                 session.changed.notify_all();
             } else if (!oversized) {
@@ -486,6 +492,8 @@ void recoverSource(Session& session, const Selection& selected,
     while (!session.stop) {
         // A paused recording must not spend its reconnect budget while the
         // user is intentionally away from the endpoint.
+        if (session.paused && !session.stop)
+            healthEvent(session, selected, health, recovery, "paused", "recovery_paused");
         while (session.paused && !session.stop) wait(100);
         if (session.stop) return;
         try {
