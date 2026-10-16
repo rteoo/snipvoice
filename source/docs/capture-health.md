@@ -75,9 +75,12 @@ Native discontinuity diagnostics include both QPC and selected sample timestamps
 audio blocks also retain the OR of their native packet flags. Watchdog packet age
 uses wall time independently of the selected audio timeline.
 
-Different physical endpoints keep separate clock anchors. Their initial alignment
-uses QPC; this policy does not compensate for long-term oscillator skew between
-independent microphone and playback hardware.
+Different physical endpoints keep separate clock anchors and drift against
+QPC at their own oscillator rates. A smoothed QPC error beyond 20 ms slews the
+anchor by at most 0.05% of each packet's duration until the error falls below
+5 ms, so per-packet jitter never moves samples while drift between the tracks
+stays bounded near 20 ms. A counter that keeps advancing more than 0.5 s away
+from real time is a discontinuity and re-anchors to QPC.
 
 ## Verification
 
@@ -89,7 +92,8 @@ python -m unittest tests.test_windows_capture tests.test_meeting_audio tests.tes
 ```
 
 The native self-test runs deterministic quiet-loopback, empty-race, zero-frame,
-starvation, same-device reopen, exhaustion, stable-budget reset, permanent-error,
+starvation, same-device reopen, capped persistent retry, missing-endpoint
+outage, default switching, stable-budget reset, permanent-error, clock drift,
 tail/sequence preservation and cancellation scenarios without opening devices.
 
 The explicit live fault probe opens real WASAPI loopback clients and uses a

@@ -95,24 +95,63 @@ bool nextExpectedDevicePosition(UINT64 devicePosition, UINT32 frames, UINT64& ne
 // endpoint's device position proves that continuity was preserved. QPC can
 // step while the audio clock continues; a device-position jump, invalid
 // timestamp, pause, or reopen must retain the QPC boundary and stay visible.
+//
+// Each endpoint's sample clock drifts from QPC (tens of ppm), so two tracks
+// anchored only to their own positions would separate over hours. A smoothed
+// QPC error beyond a deadband slews the anchor by at most kMaxSlew of each
+// packet's duration: jitter stays invisible, drift stays bounded, and no
+// sample-scale gap or overlap is introduced. A gross error means the device
+// position kept counting while real time did not (or the reverse) and
+// re-anchors as a visible discontinuity.
 struct SampleTimeline {
+    static constexpr double kErrorWeight = 0.01;
+    static constexpr double kDriftStart = 0.02;
+    static constexpr double kDriftStop = 0.005;
+    static constexpr double kMaxSlew = 0.0005;
+    static constexpr double kReanchor = 0.5;
     bool have = false;
+    bool slewing = false;
     double anchorTimestamp = 0;
+    double averageError = 0;
     UINT64 anchorDevicePosition = 0;
     UINT64 expectedDevicePosition = 0;
 
-    void reset() { have = false; anchorTimestamp = 0; anchorDevicePosition = 0; expectedDevicePosition = 0; }
+    void reset() {
+        have = slewing = false;
+        anchorTimestamp = averageError = 0;
+        anchorDevicePosition = expectedDevicePosition = 0;
+    }
 
     double timestamp(double qpcTimestamp, UINT64 devicePosition, UINT32 frames,
                      unsigned rate, bool valid) {
-        const bool continuous = have && devicePosition == expectedDevicePosition;
+        bool continuous = have && devicePosition == expectedDevicePosition;
         if (!valid || !nextExpectedDevicePosition(devicePosition, frames, expectedDevicePosition)) {
             reset();
             return qpcTimestamp;
         }
+        if (continuous) {
+            double predicted = anchorTimestamp
+                + static_cast<double>(devicePosition - anchorDevicePosition) / rate;
+            double error = qpcTimestamp - predicted;
+            if (std::abs(error) > kReanchor) {
+                continuous = false;
+            } else {
+                averageError += (error - averageError) * kErrorWeight;
+                if (std::abs(averageError) > kDriftStart) slewing = true;
+                else if (std::abs(averageError) < kDriftStop) slewing = false;
+                if (slewing) {
+                    double limit = kMaxSlew * frames / rate;
+                    double step = std::max(-limit, std::min(limit, averageError));
+                    anchorTimestamp += step;
+                    averageError -= step;
+                }
+            }
+        }
         if (!continuous) {
             anchorTimestamp = qpcTimestamp;
             anchorDevicePosition = devicePosition;
+            averageError = 0;
+            slewing = false;
         }
         const double selected = anchorTimestamp
             + static_cast<double>(devicePosition - anchorDevicePosition) / rate;
@@ -841,6 +880,27 @@ void selfTestLogic() {
             + (packet % 2 ? 0.01 : 0.0), longPosition, 480, 48000, true);
     }
     require(std::abs(longTimestamp - (30.0 + 1080000 * 0.01)) < 1e-9);
+    // A device clock 100 ppm fast against QPC for three hours would drift
+    // 1.08 s; slewing keeps it near the deadband without packet-scale steps.
+    timeline.reset();
+    UINT64 driftPosition = 100000;
+    double previousDrift = timeline.timestamp(30.0, driftPosition, 480, 48000, true);
+    double worstError = 0, smallestStep = 1, largestStep = 0;
+    for (unsigned packet = 1; packet <= 1080000; ++packet) {
+        driftPosition += 480;
+        double qpc = 30.0 + packet * 0.01 * (1.0 - 100e-6);
+        double current = timeline.timestamp(qpc, driftPosition, 480, 48000, true);
+        worstError = std::max(worstError, std::abs(current - qpc));
+        smallestStep = std::min(smallestStep, current - previousDrift);
+        largestStep = std::max(largestStep, current - previousDrift);
+        previousDrift = current;
+    }
+    require(worstError < 0.03);
+    require(smallestStep > 0.01 * (1.0 - 0.00051) && largestStep < 0.01 * (1.0 + 0.00051));
+    timeline.reset();
+    timeline.timestamp(40.0, 5000, 480, 48000, true);
+    // A continuing counter across two seconds of real time is not continuity.
+    require(std::abs(timeline.timestamp(42.0, 5480, 480, 48000, true) - 42.0) < 1e-12);
     Session buffered;
     uint64_t sequence = 0;
     AudioBatch batch{buffered, 0, 48000, 1, 0, sequence};
