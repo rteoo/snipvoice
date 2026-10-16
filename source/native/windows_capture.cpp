@@ -90,9 +90,41 @@ bool nextExpectedDevicePosition(UINT64 devicePosition, UINT32 frames, UINT64& ne
     next = devicePosition + frames;
     return true;
 }
+
+// Keep a packet-contiguous sample timeline anchored to QPC only when the
+// endpoint's device position proves that continuity was preserved. QPC can
+// step while the audio clock continues; a device-position jump, invalid
+// timestamp, pause, or reopen must retain the QPC boundary and stay visible.
+struct SampleTimeline {
+    bool have = false;
+    double anchorTimestamp = 0;
+    UINT64 anchorDevicePosition = 0;
+    UINT64 expectedDevicePosition = 0;
+
+    void reset() { have = false; anchorTimestamp = 0; anchorDevicePosition = 0; expectedDevicePosition = 0; }
+
+    double timestamp(double qpcTimestamp, UINT64 devicePosition, UINT32 frames,
+                     unsigned rate, bool valid) {
+        const bool continuous = have && devicePosition == expectedDevicePosition;
+        if (!valid || !nextExpectedDevicePosition(devicePosition, frames, expectedDevicePosition)) {
+            reset();
+            return qpcTimestamp;
+        }
+        if (!continuous) {
+            anchorTimestamp = qpcTimestamp;
+            anchorDevicePosition = devicePosition;
+        }
+        const double selected = anchorTimestamp
+            + static_cast<double>(devicePosition - anchorDevicePosition) / rate;
+        have = true;
+        return selected;
+    }
+};
 std::string nativePacketFields(DWORD flags, UINT32 frames, unsigned rate,
                                UINT64 devicePosition, bool haveExpected,
-                               UINT64 expectedDevicePosition, bool positionsValid) {
+                               UINT64 expectedDevicePosition, bool positionsValid,
+                               double qpcTimestamp = std::numeric_limits<double>::quiet_NaN(),
+                               double sampleTimestamp = std::numeric_limits<double>::quiet_NaN()) {
     std::ostringstream out;
     out << ",\"buffer_flags\":" << flags
         << ",\"packet_frames\":" << frames
@@ -103,6 +135,8 @@ std::string nativePacketFields(DWORD flags, UINT32 frames, unsigned rate,
     out << ",\"expected_device_position\":";
     if (positionsValid && haveExpected) out << expectedDevicePosition;
     else out << "null";
+    if (std::isfinite(qpcTimestamp)) out << ",\"qpc_timestamp\":" << number(qpcTimestamp);
+    if (std::isfinite(sampleTimestamp)) out << ",\"sample_timestamp\":" << number(sampleTimestamp);
     return out.str();
 }
 struct AudioFailure : std::runtime_error {
@@ -288,6 +322,7 @@ struct AudioBatch {
     unsigned rate, channels, frames = 0;
     uint64_t& sequence;
     double timestamp = 0;
+    DWORD packetFlags = 0;
     std::vector<BYTE> payload;
     unsigned maximum() const { return std::max(1u, rate / 10); }
     void flush() {
@@ -302,18 +337,23 @@ struct AudioBatch {
             + ",\"channels\":" + std::to_string(channels)
             + ",\"frames\":" + std::to_string(frames)
             + ",\"timestamp\":" + number(timestamp)
-            + ",\"sequence\":" + std::to_string(sequence++) + '}';
+            + ",\"sequence\":" + std::to_string(sequence++);
+        if (packetFlags) block.header += ",\"buffer_flags\":" + std::to_string(packetFlags);
+        block.header += '}';
         session.push(std::move(block));
         frames = 0;
+        packetFlags = 0;
         payload.clear();
     }
-    void append(double stamp, unsigned count, const std::vector<BYTE>& pcm) {
-        // ceiling: 100 ms of PCM per source; only <=2 ms packet-clock jitter
-        // is normalized. Real gaps/overlaps, pause, errors and device changes flush.
+    void append(double stamp, unsigned count, const std::vector<BYTE>& pcm, DWORD flags = 0) {
+        // ceiling: 100 ms of PCM per source. Real gaps/overlaps, pause, errors
+        // and device changes flush; the native sample timeline has already
+        // separated continuous device-clock progression from those boundaries.
         if (frames && (frames + count > maximum()
             || std::abs(stamp - (timestamp + static_cast<double>(frames) / rate)) > 0.002))
             flush();
         if (!frames) timestamp = stamp;
+        packetFlags |= flags;
         payload.insert(payload.end(), pcm.begin(), pcm.end());
         frames += count;
         if (frames >= maximum()) flush();
@@ -687,10 +727,12 @@ void selfTestLogic() {
     require(!packetDiscontinuity(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, false));
     require(packetDiscontinuity(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, true));
     auto continuous = nativePacketFields(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
-        480, 48000, 1000, true, 1000, true);
+        480, 48000, 1000, true, 1000, true, 10.05, 10.01);
     require(continuous.find("\"buffer_flags\":1") != std::string::npos);
     require(continuous.find("\"device_position\":1000") != std::string::npos);
     require(continuous.find("\"expected_device_position\":1000") != std::string::npos);
+    require(continuous.find("\"qpc_timestamp\":10.05") != std::string::npos);
+    require(continuous.find("\"sample_timestamp\":10.01") != std::string::npos);
     auto jump = nativePacketFields(AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY,
         480, 48000, 1010, true, 1000, true);
     require(jump.find("\"device_position\":1010") != std::string::npos);
@@ -726,6 +768,25 @@ void selfTestLogic() {
     require(!haveTrackedPosition);
     require(!trackPacket(true, 5000, 480));
     require(haveTrackedPosition && expectedPosition == 5480);
+    SampleTimeline timeline;
+    require(timeline.timestamp(10.0, 1000, 480, 48000, true) == 10.0);
+    require(std::abs(timeline.timestamp(10.05, 1480, 480, 48000, true) - 10.01) < 1e-12);
+    require(std::abs(timeline.timestamp(10.2, 3000, 480, 48000, true) - 10.2) < 1e-12);
+    timeline.reset();
+    require(std::abs(timeline.timestamp(20.0, 9000, 480, 48000, true) - 20.0) < 1e-12);
+    timeline.reset();
+    require(std::abs(timeline.timestamp(20.0, 9000, 480, 48000, false) - 20.0) < 1e-12
+        && !timeline.have);
+    timeline.reset();
+    UINT64 longPosition = 100000;
+    double longTimestamp = timeline.timestamp(30.0, longPosition, 480, 48000, true);
+    for (unsigned packet = 1; packet <= 1080000; ++packet) {
+        longPosition += 480;
+        // Alternate a 10 ms QPC step while the endpoint counter remains continuous.
+        longTimestamp = timeline.timestamp(30.0 + packet * 0.01
+            + (packet % 2 ? 0.01 : 0.0), longPosition, 480, 48000, true);
+    }
+    require(std::abs(longTimestamp - (30.0 + 1080000 * 0.01)) < 1e-9);
     Session buffered;
     uint64_t sequence = 0;
     AudioBatch batch{buffered, 0, 48000, 1, 0, sequence};
@@ -735,6 +796,13 @@ void selfTestLogic() {
     require(buffered.queue.front().payload.size() == 4800 * sizeof(float));
     require(std::all_of(buffered.queue.front().payload.begin(),
         buffered.queue.front().payload.end(), [](BYTE value) { return value == 1; }));
+    Session flagged;
+    uint64_t flaggedSequence = 0;
+    AudioBatch flaggedBatch{flagged, 0, 48000, 1, 0, flaggedSequence};
+    flaggedBatch.append(0.0, 4800, std::vector<BYTE>(4800 * sizeof(float), 0),
+        AUDCLNT_BUFFERFLAGS_SILENT);
+    require(flagged.queue.size() == 1
+        && flagged.queue.front().header.find("\"buffer_flags\":2") != std::string::npos);
     batch.append(1.0, 480, pcm);
     batch.append(1.2, 480, pcm); // Preserve a real 190 ms source gap.
     require(sequence == 11 && batch.frames == 480);
@@ -824,11 +892,13 @@ void capture(Session& session, Selection selected) {
             bool reopen = false;
             HRESULT failure = S_OK;
             double lastEnd = session.now();
+            double lastPacketWallTime = session.now();
             bool idleGap = false;
             bool havePacket = false;
             bool haveExpectedDevicePosition = false;
             UINT64 expectedNextDevicePosition = 0;
             AudioBatch batch{session, selected.track, format.rate, format.channels, 0, sequence};
+            SampleTimeline sampleTimeline;
             auto drain = [&](bool tail) {
                 HRESULT result = S_OK;
                 UINT32 pending = 0;
@@ -886,33 +956,38 @@ void capture(Session& session, Selection selected) {
                     bool timestampInvalid = (bufferFlags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)
                         || !std::isfinite(timestamp) || timestamp < 0;
                     if (timestampInvalid) {
+                        sampleTimeline.reset();
                         haveExpectedDevicePosition = false;
                         batch.flush();
                         session.nativeGap(selected.track, session.now(), "native_timestamp_error",
                             nativePacketFields(bufferFlags, frames, format.rate, devicePosition,
-                                haveExpectedBefore, expectedBefore, false));
+                                haveExpectedBefore, expectedBefore, false, timestamp));
                         havePacket = true;
                         // Never fabricate a device timestamp for unclocked samples.
                     } else {
+                        double packetTimestamp = sampleTimeline.timestamp(
+                            timestamp, devicePosition, frames, format.rate, !invalidBuffer);
+                        if (invalidBuffer) sampleTimeline.reset();
                         if (!nextExpectedDevicePosition(devicePosition, frames, expectedNextDevicePosition))
                             haveExpectedDevicePosition = false;
                         else
                             haveExpectedDevicePosition = true;
                         if (idleGap) {
-                            session.gap(selected.track, timestamp, "native_packets_resumed");
+                            session.gap(selected.track, packetTimestamp, "native_packets_resumed");
                             idleGap = false;
                         }
-                        lastEnd = timestamp + static_cast<double>(frames) / format.rate;
+                        lastEnd = packetTimestamp + static_cast<double>(frames) / format.rate;
                         if (packetDiscontinuity(bufferFlags, havePacket)) {
                             batch.flush();
-                            session.nativeGap(selected.track, timestamp, "native_discontinuity",
+                            session.nativeGap(selected.track, packetTimestamp, "native_discontinuity",
                                 nativePacketFields(bufferFlags, frames, format.rate, devicePosition,
-                                    haveExpectedBefore, expectedBefore, true));
+                                    haveExpectedBefore, expectedBefore, true,
+                                    timestamp, packetTimestamp));
                         }
                         havePacket = true;
                         if (invalidBuffer) {
                             batch.flush();
-                            session.gap(selected.track, timestamp, "invalid_native_buffer");
+                            session.gap(selected.track, packetTimestamp, "invalid_native_buffer");
                         }
                         // ceiling: each copied block is <=100 ms and <=4 MiB.
                         unsigned maximum = std::min<unsigned>(format.rate / 10,
@@ -930,11 +1005,12 @@ void capture(Session& session, Selection selected) {
                                         + (static_cast<size_t>(offset) * format.channels + sample) * format.stride);
                                     std::memcpy(block.payload.data() + sample * sizeof(float), &value, sizeof(float));
                                 }
-                                batch.append(timestamp + static_cast<double>(offset) / format.rate,
-                                    count, block.payload);
+                                batch.append(packetTimestamp + static_cast<double>(offset) / format.rate,
+                                    count, block.payload, offset == 0 ? bufferFlags : 0);
                             }
                             if (!invalidBuffer) {
                                 double observed = session.now();
+                                lastPacketWallTime = observed;
                                 health.packet(observed, frames);
                                 recovery.packet(observed, frames, format.rate);
                             }
@@ -959,9 +1035,11 @@ void capture(Session& session, Selection selected) {
                         running = false;
                         havePacket = false;
                         haveExpectedDevicePosition = false;
+                        sampleTimeline.reset();
                     }
                     session.gap(selected.track, session.now(), pause ? "paused" : "resumed");
                     lastEnd = session.now();
+                    lastPacketWallTime = lastEnd;
                     health.reset(session.now());
                     idleGap = false;
                     if (!pause) { check(client->Start(), "Resume capture stream"); running = true; }
@@ -986,10 +1064,10 @@ void capture(Session& session, Selection selected) {
 #endif
                     failure = drain(false);
                     if (FAILED(failure)) break;
-                    if (session.now() - lastEnd > 0.1) batch.flush();
+                    if (session.now() - lastPacketWallTime > 0.1) batch.flush();
                     // A silent loopback engine may deliver no packets at all. Keep
                     // elapsed time explicit without inventing native clocked PCM.
-                    if (!idleGap && session.now() - lastEnd > 0.5) {
+                    if (!idleGap && session.now() - lastPacketWallTime > 0.5) {
                         session.gap(selected.track, lastEnd, "no_native_packets");
                         idleGap = true;
                     }

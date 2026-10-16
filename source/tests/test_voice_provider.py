@@ -11,6 +11,41 @@ from voice_runtime import FakeAsrBackend, VoiceRuntimeError
 
 
 class VoiceProviderTests(unittest.TestCase):
+    def test_speech_gate_excludes_unvoiced_audio_and_disables_streaming(self):
+        backend = FakeAsrBackend(transcript="kept")
+
+        class Gate:
+            def __init__(self):
+                self.calls = []
+
+            def voiced_samples(self, pcm, cancel_event):
+                self.calls.append((pcm, cancel_event))
+                return None
+
+            def reset(self):
+                pass
+
+        gate = Gate()
+        provider = LocalVoiceProvider("unused", backend=backend, speech_gate=gate)
+        self.assertFalse(provider.supports_stream())
+        self.assertEqual(provider.transcribe([0.0, 0.0]), "")
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(backend.transcript, "kept")
+
+    def test_speech_gate_passes_only_voiced_samples_to_backend(self):
+        backend = FakeAsrBackend(transcript="kept")
+
+        class Gate:
+            def voiced_samples(self, pcm, cancel_event):
+                return pcm[1:3]
+
+            def reset(self):
+                pass
+
+        provider = LocalVoiceProvider("unused", backend=backend, speech_gate=Gate())
+        self.assertEqual(provider.transcribe([0.1, 0.2, 0.3, 0.4]), "kept")
+        self.assertEqual(backend.transcribe_calls, [[0.2, 0.3]])
+
     def test_installed_only_preparation_never_downloads(self):
         backend = FakeAsrBackend()
         download = mock.Mock()

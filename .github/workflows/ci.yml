@@ -71,6 +71,11 @@ jobs:
         working-directory: source
         run: python -m pip install -r requirements.txt -r requirements-voice.txt
 
+      - name: Fetch and probe Silero VAD
+        run: |
+          python packaging/voice_activity_model.py --output-dir build/voice-vad
+          python -c "import sys; sys.path.insert(0, 'source'); import onnxruntime; from voice_activity import SileroVoiceActivity; from voice_activity_model import verified_model_path; detector=SileroVoiceActivity(model_path=verified_model_path(), runtime=onnxruntime); assert detector.detect([0.0] * 16000) is False"
+
       - name: Build approved llama.cpp runtime
         run: |
           python -m pip install --require-hashes -r packaging/requirements-build.lock

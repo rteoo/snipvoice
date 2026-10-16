@@ -6,6 +6,7 @@ import struct
 import threading
 
 from i18n import N_, tr
+from voice_activity import SileroVoiceActivity, VoiceActivityError
 from voice_provider import LocalVoiceProvider
 from voice_resampler import StreamingResampler
 
@@ -285,8 +286,19 @@ class MeetingTranscriber:
             raise _Cancelled
         # Silent chunks remain represented with an empty result, which lets a
         # resumed job distinguish processed silence from a missing chunk.
+        # Production providers own speech detection. Keep the legacy shortcut
+        # only for injected providers without a detector, preserving their
+        # deterministic silent-chunk test contract without dropping quiet speech.
         energy = math.sqrt(sum(value * value for value in samples) / len(samples)) if samples else 0.0
-        raw_text = "" if energy < 1e-5 else self.provider.transcribe(samples, cancel_event=cancel_event)
+        if energy < 1e-5 and getattr(self.provider, "speech_gate", None) is None:
+            raw_text = ""
+        else:
+            try:
+                raw_text = self.provider.transcribe(samples, cancel_event=cancel_event)
+            except VoiceActivityError:
+                if cancel_event.is_set():
+                    raise _Cancelled
+                raise
         text = "" if raw_text is None else str(raw_text).strip()
         self.store.add_transcript(
             session_id,
@@ -339,7 +351,7 @@ def transcribe_meeting(
             ):
                 revision = item.get("id")
                 break
-    provider = LocalVoiceProvider(cache_dir)
+    provider = LocalVoiceProvider(cache_dir, speech_gate=SileroVoiceActivity())
     return MeetingTranscriber(store, provider).transcribe(
         session_id,
         profile,

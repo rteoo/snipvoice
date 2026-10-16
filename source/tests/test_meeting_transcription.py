@@ -19,6 +19,7 @@ class FakeProvider:
         self.calls = []
         self.cancelled = 0
         self.unloaded = 0
+        self.speech_gate = None
 
     def prepare(self, profile, language, **kwargs):
         self.prepare_calls.append((profile, language, kwargs))
@@ -74,6 +75,34 @@ class MeetingTranscriptionTests(unittest.TestCase):
         revision = MeetingTranscriber(self.store, provider).transcribe(self.session, "balanced", "auto")
         self.assertEqual(provider.calls, [])
         self.assertEqual(list(self.store.get_transcript(self.session, revision))[0]["text"], "")
+
+    def test_quiet_chunk_reaches_provider_when_speech_gate_is_owned_by_provider(self):
+        self.store.append_audio(self.session, self.event(), self.payload(value=1e-6))
+        provider = FakeProvider()
+        provider.speech_gate = object()
+        revision = MeetingTranscriber(self.store, provider).transcribe(
+            self.session, "balanced", "auto"
+        )
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(list(self.store.get_transcript(self.session, revision))[0]["text"], "texto local")
+
+    def test_gate_cancellation_marks_revision_cancelled(self):
+        from voice_activity import VoiceActivityError
+        self.store.append_audio(self.session, self.event(), self.payload(value=0.1))
+        provider = FakeProvider()
+        provider.speech_gate = object()
+        cancelled = threading.Event()
+
+        def cancel_on_transcribe(_samples, cancel_event=None):
+            cancelled.set()
+            raise VoiceActivityError("Speech detection was cancelled.")
+
+        provider.transcribe = cancel_on_transcribe
+        revision = MeetingTranscriber(self.store, provider).transcribe(
+            self.session, "balanced", "auto", cancelled
+        )
+        self.assertEqual(self.store.get(self.session)["revisions"][0]["status"], "cancelled")
+        self.assertEqual(revision, self.store.get(self.session)["revisions"][0]["id"])
 
     def test_failed_revision_can_resume_without_duplicate_completed_chunks(self):
         self.store.append_audio(self.session, self.event(), self.payload())

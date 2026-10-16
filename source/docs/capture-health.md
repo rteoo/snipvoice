@@ -49,6 +49,26 @@ for diagnosis; successful recovery is not a claim that absent samples returned.
 Native COM calls retain their platform blocking behavior. The existing helper
 process shutdown bounds remain the final containment for an unresponsive driver.
 
+## Sample timing
+
+Each opened endpoint anchors its first valid packet to QPC. While WASAPI's
+integer device position advances by exactly the preceding packet's frame count,
+subsequent timestamps come from that anchor and sample position. A QPC step with
+continuous samples must not make the exporter insert or overlap audio. The
+calculation uses the original integer anchor rather than repeatedly adding a
+floating-point packet duration, including over a three-hour session.
+
+Device-position jumps, invalid timestamps, pauses and reopened endpoints break
+that continuity. Their QPC boundaries remain visible. This does not remove PCM,
+compact silent packets, or claim that missing driver samples were recovered.
+Native discontinuity diagnostics include both QPC and selected sample timestamps;
+audio blocks also retain the OR of their native packet flags. Watchdog packet age
+uses wall time independently of the selected audio timeline.
+
+Different physical endpoints keep separate clock anchors. Their initial alignment
+uses QPC; this policy does not compensate for long-term oscillator skew between
+independent microphone and playback hardware.
+
 ## Verification
 
 From `source`, with the existing MSVC toolchain:
