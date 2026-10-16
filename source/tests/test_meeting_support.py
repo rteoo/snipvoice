@@ -151,6 +151,26 @@ class MeetingControllerTests(unittest.TestCase):
             self.assertEqual(self.controller.store.get(session)["final_audio"]["path"], output)
         self.assertEqual(len(seen), 1)
 
+    def test_final_mixed_over_unreadable_audio_is_saved_but_never_compacted(self):
+        session = self.controller.store.begin({})
+        self.controller.store.finish(session)
+
+        def encode(_store, _session, path, *, on_missing, **_kwargs):
+            on_missing({"type": "audio", "track": "system"})
+            Path(path).write_bytes(b"synthetic encoded audio")
+            return str(path)
+
+        with tempfile.TemporaryDirectory(dir=Path(self.temp.name).parent) as folder, \
+                patch("meeting_support.export_mixdown", side_effect=encode):
+            output = self.controller._export_audio(session, Path(folder) / "final.mp3", save_final=True)
+            final = self.controller.store.get(session)["final_audio"]
+            self.assertEqual(final["path"], output)
+            self.assertIs(final["verification"]["sources_complete"], False)
+            with patch("meeting_support.compact_capture") as compact:
+                self.controller._compact_capture(session)
+            evidence = compact.call_args.args[2]
+            self.assertIs(evidence["sources_complete"], False)
+
     def test_failed_and_cancelled_exports_never_leave_active_or_completed_progress(self):
         for error, stage in ((OSError("disk write failed"), "failed"),
                              (MixdownCancelled("cancelled"), "cancelled")):

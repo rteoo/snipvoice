@@ -20,6 +20,10 @@ class FakeStore:
         self.path.mkdir()
         self.metadata = metadata
         self.commits = []
+        self.payloads_complete = True
+
+    def audio_payloads_complete(self, session_id):
+        return self.payloads_complete
 
     def _session_dir(self, session_id):
         if session_id != self.session:
@@ -124,6 +128,45 @@ class MeetingStorageTests(unittest.TestCase):
         metadata = store.get(session, include_events=False)
         self.assertEqual(metadata["capture_storage"]["state"], "compacted")
         self.assertFalse((root / session / "system").exists())
+
+    def test_truncated_segment_blocks_compaction_and_is_reported(self):
+        root = self.root / "truncated"
+        store = MeetingStore(root)
+        session = store.begin({"microphone": {"mode": "default"}}, "fixture")
+        for index in range(3):
+            store.append_audio(session, {"type": "audio", "track": "system", "rate": 8,
+                                         "channels": 2, "frames": 8, "timestamp": float(index),
+                                         "sequence": index, "generation": 0}, self.payload)
+        store.finish(session)
+        final = root / "final.tmp"
+        final.write_bytes(b"synthetic")
+        store.save_final_audio(session, final)
+        segment = next((root / session / "system").iterdir())
+        segment.write_bytes(segment.read_bytes()[:len(self.payload)])
+        missing = []
+        self.assertEqual(len(list(store.iter_audio(session, on_missing=missing.append))), 1)
+        self.assertEqual([event["sequence"] for event in missing], [1, 2])
+        self.assertFalse(store.audio_payloads_complete(session))
+        with mock.patch("meeting_storage._final_audio_chunks", return_value=iter([(8, 2, self.payload * 3)])):
+            evidence = verify_final_audio(store, session)
+        with self.assertRaises(CaptureCompactionError):
+            compact_capture(store, session, evidence)
+        self.assertTrue(segment.is_file())
+        self.assertNotEqual(store.get(session, include_events=False).get("capture_storage", {}).get("state"),
+                            "compacted")
+
+    def test_final_mixed_over_unreadable_audio_keeps_originals(self):
+        (self.store.path / "system").mkdir()
+        (self.store.path / "system" / "segment.pcm").write_bytes(b"raw")
+        with mock.patch("meeting_storage._final_audio_chunks", return_value=iter([(4, 2, self.payload)])):
+            evidence = verify_final_audio(self.store, self.store.session)
+        with self.assertRaises(CaptureCompactionError):
+            compact_capture(self.store, self.store.session, {**evidence, "sources_complete": False})
+        self.store.payloads_complete = False
+        with self.assertRaises(CaptureCompactionError):
+            compact_capture(self.store, self.store.session, evidence)
+        self.assertTrue((self.store.path / "system" / "segment.pcm").is_file())
+        self.assertEqual(self.store.commits, [])
 
     def test_failure_before_commit_rolls_back(self):
         (self.store.path / "system").mkdir()

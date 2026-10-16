@@ -1488,6 +1488,9 @@ class MeetingController:
             self.store.save_processing_state(session_id, "audio", "processing")
             try:
                 evidence = verify_final_audio(self.store, session_id, cancel_event=self._cancel)
+                prior = final.get("verification")
+                if isinstance(prior, dict) and prior.get("sources_complete") is False:
+                    evidence["sources_complete"] = False
                 self.store.save_final_audio(session_id, path, bool(final.get("voice_boost")), verification=evidence)
                 self.store.save_processing_state(session_id, "audio", "completed")
                 with self._lock:
@@ -1571,6 +1574,7 @@ class MeetingController:
 
         publish("preparing", 0.0, None)
         verification = {}
+        missing_audio = threading.Event()
 
         def validate(temporary, duration):
             verification.update(verify_mp3_file(temporary, expected_duration=duration, cancel_event=self._cancel))
@@ -1585,11 +1589,15 @@ class MeetingController:
             output = export_mixdown(self.store, session_id, path,
                                     enhance_microphone=enhance_microphone,
                                     cancel_event=self._cancel, progress=publish,
-                                    validate_output=validate if Path(path).suffix.lower() == ".mp3" else None)
+                                    validate_output=validate if Path(path).suffix.lower() == ".mp3" else None,
+                                    on_missing=(lambda _event: missing_audio.set()) if save_final else None)
             if save_final:
                 if not verification:
                     validate(output, None)
                 verification["path"] = output
+                # Silence rendered for unreadable payloads still verifies at
+                # full length; record it so compaction keeps the originals.
+                verification["sources_complete"] = not missing_audio.is_set()
                 self.store.save_final_audio(session_id, output, enhance_microphone, verification=verification)
                 self.store.save_processing_state(session_id, "audio", "completed")
                 with self._lock:

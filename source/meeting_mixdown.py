@@ -516,10 +516,13 @@ def mixdown_tracks(track_sources, destination, *, enhance_microphone=False,
 
 def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
                    cancel_event=None, chunk_frames=OUTPUT_CHUNK_FRAMES,
-                   tracks=("microphone", "system"), progress=None, validate_output=None):
+                   tracks=("microphone", "system"), progress=None, validate_output=None,
+                   on_missing=None):
     """Export one meeting's store tracks without retaining the session.
 
     ``tracks`` narrows the mix, so a single source exports on its own.
+    ``on_missing(event)`` reports journaled audio whose payload was unreadable
+    and therefore rendered as silence.
     """
     tracks = tuple(tracks)
     if not tracks or set(tracks) - {"microphone", "system"}:
@@ -564,7 +567,8 @@ def export_mixdown(store, session_id, destination, *, enhance_microphone=False,
         )
         if enhance_microphone else 1.5
     )
-    sources = {track: store.iter_audio(session_id, track) for track in tracks}
+    read_options = {} if on_missing is None else {"on_missing": on_missing}
+    sources = {track: store.iter_audio(session_id, track, **read_options) for track in tracks}
     return mixdown_tracks(
         sources,
         destination,

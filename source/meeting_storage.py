@@ -277,6 +277,16 @@ def compact_capture(store, session_id, verified, cancel_event=None, fault_inject
                 raise CaptureCompactionError("An unfinished compaction must be recovered first.")
         if not any(os.path.lexists(os.path.join(session_path, track)) for track in _TRACKS):
             return {"state": "no_sources", "evidence": dict(verified)}
+        # Duration checks cannot see a payload that was mixed as silence, so
+        # removal also requires that the final audio and the disk lost nothing.
+        if verified.get("sources_complete") is False:
+            raise CaptureCompactionError(
+                "The final audio was made while some captured audio was unreadable; the originals were kept.")
+        complete = getattr(store, "audio_payloads_complete", None)
+        if not callable(complete):
+            raise CaptureCompactionError("The meeting store cannot prove the captured audio is complete.")
+        if not complete(session_id):
+            raise CaptureCompactionError("Some captured audio is incomplete on disk; the originals were kept.")
         operation_id = uuid.uuid4().hex
         staging = _staging_path(session_path, operation_id)
         os.makedirs(staging)

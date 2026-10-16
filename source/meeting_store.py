@@ -353,7 +353,7 @@ class MeetingStore:
                     continue
         return total
 
-    def iter_audio(self, session_id, track=None, start=0.0):
+    def iter_audio(self, session_id, track=None, start=0.0, *, on_missing=None):
         if track is not None and track not in _TRACKS:
             raise ValueError(tr("A fonte de áudio é inválida."))
         try:
@@ -411,10 +411,20 @@ class MeetingStore:
                     continue
                 payload = self._read_segment_record(session_id, record)
                 if payload is None:
+                    # Segments are fsynced before their journal record, so an
+                    # unreadable payload is damage or a transient read error.
+                    if on_missing is not None:
+                        on_missing(copy.deepcopy(event))
                     continue
                 yield copy.deepcopy(event), payload
 
         return _read()
+
+    def audio_payloads_complete(self, session_id):
+        """Return whether every journaled audio range is still fully on disk."""
+        sizes = {}
+        return all(self._record_complete(session_id, record, sizes)
+                   for record in self._iter_journal_records(session_id))
 
     def iter_events(self, session_id):
         """Stream public event metadata without retaining the whole journal."""
