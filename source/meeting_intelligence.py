@@ -996,16 +996,18 @@ class MeetingIntelligence:
                                   focus_evidence=None, output_limit=None):
         self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         limit = self._output_limit(budget) if output_limit is None else output_limit
-        def generate(compact=False):
-            compact = compact or limit <= 2048
+        def generate(repair=False):
+            compact = repair or limit <= 2048
             attempt_profile = dict(profile)
             if compact:
                 # Small reduction budgets need a tighter schema from the
-                # first call; the same bounds apply on the one repair attempt.
+                # first call. A repair after an already compact attempt must
+                # differ from it, so it drops to the profile minimum of 64.
                 # The model selects concise supported points without any
                 # post-generation truncation or item removal.
                 attempt_profile["max_items"] = 1
-                attempt_profile["max_section_chars"] = min(128, profile["max_section_chars"])
+                attempt_profile["max_section_chars"] = min(
+                    64 if repair and limit <= 2048 else 128, profile["max_section_chars"])
                 attempt_profile["max_citations"] = 1
             attempt_guidance = [self._profile_evidence(attempt_profile, limit)]
             if focus_evidence is not None:
@@ -1015,7 +1017,7 @@ class MeetingIntelligence:
                 budget if payload_budget is None else payload_budget,
             )
             prompt = self._prompt(profile)
-            if compact:
+            if repair:
                 prompt += (
                     "\nThe previous report exceeded its byte limit. Rewrite substantially shorter: "
                     "keep only the most important supported points, preserve valid citation IDs, "
@@ -1033,7 +1035,7 @@ class MeetingIntelligence:
             # compress their own content while preserving citations and
             # evidence. Never truncate or silently discard generated items.
             self._cancel(cancel_event, tr("O resumo foi cancelado; o resultado anterior foi preservado."))
-            return generate(compact=True)
+            return generate(repair=True)
 
     def _generate_answer(self, runtime, entry, question, evidence, allowed, budget, cancel_event,
                          payload_budget=None, question_evidence=None):

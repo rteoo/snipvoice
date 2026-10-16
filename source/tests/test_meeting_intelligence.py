@@ -297,6 +297,29 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(calls[0][:-1], calls[1][:-1])
         self.assertLess(calls[1][-1]["max_items"], calls[0][-1]["max_items"])
 
+    def test_compact_intermediate_report_repair_is_tighter_than_first_attempt(self):
+        profile = validate_profile({
+            "id": "focused", "name": "Focused",
+            "instructions": "Use only confirmed facts.", "sections": ["summary"],
+        })
+        evidence = [{"id": "s1", "text": "Alice will review the report by Friday."}]
+
+        def response(_prompt, _evidence):
+            if len(runtime.calls) == 1:
+                raise SummaryOutputLimitError("generation limit")
+            return json.dumps({"summary": "Alice reviews by Friday.", "segment_ids": ["s1"]})
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence._generate_report_document(
+            runtime, {}, profile, evidence, {"s1"}, 4096, None, output_limit=1024,
+        )
+        self.assertEqual(result["summary"], "Alice reviews by Friday.")
+        (first_prompt, first_payload, *_), (repair_prompt, repair_payload, *_) = runtime.calls
+        self.assertNotIn("exceeded its byte limit", first_prompt)
+        self.assertIn("exceeded its byte limit", repair_prompt)
+        self.assertEqual(first_payload[-1]["max_section_chars"], 128)
+        self.assertEqual(repair_payload[-1]["max_section_chars"], 64)
+
     def test_oversized_report_retries_once_then_preserves_previous(self):
         def response(_prompt, evidence):
             identifier = next(item["id"] for item in evidence if "id" in item)
