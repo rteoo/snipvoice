@@ -24,6 +24,7 @@ from meeting_intelligence import (
 from meeting_store import MeetingStore
 from meeting_library import MeetingLibrary
 from summary_catalog import DEFAULT_SUMMARY_MODEL
+from summary_runtime import SummaryOutputLimitError
 
 
 class MeetingIntelligenceProfileTests(unittest.TestCase):
@@ -270,6 +271,102 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
         self.assertTrue(runtime.closed)
 
+    def test_oversized_model_report_gets_one_bounded_compaction_retry(self):
+        calls = []
+
+        def response(prompt, evidence):
+            calls.append(evidence)
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            compact = "exceeded its byte limit" in prompt
+            return json.dumps({
+                "summary": "Short supported summary.",
+                "key_points": ([{"text": "Key point.", "segment_ids": [identifier]}]
+                               if compact else
+                               [{"text": "Long supported point. " * 45, "segment_ids": [identifier]}
+                                for _ in range(8)]),
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence.generate_report(
+            self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes",
+        )
+        self.assertEqual(result["summary"], "Short supported summary.")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][:-1], calls[1][:-1])
+        self.assertLess(calls[1][-1]["max_items"], calls[0][-1]["max_items"])
+
+    def test_compact_intermediate_report_repair_is_tighter_than_first_attempt(self):
+        profile = validate_profile({
+            "id": "focused", "name": "Focused",
+            "instructions": "Use only confirmed facts.", "sections": ["summary"],
+        })
+        evidence = [{"id": "s1", "text": "Alice will review the report by Friday."}]
+
+        def response(_prompt, _evidence):
+            if len(runtime.calls) == 1:
+                raise SummaryOutputLimitError("generation limit")
+            return json.dumps({"summary": "Alice reviews by Friday.", "segment_ids": ["s1"]})
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence._generate_report_document(
+            runtime, {}, profile, evidence, {"s1"}, 4096, None, output_limit=1024,
+        )
+        self.assertEqual(result["summary"], "Alice reviews by Friday.")
+        (first_prompt, first_payload, *_), (repair_prompt, repair_payload, *_) = runtime.calls
+        self.assertNotIn("exceeded its byte limit", first_prompt)
+        self.assertIn("exceeded its byte limit", repair_prompt)
+        self.assertEqual(first_payload[-1]["max_section_chars"], 128)
+        self.assertEqual(repair_payload[-1]["max_section_chars"], 64)
+
+    def test_oversized_report_retries_once_then_preserves_previous(self):
+        def response(_prompt, evidence):
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            return json.dumps({
+                "summary": "Short supported summary.",
+                "key_points": [{"text": "Long supported point. " * 45,
+                                 "segment_ids": [identifier]} for _ in range(8)],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(ValueError):
+            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL, profile="meeting_notes")
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+        self.assertEqual(len(runtime.calls), 2)
+
+    def test_runtime_output_limit_retries_once_then_surfaces_second_limit(self):
+        def response(_prompt, _evidence):
+            raise SummaryOutputLimitError("generation limit")
+
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(SummaryOutputLimitError):
+            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL,
+                                         profile="meeting_notes")
+        self.assertEqual(len(runtime.calls), 2)
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+
+    def test_cancellation_between_oversized_attempts_prevents_retry(self):
+        cancel = threading.Event()
+        calls = []
+        def response(_prompt, evidence):
+            calls.append(True)
+            cancel.set()
+            identifier = next(item["id"] for item in evidence if "id" in item)
+            return json.dumps({
+                "summary": "Short supported summary.",
+                "key_points": [{"text": "Long supported point. " * 45,
+                                 "segment_ids": [identifier]} for _ in range(8)],
+                "decisions": [], "action_items": [], "open_questions": [],
+                "segment_ids": [identifier],
+            })
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(RuntimeError):
+            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL,
+                                         profile="meeting_notes", cancel_event=cancel)
+        self.assertEqual(len(calls), 1)
+
     def test_multichunk_final_synthesis_is_outside_pairwise_reduction(self):
         revision = self.store.begin_revision(self.session_id, "local", "pt")
         for index in range(3):
@@ -354,6 +451,79 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(reports[0]["generated"]["summary"]["citations"], ["s1"])
         with self.assertRaises(FileExistsError):
             library.save_report(self.session_id, reports[0])
+
+    def test_multichunk_notes_preserve_every_leaf_when_overview_discards_details(self):
+        revision = self.store.begin_revision(self.session_id, "local", "en-US")
+        for index in range(20):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"point-{index}", "track": "final", "start": index * 60,
+                "end": index * 60 + 30, "text": f"Confirmed point {index}.",
+            })
+        self.store.finish_revision(self.session_id, revision)
+
+        def response(_prompt, evidence):
+            source = next(item for item in evidence if item.get("id") or item.get("segment_ids"))
+            identifier = source.get("id") or source["segment_ids"][0]
+            return json.dumps({
+                "summary": source.get("text", "Concise overview."),
+                "segment_ids": [identifier], "decisions": [], "action_items": [],
+            })
+
+        for legacy in (False, True):
+            with self.subTest(legacy=legacy):
+                intelligence, runtime = self._intelligence(response)
+                intelligence.library = MeetingLibrary(self.store, workspace_root=self.temp.name)
+                with mock.patch.object(intelligence, "_chunks", side_effect=lambda segments, _budget:
+                                       ([segment] for segment in segments)):
+                    result = intelligence.generate_report(
+                        self.session_id, DEFAULT_SUMMARY_MODEL, revision=revision, legacy=legacy,
+                    )
+                notes = result["detailed_notes"]
+                self.assertEqual(len(notes), 20)
+                self.assertEqual(result["segment_ids"], ["point-0"])
+                for index, note in enumerate(notes):
+                    self.assertEqual(note["text"], f"Confirmed point {index}.")
+                    self.assertEqual(note["segment_ids"], [f"point-{index}"])
+                    self.assertEqual((note["start"], note["end"]), (index * 60, index * 60 + 30))
+                if legacy:
+                    reopened = self.store.get(self.session_id)["summary"]
+                else:
+                    reopened = intelligence.library.get_report(self.session_id, result["report_id"])["generated"]
+                self.assertEqual(reopened["detailed_notes"], notes)
+                self.assertTrue(runtime.closed)
+                self.assertTrue(all("detailed_notes" not in item
+                                    for call in runtime.calls for item in call[1]))
+
+    def test_note_ceiling_or_cancellation_preserves_previous_report(self):
+        revision = self.store.begin_revision(self.session_id, "local", "en-US")
+        for index in range(3):
+            self.store.add_transcript(self.session_id, revision, {
+                "id": f"ceiling-{index}", "track": "final", "start": index,
+                "end": index + 1, "text": "Confirmed point.",
+            })
+        self.store.finish_revision(self.session_id, revision)
+        for ceiling in ("MAX_DETAILED_NOTES", "MAX_DETAILED_NOTES_BYTES", "MAX_DETAILED_NOTE_BYTES"):
+            with self.subTest(ceiling=ceiling):
+                intelligence, runtime = self._intelligence()
+                with mock.patch.object(intelligence, "_chunks", side_effect=lambda segments, _budget:
+                                       ([segment] for segment in segments)), \
+                        mock.patch("meeting_intelligence." + ceiling, 2):
+                    with self.assertRaises(ValueError):
+                        intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+                self.assertTrue(runtime.closed)
+                self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
+
+        cancel = threading.Event()
+        def cancelled_response(_prompt, evidence):
+            cancel.set()
+            return json.dumps(self._report(evidence))
+        intelligence, runtime = self._intelligence(cancelled_response)
+        with mock.patch.object(intelligence, "_chunks", side_effect=lambda segments, _budget:
+                               ([segment] for segment in segments)):
+            with self.assertRaises(RuntimeError):
+                intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL, cancel_event=cancel)
+        self.assertTrue(runtime.closed)
+        self.assertEqual(self.store.get(self.session_id)["summary"], {"summary": "Prior report"})
 
     def test_explicit_answer_save_is_a_qa_report_and_memory_answer_stays_unwritten(self):
         library = MeetingLibrary(self.store, workspace_root=self.temp.name)
@@ -508,7 +678,7 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         if context is not None:
             self.assertLessEqual(len(json.dumps(context).encode("utf-8")), MAX_HISTORY_BYTES)
 
-    def test_action_owner_and_deadline_must_appear_in_each_item_citation(self):
+    def test_action_owner_and_deadline_outside_item_citation_become_unknown(self):
         # The revision is already completed; use a fresh completed revision so
         # the added evidence is part of the selected immutable transcript.
         revision = self.store.begin_revision(self.session_id, "local", "pt")
@@ -528,6 +698,26 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
                 "decisions": [], "action_items": [{
                     "text": "Review the report", "owner": "Alice", "deadline": "Friday",
                     "segment_ids": ["s2"],
+                }],
+            })
+
+        intelligence, runtime = self._intelligence(invalid)
+        with self.assertLogs("meeting_intelligence", level="INFO") as audit:
+            result = intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertIsNone(result["action_items"][0]["owner"])
+        self.assertIsNone(result["action_items"][0]["deadline"])
+        self.assertEqual([record.field for record in audit.records], ["owner", "deadline"])
+        self.assertNotIn("Alice", " ".join(audit.output))
+        self.assertNotIn("Friday", " ".join(audit.output))
+        self.assertTrue(runtime.closed)
+
+    def test_action_owner_and_deadline_malformed_values_are_rejected(self):
+        def invalid(_prompt, _evidence):
+            return json.dumps({
+                "summary": "An agenda task exists.", "segment_ids": ["s1"],
+                "decisions": [], "action_items": [{
+                    "text": "Review the report", "owner": "x" * 201, "deadline": None,
+                    "segment_ids": ["s1"],
                 }],
             })
 
@@ -560,17 +750,21 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
                         "segment_ids": [identifier],
                     }],
                 })
+            identifier = next((item["id"] for item in evidence if "id" in item),
+                              evidence[0].get("segment_ids", ["s2"])[0])
+            owner, deadline = ("Alice", "Friday") if identifier == "s1" else ("Bob", "Monday")
             return json.dumps({
-                "summary": "A task exists.", "segment_ids": ["s2"],
+                "summary": "A task exists.", "segment_ids": [identifier],
                 "decisions": [], "action_items": [{
-                    "text": "Review the report", "owner": "Alice", "deadline": "Friday",
-                    "segment_ids": ["s2"],
+                    "text": "Review the report", "owner": owner, "deadline": deadline,
+                    "segment_ids": [identifier],
                 }],
             })
 
         intelligence, runtime = self._intelligence(invalid_reduction)
-        with self.assertRaises(ValueError):
-            intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        result = intelligence.generate_report(self.session_id, DEFAULT_SUMMARY_MODEL)
+        self.assertEqual(result["action_items"][0]["owner"], "Alice")
+        self.assertEqual(result["action_items"][0]["deadline"], "Friday")
         self.assertGreater(len(runtime.calls), 2)
         self.assertTrue(runtime.closed)
 
@@ -628,8 +822,10 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
     def test_repeated_valid_report_citations_are_normalized(self):
         def response(_prompt, evidence):
             report = self._report(evidence)
-            report["segment_ids"] *= 2
-            report["action_items"][0]["segment_ids"] *= 2
+            profile = next(item for item in evidence if item.get("kind") == "profile")
+            if profile.get("max_citations", 16) > 1:
+                report["segment_ids"] *= 2
+                report["action_items"][0]["segment_ids"] *= 2
             return json.dumps(report)
 
         intelligence, runtime = self._intelligence(response)
@@ -651,8 +847,10 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
 
         def response(_prompt, evidence):
             report = self._report(evidence)
-            report["segment_ids"] *= 2
-            report["action_items"][0]["segment_ids"] *= 2
+            profile = next(item for item in evidence if item.get("kind") == "profile")
+            if profile.get("max_citations", 16) > 1:
+                report["segment_ids"] *= 2
+                report["action_items"][0]["segment_ids"] *= 2
             return json.dumps(report)
 
         intelligence, runtime = self._intelligence(response)

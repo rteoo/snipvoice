@@ -9,6 +9,7 @@ import copy
 import hashlib
 import itertools
 import json
+import logging
 import math
 import re
 import threading
@@ -16,9 +17,14 @@ import time
 import uuid
 
 from i18n import N_, tr
+from meeting_library import MAX_DETAILED_NOTE_BYTES, MAX_DETAILED_NOTES, MAX_DETAILED_NOTES_BYTES
+from meeting_text import format_summary
 from summary_catalog import summary_catalog_entry
 from summary_models import summary_model_path
-from summary_runtime import SummaryRuntime
+from summary_runtime import SummaryOutputLimitError, SummaryRuntime
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 MAX_CONTEXT = 4096
@@ -53,6 +59,10 @@ MAX_CROSS_SEGMENTS_PER_MEETING = 16
 MAX_CROSS_CANONICAL_SCAN = 4_096
 MAX_CROSS_CONCURRENT_JOBS = 1
 _CROSS_QA_GATE = threading.BoundedSemaphore(MAX_CROSS_CONCURRENT_JOBS)
+
+
+class _ReportTooLarge(ValueError):
+    """The model produced a valid report whose serialized form exceeded its bound."""
 
 SUPPORTED_SECTIONS = frozenset(
     {
@@ -604,7 +614,7 @@ class MeetingIntelligence:
                     or any(ord(character) < 32 for character in identifier)
                     or identifier in seen):
                 raise ValueError(tr("A transcrição contém identificadores de segmento inválidos."))
-            if track not in {"microphone", "system"}:
+            if track not in {"microphone", "system", "final"}:
                 raise ValueError(tr("A transcrição contém uma fonte de áudio inválida."))
             if (not isinstance(text, str) or len(text) > MAX_SEGMENT_TEXT_CHARS
                     or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -765,6 +775,7 @@ class MeetingIntelligence:
             "sections": list(profile["sections"]),
             "max_items": profile["max_items"],
             "max_section_chars": profile["max_section_chars"],
+            "max_citations": profile.get("max_citations", MAX_CITATIONS),
             "language": profile["language"],
             "instructions": profile["instructions"],
         }
@@ -869,8 +880,8 @@ class MeetingIntelligence:
         return document
 
     @staticmethod
-    def _references(value, allowed, *, required=True):
-        if (not isinstance(value, list) or len(value) > MAX_CITATIONS
+    def _references(value, allowed, *, required=True, max_items=MAX_CITATIONS):
+        if (not isinstance(value, list) or len(value) > max_items
                 or (required and not value)
                 or any(not isinstance(item, str) or item not in allowed for item in value)):
             raise ValueError(tr("O modelo citou segmentos ausentes ou inválidos; o resultado anterior foi preservado."))
@@ -890,7 +901,8 @@ class MeetingIntelligence:
         expected = {"segment_ids", *profile["sections"]}
         if set(document) != expected:
             raise ValueError(tr("O modelo retornou um relatório sem a estrutura exigida; o resultado anterior foi preservado."))
-        citations = self._references(document["segment_ids"], allowed)
+        citation_limit = profile.get("max_citations", MAX_CITATIONS)
+        citations = self._references(document["segment_ids"], allowed, max_items=citation_limit)
         normalized = {"segment_ids": citations}
         for section in profile["sections"]:
             value = document[section]
@@ -913,7 +925,7 @@ class MeetingIntelligence:
                 normalized[section] = {
                     "subject": value["subject"].strip(),
                     "body": value["body"].strip(),
-                    "segment_ids": self._references(value["segment_ids"], allowed),
+                    "segment_ids": self._references(value["segment_ids"], allowed, max_items=citation_limit),
                 }
                 continue
             if not isinstance(value, list) or len(value) > profile["max_items"]:
@@ -929,29 +941,35 @@ class MeetingIntelligence:
                 if not isinstance(text, str) or not text.strip() or len(text) > profile["max_section_chars"]:
                     raise ValueError(tr("O modelo retornou um item de relatório inválido."))
                 item_value = {"text": text.strip(),
-                              "segment_ids": self._references(item["segment_ids"], allowed)}
+                              "segment_ids": self._references(item["segment_ids"], allowed, max_items=citation_limit)}
                 if section == "action_items":
                     for key in ("owner", "deadline"):
                         owner_or_deadline = item[key]
                         if owner_or_deadline is not None and (
                                 not isinstance(owner_or_deadline, str)
                                 or not owner_or_deadline.strip()
-                                or len(owner_or_deadline) > 200
-                                or owner_or_deadline.casefold() not in self._cited_text(
-                                    item["segment_ids"], source_text_by_id, evidence
-                                ).casefold()):
+                                or len(owner_or_deadline) > 200):
                             raise ValueError(
                                 tr("O modelo atribuiu responsável ou prazo ausente na evidência; "
                                    "valores desconhecidos devem ser nulos.")
                             )
-                        item_value[key] = (owner_or_deadline.strip()
-                                           if isinstance(owner_or_deadline, str) else None)
+                        if owner_or_deadline is not None:
+                            owner_or_deadline = owner_or_deadline.strip()
+                            if owner_or_deadline.casefold() not in self._cited_text(
+                                    item["segment_ids"], source_text_by_id, evidence
+                            ).casefold():
+                                LOGGER.info(
+                                    "report_attribution_normalized field=%s reason=not_in_cited_evidence", key,
+                                    extra={"field": key, "reason": "not_in_cited_evidence"},
+                                )
+                                owner_or_deadline = None
+                        item_value[key] = owner_or_deadline
                 items.append(item_value)
             normalized[section] = items
         size = len(json.dumps(normalized, ensure_ascii=False).encode("utf-8"))
         limit = self._output_limit(budget) if output_limit is None else output_limit
         if size > limit:
-            raise ValueError(tr("O modelo retornou um relatório grande demais para a redução local."))
+            raise _ReportTooLarge(tr("O modelo retornou um relatório grande demais para a redução local."))
         return normalized
 
     def _validate_answer(self, document, allowed, budget):
@@ -978,18 +996,46 @@ class MeetingIntelligence:
                                   focus_evidence=None, output_limit=None):
         self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         limit = self._output_limit(budget) if output_limit is None else output_limit
-        guidance = [self._profile_evidence(profile, limit)]
-        if focus_evidence is not None:
-            guidance.append(focus_evidence)
-        payload = self._payload(
-            evidence, guidance,
-            budget if payload_budget is None else payload_budget,
-        )
-        raw = runtime.generate(self._prompt(profile), payload, cancel_event=cancel_event,
-                               disable_thinking=entry.get("disable_thinking", False))
-        document = self._json_response(raw, N_("relatório"))
-        return self._validate_report(document, profile, allowed, evidence, budget,
-                                     source_text_by_id, limit)
+        def generate(repair=False):
+            compact = repair or limit <= 2048
+            attempt_profile = dict(profile)
+            if compact:
+                # Small reduction budgets need a tighter schema from the
+                # first call. A repair after an already compact attempt must
+                # differ from it, so it drops to the profile minimum of 64.
+                # The model selects concise supported points without any
+                # post-generation truncation or item removal.
+                attempt_profile["max_items"] = 1
+                attempt_profile["max_section_chars"] = min(
+                    64 if repair and limit <= 2048 else 128, profile["max_section_chars"])
+                attempt_profile["max_citations"] = 1
+            attempt_guidance = [self._profile_evidence(attempt_profile, limit)]
+            if focus_evidence is not None:
+                attempt_guidance.append(focus_evidence)
+            payload = self._payload(
+                evidence, attempt_guidance,
+                budget if payload_budget is None else payload_budget,
+            )
+            prompt = self._prompt(profile)
+            if repair:
+                prompt += (
+                    "\nThe previous report exceeded its byte limit. Rewrite substantially shorter: "
+                    "keep only the most important supported points, preserve valid citation IDs, "
+                    "emit the exact schema, and never omit required sections."
+                )
+            raw = runtime.generate(prompt, payload, cancel_event=cancel_event,
+                                   disable_thinking=entry.get("disable_thinking", False))
+            document = self._json_response(raw, N_("relatório"))
+            return self._validate_report(document, attempt_profile, allowed, evidence, budget,
+                                         source_text_by_id, limit)
+        try:
+            return generate()
+        except (_ReportTooLarge, SummaryOutputLimitError):
+            # One bounded repair gives compliant local models a chance to
+            # compress their own content while preserving citations and
+            # evidence. Never truncate or silently discard generated items.
+            self._cancel(cancel_event, tr("O resumo foi cancelado; o resultado anterior foi preservado."))
+            return generate(repair=True)
 
     def _generate_answer(self, runtime, entry, question, evidence, allowed, budget, cancel_event,
                          payload_budget=None, question_evidence=None):
@@ -1080,8 +1126,8 @@ class MeetingIntelligence:
         metadata = self._metadata(session_id)
         selected = self._revision(session_id, metadata, revision)
         selected_profile = self._profile(profile, language)
-        segments = self._segments(session_id, selected)
-        first = next((candidate for candidate in segments if candidate["text"].strip()), None)
+        source_segments = self._segments(session_id, selected)
+        first = next((candidate for candidate in source_segments if candidate["text"].strip()), None)
         if first is None:
             raise ValueError(tr("A transcrição não contém texto para resumir."))
         entry, model_file, context, budget = self._model(model)
@@ -1093,10 +1139,13 @@ class MeetingIntelligence:
         evidence_budget = self._evidence_budget(
             budget, guidance
         )
-        segments = itertools.chain((first,), segments)
+        segments = itertools.chain((first,), source_segments)
         runtime = self.runtime_factory(model_file, context)
         levels = []
         chunks_processed = 0
+        detailed_notes = []
+        detailed_notes_bytes = 2
+        chunks = None
         try:
             def reduce_pair(left, right):
                 left_document, left_sources = left
@@ -1116,8 +1165,12 @@ class MeetingIntelligence:
                 return document, self._cited_source_map(document, sources)
 
             def process_chunk(chunk, *, output_limit=None):
-                nonlocal chunks_processed
+                nonlocal chunks_processed, detailed_notes_bytes
                 self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
+                # ceiling: 2,048 notes and 768 KiB per report. Larger recordings
+                # need a paged report contract before this bound can increase.
+                if len(detailed_notes) >= MAX_DETAILED_NOTES:
+                    raise ValueError(tr("As notas detalhadas excedem o limite do relatório local."))
                 source_text_by_id = {}
                 for item in chunk:
                     source_text_by_id.setdefault(item["id"], []).append(item["text"])
@@ -1126,6 +1179,22 @@ class MeetingIntelligence:
                     {item["id"] for item in chunk}, evidence_budget, cancel_event,
                     source_text_by_id, payload_budget, focus_evidence, output_limit,
                 )
+                self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
+                # Reductions intentionally compress their input. Preserve every
+                # validated leaf separately so the saved report also retains
+                # supported details that its concise overview no longer cites.
+                note = {
+                    "start": min(item["start"] for item in chunk),
+                    "end": max(item["end"] for item in chunk),
+                    "text": format_summary(document),
+                    "segment_ids": sorted(self._ids(document)),
+                }
+                note_bytes = len(json.dumps(note, ensure_ascii=False).encode("utf-8"))
+                detailed_notes_bytes += note_bytes + (2 if detailed_notes else 0)
+                if (len(note["text"].encode("utf-8")) > MAX_DETAILED_NOTE_BYTES
+                        or detailed_notes_bytes > MAX_DETAILED_NOTES_BYTES):
+                    raise ValueError(tr("As notas detalhadas excedem o limite do relatório local."))
+                detailed_notes.append(note)
                 current = (document, self._cited_source_map(document, source_text_by_id))
                 chunks_processed += 1
                 self._reduce(levels, current, reduce_pair)
@@ -1176,8 +1245,21 @@ class MeetingIntelligence:
                 )
             self._cancel(cancel_event, tr("O resumo foi cancelado; o resumo anterior foi preservado."))
         finally:
-            runtime.close()
+            try:
+                if chunks is not None:
+                    close_chunks = getattr(chunks, "close", None)
+                    if callable(close_chunks):
+                        close_chunks()
+            finally:
+                try:
+                    close_source = getattr(source_segments, "close", None)
+                    if callable(close_source):
+                        close_source()
+                finally:
+                    runtime.close()
         final = final[0]
+        if detailed_notes:
+            final = dict(final, detailed_notes=detailed_notes)
         self._cancel(cancel_event, tr("O resumo foi cancelado; o resultado anterior foi preservado."))
         result = dict(final,
                       model=model,

@@ -19,7 +19,7 @@ Hold a shortcut, speak, and release, or choose handsfree Start / Stop and press
 the shortcut once to start and again to stop. SnipVoice transcribes with an installed
 local model and inserts the result at the cursor target captured when recording
 started. It can also record meetings from the microphone, speaker output, or
-both, while keeping each source in its own recoverable track.
+both, while keeping capture recoverable until the final MP3 is verified.
 
 SnipVoice is the standalone voice companion extracted from
 [Sniptype](https://github.com/rteoo/sniptype). It has separate settings, models,
@@ -33,9 +33,9 @@ recordings, shortcuts, process identity, and installers.
 - Separate microphone and selected speaker-output recording on Windows and macOS.
 - Independent microphone/system toggles, live two-track waveforms, and OS-default or manually pinned endpoints.
 - Crash-recoverable segmented audio, explicit gaps, pause/resume, and partial-session preservation.
-- Atomic final MP3 recording with conservative microphone volume adjustment; WAV remains an export option.
-- Meeting library with local search, playback, and transcription revisions.
-- WAV, MP3, AAC/M4A, FLAC, OGG, and Opus import plus Markdown, text, JSON, and per-track WAV export.
+- Atomic final MP3 recording with local capture recovery until finalization.
+- Meeting library with local search, final-MP3 playback, and transcription revisions.
+- WAV, MP3, AAC/M4A, FLAC, OGG, and Opus import plus Markdown and text export.
 - Configurable final-audio destination, automatic transcription and summaries with installed local models, and summary regeneration.
 - Readable full-text transcripts by default, with a timestamped view and complete copy/export after recording.
 - Installed-only meeting transcription; automatic processing never downloads a model.
@@ -53,8 +53,12 @@ To run from source with Python installed:
 git clone https://github.com/rteoo/snipvoice.git
 cd snipvoice\source
 python -m pip install -r requirements.txt -r requirements-voice.txt
+python ..\packaging\voice_activity_model.py
 python snipvoice.pyw
 ```
+
+The second command fetches the hash-pinned Silero speech detector into
+`build/voice-vad`; transcription refuses to run without it.
 
 Local summaries and semantic meeting search additionally require the
 [approved custom llama.cpp wheel](packaging/README.md#local-summary-and-embedding-runtime).
@@ -99,10 +103,10 @@ launch. The Windows installer uses no administrator rights and installs under
 
 ### What's new in v1.2.0
 
-- **Biblioteca > Arquivos** separates the final audio from the original (raw) tracks, shows their sizes, and downloads the final audio or each original track on its own as MP3.
-- Removing the original tracks frees most of a recording's space but keeps the final audio, transcript, summaries, and chat; the recording can no longer be transcribed again.
-- **Configurações > Privacidade** is written in plain language and can automatically remove original tracks, or move whole recordings to the restorable trash, after a number of days you choose.
-- The final audio is ready about 10x faster after a recording, and the microphone boost now survives loud moments, balances your voice against the call, and never clips.
+- **Biblioteca > Arquivos** provides the verified final MP3 download and text exports. Capture recovery files remain internal.
+- Transcription, retry, playback, and clips use the saved final MP3. A final MP3 is required before those actions become available.
+- **Configurações > Privacidade** keeps whole-recording trash retention without exposing a separate capture-track deletion policy.
+- The final audio is created in a bounded worker and verified before capture recovery files can be cleaned up.
 - Recordings use the dictation model by default, and the dictation model leaves memory after 10 idle minutes.
 
 ### What's new in v1.1.0
@@ -115,8 +119,8 @@ launch. The Windows installer uses no administrator rights and installs under
 
 - The interface is available in Brazilian Portuguese (default) and US English; switch in **Configurações > Geral > Idioma** without restarting.
 - The manager follows the Win Design System in light and dark appearance, with Ctrl+1 to Ctrl+4 to jump between Gravação, Biblioteca, Ditado, and Configurações.
-- A three-second source check with live meters runs before recording, and saved recordings replay with source selection and seeking.
-- Quiet microphone speech is raised in the final recording without touching the recoverable raw tracks.
+- A three-second source check with live meters runs before recording, and saved recordings replay the final MP3 with seeking.
+- Microphone and system selection remain available for capture setup; post-recording audio is presented as one final MP3.
 
 ## First use
 
@@ -172,21 +176,17 @@ in the meeting application. Reopening the main window hides the recording overla
 
 | Capability | Behavior |
 | --- | --- |
-| Sources | Independently toggle microphone and speaker output; raw sources stay in separate native PCM tracks |
+| Sources | Independently toggle microphone and speaker output during capture |
 | Devices | Follow the OS multimedia/communications default or pin a stable endpoint |
 | Recovery | Append-only 30-second segments, CRC journal, atomic metadata, interrupted-session repair |
 | Workspace | Live source waveforms, pause/resume, meters, title, local search, full-text and timestamped review |
-| Playback | Seek by timestamp and play one track through the current OS output |
+| Playback | Seek by timestamp and play the saved final MP3 through the current OS output |
 | Processing | Automatic transcription and summary with installed local models, with durable revisions and summary regeneration |
-| Files | Timestamp-aligned MP3 recordings, optional PCM16 WAV export, bounded WAV/MP3/AAC/M4A/FLAC/OGG/Opus import, and text/JSON/per-track exports |
+| Files | Timestamp-aligned final MP3 recordings, bounded WAV/MP3/AAC/M4A/FLAC/OGG/Opus import, and text exports |
 
 Selecting an output captures the mix already routed to that device; SnipVoice
-does not move another application's audio. Source labels identify tracks, not
-individual speakers. Acoustic echo cancellation and diarization are not included.
-
-The optional microphone volume adjustment measures the recording and applies bounded
-gain and a limiter to the derived final audio without gating quiet speech. Raw source tracks remain unchanged; it is not
-a spectral denoiser or acoustic echo canceller.
+does not move another application's audio. Acoustic echo cancellation and
+diarization are not included.
 
 ### Meeting memory: local data model and status
 
@@ -215,7 +215,7 @@ report profiles and immutable cited reports, reviewable post-meeting artifacts,
 revision-scoped transcript labels/highlights and source clips, single- and
 cross-meeting Q&A, collections/tags/people/series, SQLite/FTS5 search and
 rebuild, exports, configurable recording consent/privacy, and recoverable
-retention with trash, restore, and explicit raw-track/permanent purge. The
+retention with trash and restore. The
 controller, GUI, meeting hotkey, and tray routes are wired to these operations.
 Physical Tk/tray interaction, native capture, packaged startup, and signing
 remain unverified on this host.
@@ -248,7 +248,7 @@ cited decisions and action items before using them.
 
 ## Data safety and privacy
 
-Settings, optional commands, logs, voice history, raw meetings, and the default
+Settings, optional commands, logs, voice history, capture recovery data, and the default
 final-recording folder live under
 `~/.snipvoice` by default. **Configurações > Geral > Pasta de dados** moves
 that whole folder to another location (for example `D:\snipvoice`): SnipVoice
@@ -275,10 +275,10 @@ voice controller starts. Set `voice_history_retention_days` in `settings.json`
 to an integer from 1 to 3650 to change this period. Active, malformed, and
 unrecognized entries are preserved. This applies to existing dictation history;
 export anything you want to keep before upgrading. Meeting recordings remain
-until the user removes them. Meeting retention operations require an explicit
-preview and target resolution: whole meetings can move to recoverable trash,
-and selected raw tracks can be staged for removal. Permanent purge requires a
-separate confirmation and cannot be undone. External exports are not deleted by
+until the user removes them. Meeting retention keeps whole meetings in
+recoverable trash after an explicit preview; capture recovery data is cleaned
+only after a verified final MP3. Permanent purge requires a separate
+confirmation and cannot be undone. External exports are not deleted by
 these operations. Files and the SQLite index are plaintext; use OS disk
 encryption and protect the user account. Deleting files on an SSD is not
 forensic erasure. There is no telemetry, transcript logging, implicit upload,

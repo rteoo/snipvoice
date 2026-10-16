@@ -75,10 +75,13 @@ def serve(input_stream, output_stream):
                 try:
                     result = runtime.generate(prompt, evidence, disable_thinking=disable)
                     if len(result.encode("utf-8")) > MAX_OUTPUT_BYTES:
-                        raise ValueError("output too large")
+                        raise SummaryOutputLimitError(
+                            N_("O runtime local retornou uma resposta maior que o limite permitido.")
+                        )
                 except SummaryOutputLimitError as exc:
-                    _send(output_stream, {"ok": False, "error": str(exc)})
-                    return
+                    _send(output_stream, {"ok": False, "error": str(exc),
+                                          "error_code": "output_limit"})
+                    continue
                 except Exception:
                     _send(output_stream, {"ok": False, "error": N_("O runtime local não conseguiu gerar o resumo.")})
                     return

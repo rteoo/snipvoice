@@ -47,15 +47,16 @@ class VoiceIndicatorContentTests(unittest.TestCase):
         self.assertNotIn("Solte", subtitle)
         self.assertIn("Pausado", meeting_indicator_content({"state": "paused"})[1])
         content = meeting_indicator_content({"state": "recording", "partial": True})
-        self.assertIn("parcial", content[1])
-        self.assertIn("perdeu áudio", content[3])
+        self.assertEqual(content[1], "Gravando · 00:00:00")
+        self.assertIn("Abra Gravação", content[3])
 
     def test_meeting_interruption_remains_visible_until_review(self):
         for status in ("failed", "interrupted"):
             content = meeting_indicator_content({"state": "idle", "last_status": status})
             self.assertEqual(content[1], "Gravação interrompida")
-        self.assertEqual(meeting_indicator_content({"state": "idle", "last_status": "partial"})[1],
-                         "Gravação parcial salva")
+        self.assertIsNone(meeting_indicator_content({"state": "idle", "last_status": "partial"}))
+        self.assertEqual(meeting_indicator_content({"state": "idle", "last_status": "partial",
+                                                   "error": "device gap"})[1], "Verifique a gravação")
         self.assertIsNone(meeting_indicator_content({"state": "idle", "last_status": "completed"}))
         self.assertIsNone(meeting_indicator_content({"state": "idle"}))
 
@@ -64,6 +65,19 @@ class VoiceIndicatorContentTests(unittest.TestCase):
             content = meeting_indicator_content({"state": state, "elapsed": float("nan")})
             self.assertEqual(content[0], "transcribing")
             self.assertNotIn("Gravando", content[1])
+
+    def test_final_audio_export_progress_is_visible_for_automatic_and_manual_exports(self):
+        for state in ("postprocessing", "idle"):
+            with self.subTest(state=state):
+                content = meeting_indicator_content({"state": state, "processing": True,
+                    "audio_export": {"stage": "encoding", "label": "Criando áudio final · 42%"}})
+                self.assertEqual(content[0], "transcribing")
+                self.assertEqual(content[1], "Criando áudio final · 42%")
+                self.assertIn("preservados", content[3])
+        content = meeting_indicator_content({"state": "postprocessing", "processing": True,
+            "postprocess": "Transcrevendo localmente",
+            "audio_export": {"stage": "completed", "label": "Áudio final salvo"}})
+        self.assertEqual(content[1], "Transcrevendo localmente")
 
 
 class MacVoiceIndicatorRoutingTests(unittest.TestCase):

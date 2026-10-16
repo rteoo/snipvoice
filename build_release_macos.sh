@@ -85,13 +85,14 @@ fi
 # --- Package --------------------------------------------------------------
 echo "Packaging $APP_NAME $APP_VERSION ($RELEASE_CHANNEL) ..."
 VOICE_COLLECT_ARGS=()
-if ! "$PYTHON" -c "import av, sounddevice, soxr, transcribe_cpp, transcribe_cpp_native, llama_cpp" >/dev/null 2>&1; then
+"$PYTHON" "$REPO_DIR/packaging/voice_activity_model.py" --output-dir "$REPO_DIR/build/voice-vad"
+if ! "$PYTHON" -c "import av, llama_cpp, onnxruntime, sounddevice, soxr, transcribe_cpp, transcribe_cpp_native" >/dev/null 2>&1; then
     echo "Voice release dependencies are missing." >&2
     echo "Build and install the clean decoder runtime documented in packaging/README.md," >&2
     echo "then install source/requirements-voice.txt." >&2
     exit 1
 fi
-VOICE_COLLECT_ARGS=(--collect-all av --collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native --collect-all llama_cpp)
+VOICE_COLLECT_ARGS=(--collect-all av --collect-all onnxruntime --collect-all sounddevice --collect-all soxr --copy-metadata soxr --collect-all transcribe_cpp --collect-all transcribe_cpp_native --collect-all llama_cpp)
 "$PYTHON" "$REPO_DIR/source/embedding_runtime_probe.py"
 sh "$REPO_DIR/source/native/build_macos_capture.sh"
 "$PYTHON" -m PyInstaller --noconfirm --clean --windowed --onedir \
@@ -104,6 +105,7 @@ sh "$REPO_DIR/source/native/build_macos_capture.sh"
     --add-data "$REPO_DIR/source/snipvoice.ico:." \
     --add-data "$REPO_DIR/THIRD_PARTY_NOTICES.md:." \
     --add-data "$REPO_DIR/LICENSE:." \
+    --add-data "$REPO_DIR/build/voice-vad:voice-vad" \
     --add-data "$FFMPEG_COMPLIANCE_DIR:THIRD_PARTY_LICENSES/FFmpeg" \
     --add-binary "$REPO_DIR/source/native/bin/snipvoice-capture:native/bin" \
     --hidden-import pystray._darwin \
@@ -113,7 +115,6 @@ sh "$REPO_DIR/source/native/build_macos_capture.sh"
     --exclude-module torchaudio \
     --exclude-module cv2 \
     --exclude-module transformers \
-    --exclude-module onnxruntime \
     --exclude-module scipy \
     "$REPO_DIR/source/snipvoice.pyw"
 
@@ -215,6 +216,11 @@ fi
 
 if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --meeting-capture-probe; then
     echo "The staged capture helper probe failed. dist left unchanged." >&2
+    exit 1
+fi
+
+if ! "$STAGED_APP/Contents/MacOS/$APP_NAME" --meeting-audio-probe; then
+    echo "The staged meeting MP3 workflow probe failed. dist left unchanged." >&2
     exit 1
 fi
 

@@ -17,7 +17,7 @@ from meeting_gui import (
     TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, meter_value, open_meeting_window, playback_sources,
-    retention_plan_projection, validated_settings,
+    retention_plan_projection, validated_settings, _append_detail_once,
 )
 from meeting_index import INDEX_STATES
 from meeting_settings import EndpointSelection, resolve_meeting_settings
@@ -55,8 +55,8 @@ class ReplayChoiceTests(unittest.TestCase):
     def test_final_mix_is_primary_even_after_raw_retention(self):
         tracks = {"microphone": {"available": False, "raw_removed": True},
                   "system": {"available": True}}
-        self.assertEqual(playback_sources(tracks, True), ("Áudio final", "Sistema"))
-        self.assertEqual(playback_sources(tracks, False), ("Sistema",))
+        self.assertEqual(playback_sources(tracks, True), ("Áudio final",))
+        self.assertEqual(playback_sources(tracks, False), ())
         self.assertEqual(playback_sources({}, False), ())
 
 
@@ -138,13 +138,11 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting"
         view.snapshot = {"state": "idle"}
-        view.track = Variable("Microfone")
         view.position = Variable("12.5")
-        view.raw_unavailable_tracks = set()
         view._action = mock.Mock()
         view.play()
         view._action.assert_called_once_with(
-            "seek_playback", "meeting", "microphone", start=12.5, urgent=True,
+            "seek_playback", "meeting", "final", start=12.5, urgent=True,
         )
 
     def test_preview_status_distinguishes_signal_from_silence(self):
@@ -244,13 +242,11 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.closed = False
         view.start_button = mock.Mock()
         view.delete_button = mock.Mock()
-        view.raw_remove_button = mock.Mock()
         view.status = Variable("Preparando privacidade e recuperação local…")
         view.privacy_status = Variable()
         view.set_startup_status(False, r"failed at C:\Users\private\meeting")
         view.start_button.configure.assert_called_with(state="disabled")
         view.delete_button.configure.assert_called_with(state="disabled")
-        view.raw_remove_button.configure.assert_called_with(state="disabled")
         self.assertNotIn("C:\\Users", view.status.get())
 
     def test_shared_start_path_routes_window_hotkey_and_tray_to_notice(self):
@@ -309,84 +305,89 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.profile = Variable("accuracy")
         self.assertEqual(view._effective_profile(), "accuracy")
 
-    def test_raw_capability_gating_keeps_transcript_surface_available(self):
+    def test_final_audio_capabilities_are_the_only_playback_contract(self):
         view = MeetingWindow.__new__(MeetingWindow)
-        view.raw_unavailable_tracks = set()
-        view.raw_capabilities = {}
-        view.raw_remove_microphone = Variable()
-        view.raw_remove_system = Variable()
-        view.raw_remove_microphone_check = mock.Mock()
-        view.raw_remove_system_check = mock.Mock()
         view.play_button = mock.Mock()
         view.transcribe_button = mock.Mock()
         view.export_audio_button = mock.Mock()
-        view.raw_remove_button = mock.Mock()
-        view.audio_capability_status = Variable()
-        view.track = Variable("Microfone")
+        view.recover_audio_button = mock.Mock()
+        view.audio_source = Variable()
         view._set_audio_capabilities({
             "microphone": {"available": False, "raw_removed": True},
             "system": {"available": True},
-        })
-        self.assertEqual(view.raw_unavailable_tracks, {"microphone"})
-        self.assertEqual(view.playback_choices, ("Sistema",))
+        }, final_available=True)
+        self.assertEqual(view.playback_choices, ("Áudio final",))
+        self.assertEqual(view.audio_source.get(), "Áudio final")
         view.play_button.configure.assert_called_with(state="normal")
         view.transcribe_button.configure.assert_called_with(state="normal")
-        self.assertIn("faixas que restam", view.audio_capability_status.get())
+        view.recover_audio_button.configure.assert_called_with(
+            text="Verificar e otimizar áudio", state="normal")
 
-    def _raw_removal_view(self, *, final_available=True, removed=()):
+    def test_final_audio_recovery_remains_available_for_working_capture_tracks(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.play_button = mock.Mock()
+        view.transcribe_button = mock.Mock()
+        view.export_audio_button = mock.Mock()
+        view.recover_audio_button = mock.Mock()
+        view.audio_source = Variable()
+        view._set_audio_capabilities({
+            "microphone": {"available": True},
+            "system": {"available": False, "raw_removed": True},
+        }, final_available=True)
+        self.assertTrue(view.recovery_needed)
+        view.recover_audio_button.configure.assert_called_with(
+            text="Verificar e otimizar áudio", state="normal")
+
+    def test_play_starts_final_audio_in_the_english_ui(self):
+        import i18n
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
         view.detail_ready = True
-        view.retention_ready = True
-        view.retention_request = 0
-        view.final_available = final_available
-        view.raw_tracks_present = {"microphone", "system"}
-        view.raw_unavailable_tracks = set(removed)
-        view.raw_remove_button = mock.Mock()
-        view.status = Variable()
-        view.controller = mock.Mock()
-        view._submit = mock.Mock(return_value=True)
-        return view
+        view.snapshot = {"state": "idle"}
+        view.playback_status = Variable()
+        view.playback_position = Variable(0.0)
+        view.playback_duration = 10.0
+        view._action = mock.Mock()
+        i18n.set_language("en-US")
+        try:
+            view.playback_choices = playback_sources({}, True)
+            view.play_selected_recording()
+        finally:
+            i18n.set_language(i18n.DEFAULT_LANGUAGE)
+        view._action.assert_called_once_with(
+            "seek_playback", "meeting-1", "final", start=0.0,
+            urgent=True, callback=view._replay_started)
 
-    def test_raw_removal_takes_every_remaining_track(self):
-        view = self._raw_removal_view()
-        view.preview_raw_tracks()
-        view._submit.call_args.args[1]()
-        view.controller.plan_raw_tracks.assert_called_once_with(
-            "meeting-1", tracks=("microphone", "system"),
-            policy={"mode": "raw_tracks", "after_days": 0})
-
-    def test_raw_removal_requires_saved_final_audio(self):
-        view = self._raw_removal_view(final_available=False)
-        view.preview_raw_tracks()
-        view._submit.assert_not_called()
-        self.assertIn("áudio final", view.status.get())
-
-    def test_raw_removal_with_nothing_left_plans_nothing(self):
-        view = self._raw_removal_view(removed=("microphone", "system"))
-        view.preview_raw_tracks()
-        view._submit.assert_not_called()
-        self.assertIn("Nenhuma faixa original", view.status.get())
-
-    def test_raw_removal_is_offered_only_with_final_audio_saved(self):
+    def test_missing_final_audio_enables_recovery_action(self):
         view = MeetingWindow.__new__(MeetingWindow)
-        view.retention_ready = True
-        view.raw_remove_button = mock.Mock()
+        view.play_button = mock.Mock()
+        view.transcribe_button = mock.Mock()
         view.export_audio_button = mock.Mock()
-        view.audio_capability_status = Variable()
-        tracks = {"microphone": {"available": True}, "system": {"available": True}}
-        view._set_audio_capabilities(tracks, final_available=True)
-        view.raw_remove_button.configure.assert_called_with(state="normal")
-        view._set_audio_capabilities(tracks, final_available=False)
-        view.raw_remove_button.configure.assert_called_with(state="disabled")
+        view.recover_audio_button = mock.Mock()
+        view.audio_source = Variable()
+        view._set_audio_capabilities({}, final_available=False)
+        self.assertEqual(view.playback_choices, ())
+        view.recover_audio_button.configure.assert_called_with(
+            text="Preparar áudio final", state="normal")
         view.export_audio_button.configure.assert_called_with(state="disabled")
+
+    def test_prepare_final_audio_retries_verification_when_final_exists(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "meeting-1"
+        view.detail_ready = True
+        view.final_available = True
+        view.recovery_needed = True
+        view.controller = mock.Mock()
+        view.status = Variable()
+        view._action = mock.Mock()
+        view.prepare_final_audio()
+        self.assertEqual(view._action.call_args.args[:2], ("recover_audio", "meeting-1"))
 
     def _privacy_view(self):
         view = MeetingWindow.__new__(MeetingWindow)
         for name, value in (("privacy_notice_enabled", False), ("privacy_notice_language", "pt-BR"),
                             ("qa_mode", "explicit_save"), ("whole_meeting_auto", False),
-                            ("whole_meeting_after_days", "90"), ("raw_audio_auto", False),
-                            ("raw_audio_after_days", "30"), ("trash_days", "30"),
+                            ("whole_meeting_after_days", "90"), ("trash_days", "30"),
                             ("privacy_status", "")):
             setattr(view, name, Variable(value))
         view.privacy_defaults, view.retention_defaults = {}, {}
@@ -397,31 +398,23 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._sync_qa_controls = mock.Mock()
         return view
 
-    def test_auto_clean_setting_loads_and_saves_all_track_policy(self):
+    def test_legacy_raw_policy_is_normalized_to_keep(self):
         view = self._privacy_view()
         view._apply_workspace_settings({"retention_defaults": {
             "raw_audio": {"mode": "raw_tracks", "after_days": 14.0, "tracks": ["microphone"]}}})
-        self.assertTrue(view.raw_audio_auto.get())
-        self.assertEqual(view.raw_audio_after_days.get(), "14")
         view.save_privacy_settings()
         saved = view._submit.call_args
         self.assertEqual(saved.args[0], "save_privacy")
         saved.args[1]()
         patch = view.controller.update_workspace.call_args.args[0]["retention_defaults"]["raw_audio"]
-        self.assertEqual(patch, {"mode": "raw_tracks", "after_days": 14.0, "tracks": []})
+        self.assertEqual(patch, {"mode": "keep", "tracks": []})
 
-    def test_auto_clean_off_keeps_tracks_and_requires_days_when_on(self):
+    def test_final_audio_policy_never_enables_legacy_raw_cleanup(self):
         view = self._privacy_view()
         view.save_privacy_settings()
         view._submit.call_args.args[1]()
         patch = view.controller.update_workspace.call_args.args[0]["retention_defaults"]["raw_audio"]
         self.assertEqual(patch["mode"], "keep")
-        view = self._privacy_view()
-        view.raw_audio_auto.set(True)
-        view.raw_audio_after_days.set("")
-        view.save_privacy_settings()
-        view._submit.assert_not_called()
-        self.assertIn("dias", view.privacy_status.get())
 
     def test_meeting_auto_trash_setting_round_trips_and_needs_days(self):
         view = self._privacy_view()
@@ -438,28 +431,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.whole_meeting_after_days.set("")
         view.save_privacy_settings()
         view._submit.assert_not_called()
-
-    def test_removed_raw_tracks_leave_only_final_audio(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        for name in ("play_button", "transcribe_button", "adjust_audio_button",
-                     "export_audio_button", "raw_remove_button"):
-            setattr(view, name, mock.Mock())
-        view.audio_capability_status = Variable()
-        view.retranscribe_hint = Variable()
-        view.raw_track_buttons = {"microphone": mock.Mock(), "system": mock.Mock()}
-        view._set_audio_capabilities({
-            "microphone": {"available": False, "raw_removed": True},
-            "system": {"available": False, "raw_removed": True},
-        }, final_available=True)
-        self.assertEqual(view.playback_choices, ("Áudio final",))
-        view.play_button.configure.assert_called_with(state="normal")
-        view.export_audio_button.configure.assert_called_with(state="normal")
-        for name in ("transcribe_button", "adjust_audio_button", "raw_remove_button"):
-            getattr(view, name).configure.assert_called_with(state="disabled")
-        for button in view.raw_track_buttons.values():
-            button.configure.assert_called_with(state="disabled")
-        self.assertIn("não pode ser transcrita novamente", view.audio_capability_status.get())
-        self.assertIn("não é possível transcrever novamente", view.retranscribe_hint.get())
 
     def test_memory_only_q_and_a_does_not_submit_save(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -568,41 +539,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
             empty_call.args[1]()
         view.controller.purge_session.assert_called_once_with("meeting-1", confirm=True)
         view.controller.empty_trash.assert_called_once_with(confirm=True)
-
-    def test_raw_track_removal_preview_applies_only_selected_track_plan(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
-        view.selected = "meeting-1"
-        view.detail_ready = True
-        view.retention_ready = True
-        view.final_available = True
-        view.retention_request = 0
-        view.raw_remove_button = mock.Mock()
-        view.status = Variable()
-        view.window = object()
-        view._remember_operation_error = mock.Mock()
-        view._submit = mock.Mock(return_value=True)
-        view.controller = mock.Mock()
-        plan = {
-            "session_id": "meeting-1", "operation": "raw_tracks", "eligible": True,
-            "byte_estimate": 64, "targets": [], "raw_tracks": ["microphone"],
-            "lost_capabilities": ["playback:microphone"],
-        }
-        view.controller.plan_raw_tracks.return_value = plan
-
-        view.preview_raw_tracks(("microphone",))
-        preview_call = view._submit.call_args
-        self.assertEqual(preview_call.args[0], "raw_retention_plan")
-        self.assertEqual(preview_call.args[1](), plan)
-        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True):
-            preview_call.args[2](plan, None)
-        apply_call = view._submit.call_args_list[-1]
-        self.assertEqual(apply_call.args[0], "raw_retention_apply")
-        apply_call.args[1]()
-        # Manual removal ignores the automatic age limit.
-        view.controller.plan_raw_tracks.assert_called_once_with(
-            "meeting-1", tracks=("microphone",), policy={"mode": "raw_tracks", "after_days": 0})
-        view.controller.apply_raw_tracks.assert_called_once_with(plan, confirm=True)
 
     def test_label_allows_an_explicit_font_override(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -822,11 +758,180 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
         self.assertEqual(
             status,
-            "Parcial · 00:00:31 · Gravação preservada · "
-            "Uma fonte de áudio foi interrompida · Não foi possível concluir uma etapa",
+            "Pronto · 00:00:31 · "
+            "Gravação preservada · Ver detalhes",
         )
         self.assertNotIn("opaque-id", status)
         self.assertNotIn("HRESULT", status)
+
+    def test_recording_status_shows_export_progress_instead_of_generic_processing(self):
+        status = format_recording_status({
+            "state": "postprocessing", "processing": True,
+            "audio_export": {"stage": "encoding", "label": "Criando áudio final · 42%"},
+        })
+        self.assertIn("Criando áudio final · 42%", status)
+        self.assertNotIn("Processando localmente", status)
+
+    def test_recording_status_reports_recovery_without_native_error_text(self):
+        snapshot = {"state": "recording", "elapsed": 15, "capture_health": {
+            "system": {"state": "recovering", "reason": "HRESULT synthetic-native-detail"}}}
+        status = format_recording_status(snapshot)
+        self.assertIn("Reconectando áudio", status)
+        self.assertNotIn("HRESULT", status)
+        snapshot["capture_health"]["system"]["state"] = "receiving"
+        self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
+        snapshot["capture_health"]["system"]["state"] = "quiet"
+        self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
+        snapshot["capture_health"]["system"]["state"] = "disconnected"
+        status = format_recording_status(snapshot)
+        self.assertIn("Sem áudio de uma fonte", status)
+        self.assertNotIn("Reconectando áudio", status)
+
+    def test_export_progress_is_scoped_to_selection_and_refreshes_final_before_asr_finishes(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.detail_ready = True
+        view.audio_export_progress = mock.Mock()
+        view.final_audio_progress = mock.Mock()
+        for bar in (view.audio_export_progress, view.final_audio_progress):
+            bar.cget.return_value = "determinate"
+        view.final_audio_status = Variable()
+        view.export_audio_button = mock.Mock()
+        view.refresh_outputs = mock.Mock()
+        view.snapshot = {"processing": True, "audio_export": {
+            "session_id": "session", "stage": "encoding", "percent": 42,
+            "label": "Criando áudio final · 42%",
+        }}
+        view._sync_audio_export_progress()
+        self.assertEqual(view.final_audio_status.get(), "Criando áudio final · 42%")
+        view.final_audio_progress.configure.assert_called_with(value=42)
+        view.export_audio_button.configure.assert_called_with(state="disabled")
+        view.selected = "other"
+        view.final_audio_status.set("Other recording")
+        view._sync_audio_export_progress()
+        self.assertEqual(view.final_audio_status.get(), "Other recording")
+        view.final_audio_progress.grid_remove.assert_called()
+        view.selected = "session"
+        view.snapshot["audio_export"]["stage"] = "completed"
+        view.snapshot["audio_export"]["percent"] = 100
+        view._sync_audio_export_progress()
+        view._sync_audio_export_progress()
+        self.assertTrue(view.snapshot["processing"])
+        view.refresh_outputs.assert_called_once_with("session")
+
+    def test_preparing_export_animation_restarts_after_hiding_without_duplicate_timers(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = None
+        view.detail_ready = False
+        view.audio_export_progress = mock.Mock()
+        view.audio_export_progress.cget.return_value = "indeterminate"
+        view.snapshot = {"processing": True, "audio_export": {
+            "session_id": "session", "stage": "preparing", "percent": None,
+            "label": "Preparando o áudio final…",
+        }}
+        view._sync_audio_export_progress()
+        view._sync_audio_export_progress()
+        view.audio_export_progress.start.assert_called_once_with(50)
+        view.snapshot["processing"] = False
+        view._sync_audio_export_progress()
+        view.snapshot["processing"] = True
+        view._sync_audio_export_progress()
+        self.assertEqual(view.audio_export_progress.start.call_count, 2)
+
+    def test_final_audio_download_stays_enabled_while_summary_finishes(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.detail_ready = True
+        view.final_available = True
+        view.audio_export_progress = mock.Mock()
+        view.final_audio_progress = mock.Mock()
+        for bar in (view.audio_export_progress, view.final_audio_progress):
+            bar.cget.return_value = "determinate"
+        view.final_audio_status = Variable()
+        view.export_audio_button = mock.Mock()
+        view.recover_audio_button = mock.Mock()
+        view.refresh_outputs = mock.Mock()
+        view.snapshot = {"processing": True, "audio_export": {
+            "session_id": "session", "stage": "completed", "percent": 100,
+            "label": "Áudio final concluído",
+        }}
+
+        view._sync_audio_export_progress()
+
+        view.export_audio_button.configure.assert_called_with(state="normal")
+
+    def test_detailed_notes_editor_keeps_first_middle_and_last_notes(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.report_sections = {"detailed_notes": [
+            {"start": 0, "end": 1, "text": "FIRST-" + "a" * 22000, "segment_ids": ["s1"]},
+            {"start": 60, "end": 61, "text": "MIDDLE-" + "b" * 22000, "segment_ids": ["s2"]},
+            {"start": 120, "end": 121, "text": "LAST-" + "c" * 22000, "segment_ids": ["s3"]},
+        ]}
+        view.report_section_choice = Variable("detailed_notes")
+        view.report_editor = mock.Mock()
+
+        view._render_report_section()
+
+        rendered = view.report_editor.insert.call_args.args[1]
+        self.assertIn("FIRST-", rendered)
+        self.assertIn("MIDDLE-", rendered)
+        self.assertIn("LAST-", rendered)
+        self.assertGreater(len(rendered), 65536)
+
+    def test_oversized_report_review_is_rejected_without_truncation(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.selected_report = {"id": "report", "reviewed_artifact": {"generation": 2}}
+        view.report_section_choice = Variable("summary")
+        view.report_editor = mock.Mock()
+        view.report_editor.get.return_value = "x" * 65537
+        view.status = Variable()
+        view._action = mock.Mock()
+
+        view.save_report_review()
+
+        self.assertIn("Exporte a seção completa", view.status.get())
+        view._action.assert_not_called()
+
+    def test_short_report_review_still_saves_in_full(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "session"
+        view.selected_report = {"id": "report", "reviewed_artifact": {"generation": 2}}
+        view.report_section_choice = Variable("summary")
+        view.report_editor = mock.Mock()
+        view.report_editor.get.return_value = "Reviewed text"
+        view.status = Variable()
+        view._action = mock.Mock()
+
+        view.save_report_review()
+
+        view._action.assert_called_once_with(
+            "review_report", "session", "report", {"summary": "Reviewed text"},
+            expected_generation=2, callback=mock.ANY,
+        )
+
+    def test_terminal_audio_stage_keeps_existing_file_downloadable(self):
+        for stage in ("failed", "cancelled"):
+            view = MeetingWindow.__new__(MeetingWindow)
+            view.selected = "session"
+            view.detail_ready = True
+            view.final_available = True
+            view.audio_export_progress = mock.Mock()
+            view.final_audio_progress = mock.Mock()
+            for bar in (view.audio_export_progress, view.final_audio_progress):
+                bar.cget.return_value = "determinate"
+            view.final_audio_status = Variable()
+            view.export_audio_button = mock.Mock()
+            view.recover_audio_button = mock.Mock()
+            view.refresh_outputs = mock.Mock()
+            view.snapshot = {"processing": True, "audio_export": {
+                "session_id": "session", "stage": stage, "percent": None,
+                "label": "Audio operation failed",
+            }}
+
+            view._sync_audio_export_progress()
+
+            view.export_audio_button.configure.assert_called_with(state="normal")
 
     def test_empty_destination_has_a_clear_local_default_label(self):
         self.assertEqual(destination_display(""), "Pasta local padrão (recordings)")
@@ -859,6 +964,15 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertNotIn("HRESULT", view.status.get())
         self.assertIn("HRESULT", view.record_details)
         view.record_details_button.configure.assert_called_with(state="normal")
+
+    def test_repeated_worker_error_detail_is_shown_once(self):
+        details = ["Detalhes técnicos: native discontinuity"]
+        _append_detail_once(details, "Detalhes técnicos: native discontinuity")
+        _append_detail_once(details, "Detalhes técnicos: encoder failure")
+        self.assertEqual(details, [
+            "Detalhes técnicos: native discontinuity",
+            "Detalhes técnicos: encoder failure",
+        ])
 
     def test_summary_inventory_result_is_applied_only_on_gui_callback(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1163,23 +1277,28 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(dialog.call_args.kwargs["filetypes"], (("Áudio MP3", "*.mp3"),))
         view._action.assert_called_once_with("export_final_audio", "meeting-1", "final.mp3")
 
-    def test_track_download_exports_one_source_as_mp3(self):
+    def test_audio_download_suggestions_keep_titles_out_of_paths(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
-        view.raw_tracks_present = {"microphone", "system"}
-        view.raw_unavailable_tracks = set()
-        view.title = Variable("Reunião")
+        view.final_available = True
+        view.audio_sizes = {"final_format": "MP3"}
         view.window = mock.Mock()
         view.status = Variable()
         view._action = mock.Mock()
-        with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="mic.mp3") as dialog:
-            view.export_track("microphone")
-        self.assertEqual(dialog.call_args.kwargs["defaultextension"], ".mp3")
-        self.assertEqual(dialog.call_args.kwargs["filetypes"], (("Áudio MP3", "*.mp3"),))
-        view._action.assert_called_once_with("export_track", "meeting-1", "microphone", "mic.mp3")
-        view.raw_unavailable_tracks = {"system"}
-        view._action.reset_mock()
-        view.export_track("system")
+        for title, stem in (
+            ("Reunião 14/10/2026", "Reunião 14-10-2026"),
+            ('Review<>:"/\\|?*\x00\nNotes', "Review-Notes"),
+            ("  Reunião final.  ", "Reunião final"),
+            ("CON", "_CON"),
+            ("...", "recording"),
+            ("Reunião – orçamento", "Reunião – orçamento"),
+        ):
+            with self.subTest(title=title):
+                view.title = Variable(title)
+                with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="") as dialog:
+                    view.export_audio()
+                self.assertEqual(dialog.call_args.kwargs["initialfile"], stem + ".mp3")
+                self.assertEqual(view.title.get(), title)
         view._action.assert_not_called()
 
     def test_summary_display_is_readable_and_read_only(self):
@@ -1197,21 +1316,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIn("Enviar o relatório.", view.summary.get())
         self.assertNotIn("segment_ids", view.summary.get())
         self.assertEqual(view.summary.state, "disabled")
-
-    def test_adjust_audio_marks_only_the_successful_recording_for_final_selection(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.selected = "meeting-1"
-        view.detail_ready = True
-        view.raw_tracks_present = {"microphone"}
-        view.raw_unavailable_tracks = set()
-        view._action = mock.Mock()
-        view._processing_launched = mock.Mock()
-        view.adjust_audio()
-        self.assertEqual(view._action.call_args.args[:2],
-                         ("regenerate_final_audio", "meeting-1"))
-        callback = view._action.call_args.kwargs["callback"]
-        callback(True, None)
-        self.assertEqual(view._adjusted_audio_target, "meeting-1")
 
     def test_refresh_outputs_selects_final_audio_only_for_adjusted_recording(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1245,6 +1349,41 @@ class MeetingGuiLogicTests(unittest.TestCase):
             callback(operation(), None)
         self.assertEqual(view.audio_source.get(), "Áudio final")
         self.assertIsNone(view._adjusted_audio_target)
+
+    def test_output_footer_uses_selected_processing_stages_not_capture_error(self):
+        for stage_status, incomplete in (("completed", False), ("skipped", False),
+                                         ("failed", True), ("cancelled", True)):
+            with self.subTest(stage_status=stage_status):
+                view = MeetingWindow.__new__(MeetingWindow)
+                view.selected = "meeting-1"
+                view.detail_ready = True
+                view.transcript_revision = "revision-1"
+                view.transcript_offset = 0
+                view.status = Variable()
+                view.snapshot = {"error": "native_discontinuity" if not incomplete else ""}
+                view.controller = mock.Mock()
+                view.controller.get_session.return_value = {
+                    "processing": {"summary": {"status": stage_status, "error": "model unavailable"}},
+                    "error": "native_discontinuity",
+                }
+                view._read_transcript_page = mock.Mock(return_value={"segments": []})
+                for name in ("_set_audio_capabilities", "_show_summary", "_render_transcript",
+                             "_render_annotations", "_update_transcript_paging_controls",
+                             "_load_transcript_document", "refresh_reports", "_submit",
+                             "_remember_operation_error"):
+                    setattr(view, name, mock.Mock())
+                view.refresh_outputs("meeting-1")
+                operation, callback = view._submit.call_args.args[1:]
+                callback(operation(), None)
+                self.assertEqual("uma etapa não foi concluída" in view.status.get(), incomplete)
+                if incomplete:
+                    view._remember_operation_error.assert_called_once_with("summary: model unavailable")
+                else:
+                    view._remember_operation_error.assert_not_called()
+                view.selected = "meeting-2"
+                view.status.set("Selected another recording")
+                callback(operation(), None)
+                self.assertEqual(view.status.get(), "Selected another recording")
 
     def test_recording_finished_opens_clean_new_recording_and_tracks_processing(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1675,6 +1814,36 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertFalse(view.recording_defaults_parent.winfo_ismapped())
         self.assertTrue(sections.frames["privacy"].winfo_ismapped())
 
+    def test_export_progress_updates_real_tk_widgets_and_hides_on_cancel(self):
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.recording_tab)
+        snapshot = {"state": "postprocessing", "processing": True, "audio_export": {
+            "session_id": "session", "stage": "encoding", "percent": 42,
+            "label": "Criando áudio final · 42%",
+        }}
+        view.controller.snapshot.return_value = snapshot
+        view.snapshot = snapshot
+        view.selected = "session"
+        view.detail_ready = True
+        view.refresh_outputs = mock.Mock()
+        view._sync_audio_export_progress()
+        self.root.update()
+        self.assertTrue(view.audio_export_progress.winfo_ismapped())
+        self.assertLessEqual(view.audio_export_progress.winfo_rooty() + view.audio_export_progress.winfo_height(),
+                             view.window.winfo_rooty() + view.window.winfo_height())
+        self.assertGreater(view.stop_button.winfo_rooty(), view.audio_export_progress.winfo_rooty())
+        self.assertEqual(float(view.audio_export_progress.cget("value")), 42)
+        self.assertEqual(float(view.final_audio_progress.cget("value")), 42)
+        self.assertEqual(view.final_audio_status.get(), "Criando áudio final · 42%")
+        snapshot["audio_export"].update(stage="cancelled", percent=None,
+                                       label="Exportação cancelada; os originais foram preservados.")
+        snapshot["processing"] = False
+        view._sync_audio_export_progress()
+        self.root.update()
+        self.assertFalse(view.audio_export_progress.winfo_ismapped())
+        self.assertFalse(view.final_audio_progress.grid_info())
+        self.assertIn("cancelada", view.final_audio_status.get())
+
     def test_recording_screen_keeps_setup_visible_and_opens_settings(self):
         view, notebook = self._embedded_view(geometry="920x700")
         notebook.select(view.recording_tab)
@@ -1754,7 +1923,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertFalse(hasattr(view, "bookmark_picker"))
         self.assertFalse(hasattr(view, "transcript_tools_toggle"))
         self.assertNotIn("speaker", view.transcript["columns"])
-        self.assertEqual(tuple(view.transcript["columns"]), ("time", "track", "text"))
+        self.assertEqual(tuple(view.transcript["columns"]), ("time", "text"))
         self.assertFalse(view.report_frame.winfo_ismapped())
 
     def test_library_replay_button_dispatches_saved_mix(self):
@@ -1765,7 +1934,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.detail_ready = True
         view.playback_duration = 30.0
         view.playback_position.set(5.0)
-        view._set_audio_capabilities({"microphone": {"available": True}}, True)
+        view._set_audio_capabilities({}, True)
         self.root.update()
         self.assertEqual(view.audio_source.get(), "Áudio final")
         self.assertEqual(str(view.play_button.cget("state")), "normal")
@@ -1774,6 +1943,43 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.controller.seek_playback.assert_called_once_with(
             "synthetic-session", "final", start=5.0,
         )
+
+    def test_playback_overview_displays_duration_for_capture_with_diagnostics(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view.selected = "synthetic-session"
+        metadata = {"status": "partial", "duration": 41, "final_available": True,
+                    "tracks": {}, "summary": "", "error": "native_discontinuity",
+                    "processing_details": ""}
+        view._detail_loaded("synthetic-session", (metadata, []), None)
+        self.root.update()
+        self.assertEqual(view.audio_overview.get(), "00:00:41")
+        self.assertEqual(metadata["status"], "partial")
+        self.assertNotIn("Uma etapa anterior", view.status.get())
+        self.assertIn("native_discontinuity", view.operation_details)
+        metadata["processing_details"] = "summary: model unavailable"
+        view._detail_loaded("synthetic-session", (metadata, []), None)
+        self.assertIn("Uma etapa anterior não foi concluída", view.status.get())
+        self.assertIn("summary: model unavailable", view.operation_details)
+
+    def test_processing_completion_preserves_another_selected_recordings_details(self):
+        view, _notebook = self._embedded_view()
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        view.selected = "new-recording"
+        view.processing_target = "old-recording"
+        view.previous_processing = False
+        view.operation_details = "Selected recording details"
+        view.status.set("Selected another recording")
+        view.controller.snapshot.return_value["error"] = "Old recording capture diagnostic"
+        with mock.patch.object(view, "_remember_operation_error") as remember:
+            view._poll()
+        self.assertIsNone(view.processing_target)
+        remember.assert_not_called()
+        self.assertEqual(view.operation_details, "Selected recording details")
+        self.assertEqual(view.status.get(), "Selected another recording")
 
     def test_chat_send_button_keeps_conversation_and_composer_visible(self):
         callback_errors = []

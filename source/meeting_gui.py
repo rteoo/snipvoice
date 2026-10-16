@@ -17,7 +17,8 @@ import i18n
 from i18n import N_, tr
 from meeting_files import report_export_projection
 from meeting_chat import MeetingChat
-from meeting_text import format_summary
+from meeting_text import format_detailed_notes, format_summary
+from meeting_titles import safe_filename_stem
 from meeting_settings import (
     FOLLOW_DICTATION, EndpointSelection, dictation_profile, resolve_meeting_settings,
     validate_hotkey_conflicts,
@@ -57,6 +58,7 @@ REPORT_HISTORY_LIMIT = 500
 MAX_RETENTION_PREVIEW_ITEMS = 64
 MAX_TRASH_ITEMS = 256
 MAX_RETENTION_TEXT = 800
+MAX_REPORT_REVIEW_CHARS = 65536
 RETENTION_POLICY_LABELS = {
     "keep": N_("Manter indefinidamente"),
     "whole_meeting": N_("Excluir reunião após o prazo"),
@@ -80,8 +82,6 @@ PROFILE_LABELS = {"whisper-small": N_("Leve · Whisper Small"), "balanced": N_("
 LANGUAGE_LABELS = {"auto": N_("Automático"), "pt-BR": N_("Português (Brasil)"),
                    "en-US": N_("Inglês (Estados Unidos)")}
 TRACK_LABELS = {N_("Microfone"): "microphone", N_("Sistema"): "system"}
-AUDIO_SOURCE_LABELS = {N_("Áudio final"): "final", **TRACK_LABELS}
-AUDIO_TRACK_LABELS = {track: label for label, track in AUDIO_SOURCE_LABELS.items()}
 SUMMARY_LABELS = {entry["id"]: entry["label"] for entry in summary_catalog()}
 
 
@@ -167,15 +167,8 @@ def format_time(seconds):
 
 
 def playback_sources(tracks, final_available):
-    """Offer the saved mix first, then only raw tracks that still exist."""
-    choices = [tr("Áudio final")] if final_available else []
-    if isinstance(tracks, dict):
-        for label, track in TRACK_LABELS.items():
-            value = tracks.get(track)
-            if (isinstance(value, dict) and value.get("available") is not False
-                    and not value.get("raw_removed")):
-                choices.append(tr(label))
-    return tuple(choices)
+    """Expose only the saved final MP3 as the playback source."""
+    return (tr("Áudio final"),) if final_available else ()
 
 
 def meter_value(peak):
@@ -243,20 +236,50 @@ def destination_display(path):
     return str(path or "").strip() or tr("Pasta local padrão (recordings)")
 
 
+def _technical_error_detail(error):
+    """Format one bounded, redacted technical error for recording details."""
+    return tr("Detalhes técnicos: {details}", details=_safe_retention_text(error, 4096))
+
+
+def _append_detail_once(details, value):
+    """Keep repeated worker/error reporting from duplicating one detail line."""
+    if value and value not in details:
+        details.append(value)
+
+
+def _processing_failure_details(metadata):
+    """Keep retained capture diagnostics separate from persisted processing failures."""
+    stages = metadata.get("processing")
+    if not isinstance(stages, dict):
+        return ""
+    details = []
+    for name in ("audio", "capture_cleanup", "transcription", "summary"):
+        stage = stages.get(name)
+        if isinstance(stage, dict) and stage.get("status") in {"failed", "cancelled"}:
+            details.append(f"{name}: {str(stage.get('error') or stage['status'])[:1024]}")
+    return "; ".join(details)
+
+
 def format_recording_status(snapshot):
     """Return bounded user-facing state without exposing paths or native errors."""
     state = snapshot.get("state", "idle")
-    displayed = snapshot.get("last_status") if state == "idle" else state
-    parts = [tr(STATE_LABELS.get(displayed or state, displayed or state)),
+    state_label = tr(STATE_LABELS.get(state, state))
+    parts = [state_label,
              format_time(snapshot.get("elapsed"))]
     if snapshot.get("processing"):
-        parts.append(tr("Processando localmente"))
+        export = snapshot.get("audio_export") or {}
+        parts.append(export["label"] if export.get("stage") in {"preparing", "encoding", "finalizing"}
+                     else tr("Processando localmente"))
+    health_states = {value.get("state") for value in (snapshot.get("capture_health") or {}).values()
+                     if isinstance(value, dict)}
+    if state in {"starting", "recording", "paused", "stopping"} and "disconnected" in health_states:
+        parts.append(tr("Sem áudio de uma fonte"))
+    elif state in {"starting", "recording", "paused", "stopping"} and "recovering" in health_states:
+        parts.append(tr("Reconectando áudio"))
     if snapshot.get("final_audio"):
         parts.append(tr("Gravação preservada"))
-    if snapshot.get("partial"):
-        parts.append(tr("Uma fonte de áudio foi interrompida"))
     if snapshot.get("error"):
-        parts.append(tr("Não foi possível concluir uma etapa"))
+        parts.append(tr("Ver detalhes"))
     return " · ".join(parts)
 
 
@@ -1157,8 +1180,12 @@ class MeetingWindow:
             monitor, "", textvariable=self.record_status, justify="center",
             bg=self.ui.card, fg=self.ui.text_strong, font=self.ui.font(14, "bold"),
         ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_md, self.ui.space_sm))
+        self.audio_export_progress = ttk.Progressbar(monitor, maximum=100, mode="determinate")
+        self.audio_export_progress.grid(row=4, column=0, columnspan=2, sticky="ew",
+                                        pady=(0, self.ui.space_sm))
+        self.audio_export_progress.grid_remove()
         transport = tk.Frame(monitor, bg=self.ui.card)
-        transport.grid(row=4, column=0, columnspan=2)
+        transport.grid(row=5, column=0, columnspan=2)
         self.start_button = self._button(transport, tr("Iniciar gravação"), self.start, accent=True)
         self.start_button.pack(side="left", padx=(0, 8))
         self.pause_button = self._button(transport, tr("Pausar"), self.pause_resume)
@@ -1169,7 +1196,7 @@ class MeetingWindow:
             self.window, tr("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas."),
         )
         status_row = tk.Frame(monitor, bg=self.ui.card)
-        status_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
+        status_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
         self._wrap_label(status_row, "", textvariable=self.preview_status, anchor="w",
                          justify="left", bg=self.ui.card, fg=self.ui.text_muted).pack(
                              side="left", fill="x", expand=True)
@@ -1412,12 +1439,10 @@ class MeetingWindow:
         # Recording list with an empty state drawn over the tree.
         list_frame = tk.Frame(left, bg=self.ui.surface)
         list_frame.pack(fill="both", expand=True)
-        self.sessions = ttk.Treeview(list_frame, columns=("title", "status"), show="headings",
+        self.sessions = ttk.Treeview(list_frame, columns=("title",), show="headings",
                                      selectmode="browse", style="Meeting.Treeview", height=6)
         self.sessions.heading("title", text=tr("Gravação"))
-        self.sessions.heading("status", text=tr("Estado"))
         self.sessions.column("title", width=170)
-        self.sessions.column("status", width=85)
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.sessions.yview)
         self.sessions.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
@@ -1548,16 +1573,8 @@ class MeetingWindow:
         self.playback_seek.bind("<ButtonRelease-1>", self._player_seek_end)
         player_details = tk.Frame(player, bg=self.ui.card)
         player_details.pack(fill="x", pady=(self.ui.space_xs, 0))
-        self._label(player_details, tr("Fonte de áudio"), bg=self.ui.card,
-                    fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
         self.audio_source = tk.StringVar(self.window)
-        self.audio_source_box = ttk.Combobox(player_details, textvariable=self.audio_source,
-                                             state="disabled", values=(), width=16)
-        self.audio_source_box.pack(side="left")
-        self.audio_source_box.bind("<<ComboboxSelected>>", self._player_source_changed)
-        self.adjust_audio_button = self._button(player_details, tr("Ajustar volume"), self.adjust_audio)
-        self.adjust_audio_button.configure(state="disabled")
-        self.adjust_audio_button.pack(side="left", padx=(6, 0))
+        self.audio_source.set(tr("Áudio final"))
         status = tk.Frame(player, bg=self.ui.card)
         status.pack(fill="x", pady=(self.ui.space_xs, 0))
         self.audio_overview = tk.StringVar(self.window, tr("Selecione uma gravação para ouvir."))
@@ -1618,11 +1635,6 @@ class MeetingWindow:
         self.transcribe_button = self._button(actions, tr("Transcrever novamente"), self.transcribe)
         self.transcribe_button.pack(side="left", padx=(0, 6))
         self._button(actions, tr("Cancelar processamento"), lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
-        # Says why Transcrever novamente is disabled once the raw tracks are gone.
-        self.retranscribe_hint = tk.StringVar(self.window, "")
-        self._wrap_label(actions, "", textvariable=self.retranscribe_hint, anchor="w", justify="left",
-                         fg=self.ui.text_muted, font=self.ui.font(8)).pack(
-                             side="left", fill="x", expand=True, padx=(self.ui.space_sm, 0))
         self.transcript_timing = tk.StringVar(
             self.window, tr("Dois cliques ou Enter para ouvir; horários marcam blocos de áudio, não palavras."),
         )
@@ -1630,12 +1642,10 @@ class MeetingWindow:
             self.timed_transcript, "", textvariable=self.transcript_timing, anchor="w",
             fg=self.ui.text_muted,
         ).pack(fill="x", padx=12)
-        self.track = tk.StringVar(self.window, tr("Microfone"))
         self.transcript = ttk.Treeview(
-            self.timed_transcript, columns=("time", "track", "text"), show="headings", height=8,
+            self.timed_transcript, columns=("time", "text"), show="headings", height=8,
             selectmode="browse", style="Meeting.Treeview")
-        for column, label, width in (("time", tr("Início"), 60), ("track", tr("Fonte"), 70),
-                                     ("text", tr("Texto"), 200)):
+        for column, label, width in (("time", tr("Início"), 60), ("text", tr("Texto"), 200)):
             self.transcript.heading(column, text=label)
             self.transcript.column(column, width=width, stretch=column == "text")
         self.transcript.pack(fill="both", expand=True, padx=(12, 0))
@@ -1808,9 +1818,7 @@ class MeetingWindow:
         self.ask_status = self.meeting_chat.status
         self._render_chat()
 
-        # Arquivos: text exports, the final audio, the raw tracks it was mixed
-        # from, and deletion last. Once the raw tracks are removed the final
-        # audio is the recording's only audio, so this page says so plainly.
+        # Files: text exports and the saved final MP3.
         self._label(files_page, tr("Exportar texto"), anchor="w", fg=self.ui.text_strong,
                     font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(0, 4))
         exports = ttk.Frame(files_page, style="Meeting.TFrame")
@@ -1829,30 +1837,14 @@ class MeetingWindow:
                              row=1, column=0, sticky="ew", pady=(2, 0))
         self.export_audio_button = self._button(audio, tr("Baixar áudio final…"), self.export_audio)
         self.export_audio_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(self.ui.space_md, 0))
+        self.recover_audio_button = self._button(audio, tr("Preparar áudio final"), self.prepare_final_audio)
+        self.recover_audio_button.grid(row=2, column=1, sticky="e", padx=(self.ui.space_md, 0), pady=(self.ui.space_sm, 0))
+        self.recover_audio_button.configure(state="disabled")
+        self.final_audio_progress = ttk.Progressbar(audio, maximum=100, mode="determinate")
+        self.final_audio_progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
+        self.final_audio_progress.grid_remove()
         tk.Frame(audio, bg=self.ui.divider, height=1).grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=self.ui.space_md)
-        self._label(audio, tr("Faixas originais (raw)"), bg=self.ui.card, fg=self.ui.text_strong,
-                    font=self.ui.font(10, "bold"), anchor="w").grid(row=3, column=0, sticky="w")
-        self.audio_capability_status = tk.StringVar(self.window, "")
-        self._wrap_label(audio, "", textvariable=self.audio_capability_status, bg=self.ui.card,
-                         fg=self.ui.text_muted, anchor="w", justify="left").grid(
-                             row=4, column=0, columnspan=2, sticky="ew", pady=(2, self.ui.space_sm))
-        self.raw_track_status = {}
-        self.raw_track_buttons = {}
-        for row, (track, label) in enumerate((("microphone", N_("Microfone")),
-                                              ("system", N_("Áudio do sistema"))), 5):
-            status = tk.StringVar(self.window, tr(label))
-            self._label(audio, "", textvariable=status, bg=self.ui.card, anchor="w").grid(
-                row=row, column=0, sticky="w", pady=2)
-            button = self._button(audio, tr("Baixar…"), lambda value=track: self.export_track(value))
-            button.configure(state="disabled")
-            button.grid(row=row, column=1, sticky="e", padx=(self.ui.space_md, 0), pady=2)
-            self.raw_track_status[track] = (status, label)
-            self.raw_track_buttons[track] = button
-        self.raw_remove_button = self._button(audio, tr("Remover faixas originais…"), self.preview_raw_tracks,
-                                              danger=True)
-        self.raw_remove_button.configure(state="disabled")
-        self.raw_remove_button.grid(row=7, column=0, sticky="w", pady=(self.ui.space_md, 0))
+            row=4, column=0, columnspan=2, sticky="ew", pady=self.ui.space_md)
 
         self.delete_button = self._button(files_page, tr("Excluir gravação…"), self.delete_selected,
                                           danger=True)
@@ -1883,8 +1875,6 @@ class MeetingWindow:
         self.qa_never_save = tk.BooleanVar(self.window, False)
         self.whole_meeting_auto = tk.BooleanVar(self.window, False)
         self.whole_meeting_after_days = tk.StringVar(self.window, "90")
-        self.raw_audio_auto = tk.BooleanVar(self.window, False)
-        self.raw_audio_after_days = tk.StringVar(self.window, "30")
         self.trash_days = tk.StringVar(self.window, "30")
         self.privacy_notice_language.trace_add("write", lambda *_args: self.privacy_notice_language_display.set(
             i18n.LANGUAGE_NAMES.get(self.privacy_notice_language.get(), self.privacy_notice_language.get())))
@@ -1928,28 +1918,21 @@ class MeetingWindow:
         self.whole_meeting_days_entry = days_entry(line, self.whole_meeting_after_days)
         hint(7, tr("A gravação inteira vai para a lixeira, de onde ainda pode ser restaurada."))
 
-        line, self.raw_audio_auto_check = option(
-            8, tr("Remover as faixas originais automaticamente após"), self.raw_audio_auto,
-            self._sync_raw_policy_controls)
-        self.raw_audio_days_entry = days_entry(line, self.raw_audio_after_days)
-        hint(9, tr("Só em gravações com áudio final salvo e transcrição concluída. Libera a maior parte do "
-                   "espaço, mas essas gravações não poderão ser transcritas novamente."))
-
         trash = tk.Frame(card, bg=self.ui.card)
-        trash.grid(row=10, column=0, sticky="w", pady=(self.ui.space_md, 0))
+        trash.grid(row=8, column=0, sticky="w", pady=(self.ui.space_md, 0))
         self._label(trash, tr("Manter itens na lixeira por"), bg=self.ui.card).pack(side="left")
         self._entry(trash, self.trash_days, 5).pack(side="left", padx=self.ui.space_xs)
         self._label(trash, tr("dias"), bg=self.ui.card).pack(side="left")
-        hint(11, tr("Depois disso, Esvaziar expirados, na lixeira da Biblioteca, apaga esses itens de vez."))
+        hint(9, tr("Depois disso, Esvaziar expirados, na lixeira da Biblioteca, apaga esses itens de vez."))
 
         self._wrap_label(
             card,
             tr("Apagar não garante eliminação forense em SSDs, e cópias que você exportou para outras pastas "
                "não são afetadas."),
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-        ).grid(row=12, column=0, sticky="ew", pady=(self.ui.space_md, 2))
+        ).grid(row=10, column=0, sticky="ew", pady=(self.ui.space_md, 2))
         footer = tk.Frame(card, bg=self.ui.card)
-        footer.grid(row=13, column=0, sticky="ew", pady=(self.ui.space_sm, 0))
+        footer.grid(row=11, column=0, sticky="ew", pady=(self.ui.space_sm, 0))
         self.privacy_status = tk.StringVar(self.window, tr("Configurações de privacidade carregando…"))
         self._label(footer, "", textvariable=self.privacy_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w").pack(side="left")
@@ -2222,8 +2205,7 @@ class MeetingWindow:
             self.window.after_idle(lambda: self.on_appearance_changed(preference))
 
     def _sync_raw_policy_controls(self):
-        for entry_name, variable_name in (("raw_audio_days_entry", "raw_audio_auto"),
-                                          ("whole_meeting_days_entry", "whole_meeting_auto")):
+        for entry_name, variable_name in (("whole_meeting_days_entry", "whole_meeting_auto"),):
             entry = getattr(self, entry_name, None)
             if entry is not None:
                 entry.configure(state="normal" if getattr(self, variable_name).get() else "disabled")
@@ -2274,16 +2256,18 @@ class MeetingWindow:
         whole_days = whole.get("after_days")
         self.whole_meeting_auto.set(whole_mode == "whole_meeting" and whole_days is not None)
         self.whole_meeting_after_days.set("90" if whole_days is None else f"{float(whole_days):g}")
+        # Raw-track retention is a legacy storage policy. It is deliberately
+        # normalized to keep because the UI no longer offers that destructive
+        # operation and final MP3 is the canonical user-facing audio.
         raw = self.retention_defaults.get("raw_audio", self.retention_defaults.get(
             "raw_audio_policy", {"mode": "keep", "tracks": []}))
         if not isinstance(raw, dict):
-            raw = {"mode": str(raw)}
-        raw_mode = raw.get("mode")
-        if raw_mode is None and raw.get("after_days") is not None:
-            raw_mode = "raw_tracks"
-        days = raw.get("after_days")
-        self.raw_audio_auto.set(raw_mode == "raw_tracks" and days is not None)
-        self.raw_audio_after_days.set("30" if days is None else f"{float(days):g}")
+            raw = {}
+        raw = copy.deepcopy(raw)
+        raw["mode"] = "keep"
+        raw["tracks"] = []
+        raw.pop("after_days", None)
+        self.retention_defaults["raw_audio"] = raw
         self.trash_days.set(f"{float(self.retention_defaults.get('trash_days', 30)):g}")
         self._sync_raw_policy_controls()
         self._sync_qa_controls()
@@ -2309,10 +2293,6 @@ class MeetingWindow:
             whole_days = self._policy_days(self.whole_meeting_after_days.get(), field=tr("Reunião"))
             if whole_auto and not whole_days:
                 raise ValueError(tr("Informe após quantos dias mover gravações para a lixeira."))
-            raw_auto = bool(self.raw_audio_auto.get())
-            raw_days = self._policy_days(self.raw_audio_after_days.get(), field=tr("Faixas originais"))
-            if raw_auto and not raw_days:
-                raise ValueError(tr("Informe após quantos dias remover as faixas originais."))
             trash = self._policy_days(self.trash_days.get(), field=tr("Lixeira"))
             if trash is None:
                 trash = 30.0
@@ -2338,17 +2318,9 @@ class MeetingWindow:
             else:
                 whole["after_days"] = whole_days
             retention["whole_meeting"] = whole
-            raw = copy.deepcopy(retention.get("raw_audio", {}))
-            if not isinstance(raw, dict):
-                raw = {}
-            # Automatic removal always takes every original track together.
-            raw["mode"] = "raw_tracks" if raw_auto else "keep"
-            raw["tracks"] = []
-            if raw_days is None:
-                raw.pop("after_days", None)
-            else:
-                raw["after_days"] = raw_days
-            retention["raw_audio"] = raw
+            # Preserve the legacy key for migrations, but disable its
+            # destructive mode now that raw-track retention is not user-facing.
+            retention["raw_audio"] = {"mode": "keep", "tracks": []}
             retention["trash_days"] = trash
         except (ValueError, TypeError) as exc:
             self.privacy_status.set(str(exc))
@@ -2803,10 +2775,16 @@ class MeetingWindow:
         self._render_report_section()
 
     def _render_report_section(self):
-        value = self.report_sections.get(self.report_section_choice.get(), "")
-        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+        section = self.report_section_choice.get()
+        value = self.report_sections.get(section, "")
+        if section == "detailed_notes":
+            text = format_detailed_notes(value)
+            # Validated notes are capped below this UI ceiling; retain the
+            # complete readable presentation instead of the old 64 KiB slice.
+        else:
+            text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
         self.report_editor.delete("1.0", "end")
-        self.report_editor.insert("1.0", str(text)[:65536])
+        self.report_editor.insert("1.0", str(text) if section == "detailed_notes" else str(text)[:MAX_REPORT_REVIEW_CHARS])
 
     @staticmethod
     def _citation_ids(value):
@@ -2861,7 +2839,10 @@ class MeetingWindow:
         if not report_id or report_id == "legacy-summary" or not section:
             self.status.set(tr("O resumo legado não aceita revisão por seção; gere um relatório novo."))
             return
-        text = self.report_editor.get("1.0", "end-1c")[:65536]
+        text = self.report_editor.get("1.0", "end-1c")
+        if len(text) > MAX_REPORT_REVIEW_CHARS:
+            self.status.set(tr("Esta revisão é longa demais para salvar. Exporte a seção completa."))
+            return
         artifact = self.selected_report.get("reviewed_artifact")
         expected = artifact.get("generation", 0) if isinstance(artifact, dict) else 0
         session_id = self.selected
@@ -3190,7 +3171,7 @@ class MeetingWindow:
         self.startup_status = _safe_retention_text(message, 320)
         if hasattr(self, "start_button") and not ready:
             self.start_button.configure(state="disabled")
-        for name in ("delete_button", "raw_remove_button"):
+        for name in ("delete_button",):
             widget = getattr(self, name, None)
             if widget is not None and not ready:
                 widget.configure(state="disabled")
@@ -3305,7 +3286,7 @@ class MeetingWindow:
             )
 
     def _remember_operation_error(self, error):
-        self.operation_details = tr("Detalhes técnicos: {details}", details=_safe_retention_text(error, 4096))
+        self.operation_details = _technical_error_detail(error)
         self.record_details = self.operation_details
         self.record_details_button.configure(state="normal")
 
@@ -4317,6 +4298,7 @@ class MeetingWindow:
         def read():
             raw = self.controller.get_session(session_id)
             metadata = {key: raw.get(key) for key in ("id", "title", "status", "duration", "error")}
+            metadata["processing_details"] = _processing_failure_details(raw)
             final = raw.get("final_audio")
             final_path = final.get("path") if isinstance(final, dict) else None
             metadata["final_available"] = bool(isinstance(final_path, str) and os.path.isfile(final_path))
@@ -4371,6 +4353,9 @@ class MeetingWindow:
             self.status.set(tr("Não foi possível carregar a gravação. Veja os detalhes na aba Gravação."))
             return
         metadata, segments = data
+        self.operation_details = ""
+        if metadata.get("processing_details") or metadata.get("error"):
+            self._remember_operation_error(metadata.get("processing_details") or metadata["error"])
         self.loading = True
         self.title.set(metadata.get("title") or "")
         self.transcript_revision = metadata.get("transcript_revision")
@@ -4389,8 +4374,7 @@ class MeetingWindow:
         self.playback_seek.configure(to=max(1.0, self.playback_duration))
         self.playback_position.set(0.0)
         self.playback_clock.set(f"{format_time(0)} / {format_time(self.playback_duration)}")
-        state = tr(STATE_LABELS.get(metadata.get("status"), N_("Gravação")))
-        self.audio_overview.set(f"{format_time(self.playback_duration)} · {state}")
+        self.audio_overview.set(format_time(self.playback_duration))
         self.audio_sizes = metadata.get("audio_sizes") or {}
         self._set_audio_capabilities(metadata.get("tracks", {}), metadata.get("final_available", False))
         self.detail_ready = True
@@ -4412,90 +4396,59 @@ class MeetingWindow:
             self.pending_search_resolution = None
             self._apply_search_resolution(pending_search, self.search_request)
         self.status.set(tr("Gravação carregada · página de transcrição com {count} trechos.", count=len(segments))
-                         + (" · " + tr("Uma etapa anterior não foi concluída.") if metadata.get("error") else ""))
+                         + (" · " + tr("Uma etapa anterior não foi concluída.")
+                            if metadata.get("processing_details") else ""))
 
     def _set_audio_capabilities(self, tracks, final_available=False):
-        unavailable = set()
-        self.raw_tracks_present = set()
-        if isinstance(tracks, dict):
-            for track, value in tracks.items():
-                if track in TRACK_LABELS.values() and isinstance(value, dict):
-                    self.raw_tracks_present.add(track)
-                if isinstance(value, dict) and (value.get("available") is False or value.get("raw_removed")):
-                    unavailable.add(track)
-        self.raw_unavailable_tracks = unavailable
+        # Keep these projections for legacy metadata and controller doubles;
+        # they are intentionally not rendered as user-facing controls.
+        self.raw_tracks_present = {
+            track for track, value in (tracks or {}).items()
+            if track in TRACK_LABELS.values() and isinstance(value, dict)
+        } if isinstance(tracks, dict) else set()
+        self.raw_unavailable_tracks = {
+            track for track, value in (tracks or {}).items()
+            if isinstance(value, dict) and (value.get("available") is False or value.get("raw_removed"))
+        } if isinstance(tracks, dict) else set()
         self.final_available = bool(final_available)
-        available = self.raw_tracks_present - unavailable
+        self.recovery_needed = (not self.final_available or
+                                bool(self.raw_tracks_present - self.raw_unavailable_tracks))
         sizes = getattr(self, "audio_sizes", None) or {}
-
-        def size_text(value):
-            # Non-breaking space: a wrapped label must not split "35" from "MB".
-            if not isinstance(value, int) or isinstance(value, bool):
-                return ""
-            return format_size(value).replace(" ", "\u00a0")
-
         self.playback_choices = playback_sources(tracks, final_available)
-        if hasattr(self, "audio_source_box"):
-            self.audio_source_box.configure(values=self.playback_choices,
-                                            state="readonly" if self.playback_choices else "disabled")
-            if self.audio_source.get() not in self.playback_choices:
-                self.audio_source.set(self.playback_choices[0] if self.playback_choices else "")
+        self.audio_source.set(self.playback_choices[0] if self.playback_choices else "")
         self.raw_capabilities = {
             "playback": bool(self.playback_choices),
-            "retranscription": bool(available),
-            "clip": bool(available),
-            "audio_export": bool(available),
+            "retranscription": bool(final_available),
+            "clip": bool(final_available),
+            "audio_export": bool(final_available),
         }
         if hasattr(self, "final_audio_status"):
             if final_available:
+                final_size = sizes.get("final")
                 detail = " · ".join(value for value in (
-                    sizes.get("final_format", ""), size_text(sizes.get("final"))) if value)
+                    sizes.get("final_format", ""),
+                    format_size(final_size) if isinstance(final_size, (int, float)) else "",
+                ) if value)
                 self.final_audio_status.set(
                     tr("O áudio mixado usado para ouvir e baixar.")
                     + (f" {detail}." if detail else ""))
             else:
                 self.final_audio_status.set(tr("Esta gravação ainda não tem áudio final salvo."))
-        for track, (variable, label) in getattr(self, "raw_track_status", {}).items():
-            if track in available:
-                size = size_text(sizes.get(track))
-                variable.set(f"{tr(label)} · {size}" if size else tr(label))
-            elif track in self.raw_tracks_present:
-                variable.set(tr("{source} · removida", source=tr(label)))
-            else:
-                variable.set(tr("{source} · não gravada", source=tr(label)))
-        if unavailable and not available:
-            self.audio_capability_status.set(
-                tr("As faixas originais foram removidas. A reprodução e os downloads usam só o áudio final, "
-                   "e esta gravação não pode ser transcrita novamente."))
-        elif available:
-            known = [sizes.get(track) for track in available if isinstance(sizes.get(track), int)]
-            text = tr("Uma faixa sem compressão por fonte, necessária para transcrever novamente.")
-            if known:
-                text += " " + tr("Ocupam {size}.", size=format_size(sum(known)))
-            if unavailable:
-                # Older builds and automatic retention could remove one source only.
-                text += " " + tr("Transcrever novamente usa só as faixas que restam.")
-            self.audio_capability_status.set(text)
-        else:
-            self.audio_capability_status.set(tr("Nenhuma faixa original está disponível."))
-        if hasattr(self, "retranscribe_hint"):
-            self.retranscribe_hint.set(
-                tr("As faixas originais foram removidas; não é possível transcrever novamente.")
-                if self.raw_tracks_present and not available else "")
-        for track, button in getattr(self, "raw_track_buttons", {}).items():
-            button.configure(state="normal" if track in available else "disabled")
         for name, state in (
             ("play_button", "normal" if self.playback_choices else "disabled"),
-            ("transcribe_button", "normal" if self.raw_capabilities["retranscription"] else "disabled"),
-            ("adjust_audio_button", "normal" if "microphone" in available else "disabled"),
+            ("transcribe_button", "normal" if final_available else "disabled"),
             ("export_audio_button", "normal" if final_available else "disabled"),
-            ("raw_remove_button", "normal" if getattr(self, "retention_ready", True)
-             and available and final_available
-             else "disabled"),
         ):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.configure(state=state)
+        recover_button = getattr(self, "recover_audio_button", None)
+        if recover_button is not None:
+            recover_button.configure(
+                text=tr("Verificar e otimizar áudio") if final_available
+                else tr("Preparar áudio final"),
+                state="normal" if self.recovery_needed else "disabled",
+            )
 
     @staticmethod
     def _retention_workflow_available(controller):
@@ -4523,9 +4476,6 @@ class MeetingWindow:
                count=projection.get('target_count', 0), size=projection.get('byte_estimate', 0)),
             tr("Recuperação: {mode}", mode=projection.get('recovery_mode', 'none')),
         ]
-        tracks = projection.get("raw_tracks") or []
-        if tracks:
-            lines.append(tr("Fontes raw: {tracks}", tracks=", ".join(tracks)))
         for label, key in (
             (tr("Motivos"), "reasons"), (tr("Capacidades perdidas"), "lost_capabilities"),
             (tr("Exportações externas preservadas"), "excluded_external_exports"),
@@ -4634,86 +4584,6 @@ class MeetingWindow:
                 ),
         ):
             self.delete_button.configure(state="normal")
-
-    def preview_raw_tracks(self, tracks=None):
-        if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação antes de remover áudio raw."))
-            return
-        if not getattr(self, "retention_ready", True):
-            self.status.set(tr("A retenção aguarda a recuperação do workspace."))
-            return
-        if not getattr(self, "final_available", False):
-            self.status.set(tr("Salve o áudio final antes de remover as faixas originais."))
-            return
-        if tracks is None:
-            # All or nothing: afterwards the final audio is the only audio.
-            tracks = sorted(getattr(self, "raw_tracks_present", set())
-                            - getattr(self, "raw_unavailable_tracks", set()))
-        selected_tracks = tuple(tracks)
-        if not selected_tracks:
-            self.status.set(tr("Nenhuma faixa original disponível para remover."))
-            return
-        session_id = self.selected
-        self.retention_request += 1
-        request = self.retention_request
-        self.raw_remove_button.configure(state="disabled")
-        self.status.set(tr("Calculando prévia de remoção raw…"))
-
-        def loaded(plan, error):
-            if self.closed or request != self.retention_request or self.selected != session_id:
-                return
-            if error:
-                self.raw_remove_button.configure(state="normal")
-                self._remember_operation_error(error)
-                self.status.set(tr("A prévia raw falhou; nenhum áudio foi removido."))
-                return
-            projection = retention_plan_projection(plan)
-            if not projection.get("eligible"):
-                self.raw_remove_button.configure(state="normal")
-                messagebox.showwarning(tr("Remoção raw bloqueada"), self._retention_preview_text(projection), parent=self.window)
-                self.status.set(tr("A remoção raw foi bloqueada; a transcrição existente permanece disponível."))
-                return
-            if not messagebox.askyesno(
-                    tr("Remover faixas originais"),
-                    self._retention_preview_text(projection)
-                    + tr("\n\nDepois disso:\n"
-                         "• esta gravação não poderá ser transcrita novamente;\n"
-                         "• ouvir e baixar usarão só o áudio final;\n"
-                         "• transcrição, resumos, chat e citações continuam disponíveis.\n\n"
-                         "Isso não pode ser desfeito no SnipVoice. Remover?"),
-                    icon="warning", default="no", parent=self.window):
-                self.raw_remove_button.configure(state="normal")
-                self.status.set(tr("Nenhum áudio raw foi removido."))
-                return
-            self.status.set(tr("Aplicando remoção raw…"))
-            if not self._submit(
-                    "raw_retention_apply",
-                    lambda: self.controller.apply_raw_tracks(plan, confirm=True),
-                    lambda value, apply_error: self._raw_tracks_applied(
-                        session_id, value, apply_error, request,
-                    ),
-            ):
-                self.raw_remove_button.configure(state="normal")
-
-        if not self._submit(
-            "raw_retention_plan",
-            lambda: self.controller.plan_raw_tracks(
-                session_id, tracks=selected_tracks, policy={"mode": "raw_tracks", "after_days": 0}),
-            loaded,
-        ):
-            self.raw_remove_button.configure(state="normal")
-
-    def _raw_tracks_applied(self, session_id, value, error, request):
-        if self.closed or request != self.retention_request or self.selected != session_id:
-            return
-        if error or value is False:
-            self.raw_remove_button.configure(state="normal")
-            if error:
-                self._remember_operation_error(error)
-            self.status.set(tr("A prévia raw ficou inválida; nenhuma nova tentativa foi feita."))
-            return
-        self.status.set(tr("Áudio raw removido; transcrição, citações e relatórios continuam disponíveis."))
-        self.load_session(session_id)
 
     def _select_transcript_text(self, _event=None):
         self.transcript_document.tag_add("sel", "1.0", "end-1c")
@@ -4831,7 +4701,6 @@ class MeetingWindow:
                 key = f"{self.transcript_offset + index}:{key}"
             self.segments[key] = segment
             self.transcript.insert("", "end", iid=key, values=(format_time(segment.get("start", 0)),
-                tr("Microfone") if segment.get("track") == "microphone" else tr("Sistema"),
                 str(segment.get("text", ""))[:8000]))
 
     def _render_annotations(self, speaker_labels, generation=None):
@@ -5030,7 +4899,6 @@ class MeetingWindow:
             self.selected_segment_id = self.segments[selected[0]].get("id")
             segment = self.segments[selected[0]]
             self.position.set(str(segment.get("start", 0)))
-            self.track.set(tr("Microfone") if segment.get("track") == "microphone" else tr("Sistema"))
             self.segment_text.configure(state="normal")
             self.segment_text.delete("1.0", "end")
             self.segment_text.insert("1.0", segment.get("text", ""))
@@ -5076,15 +4944,14 @@ class MeetingWindow:
         if self.snapshot.get("state") in ("starting", "recording", "paused", "stopping"):
             self.playback_status.set(tr("Finalize a captura antes de reproduzir uma gravação."))
             return
-        source = displayed_value(AUDIO_SOURCE_LABELS, self.audio_source.get())
-        if source is None or self.audio_source.get() not in self.playback_choices:
+        if not self.playback_choices:
             self.playback_status.set(tr("O áudio desta gravação não está disponível."))
             return
         position = min(self.playback_duration, max(0.0, self.playback_position.get()))
         if self.playback_duration and position >= self.playback_duration:
             position = 0.0
             self.playback_position.set(0.0)
-        self._action("seek_playback", self.selected, source, start=position,
+        self._action("seek_playback", self.selected, "final", start=position,
                      urgent=True, callback=self._replay_started)
 
     def _replay_started(self, accepted, error):
@@ -5106,25 +4973,19 @@ class MeetingWindow:
         if self.snapshot.get("state") in ("starting", "recording", "paused", "stopping"):
             self.status.set(tr("Finalize a captura antes de ouvir uma gravação."))
             return
-        track = displayed_value(TRACK_LABELS, self.track.get())
-        if track in getattr(self, "raw_unavailable_tracks", set()):
-            self.status.set(tr("A fonte raw selecionada foi removida; a reprodução está desabilitada."))
-            return
         try:
             position = self._position()
         except ValueError as exc:
             self.status.set(str(exc))
             return
-        self._action("seek_playback", self.selected, track, start=position, urgent=True)
+        self._action("seek_playback", self.selected, "final", start=position, urgent=True)
 
     def transcribe(self):
         if not self.selected:
             self.status.set(tr("Selecione uma gravação na biblioteca."))
             return
-        available = getattr(self, "raw_tracks_present", set()) - getattr(
-            self, "raw_unavailable_tracks", set())
-        if not available:
-            self.status.set(tr("A retranscrição está desabilitada porque não há áudio raw; a transcrição existente continua disponível."))
+        if not getattr(self, "final_available", False):
+            self.status.set(tr("A retranscrição exige um áudio final MP3 salvo."))
             return
         try:
             settings = self._current_settings()
@@ -5161,6 +5022,7 @@ class MeetingWindow:
             def imported(session_id, error):
                 if error:
                     self._remember_operation_error(error)
+                    self.refresh_library()
                     self.status.set(
                         tr("Não foi possível importar o áudio. Veja os detalhes na aba Gravação.")
                     )
@@ -5194,29 +5056,26 @@ class MeetingWindow:
         sizes = getattr(self, "audio_sizes", None) or {}
         extension = "." + (sizes.get("final_format") or "MP3").lower()
         options = {"parent": self.window, "title": tr("Baixar áudio final"),
-                   "defaultextension": extension, "initialfile": self.title.get().strip() + extension,
+                   "defaultextension": extension, "initialfile": safe_filename_stem(self.title.get()) + extension,
                    "filetypes": ((tr("Áudio {format}", format=extension[1:].upper()), "*" + extension),)}
         path = filedialog.asksaveasfilename(**options)
         if path:
             self._action("export_final_audio", self.selected, path)
 
-    def export_track(self, track):
-        """Save one original source on its own, as MP3."""
-        if not self.selected:
+    def prepare_final_audio(self):
+        """Recover and verify the final MP3 from a retained capture."""
+        if not self.selected or not self.detail_ready:
             self.status.set(tr("Selecione uma gravação na biblioteca."))
             return
-        available = getattr(self, "raw_tracks_present", set()) - getattr(self, "raw_unavailable_tracks", set())
-        if track not in available:
-            self.status.set(tr("Esta faixa original não está mais disponível."))
+        if getattr(self, "final_available", False) and not getattr(self, "recovery_needed", False):
+            self.status.set(tr("Esta gravação já tem áudio final salvo."))
             return
-        source = tr(AUDIO_TRACK_LABELS.get(track, track))
-        options = {"parent": self.window, "title": tr("Baixar faixa: {source}", source=source),
-                   "defaultextension": ".mp3",
-                   "initialfile": f"{self.title.get().strip()} - {source}.mp3",
-                   "filetypes": ((tr("Áudio MP3"), "*.mp3"),)}
-        path = filedialog.asksaveasfilename(**options)
-        if path:
-            self._action("export_track", self.selected, track, path)
+        if not callable(getattr(self.controller, "recover_audio", None)):
+            self.status.set(tr("A recuperação do áudio final não está disponível nesta versão."))
+            return
+        session_id = self.selected
+        self._action("recover_audio", session_id,
+                     callback=lambda value, error: self._processing_launched(session_id, value, error))
 
     def summarize(self):
         self.generate_report()
@@ -5233,20 +5092,6 @@ class MeetingWindow:
         )
         if hasattr(self, "cancel_summary_button"):
             self.cancel_summary_button.configure(state="normal" if pending else "disabled")
-
-    def adjust_audio(self):
-        available = getattr(self, "raw_tracks_present", set()) - getattr(
-            self, "raw_unavailable_tracks", set())
-        if not self.selected or not self.detail_ready or "microphone" not in available:
-            self.status.set(tr("Selecione uma gravação com o áudio original do microfone."))
-            return
-        session_id = self.selected
-        def launched(value, error):
-            if value and not error:
-                self._adjusted_audio_target = session_id
-            self._processing_launched(session_id, value, error)
-        self._action("regenerate_final_audio", session_id,
-                     callback=launched)
 
     def _processing_launched(self, session_id, accepted, error):
         if error or not accepted:
@@ -5279,7 +5124,7 @@ class MeetingWindow:
             path = final.get("path") if isinstance(final, dict) else None
             final_available = bool(isinstance(path, str) and os.path.isfile(path))
             return (summary, page, annotations_for_revision(annotations, current_revision),
-                    raw.get("tracks", {}), final_available)
+                    raw.get("tracks", {}), final_available, _processing_failure_details(raw))
         def loaded(data, error):
             if self.selected != session_id or not self.detail_ready:
                 return
@@ -5287,7 +5132,9 @@ class MeetingWindow:
                 self._remember_operation_error(error)
                 self.status.set(tr("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação."))
                 return
-            summary, page, annotations, tracks, final_available = data
+            summary, page, annotations, tracks, final_available, processing_details = data
+            if processing_details:
+                self._remember_operation_error(processing_details)
             self._set_audio_capabilities(tracks, final_available)
             if getattr(self, "_adjusted_audio_target", None) == session_id:
                 self._adjusted_audio_target = None
@@ -5314,7 +5161,7 @@ class MeetingWindow:
             self.refresh_reports(session_id)
             self.status.set(
                 tr("Resultados disponíveis atualizados; uma etapa não foi concluída. Veja os detalhes na aba Gravação.")
-                if getattr(self, "snapshot", {}).get("error") else
+                if processing_details else
                 tr("Resultado local atualizado. Revise a transcrição e o resumo.")
             )
         self._submit("outputs", read, loaded)
@@ -5381,7 +5228,7 @@ class MeetingWindow:
             return
         if active:
             track = playback.get("track")
-            track_label = tr(AUDIO_TRACK_LABELS.get(track, N_("Áudio")))
+            track_label = tr("Áudio final") if track == "final" else tr("Áudio")
             self.playback_status.set(
                 tr("Reproduzindo {track} · {time}", track=track_label, time=format_time(position))
             )
@@ -5419,6 +5266,59 @@ class MeetingWindow:
         if not self.dirty:
             self.notebook.select(self.library_tab)
             self.load_session(session_id)
+
+    def _sync_audio_export_progress(self):
+        """Render worker progress on Tk and refresh the saved file before ASR finishes."""
+        export = self.snapshot.get("audio_export") or {}
+        stage = export.get("stage")
+        active = bool(self.snapshot.get("processing") and stage in {"preparing", "encoding", "finalizing"})
+        selected = bool(export.get("session_id") and export["session_id"] == self.selected
+                        and self.detail_ready)
+        animating = getattr(self, "_audio_export_animating", set())
+        self._audio_export_animating = animating
+        for name, visible in (("audio_export_progress", active),
+                              ("final_audio_progress", active and selected)):
+            bar = getattr(self, name, None)
+            if bar is None:
+                continue
+            if visible:
+                percent = export.get("percent")
+                mode = "indeterminate" if percent is None else "determinate"
+                if str(bar.cget("mode")) != mode:
+                    bar.stop()
+                    animating.discard(name)
+                    bar.configure(mode=mode)
+                if mode == "indeterminate" and name not in animating:
+                    bar.start(50)
+                    animating.add(name)
+                if percent is not None:
+                    bar.configure(value=percent)
+                bar.grid()
+            else:
+                bar.stop()
+                animating.discard(name)
+                bar.grid_remove()
+        if selected and stage in {"preparing", "encoding", "finalizing", "failed", "cancelled"}:
+            self.final_audio_status.set(export["label"])
+        if selected and hasattr(self, "export_audio_button"):
+            audio_stage_active = stage in {"preparing", "encoding", "finalizing"}
+            self.export_audio_button.configure(
+                state="disabled" if audio_stage_active else (
+                    "normal" if getattr(self, "final_available", False) else "disabled"
+                ),
+            )
+        if selected and hasattr(self, "recover_audio_button"):
+            self.recover_audio_button.configure(
+                state="normal" if not self.snapshot.get("processing")
+                and getattr(self, "recovery_needed", False) else "disabled",
+            )
+        key = (export.get("session_id"), stage) if selected and stage in {
+            "completed", "failed", "cancelled"} else None
+        if key and key != getattr(self, "_audio_export_refreshed", None):
+            self._audio_export_refreshed = key
+            self.refresh_outputs(export["session_id"])
+        elif not key:
+            self._audio_export_refreshed = None
 
     def _poll(self):
         if self.closed:
@@ -5476,23 +5376,17 @@ class MeetingWindow:
                 state="normal" if state == "idle" and not processing
                 and self.detail_ready and self.playback_choices else "disabled"
             )
-            if hasattr(self, "adjust_audio_button"):
-                available = self.raw_tracks_present - self.raw_unavailable_tracks
-                self.adjust_audio_button.configure(
-                    state="normal" if state == "idle" and not processing
-                    and self.detail_ready and "microphone" in available
-                    and not self.snapshot.get("playback", {}).get("active") else "disabled",
-                )
             self._sync_summary_controls()
             error = self.snapshot.get("error")
             self.record_status.set(format_recording_status(self.snapshot))
+            self._sync_audio_export_progress()
             details = [self.operation_details] if self.operation_details else []
             if self.snapshot.get("final_audio"):
                 details.append(tr("Arquivo final: {path}", path=str(self.snapshot["final_audio"])[:2048]))
             if self.snapshot.get("postprocess"):
                 details.append(tr("Processamento: {details}", details=str(self.snapshot["postprocess"])[:2048]))
             if error:
-                details.append(tr("Detalhes técnicos: {details}", details=str(error)[:4096]))
+                _append_detail_once(details, _technical_error_detail(error))
             self.record_details = "\n".join(details)
             self.record_details_button.configure(
                 state="normal" if self.record_details else "disabled",
@@ -5520,14 +5414,12 @@ class MeetingWindow:
                 target, self.processing_target = self.processing_target, None
                 if error:
                     self._adjusted_audio_target = None
-                    self._remember_operation_error(error)
-                    self.status.set(
-                        tr("O processamento local não foi concluído. "
-                           "Veja os detalhes na aba Gravação.")
-                    )
-                else:
+                    if target == self.selected:
+                        self._remember_operation_error(error)
+                elif target == self.selected:
                     self.operation_details = ""
-                    self.status.set(tr("Processamento local finalizado."))
+                if target == self.selected:
+                    self.status.set(tr("Atualizando…"))
                 if target:
                     self.refresh_outputs(target)
         except Exception:

@@ -34,6 +34,15 @@ class MeetingAudioTests(unittest.TestCase):
         self.assertEqual(event, self.event())
         self.assertEqual(actual, payload)
 
+    def test_native_timing_diagnostics_round_trip(self):
+        event = self.event(buffer_flags=2, qpc_timestamp=10.05,
+                           sample_timestamp=10.01)
+        payload = struct.pack("<4f", 0.25, 0.5, -0.25, -0.5)
+        actual_event, actual_payload = read_frame(
+            FragmentedReader(encode_frame(event, payload)))
+        self.assertEqual(actual_event, event)
+        self.assertEqual(actual_payload, payload)
+
     def test_invalid_formats_and_clocks_are_rejected(self):
         for values in ({"rate": True}, {"channels": 9}, {"frames": 0},
                        {"timestamp": -1}, {"sequence": -1}, {"track": "other"}):
@@ -43,6 +52,22 @@ class MeetingAudioTests(unittest.TestCase):
     def test_control_event_cannot_hide_audio(self):
         with self.assertRaises(MeetingAudioError):
             read_frame(io.BytesIO(encode_frame({"type": "ready"}, b"audio")))
+
+    def test_capture_health_round_trip_and_invalid_observations(self):
+        health = {"type": "capture_health", "generation": 2, "track": "system",
+                  "state": "recovering", "reason": "synthetic reconnect", "packets": 12,
+                  "frames": 5760, "last_packet_age": 3.0, "recovery_attempt": 1,
+                  "timestamp": 4.0}
+        actual, payload = read_frame(FragmentedReader(encode_frame(health)))
+        self.assertEqual(actual, health)
+        self.assertEqual(payload, b"")
+        disconnected = dict(health, state="disconnected", recovery_attempt=6)
+        self.assertEqual(read_frame(io.BytesIO(encode_frame(disconnected)))[0], disconnected)
+        for changes in ({"state": "completed"}, {"frames": True}, {"packets": -1},
+                        {"last_packet_age": -1}, {"timestamp": "4"},
+                        {"recovery_attempt": 7}, {"reason": "x" * 4097}, {"track": "other"}):
+            with self.subTest(changes=changes), self.assertRaises(MeetingAudioError):
+                read_frame(io.BytesIO(encode_frame(dict(health, **changes))))
 
     def test_oversized_header_rejected_before_allocation(self):
         with self.assertRaises(MeetingAudioError):

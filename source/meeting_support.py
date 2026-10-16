@@ -5,11 +5,11 @@ import contextlib
 import copy
 from collections import deque
 import itertools
+import json
 import math
 import os
 from pathlib import Path
 import queue
-import re
 import shutil
 import sys
 import tempfile
@@ -18,11 +18,12 @@ import time
 
 from i18n import tr
 from meeting_audio import NativeCapture
-from meeting_mixdown import export_mixdown
+from meeting_mixdown import MixdownCancelled, export_mixdown
 from meeting_library import MeetingLibrary, REPORT_HISTORY_LIMIT as LIBRARY_REPORT_HISTORY_LIMIT
 from meeting_settings import resolve_meeting_settings
 from meeting_store import MeetingStore
-from meeting_titles import initial_recording_title, refine_recording_title
+from meeting_storage import compact_capture, recover_capture_compaction, verify_final_audio, verify_mp3_file
+from meeting_titles import initial_recording_title, refine_recording_title, safe_filename_stem
 
 
 _UNSET = object()
@@ -34,7 +35,6 @@ TRANSCRIPT_PAGE_SIZE = 100
 TRANSCRIPT_LIMIT = 500
 REPORT_HISTORY_LIMIT = LIBRARY_REPORT_HISTORY_LIMIT
 PLAYBACK_PROGRESS_INTERVAL = 0.25
-_INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 
 
 def _report_history_projection(report):
@@ -143,7 +143,7 @@ def _final_audio_path(root, settings, session_id, title=""):
     else:
         destination = Path(root).resolve().parent / "recordings"
         destination.mkdir(parents=True, exist_ok=True)
-    clean_title = _INVALID_FILENAME.sub("-", str(title)).strip(" .-")[:120]
+    clean_title = safe_filename_stem(title, fallback="")
     stem = session_id + (" - " + clean_title if clean_title else "")
     candidate = destination / (stem + ".mp3")
     # ceiling: a session will not probe an unbounded hostile destination.
@@ -188,6 +188,9 @@ class MeetingController:
         self._cancel = threading.Event()
         self._file_done = threading.Event()
         self._file_done.set()
+        self._final_copy_done = threading.Event()
+        self._final_copy_done.set()
+        self._final_copy_active = False
         self._commands = queue.Queue(maxsize=16)
         self._stop = threading.Event()
         self._closed = False
@@ -205,6 +208,7 @@ class MeetingController:
                            for track in ("microphone", "system")}
         self._output_path = ""
         self._postprocess = ""
+        self._audio_export_progress = None
         self._processing = False
         self._processing_session = None
         self._retention_active = False
@@ -213,6 +217,8 @@ class MeetingController:
         self._recording_consent_granted = False
         self._last_status = ""
         self._source_errors = set()
+        self._capture_health = {}
+        self._no_audio_alerted = set()
         self._annotation_generations = {}
         self._index_rebuild_lock = threading.Lock()
         self._index_rebuild_cancel = threading.Event()
@@ -345,6 +351,8 @@ class MeetingController:
                 return True
             if self._processing:
                 return True
+            if self._final_copy_active:
+                return True
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
                 return True
         return False
@@ -381,6 +389,8 @@ class MeetingController:
                 raise RuntimeError(tr("Aguarde a gravação terminar antes da retenção."))
             if self._processing:
                 raise RuntimeError(tr("Aguarde o processamento terminar antes da retenção."))
+            if self._final_copy_active:
+                raise RuntimeError(tr("Aguarde a cópia do áudio final terminar antes da retenção."))
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
                 raise RuntimeError(tr("Aguarde a reprodução terminar antes da retenção."))
             self._retention_active = True
@@ -438,10 +448,12 @@ class MeetingController:
                     "elapsed": max(0.0, time.monotonic() - self._started)
                     if self._state in {"starting", "recording", "paused", "stopping"} else self._elapsed,
                     "levels": dict(self._levels),
+                    "capture_health": {track: dict(value) for track, value in self._capture_health.items()},
                     "previewing": self._previewing,
                     "waveforms": {track: list(values) for track, values in self._waveforms.items()},
                     "final_audio": self._output_path,
                     "postprocess": self._postprocess,
+                    "audio_export": dict(self._audio_export_progress) if self._audio_export_progress else None,
                     "playback": {
                         "active": self._playback_active,
                         "session_id": self._playback_session,
@@ -534,7 +546,8 @@ class MeetingController:
         if isinstance(settings, dict):
             settings = resolve_meeting_settings(settings)
         with self._lock:
-            if self._closed or self._retention_active or self._processing or self._state != "idle":
+            if (self._closed or self._retention_active or self._processing
+                    or self._final_copy_active or self._state != "idle"):
                 return False
             if self._play_thread and self._play_thread.is_alive():
                 return False
@@ -552,9 +565,12 @@ class MeetingController:
             self._generation += 1
             self._state, self._error = "starting", ""
             self._source_errors.clear()
+            self._capture_health.clear()
+            self._no_audio_alerted.clear()
             self._elapsed = 0.0
             self._output_path = ""
             self._postprocess = ""
+            self._audio_export_progress = None
             self._levels = {"microphone": 0.0, "system": 0.0}
             for values in self._waveforms.values():
                 values.clear()
@@ -653,15 +669,42 @@ class MeetingController:
                         self._waveforms[event["track"]].extend(envelope)
                 else:
                     self.store.add_event(session, event)
-                    loss = event["type"] == "gap" and any(word in str(event.get("reason", ""))
-                        for word in ("overflow", "invalid", "discontinuity", "timestamp_error"))
+                    if event["type"] == "capture_health" and event.get("track") in ("microphone", "system"):
+                        track = event["track"]
+                        with self._lock:
+                            self._capture_health[track] = {
+                                key: event[key] for key in ("state", "reason", "packets", "frames",
+                                                           "last_packet_age", "recovery_attempt")
+                            }
+                            # Alert once per outage: an absent endpoint, or a
+                            # reopen that keeps failing at the capped cadence.
+                            silent = (event["state"] == "disconnected"
+                                      or (event["state"] == "recovering" and event["recovery_attempt"] >= 6))
+                            alert = silent and track not in self._no_audio_alerted
+                            if alert:
+                                self._no_audio_alerted.add(track)
+                                self._error = tr(
+                                    "A gravação não está recebendo áudio do {source}. Reconecte o dispositivo; "
+                                    "a gravação continua e retoma quando ele voltar.",
+                                    source=tr("microfone") if track == "microphone" else tr("sistema"))
+                            elif event["state"] == "receiving":
+                                self._no_audio_alerted.discard(track)
+                        if alert:
+                            self.notify(self._error)
+                    reason = str(event.get("reason", ""))
+                    loss = event["type"] == "gap" and any(word in reason
+                        for word in ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption"))
                     if event["type"] == "source_error" or loss:
                         with self._lock:
                             first_loss = event.get("track", "unknown") not in self._source_errors
                             self._source_errors.add(event.get("track", "unknown"))
-                            detail = str(event.get("message") or event.get("reason") or tr("Uma fonte foi interrompida."))[:1024]
-                            self._error = tr("Captura parcial: {detail}", detail=detail)
-                        if first_loss:
+                            # A reopen keeps the recording going; its health
+                            # events decide whether the user must act.
+                            reopening = event["type"] == "gap" and "capture_interruption" in reason
+                            if not reopening:
+                                detail = str(event.get("message") or reason or tr("Uma fonte foi interrompida."))[:1024]
+                                self._error = tr("Verifique a captura de áudio: {detail}", detail=detail)
+                        if first_loss and not reopening:
                             self.notify(self._error)
         except Exception as exc:
             # Never log native buffers, transcript contents, or helper diagnostics.
@@ -688,12 +731,18 @@ class MeetingController:
                     self._state = "postprocessing"
                     self._processing = True
                     self._processing_session = session
-                postprocess_errors, postprocess_resource_live = self._postprocess_recording(
-                    session, title, settings)
-                if postprocess_resource_live:
+                try:
+                    postprocess_errors, postprocess_resource_live = self._postprocess_recording(
+                        session, title, settings)
+                    if postprocess_resource_live:
+                        clean_stop = False
+                    if postprocess_errors:
+                        error = tr("A gravação foi preservada, mas {errors}", errors="; ".join(postprocess_errors))
+                except Exception as exc:
+                    # A second persistence failure must still settle admission.
+                    # Unknown native resource ownership requires a restart.
                     clean_stop = False
-                if postprocess_errors:
-                    error = tr("A gravação foi preservada, mas {errors}", errors="; ".join(postprocess_errors))
+                    error = tr("A gravação foi preservada, mas {errors}", errors=str(exc))
             if token is not None and clean_stop:
                 self.voice.release_meeting(token)
             with self._lock:
@@ -717,19 +766,18 @@ class MeetingController:
         """
         errors = []
         resource_live = False
+        audio_saved = False
         try:
             with self._lock:
                 self._postprocess = tr("Gerando o áudio final")
             destination = _final_audio_path(self.root, settings, session_id, title)
-            output = export_mixdown(
-                self.store, session_id, destination,
+            self._export_audio(
+                session_id, destination, save_final=True,
                 enhance_microphone=settings.voice_boost,
-                cancel_event=self._cancel,
             )
-            self.store.save_final_audio(session_id, output, settings.voice_boost)
-            with self._lock:
-                self._output_path = output
+            audio_saved = True
         except Exception as exc:
+            # The raw tracks stay canonical; transcription reads them instead.
             errors.append(tr("não foi possível gerar o áudio final: {error}", error=exc))
 
         transcription_profile = self._installed_voice_profile(settings.profile)
@@ -740,21 +788,26 @@ class MeetingController:
                     self._postprocess = tr("Transcrevendo localmente")
                 from meeting_transcription import transcribe_meeting
                 from voice_catalog import default_language_for_profile
+                self.store.save_processing_state(session_id, "transcription", "processing")
                 transcribe_meeting(
                     self.store, session_id, transcription_profile,
                     default_language_for_profile(transcription_profile, settings.language),
                     self.voice.cache_dir, cancel_event=self._cancel,
                 )
                 if self._cancel.is_set():
+                    self.store.save_processing_state(session_id, "transcription", "cancelled")
                     errors.append(tr("o processamento automático foi cancelado"))
                 else:
+                    self.store.save_processing_state(session_id, "transcription", "completed")
                     self._refine_automatic_title(session_id)
                     transcription_ready = True
                     self._queue_projection(session_id)
             except Exception as exc:
-                errors.append(tr("a transcrição automática falhou: {error}", error=exc))
                 if getattr(exc, "resource_live", False):
                     resource_live = True
+                self.store.save_processing_state(session_id, "transcription",
+                                                "cancelled" if self._cancel.is_set() else "failed", str(exc)[:4096])
+                errors.append(tr("a transcrição automática falhou: {error}", error=exc))
 
         summary_model = self._installed_summary_model(settings.summary_model)
         if summary_model and transcription_ready and not self._cancel.is_set():
@@ -762,13 +815,29 @@ class MeetingController:
                 with self._lock:
                     self._postprocess = tr("Gerando o resumo local")
                 from meeting_summary import summarize_meeting
+                self.store.save_processing_state(session_id, "summary", "processing")
                 summarize_meeting(self.store, session_id, summary_model,
                                   cancel_event=self._cancel)
+                self.store.save_processing_state(session_id, "summary", "completed")
                 self._queue_projection(session_id)
             except Exception as exc:
+                self.store.save_processing_state(session_id, "summary",
+                                                "cancelled" if self._cancel.is_set() else "failed", str(exc)[:4096])
                 errors.append(tr("o resumo automático falhou: {error}", error=exc))
+
+        # Raw capture is the fallback for every step above, so it is removed
+        # only after the verified MP3 and all automatic processing succeeded.
+        if audio_saved and not errors and not self._cancel.is_set():
+            try:
+                self._compact_capture(session_id)
+            except Exception as exc:
+                errors.append(tr("não foi possível liberar os arquivos temporários: {error}", error=exc))
+        elif audio_saved:
+            self.store.save_processing_state(
+                session_id, "capture_cleanup", "skipped",
+                "Raw capture was kept because automatic processing did not complete.")
         with self._lock:
-            self._postprocess = tr("Pós-processamento concluído") if not errors else tr("Pós-processamento parcial")
+            self._postprocess = tr("Pós-processamento concluído") if not errors else tr("Processamento interrompido; tente novamente.")
         return errors, resource_live
 
     def _installed_voice_profile(self, preferred):
@@ -996,8 +1065,24 @@ class MeetingController:
         return self._run_retention(lambda retention: retention.empty_trash(confirm=confirm))
 
     def recover_retention_operations(self):
-        """Reconcile interrupted operations; never auto-purge expired trash."""
-        return self._run_retention(lambda retention: retention.recover_operations())
+        """Reconcile interrupted local operations before admitting capture."""
+        def recover(retention):
+            results = list(retention.recover_operations())
+            for session_id in self._all_session_ids():
+                journal = Path(self.store._session_dir(session_id)) / "capture-compaction.json"
+                if not journal.is_file():
+                    continue
+                with journal.open(encoding="utf-8") as handle:
+                    operation = json.load(handle)
+                if operation.get("state") in {"complete", "rolled_back"}:
+                    continue
+                recovered = recover_capture_compaction(self.store, session_id)
+                # Before the canonical commit, recovery restores working data.
+                # The existing verification is checked again before retrying.
+                self._compact_capture(session_id)
+                results.append(recovered)
+            return results
+        return self._run_retention(recover)
 
     startup_recover_retention = recover_retention_operations
 
@@ -1045,9 +1130,8 @@ class MeetingController:
 
         The settings are the user's standing consent, so plans apply without a
         per-recording prompt. Whole recordings older than their limit move to
-        the restorable trash first; original tracks are then removed from the
-        rest. Eligibility is the planner's (age, final state, a saved final
-        audio and finished transcript for raw removal, no active lease). The
+        the restorable trash. Eligibility is the planner's (age, final state,
+        no active lease). Legacy source policies never discard recovery data. The
         pass is skipped while the controller is busy rather than waiting.
         """
         from meeting_retention import RetentionPolicy
@@ -1060,12 +1144,8 @@ class MeetingController:
         if whole is not None and whole.mode == "whole_meeting" and whole.after_days is not None:
             policies.append(("trashed", RetentionPolicy.whole_meeting(
                 after_days=whole.after_days, purge_after_days=trash_days)))
-        raw = defaults.get("raw_audio")
-        raw = RetentionPolicy.from_value(raw) if isinstance(raw, dict) else None
-        if raw is not None and raw.mode == "raw_tracks" and raw.after_days is not None:
-            # Automatic removal is all-or-nothing, like the Files tab.
-            policies.append(("raw_removed", RetentionPolicy.raw_tracks(
-                after_days=raw.after_days, purge_after_days=raw.purge_after_days)))
+        # Legacy source-retention settings no longer trigger hidden deletions.
+        # New working captures use verified, journaled MP3 compaction instead.
         counts = {"trashed": 0, "raw_removed": 0}
         if not policies:
             return {**counts, "errors": [], "active": False}
@@ -1283,10 +1363,12 @@ class MeetingController:
 
     def _launch_processing(self, function, session_id=None):
         with self._lock:
-            if self._closed or self._retention_active or self._processing or self._state != "idle":
+            if (self._closed or self._retention_active or self._processing
+                    or self._final_copy_active or self._state != "idle"):
                 return False
             self._processing = True
             self._processing_session = session_id
+            self._audio_export_progress = None
             self._error = ""
             self._cancel.clear()
 
@@ -1318,12 +1400,24 @@ class MeetingController:
         token = self.voice.reserve_for_meeting()
         release = True
         try:
-            transcribe_meeting(
-                self.store, session_id, profile, language,
-                self.voice.cache_dir, cancel_event=self._cancel,
-            )
+            self.store.save_processing_state(session_id, "transcription", "processing")
+            try:
+                transcribe_meeting(
+                    self.store, session_id, profile, language,
+                    self.voice.cache_dir, cancel_event=self._cancel,
+                )
+            except Exception as exc:
+                if getattr(exc, "resource_live", False):
+                    release = False
+                    with self._lock:
+                        self._state = "unavailable"
+                self.store.save_processing_state(session_id, "transcription",
+                                                "cancelled" if self._cancel.is_set() else "failed", str(exc)[:4096])
+                raise
             if self._cancel.is_set():
+                self.store.save_processing_state(session_id, "transcription", "cancelled")
                 return False
+            self.store.save_processing_state(session_id, "transcription", "completed")
             self._refine_automatic_title(session_id)
             self._queue_projection(session_id)
             if preferred_summary is None:
@@ -1348,7 +1442,14 @@ class MeetingController:
         if not model or self._cancel.is_set():
             return False
         from meeting_summary import summarize_meeting
-        summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
+        self.store.save_processing_state(session_id, "summary", "processing")
+        try:
+            summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
+        except Exception as exc:
+            self.store.save_processing_state(session_id, "summary",
+                                            "cancelled" if self._cancel.is_set() else "failed", str(exc)[:4096])
+            raise
+        self.store.save_processing_state(session_id, "summary", "cancelled" if self._cancel.is_set() else "completed")
         if not self._cancel.is_set():
             self._queue_projection(session_id)
         return True
@@ -1386,6 +1487,10 @@ class MeetingController:
         from meeting_files import import_audio
         def work():
             session_id = import_audio(self.store, path, settings, cancel_event=self._cancel)
+            try:
+                self._prepare_mp3(session_id, settings=settings)
+            finally:
+                self._queue_projection(session_id)
             transcription_profile = self._installed_voice_profile(settings.profile)
             if transcription_profile and not self._cancel.is_set():
                 from voice_catalog import default_language_for_profile
@@ -1397,6 +1502,57 @@ class MeetingController:
             self._queue_projection(session_id)
             return session_id
         return self._file_work(work)
+
+    def recover_audio(self, session_id, settings=None):
+        """Resume final MP3 preparation while preserving every prior artifact."""
+        return self._launch_processing(
+            lambda: self._prepare_mp3(session_id, settings=settings), session_id=session_id,
+        )
+
+    def _prepare_mp3(self, session_id, settings=None):
+        recover_capture_compaction(self.store, session_id)
+        metadata = self.store.get(session_id, include_events=False)
+        if metadata.get("status") == "recording":
+            raise RuntimeError(tr("Finalize a gravação antes de preparar o MP3."))
+        final = metadata.get("final_audio") or {}
+        path = final.get("path")
+        if isinstance(path, str) and Path(path).suffix.lower() == ".mp3" and os.path.isfile(path):
+            self.store.save_processing_state(session_id, "audio", "processing")
+            try:
+                evidence = verify_final_audio(self.store, session_id, cancel_event=self._cancel)
+                prior = final.get("verification")
+                if isinstance(prior, dict) and prior.get("sources_complete") is False:
+                    evidence["sources_complete"] = False
+                self.store.save_final_audio(session_id, path, bool(final.get("voice_boost")), verification=evidence)
+                self.store.save_processing_state(session_id, "audio", "completed")
+                with self._lock:
+                    self._output_path = path
+            except Exception as exc:
+                self.store.save_processing_state(session_id, "audio", "failed", str(exc)[:4096])
+                raise
+        else:
+            settings = settings or resolve_meeting_settings(metadata.get("settings") or {})
+            destination = _final_audio_path(self.root, settings, session_id, metadata.get("title", ""))
+            self._export_audio(session_id, destination, enhance_microphone=settings.voice_boost, save_final=True)
+        self._compact_capture(session_id)
+        self._queue_projection(session_id)
+
+    def _compact_capture(self, session_id):
+        metadata = self.store.get(session_id, include_events=False)
+        final = metadata.get("final_audio") or {}
+        verification = final.get("verification")
+        if not isinstance(verification, dict):
+            raise RuntimeError(tr("O MP3 precisa ser verificado antes de liberar espaço."))
+        self.store.save_processing_state(session_id, "capture_cleanup", "processing")
+        try:
+            recover_capture_compaction(self.store, session_id)
+            compact_capture(self.store, session_id, {**verification, "path": final["path"]},
+                            cancel_event=self._cancel)
+            self.store.save_processing_state(session_id, "capture_cleanup", "completed")
+        except Exception as exc:
+            self.store.save_processing_state(session_id, "capture_cleanup",
+                                            "cancelled" if self._cancel.is_set() else "failed", str(exc)[:4096])
+            raise
 
     def import_wav(self, path, settings):
         return self.import_audio(path, settings)
@@ -1417,10 +1573,81 @@ class MeetingController:
         return self._file_work(operation, session_id=session_id)
 
     def export_mixdown(self, session_id, path, enhance_microphone=False):
-        return self._file_work(lambda: export_mixdown(
-            self.store, session_id, path, enhance_microphone=enhance_microphone,
-            cancel_event=self._cancel,
+        return self._file_work(lambda: self._export_audio(
+            session_id, path, enhance_microphone=enhance_microphone,
         ), session_id=session_id)
+
+    def _export_audio(self, session_id, path, *, enhance_microphone=False, save_final=False):
+        """Publish bounded worker progress; saved means file and metadata committed."""
+        def publish(stage, done, total):
+            if stage == "completed" and save_final:
+                stage = "finalizing"
+            percent = None
+            if stage == "encoding" and total:
+                percent = min(99, max(0, int(done / total * 100)))
+            elif stage == "finalizing":
+                percent = 99
+            elif stage == "completed":
+                percent = 100
+            labels = {
+                "preparing": tr("Preparando o áudio final…"),
+                "encoding": tr("Criando áudio final · {percent}%", percent=percent)
+                if percent is not None else tr("Criando áudio final…"),
+                "finalizing": tr("Finalizando e salvando o áudio final…"),
+                "completed": tr("Áudio final salvo"),
+                "cancelled": tr("Exportação cancelada; os originais foram preservados."),
+                "failed": tr("Não foi possível salvar o áudio final; os originais foram preservados."),
+            }
+            with self._lock:
+                self._audio_export_progress = {"session_id": session_id, "stage": stage,
+                                               "done": done, "total": total,
+                                               "percent": percent, "label": labels[stage]}
+                self._postprocess = labels[stage]
+
+        publish("preparing", 0.0, None)
+        verification = {}
+        missing_audio = threading.Event()
+
+        def validate(temporary, duration):
+            verification.update(verify_mp3_file(temporary, expected_duration=duration, cancel_event=self._cancel))
+
+        try:
+            # A writer admitted just before a copy may reach this point later.
+            # Preparing blocks new copies; drain the admitted reader first.
+            if not self._final_copy_done.wait(12):
+                raise RuntimeError(tr("Uma cópia do áudio final ainda está encerrando."))
+            if save_final:
+                self.store.save_processing_state(session_id, "audio", "processing")
+            output = export_mixdown(self.store, session_id, path,
+                                    enhance_microphone=enhance_microphone,
+                                    cancel_event=self._cancel, progress=publish,
+                                    validate_output=validate if Path(path).suffix.lower() == ".mp3" else None,
+                                    on_missing=(lambda _event: missing_audio.set()) if save_final else None)
+            if save_final:
+                if not verification:
+                    validate(output, None)
+                verification["path"] = output
+                # Silence rendered for unreadable payloads still verifies at
+                # full length; record it so compaction keeps the originals.
+                verification["sources_complete"] = not missing_audio.is_set()
+                self.store.save_final_audio(session_id, output, enhance_microphone, verification=verification)
+                self.store.save_processing_state(session_id, "audio", "completed")
+                with self._lock:
+                    self._output_path = output
+        except Exception as exc:
+            with self._lock:
+                latest = dict(self._audio_export_progress)
+            failed_stage = "cancelled" if self._cancel.is_set() or isinstance(exc, MixdownCancelled) else "failed"
+            publish(failed_stage, latest["done"], latest["total"])
+            if save_final:
+                self.store.save_processing_state(session_id, "audio", failed_stage, str(exc)[:4096])
+            raise
+        with self._lock:
+            self._audio_export_progress["stage"] = "completed"
+            self._audio_export_progress["percent"] = 100
+            self._audio_export_progress["label"] = tr("Áudio final salvo")
+            self._postprocess = self._audio_export_progress["label"]
+        return output
 
     def export_track(self, session_id, track, path):
         """Export one raw source on its own, as MP3."""
@@ -1464,7 +1691,29 @@ class MeetingController:
                     os.unlink(temporary)
                 raise
             return str(destination)
-        return self._file_work(work, session_id=session_id)
+        # A saved-file copy can overlap inference. Its own lease protects it
+        # from retention/shutdown without changing inference cancellation.
+        with self._lock:
+            # Automatic post-recording work never rewrites a saved MP3 except
+            # through _export_audio, which publishes "preparing" and then
+            # waits for this lease, so copies may overlap it like manual work.
+            if (self._closed or self._retention_active
+                    or self._state not in {"idle", "postprocessing"}
+                    or self._playback_active or (self._play_thread and self._play_thread.is_alive())
+                    or self._final_copy_active):
+                raise RuntimeError(tr("Aguarde a gravação, reprodução ou outra cópia terminar."))
+            progress = self._audio_export_progress or {}
+            if (progress.get("stage") in {"preparing", "encoding", "finalizing"}
+                    and progress.get("session_id") == session_id):
+                raise RuntimeError(tr("Aguarde a preparação do áudio final terminar."))
+            self._final_copy_active = True
+            self._final_copy_done.clear()
+        try:
+            return work()
+        finally:
+            with self._lock:
+                self._final_copy_active = False
+                self._final_copy_done.set()
 
     def audio_inventory(self, session_id):
         """Bytes of the final audio and each raw source; None where absent."""
@@ -1512,11 +1761,7 @@ class MeetingController:
                     self.root, resolve_meeting_settings({"meeting_destination": folder}), session_id,
                     metadata.get("title", ""),
                 )
-            output = export_mixdown(
-                self.store, session_id, destination,
-                enhance_microphone=True, cancel_event=self._cancel,
-            )
-            self.store.save_final_audio(session_id, output, voice_boost=True)
+            self._export_audio(session_id, destination, enhance_microphone=True, save_final=True)
             self._queue_projection(session_id)
             with self._lock:
                 self._postprocess = tr("Áudio final ajustado; originais preservados")
@@ -1529,11 +1774,13 @@ class MeetingController:
     def _file_work(self, operation, session_id=None):
         # Caller is an IO worker; reserve admission without another nested thread.
         with self._lock:
-            if (self._closed or self._retention_active or self._processing or self._state != "idle"
+            if (self._closed or self._retention_active or self._processing
+                    or self._final_copy_active or self._state != "idle"
                     or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
                 raise RuntimeError(tr("Aguarde a gravação, reprodução ou processamento terminar."))
             self._processing = True
             self._processing_session = session_id
+            self._audio_export_progress = None
             self._cancel.clear()
             self._file_done.clear()
         try:
@@ -1828,6 +2075,8 @@ class MeetingController:
         self.stop_playback()
         if not self._file_done.wait(12):
             raise RuntimeError(tr("Uma operação de arquivo de reunião ainda está encerrando."))
+        if not self._final_copy_done.wait(12):
+            raise RuntimeError(tr("Uma cópia do áudio final ainda está encerrando."))
         for worker in (self._thread, self._processing_thread, self._play_thread):
             if worker and worker is not threading.current_thread():
                 worker.join(12)

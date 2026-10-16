@@ -51,6 +51,9 @@ MAX_BATCH_ASSIGNMENTS = 500
 MAX_LIBRARY_CURSOR_CHARS = 2048
 MAX_LIBRARY_BACKSTACK = 32
 MAX_REPORT_CITATIONS = 16
+MAX_DETAILED_NOTES = 2048
+MAX_DETAILED_NOTE_BYTES = 32 * 1024
+MAX_DETAILED_NOTES_BYTES = 768 * 1024
 MAX_ID_CHARS = 128
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_SECONDS = 0.05
@@ -60,6 +63,7 @@ SUPPORTED_QA_MODES = frozenset(("memory_only", "explicit_save"))
 REPORT_SECTIONS = frozenset({
     "summary", "key_points", "decisions", "action_items", "open_questions", "risks",
     "objections", "feedback", "follow_up_email", "answer",
+    "detailed_notes",
 })
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _REFERENCE_RE = re.compile(r"^[^/\\\x00]{1,128}$")
@@ -1048,6 +1052,11 @@ class MeetingLibrary:
 
     @staticmethod
     def _session_duration(metadata, track=None):
+        if track == "final":
+            final = metadata.get("final_audio") or {}
+            verified = final.get("verification") or {}
+            if _finite_number(verified.get("duration")):
+                return max(0.0, float(verified["duration"]))
         duration = metadata.get("duration", 0.0)
         duration = float(duration) if _finite_number(duration) else 0.0
         tracks = metadata.get("tracks", {})
@@ -1083,7 +1092,9 @@ class MeetingLibrary:
             raise SchemaError(tr("O intervalo de um destaque é inválido; o arquivo foi preservado."))
         track = highlight.get("track")
         tracks = metadata.get("tracks", {})
-        if track not in {"microphone", "system"} or not isinstance(tracks, dict) or track not in tracks:
+        if (track not in {"microphone", "system", "final"}
+                or (track == "final" and not isinstance(metadata.get("final_audio"), dict))
+                or (track != "final" and (not isinstance(tracks, dict) or track not in tracks))):
             raise SchemaError(tr("A fonte de um destaque é inválida; o arquivo foi preservado."))
         segment_ids = highlight.get("segment_ids", highlight.get("segments", []))
         if (
@@ -1213,7 +1224,7 @@ class MeetingLibrary:
                 raise SchemaError(tr("A nota do rótulo de locutor é inválida; o arquivo foi preservado."))
             if "track" in record:
                 track = record["track"]
-                if track not in {"microphone", "system"} or (
+                if track not in {"microphone", "system", "final"} or (
                     segment.get("track") not in {None, track}
                 ):
                     raise SchemaError(tr("A fonte do rótulo de locutor é inválida; o arquivo foi preservado."))
@@ -2234,6 +2245,35 @@ class MeetingLibrary:
             raise SchemaError(tr("O relatório excede o limite de citações únicas."))
         return citations
 
+    @staticmethod
+    def _validate_detailed_notes(generated, segments):
+        if "detailed_notes" not in generated:
+            return
+        notes = generated["detailed_notes"]
+        if not isinstance(notes, list) or len(notes) > MAX_DETAILED_NOTES:
+            raise SchemaError(tr("As notas detalhadas do relatório são inválidas."))
+        for note in notes:
+            if not isinstance(note, dict) or set(note) != {"start", "end", "text", "segment_ids"}:
+                raise SchemaError(tr("As notas detalhadas do relatório são inválidas."))
+            start, end = note["start"], note["end"]
+            if (isinstance(start, bool) or not isinstance(start, (int, float))
+                    or not math.isfinite(start) or start < 0
+                    or isinstance(end, bool) or not isinstance(end, (int, float))
+                    or not math.isfinite(end) or end < start):
+                raise SchemaError(tr("O intervalo da nota detalhada é inválido."))
+            text = note["text"]
+            if (not isinstance(text, str) or not text.strip()
+                    or len(text.encode("utf-8")) > MAX_DETAILED_NOTE_BYTES):
+                raise SchemaError(tr("O texto da nota detalhada é inválido."))
+            citations = note["segment_ids"]
+            if (not isinstance(citations, list) or not citations or len(citations) > MAX_REPORT_CITATIONS
+                    or any(not isinstance(item, str) for item in citations)
+                    or len(set(citations)) != len(citations)
+                    or any(item not in segments for item in citations)):
+                raise SchemaError(tr("As citações da nota detalhada são inválidas."))
+        if len(json.dumps(notes, ensure_ascii=False).encode("utf-8")) > MAX_DETAILED_NOTES_BYTES:
+            raise SchemaError(tr("As notas detalhadas excedem o limite permitido."))
+
     def _validate_report(self, session_id, envelope):
         if not isinstance(envelope, dict):
             raise SchemaError(tr("O relatório deve ser um objeto."))
@@ -2288,7 +2328,9 @@ class MeetingLibrary:
             for item in self.store.get_transcript(session_id, revision_id)
             if isinstance(item, dict)
         }
-        if any(item not in segments for item in self._report_citations(generated)):
+        self._validate_detailed_notes(generated, segments)
+        other_generated = {key: value for key, value in generated.items() if key != "detailed_notes"}
+        if any(item not in segments for item in self._report_citations(other_generated)):
             raise SchemaError(tr("O relatório contém citações que não existem na revisão."))
         normalized = copy.deepcopy(envelope)
         normalized["id"] = report_id

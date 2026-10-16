@@ -10,7 +10,7 @@ import types
 import unittest
 from unittest import mock
 
-from summary_runtime import NativeSummaryRuntime, SummaryRuntime
+from summary_runtime import NativeSummaryRuntime, SummaryOutputLimitError, SummaryRuntime
 from summary_runtime_worker import serve
 
 
@@ -116,6 +116,35 @@ class SummaryRuntimeTests(unittest.TestCase):
         finally:
             runtime.close()
 
+    def test_compact_profile_schema_bounds_items_citations_and_text(self):
+        profile = {"kind": "profile", "sections": ["summary", "action_items"],
+                   "max_items": 1, "max_section_chars": 128, "max_citations": 1}
+        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+            runtime = NativeSummaryRuntime("local.gguf")
+        try:
+            runtime.generate("system", [{"id": "s1"}, {"id": "s2"}, profile])
+            schema = runtime._llama.call["response_format"]["schema"]
+            self.assertEqual(schema["properties"]["segment_ids"]["maxItems"], 1)
+            self.assertEqual(schema["properties"]["summary"]["maxLength"], 128)
+            self.assertEqual(schema["properties"]["action_items"]["maxItems"], 1)
+            self.assertEqual(schema["properties"]["action_items"]["items"]["properties"]["text"]["maxLength"], 128)
+        finally:
+            runtime.close()
+
+    def test_compact_profile_rejects_boolean_citation_limit(self):
+        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+            runtime = NativeSummaryRuntime("local.gguf")
+        runtime._llama.create_chat_completion = mock.Mock()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "limites ou seções inválidos"):
+                runtime.generate("system", [{"id": "s1"}, {
+                    "kind": "profile", "sections": ["summary"],
+                    "max_items": 1, "max_section_chars": 128, "max_citations": True,
+                }])
+            runtime._llama.create_chat_completion.assert_not_called()
+        finally:
+            runtime.close()
+
     def test_missing_packaged_runtime_is_actionable(self):
         with mock.patch.dict(sys.modules, {"llama_cpp": None}):
             with self.assertRaisesRegex(RuntimeError, "Reinstale"):
@@ -175,7 +204,7 @@ class SummaryRuntimeTests(unittest.TestCase):
     def test_worker_propagates_generation_limit_as_safe_error(self):
         class LimitedLlama(FakeLlama):
             def create_chat_completion(self, **kwargs):
-                return iter([{"choices": [{"delta": {"content": '{"summary":"partial'},
+                return iter([{"choices": [{"delta": {"content": "partial"},
                                              "finish_reason": "length"}]}])
 
         requests = io.StringIO("\n".join((
@@ -190,6 +219,59 @@ class SummaryRuntimeTests(unittest.TestCase):
         self.assertEqual(lines[0], {"ok": True})
         self.assertFalse(lines[1]["ok"])
         self.assertIn("limite de geração", lines[1]["error"])
+        self.assertEqual(lines[1]["error_code"], "output_limit")
+
+    def test_worker_keeps_runtime_after_generation_limit(self):
+        class RetryLlama(FakeLlama):
+            calls = 0
+            def create_chat_completion(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return iter([{"choices": [{"delta": {"content": "{"},
+                                             "finish_reason": "length"}]}])
+                return iter([{"choices": [{"delta": {"content": '{"summary":"ok"}'}}]}])
+        requests = io.StringIO("\n".join((
+            json.dumps({"type": "open", "model_path": "local.gguf", "context_length": 4096}),
+            json.dumps({"type": "generate", "prompt": "system", "evidence": [], "disable_thinking": False}),
+            json.dumps({"type": "generate", "prompt": "compact", "evidence": [], "disable_thinking": False}),
+            json.dumps({"type": "close"}),
+        )) + "\n")
+        responses = io.StringIO()
+        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=RetryLlama)}):
+            serve(requests, responses)
+        lines = [json.loads(line) for line in responses.getvalue().splitlines()]
+        self.assertEqual([line.get("ok") for line in lines], [True, False, True])
+
+    def test_worker_still_terminates_on_non_limit_generation_error(self):
+        class ErrorLlama(FakeLlama):
+            def create_chat_completion(self, **kwargs):
+                raise RuntimeError("native failure")
+
+        requests = io.StringIO("\n".join((
+            json.dumps({"type": "open", "model_path": "local.gguf", "context_length": 4096}),
+            json.dumps({"type": "generate", "prompt": "system", "evidence": [],
+                        "disable_thinking": False}),
+            json.dumps({"type": "generate", "prompt": "unreachable", "evidence": [],
+                        "disable_thinking": False}),
+        )) + "\n")
+        responses = io.StringIO()
+        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=ErrorLlama)}):
+            serve(requests, responses)
+        lines = [json.loads(line) for line in responses.getvalue().splitlines()]
+        self.assertEqual([line.get("ok") for line in lines], [True, False])
+        self.assertNotIn("error_code", lines[1])
+
+    def test_native_byte_limit_uses_the_recoverable_error(self):
+        class LargeLlama(FakeLlama):
+            def create_chat_completion(self, **kwargs):
+                return iter([{"choices": [{"delta": {"content": "x" * 101}}]}])
+        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=LargeLlama)}):
+            runtime = NativeSummaryRuntime("local.gguf")
+        try:
+            with mock.patch("summary_runtime.MAX_OUTPUT_BYTES", 100), self.assertRaises(SummaryOutputLimitError):
+                runtime.generate("system", [])
+        finally:
+            runtime.close()
 
     def test_public_runtime_uses_worker_even_when_native_import_is_unavailable(self):
         class RecordingStdin(io.StringIO):
@@ -225,6 +307,33 @@ class SummaryRuntimeTests(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertEqual([json.loads(line)["type"] for line in process.stdin.recorded.splitlines()],
                          ["open", "generate", "close"])
+
+    def test_public_runtime_maps_output_limit_and_reuses_worker(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"ok":true}\n'
+                    '{"ok":false,"error_code":"output_limit","error":"O runtime local retornou uma '
+                    'resposta maior que o limite permitido."}\n'
+                    '{"ok":true,"text":"{\\"summary\\":\\"ok\\"}"}\n'
+                )
+                self.terminated = False
+            def poll(self): return None if not self.terminated else 0
+            def terminate(self): self.terminated = True
+            def wait(self, timeout=None): return 0
+        import i18n
+        process = FakeProcess()
+        with mock.patch("summary_runtime._spawn_worker", return_value=process):
+            runtime = SummaryRuntime("local.gguf")
+            i18n.set_language("en-US")
+            try:
+                with self.assertRaisesRegex(SummaryOutputLimitError, "larger than the allowed limit"):
+                    runtime.generate("system", [])
+                self.assertEqual(json.loads(runtime.generate("compact", [])), {"summary": "ok"})
+            finally:
+                i18n.set_language(i18n.DEFAULT_LANGUAGE)
+                runtime.close()
 
     def test_real_local_worker_keeps_native_import_out_of_parent(self):
         with self._fake_worker_package() as package:

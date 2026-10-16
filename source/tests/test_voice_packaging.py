@@ -14,12 +14,16 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class PackagingExcludeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        Path(ROOT, "source", "tests", "tmp").mkdir(exist_ok=True)
+
     def test_ffmpeg_orchestration_uses_shared_lame_prefix(self):
         path = os.path.join(ROOT, "packaging", "clean_audio_runtime.py")
         spec = importlib.util.spec_from_file_location("clean_audio_runtime_orchestration", path)
         recipe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(recipe)
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
             root = Path(temporary_directory)
             source = root / "ffmpeg-source"
             source.mkdir()
@@ -39,7 +43,7 @@ class PackagingExcludeTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("clean_audio_runtime_wheel", path)
         recipe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(recipe)
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
             wheel = Path(temporary_directory) / "av.whl"
             with zipfile.ZipFile(wheel, "w") as archive:
                 for name in (
@@ -70,7 +74,7 @@ class PackagingExcludeTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location("clean_audio_runtime_symbols", path)
         recipe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(recipe)
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
             root = Path(temporary_directory)
             source = root / "source"
             (source / "include").mkdir(parents=True)
@@ -91,7 +95,7 @@ class PackagingExcludeTests(unittest.TestCase):
         recipe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(recipe)
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
             msys_root = Path(temporary_directory)
             for relative_path in (
                 "usr/bin/sh.exe",
@@ -186,6 +190,90 @@ class PackagingExcludeTests(unittest.TestCase):
         for name in expected:
             self.assertIn(name, win_text, name)
             self.assertIn(name, mac_text, name)
+        self.assertNotIn("--exclude-module onnxruntime", win_text)
+        self.assertNotIn("--exclude-module onnxruntime", mac_text)
+        self.assertIn("--collect-all onnxruntime", win_text)
+        self.assertIn("--collect-all onnxruntime", mac_text)
+        self.assertIn("build\\voice-vad;voice-vad", win_text)
+        self.assertIn("build/voice-vad:voice-vad", mac_text)
+
+    def test_vad_fetch_helper_is_pinned_and_atomic(self):
+        path = os.path.join(ROOT, "packaging", "voice_activity_model.py")
+        spec = importlib.util.spec_from_file_location("voice_activity_model_fetch", path)
+        fetcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fetcher)
+        self.assertEqual(fetcher.MODEL_VERSION, "6.2.2")
+        self.assertEqual(len(fetcher.MODEL_SHA256), 64)
+        self.assertEqual(fetcher.MODEL_COMMIT, "60b7ffa243625ebdc1070275a29f18c87843786a")
+        self.assertIn(f"{fetcher.MODEL_COMMIT}/src/silero_vad/data/silero_vad.onnx", fetcher.MODEL_URL)
+        self.assertIn(f"{fetcher.MODEL_COMMIT}/LICENSE", fetcher.LICENSE_URL)
+        self.assertEqual(len(fetcher.LICENSE_SHA256), 64)
+
+    def test_vad_resolver_checks_hash_before_returning(self):
+        path = os.path.join(ROOT, "source", "voice_activity_model.py")
+        spec = importlib.util.spec_from_file_location("voice_activity_model_resolver", path)
+        resolver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(resolver)
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            candidate = temporary_root / "build" / "voice-vad" / "silero-vad.onnx"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_bytes(b"synthetic-vad")
+            with mock.patch.object(resolver, "MODEL_SHA256", resolver._sha256(candidate)):
+                source_file = temporary_root / "source" / "voice_activity_model.py"
+                source_file.parent.mkdir()
+                with mock.patch.object(resolver, "__file__", str(source_file)):
+                    self.assertEqual(resolver.verified_model_path(), candidate)
+
+    def test_vad_resolver_frozen_path_fails_closed_for_missing_or_tampered_asset(self):
+        path = os.path.join(ROOT, "source", "voice_activity_model.py")
+        spec = importlib.util.spec_from_file_location("voice_activity_model_frozen", path)
+        resolver = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(resolver)
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
+            meipass = Path(temporary_directory)
+            with mock.patch.object(resolver.sys, "frozen", True, create=True), \
+                    mock.patch.object(resolver.sys, "_MEIPASS", str(meipass), create=True):
+                with self.assertRaisesRegex(FileNotFoundError, "missing"):
+                    resolver.verified_model_path()
+                frozen_model = meipass / "voice-vad" / "silero-vad.onnx"
+                frozen_model.parent.mkdir()
+                frozen_model.write_bytes(b"tampered")
+                with self.assertRaisesRegex(ValueError, "hash"):
+                    resolver.verified_model_path()
+
+    def test_vad_fetch_hash_failure_preserves_existing_destination(self):
+        path = os.path.join(ROOT, "packaging", "voice_activity_model.py")
+        spec = importlib.util.spec_from_file_location("voice_activity_model_fetch_failure", path)
+        fetcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fetcher)
+
+        class Response:
+            headers = {"Content-Length": "8"}
+
+            def __init__(self):
+                self._read = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                if self._read:
+                    return b""
+                self._read = True
+                return b"tampered"
+
+        with tempfile.TemporaryDirectory(dir=os.path.join(ROOT, "source", "tests", "tmp")) as temporary_directory:
+            destination = Path(temporary_directory) / "model.onnx"
+            destination.write_bytes(b"original")
+            with mock.patch.object(fetcher, "urlopen", return_value=Response()):
+                with self.assertRaisesRegex(RuntimeError, "hash"):
+                    fetcher.fetch_asset("https://example.invalid/model", destination, sha256="0" * 64)
+            self.assertEqual(destination.read_bytes(), b"original")
+            self.assertEqual(list(destination.parent.glob(".model.onnx.*")), [])
 
     def test_macos_declares_microphone_usage(self):
         path = os.path.join(ROOT, "build_release_macos.sh")
@@ -202,7 +290,8 @@ class PackagingExcludeTests(unittest.TestCase):
             mac_text = handle.read()
         for text in (win_text, mac_text):
             self.assertIn("VOICE_COLLECT_ARGS", text)
-            self.assertIn("import av, sounddevice, soxr, transcribe_cpp, transcribe_cpp_native", text)
+            for package in ("av", "onnxruntime", "sounddevice", "soxr", "transcribe_cpp", "transcribe_cpp_native"):
+                self.assertIn(package, text)
             self.assertIn("--collect-all av", text)
             self.assertIn("--collect-all sounddevice", text)
             self.assertIn("--collect-all soxr", text)
@@ -278,6 +367,7 @@ class PackagingExcludeTests(unittest.TestCase):
             requirements,
             {
                 "sounddevice==0.5.5",
+                "onnxruntime==1.31.0",
                 "soxr==1.1.0",
                 "transcribe-cpp==0.1.3",
                 "transcribe-cpp-native==0.1.3",

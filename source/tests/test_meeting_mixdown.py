@@ -1,6 +1,7 @@
 """Focused streaming and preservation checks for meeting_mixdown."""
 
 import os
+import itertools
 from pathlib import Path
 import struct
 import tempfile
@@ -8,6 +9,7 @@ import threading
 import unittest
 import warnings
 import wave
+from unittest import mock
 
 from meeting_mixdown import MixdownCancelled, _adaptive_microphone_gain, export_mixdown, mixdown_tracks
 
@@ -41,6 +43,79 @@ class MeetingMixdownTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_progress_follows_a_long_timeline_and_publication_is_last(self):
+        self.destination.write_bytes(b"previous final")
+        reports = []
+        source = [_event("system", [0.25, 0.25], timestamp=3 * 3600 - 0.5)]
+
+        def progress(stage, done, total):
+            reports.append((stage, done, total))
+            if stage == "completed":
+                self.assertEqual(_read(self.destination)[:2], (4, 1))
+            else:
+                self.assertEqual(self.destination.read_bytes(), b"previous final")
+
+        with mock.patch("meeting_mixdown.time.monotonic", side_effect=itertools.count()):
+            mixdown_tracks({"system": source}, self.destination, duration=10800,
+                           progress=progress)
+        encoding = [done for stage, done, _ in reports if stage == "encoding"]
+        self.assertGreater(len(encoding), 2)
+        self.assertEqual(encoding, sorted(encoding))
+        self.assertEqual(reports[-2:], [("finalizing", 10800.0, 10800.0),
+                                      ("completed", 10800.0, 10800.0)])
+        self.assertEqual(len(_read(self.destination)[2]), 10800 * 4 * 2)
+
+    def test_progress_is_throttled_but_phase_boundaries_are_always_reported(self):
+        reports = []
+        clock = itertools.count(step=0.01)
+        with mock.patch("meeting_mixdown.time.monotonic", side_effect=clock):
+            mixdown_tracks({"system": [_event("system", [0.25] * 100)]}, self.destination,
+                           progress=lambda *values: reports.append(values), chunk_frames=1)
+        self.assertLessEqual(sum(stage == "encoding" for stage, _, _ in reports), 5)
+        self.assertEqual(reports[0], ("encoding", 0.0, None))
+        self.assertEqual(reports[-2:], [("finalizing", 25.0, 25.0), ("completed", 25.0, 25.0)])
+
+    def test_cancel_during_progress_preserves_previous_final_and_never_completes(self):
+        self.destination.write_bytes(b"previous final")
+        cancel = threading.Event()
+        reports = []
+
+        def progress(stage, done, total):
+            reports.append(stage)
+            if stage == "encoding":
+                cancel.set()
+
+        with self.assertRaises(MixdownCancelled):
+            mixdown_tracks({"system": [_event("system", [0.25] * 8)]}, self.destination,
+                           progress=progress, cancel_event=cancel)
+        self.assertNotIn("completed", reports)
+        self.assertEqual(self.destination.read_bytes(), b"previous final")
+        self.assertEqual(list(Path(self.temp.name).iterdir()), [self.destination])
+
+    def test_publication_failure_never_reports_completion(self):
+        self.destination.write_bytes(b"previous final")
+        reports = []
+        with mock.patch("meeting_mixdown.os.replace", side_effect=OSError("cannot publish")), \
+                self.assertRaisesRegex(OSError, "cannot publish"):
+            mixdown_tracks({"system": [_event("system", [0.25] * 8)]}, self.destination,
+                           progress=lambda *values: reports.append(values))
+        self.assertEqual(reports[-1][0], "finalizing")
+        self.assertEqual(self.destination.read_bytes(), b"previous final")
+        self.assertEqual(list(Path(self.temp.name).iterdir()), [self.destination])
+
+    def test_export_progress_uses_only_selected_track_end_not_session_pause(self):
+        store = _Store({"system": [_event("system", [0.25, 0.25], timestamp=2.5)]})
+        store.get = mock.Mock(return_value={
+            "duration": 1000,
+            "tracks": {"system": {"segments": [{"end": 3.0}]},
+                       "microphone": {"segments": [{"end": 100.0}]}},
+        })
+        reports = []
+        export_mixdown(store, "session", self.destination, tracks=("system",),
+                       progress=lambda *values: reports.append(values))
+        self.assertEqual(reports[0], ("preparing", 0.0, 3.0))
+        self.assertEqual(reports[-1], ("completed", 3.0, 3.0))
 
     def test_timestamp_alignment_and_single_source_output(self):
         mic = [_event("microphone", [0.25, 0.25], timestamp=0.0)]
@@ -204,6 +279,52 @@ class MeetingMixdownTests(unittest.TestCase):
         rate, _, raw = _read(self.destination)
         self.assertEqual(rate, 8)
         self.assertEqual(struct.unpack("<4h", raw), (0, 8192, 16384, 16384))
+
+    def test_source_format_change_is_resampled_and_channels_are_downmixed(self):
+        source = [
+            _event("system", [0.1, 0.1], rate=4, channels=1, timestamp=0.0),
+            _event("system", [0.2, 0.4, 0.6, 0.8], rate=4, channels=2, timestamp=0.5, sequence=1),
+        ]
+        mixdown_tracks({"system": source}, self.destination, chunk_frames=2)
+        rate, channels, raw = _read(self.destination)
+        self.assertEqual((rate, channels), (4, 1))
+        self.assertEqual(struct.unpack("<4h", raw), (3277, 3277, 9830, 22937))
+
+    def test_six_channel_source_is_averaged_to_stereo_without_dropping_center(self):
+        source = [_event("system", [0.0, 0.0, 0.6, 0.0, 0.0, 0.0,
+                                     0.0, 0.0, 0.3, 0.0, 0.0, 0.0],
+                         rate=4, channels=6)]
+        mixdown_tracks({"system": source}, self.destination, chunk_frames=2)
+        rate, channels, raw = _read(self.destination)
+        self.assertEqual((rate, channels), (4, 2))
+        self.assertEqual(struct.unpack("<4h", raw), (3277, 3277, 1638, 1638))
+
+    def test_export_uses_metadata_max_format_for_endpoint_handoff(self):
+        source = [
+            _event("system", [0.1, 0.1], rate=4, channels=1, timestamp=0.0),
+            _event("system", [0.2, 0.4, 0.6, 0.8], rate=8, channels=2, timestamp=0.5, sequence=1),
+        ]
+        store = _Store({"system": source})
+        store.get = mock.Mock(return_value={
+            "tracks": {"system": {"segments": [
+                {"rate": 4, "channels": 1, "end": 0.5},
+                {"rate": 8, "channels": 2, "end": 0.75},
+            ]}},
+        })
+        export_mixdown(store, "session", self.destination, tracks=("system",), chunk_frames=2)
+        rate, channels, raw = _read(self.destination)
+        self.assertEqual((rate, channels), (8, 2))
+        self.assertEqual(struct.unpack("<12h", raw),
+                         (3277, 3277) * 4 + (6553, 13107, 19660, 26214))
+
+    def test_invalid_output_format_preserves_existing_destination(self):
+        self.destination.write_bytes(b"existing")
+        for options in ({"output_rate": 0}, {"output_rate": True}, {"output_rate": 192001},
+                        {"output_channels": 0}, {"output_channels": True}, {"output_channels": 3}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                mixdown_tracks({"system": [_event("system", [0.1], rate=4)]},
+                               self.destination, **options)
+            self.assertEqual(self.destination.read_bytes(), b"existing")
 
     def test_fractional_native_timestamp_is_preserved(self):
         source = [_event("microphone", [0.25, 0.25], rate=4, timestamp=0.125)]

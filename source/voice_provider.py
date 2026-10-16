@@ -17,6 +17,7 @@ from voice_models import (
     model_is_installed,
 )
 from voice_runtime import VoiceRuntimeError, create_backend
+from voice_activity import SileroVoiceActivity
 
 
 class VoiceProvider:
@@ -77,6 +78,7 @@ class LocalVoiceProvider(VoiceProvider):
         is_installed=None,
         installed_path=None,
         delete=None,
+        speech_gate=None,
     ):
         self.cache_dir = cache_dir
         self.backend = backend if backend is not None else create_backend()
@@ -84,6 +86,7 @@ class LocalVoiceProvider(VoiceProvider):
         self._is_installed = is_installed or model_is_installed
         self._installed_path = installed_path or installed_model_path
         self._delete = delete or delete_model
+        self.speech_gate = speech_gate
 
     def available(self):
         return bool(self.backend.available() or self.backend.is_loaded())
@@ -136,16 +139,26 @@ class LocalVoiceProvider(VoiceProvider):
         self.backend.load(path, profile, language)
 
     def unload(self):
-        return self.backend.unload()
+        try:
+            return self.backend.unload()
+        finally:
+            if self.speech_gate is not None:
+                self.speech_gate.reset()
 
     def cancel(self):
         return self.backend.cancel()
 
     def transcribe(self, pcm, cancel_event=None):
+        if self.speech_gate is not None:
+            pcm = self.speech_gate.voiced_samples(pcm, cancel_event)
+            if pcm is None:
+                return ""
         return self.backend.transcribe(pcm, cancel_event=cancel_event)
 
     def supports_stream(self):
-        return self.backend.supports_stream()
+        # Streaming bypasses the bounded speech gate. Use the non-streaming
+        # path while VAD is active until streaming ranges are supported.
+        return self.speech_gate is None and self.backend.supports_stream()
 
     def start_stream(self):
         return self.backend.start_stream()
@@ -168,5 +181,6 @@ def create_provider(cache_dir, backend=None, download=None, **kwargs):
         cache_dir,
         backend=backend,
         download=download,
+        speech_gate=kwargs.pop("speech_gate", None) or SileroVoiceActivity(),
         **kwargs,
     )

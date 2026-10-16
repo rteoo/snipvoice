@@ -51,6 +51,7 @@ def _profile_response_schema(evidence):
     sections = profile.get("sections")
     max_items = profile.get("max_items")
     max_chars = profile.get("max_section_chars")
+    max_citations = profile.get("max_citations", MAX_PROFILE_CITATIONS)
     if (not isinstance(sections, list) or not sections
             or len(sections) > MAX_PROFILE_SECTIONS
             or any(not isinstance(section, str) or section not in PROFILE_SECTIONS
@@ -60,7 +61,9 @@ def _profile_response_schema(evidence):
             or isinstance(max_items, bool) or not isinstance(max_items, int)
             or not 1 <= max_items <= MAX_PROFILE_ITEMS
             or isinstance(max_chars, bool) or not isinstance(max_chars, int)
-            or not 64 <= max_chars <= MAX_PROFILE_SECTION_CHARS):
+            or not 64 <= max_chars <= MAX_PROFILE_SECTION_CHARS
+            or isinstance(max_citations, bool) or not isinstance(max_citations, int)
+            or not 1 <= max_citations <= MAX_PROFILE_CITATIONS):
         raise ValueError(tr("O perfil de saída contém limites ou seções inválidos."))
 
     citation_ids = []
@@ -107,17 +110,20 @@ def _profile_response_schema(evidence):
         raise ValueError(tr("O perfil de saída não contém IDs de evidência válidos."))
     citations = {
         "type": "array", "items": {"type": "string", "enum": citation_ids},
-        "minItems": 1, "maxItems": MAX_PROFILE_CITATIONS,
+        "minItems": 1, "maxItems": max_citations,
     }
-    # Keep the native grammar structural and citation-bounded.  Large
-    # character-level maxLength rules expand into excessive repetition rules
-    # in llama.cpp; profile validation and post-generation report validation
-    # enforce text lengths independently.
+    compact = max_citations == 1 and max_chars <= 128
+    text_schema = {"type": "string"}
+    if compact:
+        text_schema["maxLength"] = max_chars
+    # ceiling: character grammar bounds are limited to 128 for compact
+    # reductions. Larger maxLength rules expand excessively in llama.cpp;
+    # normal profiles retain independent post-generation text validation.
     properties = {"segment_ids": citations}
     if "summary" in sections:
-        properties["summary"] = {"type": "string"}
+        properties["summary"] = dict(text_schema)
     item_properties = {
-        "text": {"type": "string"},
+        "text": dict(text_schema),
         "segment_ids": citations,
     }
     for section in sections:
@@ -127,8 +133,8 @@ def _profile_response_schema(evidence):
             properties[section] = {
                 "type": "object",
                 "properties": {
-                    "subject": {"type": "string"},
-                    "body": {"type": "string"},
+                    "subject": dict(text_schema),
+                    "body": dict(text_schema),
                     "segment_ids": citations,
                 },
                 "required": ["subject", "body", "segment_ids"],
@@ -202,7 +208,7 @@ class NativeSummaryRuntime:
                     raise ValueError(tr("O runtime local retornou conteúdo inválido."))
                 size += len(text.encode("utf-8"))
                 if size > MAX_OUTPUT_BYTES:
-                    raise ValueError(tr("O runtime local retornou uma resposta maior que o limite permitido."))
+                    raise SummaryOutputLimitError(tr("O runtime local retornou uma resposta maior que o limite permitido."))
                 chunks.append(text)
             return "".join(chunks)
         except SummaryOutputLimitError:
@@ -301,6 +307,12 @@ class _WorkerClient:
                 self.close(force=True)
                 raise RuntimeError(tr("O runtime local de resumo retornou uma resposta inválida."))
             if not value["ok"]:
+                if value.get("error_code") == "output_limit":
+                    # The worker sends untranslated msgids; translate here
+                    # like every other worker error.
+                    raise SummaryOutputLimitError(tr(
+                        value.get("error") or N_("O resumo atingiu o limite de geração antes de terminar; o resultado anterior foi preservado.")
+                    ))
                 raise RuntimeError(tr(value.get("error") or N_("O runtime local de resumo falhou.")))
             return value
 

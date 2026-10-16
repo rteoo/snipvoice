@@ -98,6 +98,29 @@ class MeetingTextTests(unittest.TestCase):
             "reviewed_artifact": {"sections": {"summary": "Revisado.", "risks": "Risco confirmado."}},
         }), "Revisado.\n\nRiscos:\n• Risco confirmado.")
 
+    def test_summary_renders_detailed_notes_in_chronological_order(self):
+        result = format_summary({
+            "summary": "Visão geral.",
+            "detailed_notes": [
+                {"start": 3661, "end": 3663, "text": "Último", "segment_ids": ["s3"]},
+                {"start": 0, "end": 2, "text": "Primeiro\nlinha dois", "segment_ids": ["s1"]},
+                {"start": 61, "end": 64, "text": "Meio", "segment_ids": ["s2"]},
+            ],
+        })
+        self.assertIn("Notas detalhadas:", result)
+        self.assertLess(result.index("00:00:00–00:00:02"), result.index("00:01:01–00:01:04"))
+        self.assertIn("01:01:01–01:01:03", result)
+        self.assertIn("Primeiro\nlinha dois", result)
+        self.assertIn("citações: s2", result)
+
+    def test_reviewed_detailed_notes_override_generated_notes(self):
+        result = format_summary({
+            "generated": {"summary": "Gerado.", "detailed_notes": "Original."},
+            "reviewed_artifact": {"sections": {"detailed_notes": "Revisado."}},
+        })
+        self.assertIn("Revisado.", result)
+        self.assertNotIn("Original.", result)
+
 
 if __name__ == "__main__":
     unittest.main()

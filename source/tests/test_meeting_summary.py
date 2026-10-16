@@ -86,11 +86,11 @@ class MeetingSummaryTests(unittest.TestCase):
                     meeting_summary.summarize_meeting(self.store, self.sid, DEFAULT_SUMMARY_MODEL)
         runtime.assert_not_called()
 
-    def test_invented_references_and_owners_preserve_prior_summary(self):
+    def test_invented_references_and_malformed_owners_preserve_prior_summary(self):
         self.transcript()
         for modification in (
             {"segment_ids": ["invented"]},
-            {"action_items": [{"text": "Task", "owner": "Invented Person",
+            {"action_items": [{"text": "Task", "owner": "x" * 201,
                                "deadline": None, "segment_ids": ["s1"]}]},
         ):
             document = dict(self.result(), **modification)
@@ -100,6 +100,17 @@ class MeetingSummaryTests(unittest.TestCase):
                     meeting_summary.summarize_meeting(self.store, self.sid, DEFAULT_SUMMARY_MODEL)
             runtime.close.assert_called_once_with()
             self.assertEqual(self.store.get(self.sid)["summary"], {"summary": "Prior summary"})
+
+    def test_unsupported_owner_is_saved_as_unknown(self):
+        self.transcript()
+        document = self.result()
+        document["action_items"][0]["owner"] = "Invented Person"
+        runtime = self.runtime(lambda *_args, **_kwargs: json.dumps(document))
+        with self.installed(runtime):
+            result = meeting_summary.summarize_meeting(self.store, self.sid, DEFAULT_SUMMARY_MODEL)
+        self.assertIsNone(result["action_items"][0]["owner"])
+        self.assertEqual(self.store.get(self.sid)["summary"], result)
+        runtime.close.assert_called_once_with()
 
     def test_cancel_during_generation_preserves_prior_and_closes_runtime(self):
         self.transcript()

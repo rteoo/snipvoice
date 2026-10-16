@@ -15,6 +15,7 @@ import tempfile
 import wave
 
 from i18n import tr
+from meeting_text import format_detailed_notes
 
 
 # ceiling: 1,024 frames per playback write and 8,192 per import; raise only after cancellation/memory profiling.
@@ -454,7 +455,8 @@ def _report_history_for_export(store, session, cancel_event=None):
 def _metadata_export_projection(store, session, metadata, cancel_event=None):
     """Build additive, path-free metadata for whole-meeting exports."""
     public_metadata = _redact_free_form_export(_export_value({
-        key: value for key, value in metadata.items() if key not in {"events", "annotations"}
+        key: value for key, value in metadata.items()
+        if key not in {"events", "annotations", "capture_storage"}
     }))
     settings = public_metadata.get("settings")
     if isinstance(settings, dict):
@@ -934,8 +936,13 @@ def export_report(report, path, format="markdown", *, section=None, cancel_event
                  tr("Revisão de transcrição: {revision}",
                     revision=projection.get('transcript_revision')), ""]
         for name, value in projection["sections"].items():
-            lines.append(("## " if format == "markdown" else "") + str(name))
-            if isinstance(value, str):
+            label = tr("Notas detalhadas") if name == "detailed_notes" else str(name)
+            lines.append(("## " if format == "markdown" else "") + label)
+            if name == "detailed_notes":
+                rendered = format_detailed_notes(value, markdown=format == "markdown")
+                if rendered:
+                    lines.append(rendered)
+            elif isinstance(value, str):
                 lines.append(value)
             else:
                 lines.append(json.dumps(value, ensure_ascii=False, indent=2))
@@ -1059,13 +1066,42 @@ def _highlight_wav_export(handle, store, session, highlight, cancel_event=None):
     handle.seek(file_end)
 
 
+def _highlight_mp3_export(handle, metadata, start, end, cancel_event):
+    """Stream a bounded interval from the saved recording into an MP3."""
+    from meeting_mixdown import _encoded_output
+
+    chunks = iter(_final_audio_chunks(metadata, start, cancel_event))
+    try:
+        first = next(chunks, None)
+        if first is None:
+            raise ValueError(tr("A fonte escolhida não contém áudio no intervalo do destaque."))
+        rate, channels, _ = first
+        remaining = math.ceil((end - start) * rate - 1e-9)
+        with _encoded_output(handle, rate, channels, "mp3", cancel_event) as write:
+            for chunk_rate, chunk_channels, payload in itertools.chain((first,), chunks):
+                _cancel(cancel_event)
+                if (chunk_rate, chunk_channels) != (rate, channels):
+                    raise ValueError(tr("O formato do áudio mudou durante a decodificação."))
+                count = min(remaining, len(payload) // (channels * 4))
+                write(_pcm16(payload[:count * channels * 4]))
+                remaining -= count
+                if not remaining:
+                    break
+            if remaining:
+                raise ValueError(tr("O arquivo de áudio está incompleto; preserve o original."))
+    finally:
+        close = getattr(chunks, "close", None)
+        if close is not None:
+            close()
+
+
 def export_highlight_clip(store, session_id, highlight, path, cancel_event=None):
-    """Export one source-track highlight as an atomic, non-overwriting PCM16 WAV."""
+    """Export a final MP3 interval; preserve legacy source WAV callers."""
     if not isinstance(highlight, dict):
         raise ValueError(tr("O destaque deve ser um objeto."))
     track = highlight.get("track")
     start, end = highlight.get("start"), highlight.get("end")
-    if track not in {"microphone", "system"}:
+    if track not in {"microphone", "system", "final"}:
         raise ValueError(tr("A fonte do destaque é inválida."))
     if (isinstance(start, bool) or isinstance(end, bool)
             or not isinstance(start, (int, float)) or not isinstance(end, (int, float))
@@ -1084,18 +1120,27 @@ def export_highlight_clip(store, session_id, highlight, path, cancel_event=None)
         inside_library = False
     if inside_library:
         raise ValueError(tr("Escolha uma pasta fora da biblioteca de reuniões para preservar os arquivos originais."))
-    store.get(session_id, include_events=False)
+    metadata = store.get(session_id, include_events=False)
+    mp3 = destination.suffix.casefold() == ".mp3"
+    if track == "final" and not mp3:
+        raise ValueError(tr("Salve o destaque do áudio final como MP3."))
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
     )
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            _highlight_wav_export(handle, store, session_id, {
-                **highlight, "start": float(start), "end": float(end),
-            }, cancel_event)
+            if mp3:
+                _highlight_mp3_export(handle, metadata, float(start), float(end), cancel_event)
+            else:
+                _highlight_wav_export(handle, store, session_id, {
+                    **highlight, "start": float(start), "end": float(end),
+                }, cancel_event)
             handle.flush()
             os.fsync(handle.fileno())
         _cancel(cancel_event)
+        if mp3:
+            from meeting_storage import verify_mp3_file
+            verify_mp3_file(temporary, expected_duration=float(end) - float(start), cancel_event=cancel_event)
         _commit_new_file(temporary, destination)
     except Exception:
         if os.path.lexists(temporary):
@@ -1122,7 +1167,7 @@ def _final_audio_chunks(metadata, start, cancel_event):
             if not 8000 <= rate <= 192000 or channels not in (1, 2) or width != 2:
                 raise ValueError(tr("O arquivo de áudio final não usa WAV PCM16 compatível."))
             reader.setpos(min(reader.getnframes(), int(start * rate)))
-            while not cancel_event.is_set():
+            while cancel_event is None or not cancel_event.is_set():
                 raw = reader.readframes(PLAY_FRAMES)
                 if not raw:
                     return

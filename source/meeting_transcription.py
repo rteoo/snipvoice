@@ -1,10 +1,12 @@
 """Bounded, local transcription jobs for durable meeting recordings."""
 
 import math
+import os
 import struct
 import threading
 
 from i18n import N_, tr
+from voice_activity import SileroVoiceActivity, VoiceActivityError
 from voice_provider import LocalVoiceProvider
 from voice_resampler import StreamingResampler
 
@@ -45,7 +47,8 @@ class MeetingTranscriber:
     network download.  Jobs on one transcriber serialize native inference.
     """
 
-    def __init__(self, store, provider, resampler_factory=StreamingResampler, chunk_seconds=CHUNK_SECONDS):
+    def __init__(self, store, provider, resampler_factory=StreamingResampler,
+                 chunk_seconds=CHUNK_SECONDS, final_audio_decoder=None):
         self.store = store
         self.provider = provider
         self.resampler_factory = resampler_factory
@@ -53,6 +56,7 @@ class MeetingTranscriber:
             raise ValueError(tr("O tamanho do bloco de transcrição é inválido."))
         self.chunk_seconds = float(chunk_seconds)
         self._max_chunk_samples = min(MAX_CHUNK_SAMPLES, int(TARGET_RATE * self.chunk_seconds))
+        self.final_audio_decoder = final_audio_decoder
         self._lock = threading.Lock()
 
     def transcribe(self, session_id, profile, language, cancel_event=None, revision=None):
@@ -88,8 +92,18 @@ class MeetingTranscriber:
             previous = revision
             try:
                 revision = self.store.begin_revision(session_id, profile, language)
+                source_tracks = self._source_tracks(metadata)
+                previous_segments = list(self.store.get_transcript(session_id, previous))
+                previous_tracks = {
+                    str(segment.get("track")) for segment in previous_segments
+                    if isinstance(segment, dict) and isinstance(segment.get("track"), str)
+                }
+                # Mixed final audio cannot safely resume source-specific
+                # microphone/system segments. Preserve the old revision, but
+                # start this revision clean when the source kind changes.
+                copy_previous = previous_tracks.issubset(set(source_tracks))
                 completed_ids = set()
-                for segment in self.store.get_transcript(session_id, previous):
+                for segment in previous_segments if copy_previous else ():
                     if isinstance(segment.get("id"), str):
                         segment = dict(segment, revision=revision)
                         self.store.add_transcript(session_id, revision, segment)
@@ -110,10 +124,13 @@ class MeetingTranscriber:
                     cancel_event=cancel_event,
                     allow_download=False,
                 )
-                for track in ("microphone", "system"):
+                metadata = self.store.get(session_id, include_events=False)
+                tracks = self._source_tracks(metadata)
+                wrote_audio = False
+                for track in tracks:
                     if cancel_event.is_set():
                         raise _Cancelled
-                    self._transcribe_track(
+                    wrote_audio = self._transcribe_track(
                         session_id,
                         track,
                         profile,
@@ -121,6 +138,10 @@ class MeetingTranscriber:
                         revision,
                         completed_ids,
                         cancel_event,
+                    ) or wrote_audio
+                if not wrote_audio:
+                    raise MeetingTranscriptionError(
+                        tr("A fonte de áudio não contém blocos decodificáveis para transcrição.")
                     )
                 self.store.finish_revision(session_id, revision, "completed")
                 return revision
@@ -141,6 +162,61 @@ class MeetingTranscriber:
                 ) from exc
             finally:
                 self._lock.release()
+
+    def _source_tracks(self, metadata):
+        final = metadata.get("final_audio") if isinstance(metadata, dict) else None
+        path = final.get("path") if isinstance(final, dict) else None
+        if isinstance(path, str) and path and os.path.isfile(path):
+            return ("final",)
+        return ("microphone", "system")
+
+    def _source_events(self, session_id, track, cancel_event):
+        if track != "final":
+            yield from self.store.iter_audio(session_id, track=track)
+            return
+        metadata = self.store.get(session_id, include_events=False)
+        decoder = self.final_audio_decoder
+        if decoder is None:
+            from meeting_files import _final_audio_chunks
+            decoder = _final_audio_chunks
+        timestamp = 0.0
+        sequence = 0
+        saw_audio = False
+        try:
+            for item in decoder(metadata, 0.0, cancel_event):
+                if cancel_event.is_set():
+                    raise _Cancelled
+                try:
+                    rate, channels, payload = item
+                    frames = len(payload) // (channels * 4)
+                except (TypeError, ValueError, ZeroDivisionError) as exc:
+                    raise MeetingTranscriptionError(
+                        tr("O decodificador do áudio final retornou um bloco inválido.")
+                    ) from exc
+                if (not isinstance(rate, int) or not 8000 <= rate <= 192000
+                        or not isinstance(channels, int) or channels not in (1, 2)
+                        or frames <= 0 or len(payload) != frames * channels * 4):
+                    raise MeetingTranscriptionError(
+                        tr("O decodificador do áudio final retornou um formato incompatível.")
+                    )
+                saw_audio = True
+                yield {
+                    "type": "audio", "generation": 0, "track": "final",
+                    "rate": rate, "channels": channels, "frames": frames,
+                    "timestamp": timestamp, "sequence": sequence,
+                }, payload
+                timestamp += frames / rate
+                sequence += 1
+        except _Cancelled:
+            raise
+        except Exception:
+            if cancel_event.is_set():
+                raise _Cancelled
+            raise
+        if not saw_audio:
+            raise MeetingTranscriptionError(
+                tr("O áudio final não contém blocos decodificáveis para transcrição.")
+            )
 
     def _transcribe_track(self, session_id, track, profile, language, revision, completed_ids, cancel_event):
         samples = []
@@ -177,9 +253,11 @@ class MeetingTranscriber:
             chunk_end = None
             resampler = None
 
-        for event, payload in self.store.iter_audio(session_id, track=track):
+        wrote_audio = False
+        for event, payload in self._source_events(session_id, track, cancel_event):
             if cancel_event.is_set():
                 raise _Cancelled
+            wrote_audio = True
             rate = event["rate"]
             event_start = float(event["timestamp"])
             event_end = event_start + event["frames"] / rate
@@ -201,14 +279,26 @@ class MeetingTranscriber:
                 flush()
                 expected_next = None
         flush()
+        return wrote_audio
 
     def _write_segment(self, session_id, track, profile, language, revision, segment_id, start, end, samples, cancel_event):
         if cancel_event.is_set():
             raise _Cancelled
         # Silent chunks remain represented with an empty result, which lets a
         # resumed job distinguish processed silence from a missing chunk.
+        # Production providers own speech detection. Keep the legacy shortcut
+        # only for injected providers without a detector, preserving their
+        # deterministic silent-chunk test contract without dropping quiet speech.
         energy = math.sqrt(sum(value * value for value in samples) / len(samples)) if samples else 0.0
-        raw_text = "" if energy < 1e-5 else self.provider.transcribe(samples, cancel_event=cancel_event)
+        if energy < 1e-5 and getattr(self.provider, "speech_gate", None) is None:
+            raw_text = ""
+        else:
+            try:
+                raw_text = self.provider.transcribe(samples, cancel_event=cancel_event)
+            except VoiceActivityError:
+                if cancel_event.is_set():
+                    raise _Cancelled
+                raise
         text = "" if raw_text is None else str(raw_text).strip()
         self.store.add_transcript(
             session_id,
@@ -261,7 +351,7 @@ def transcribe_meeting(
             ):
                 revision = item.get("id")
                 break
-    provider = LocalVoiceProvider(cache_dir)
+    provider = LocalVoiceProvider(cache_dir, speech_gate=SileroVoiceActivity())
     return MeetingTranscriber(store, provider).transcribe(
         session_id,
         profile,

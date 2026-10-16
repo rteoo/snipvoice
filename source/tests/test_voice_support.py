@@ -35,6 +35,37 @@ from voice_support import (
 )
 
 
+class _PassThroughSpeechGate:
+    """Keep controller tests independent from the packaged ONNX VAD asset."""
+
+    def voiced_samples(self, pcm, cancel_event=None):
+        del cancel_event
+        return pcm
+
+    def reset(self):
+        return None
+
+
+_production_create_provider = sys.modules["voice_support"].create_provider
+
+
+def _test_create_provider(*args, **kwargs):
+    kwargs.setdefault("speech_gate", _PassThroughSpeechGate())
+    provider = _production_create_provider(*args, **kwargs)
+    # Keep streaming-controller contracts covered while the pass-through gate
+    # isolates ordinary transcription tests from the packaged ONNX asset.
+    provider.supports_stream = lambda: provider.backend.supports_stream()
+    return provider
+
+
+def setUpModule():
+    sys.modules["voice_support"].create_provider = _test_create_provider
+
+
+def tearDownModule():
+    sys.modules["voice_support"].create_provider = _production_create_provider
+
+
 class InlineRunner:
     def start(self, fn, *args, name=None):
         fn(*args)

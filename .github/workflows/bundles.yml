@@ -18,6 +18,9 @@ on:
       - "source/native/**"
       - "source/clean_ffmpeg_runtime.py"
       - "source/voice_runtime_probe.py"
+      - "source/voice_activity.py"
+      - "source/voice_activity_model.py"
+      - "source/meeting_audio_probe.py"
       - "source/summary_runtime_probe.py"
       - "source/embedding_runtime_probe.py"
       - "source/embedding_runtime_worker.py"
@@ -90,6 +93,9 @@ jobs:
           if ($installer -notmatch "MyAppVersion `"$env:SNIPVOICE_VERSION`"") { throw "installer version mismatch" }
           if ($installer -notmatch "MyAppChannel `"$env:SNIPVOICE_CHANNEL`"") { throw "installer channel mismatch" }
 
+      - name: Fetch and verify Silero VAD asset
+        run: python packaging/voice_activity_model.py --output-dir build/voice-vad
+
       - name: Build clean LGPL audio runtime
         shell: msys2 {0}
         run: |
@@ -112,7 +118,14 @@ jobs:
           $env:PATH = "$pythonDirectory;$env:SystemRoot\System32;$env:SystemRoot"
           & $python -c "from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime; verify_clean_ffmpeg_runtime()"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests -v
+          & $python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests tests.test_mp3_workflow -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Probe Silero VAD asset and ONNX Runtime
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "source"
+          & python -c "import onnxruntime; from voice_activity import SileroVoiceActivity; from voice_activity_model import verified_model_path; detector=SileroVoiceActivity(model_path=verified_model_path(), runtime=onnxruntime); assert detector.detect([0.0] * 16000) is False"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build approved llama.cpp runtime
@@ -206,6 +219,9 @@ jobs:
           grep -Fq "APP_VERSION = \"$SNIPVOICE_VERSION\"" source/snipvoice.pyw
           grep -Fq "RELEASE_CHANNEL = \"$SNIPVOICE_CHANNEL\"" source/snipvoice.pyw
 
+      - name: Fetch and verify Silero VAD asset
+        run: python packaging/voice_activity_model.py --output-dir build/voice-vad
+
       - name: Build clean LGPL audio runtime
         env:
           MACOSX_DEPLOYMENT_TARGET: "14.4"
@@ -223,7 +239,11 @@ jobs:
           test "${#wheel[@]}" -eq 1
           python -m pip install --no-index "${wheel[0]}"
           DYLD_LIBRARY_PATH= PYTHONPATH=source python -c "from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime; verify_clean_ffmpeg_runtime()"
-          DYLD_LIBRARY_PATH= PYTHONPATH=source python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests -v
+          DYLD_LIBRARY_PATH= PYTHONPATH=source python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests tests.test_mp3_workflow -v
+
+      - name: Probe Silero VAD asset and ONNX Runtime
+        run: |
+          DYLD_LIBRARY_PATH= PYTHONPATH=source python -c 'import onnxruntime; from voice_activity import SileroVoiceActivity; from voice_activity_model import verified_model_path; detector=SileroVoiceActivity(model_path=verified_model_path(), runtime=onnxruntime); assert detector.detect([0.0] * 16000) is False'
 
       - name: Build approved llama.cpp runtime
         env:

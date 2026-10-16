@@ -14,12 +14,22 @@ _AUTO_TITLE = re.compile(
 )
 _SESSION_STAMP = re.compile(r"^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}(?:-|$)")
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
+_INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_DEVICE_FILENAME = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\s*\.|$)", re.IGNORECASE)
 _STOPWORDS = frozenset({
     "a", "as", "ao", "aos", "de", "da", "das", "do", "dos", "e", "em", "eu",
     "hoje", "nos", "o", "os", "para", "por", "que", "sobre", "um", "uma", "vamos",
     "agora", "aqui", "bom", "boa", "dia", "entao", "gente", "pessoal", "the", "a",
     "an", "and", "for", "from", "in", "of", "on", "that", "this", "to", "we",
 })
+
+
+def safe_filename_stem(title, fallback="recording"):
+    """Keep a display title in one portable filename component."""
+    stem = _INVALID_FILENAME.sub("-", str(title)).strip(" .-")[:120].rstrip(" .-")
+    if _DEVICE_FILENAME.match(stem):
+        stem = "_" + stem[:119]
+    return stem or fallback
 
 
 def initial_recording_title(title, timestamp=None):
@@ -94,4 +104,4 @@ def _display_word(word):
     return word if word.isupper() else word[:1].upper() + word[1:]
 
 
-__all__ = ["initial_recording_title", "refine_recording_title"]
+__all__ = ["initial_recording_title", "refine_recording_title", "safe_filename_stem"]
