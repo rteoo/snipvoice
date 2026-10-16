@@ -18,6 +18,9 @@ on:
       - "source/native/**"
       - "source/clean_ffmpeg_runtime.py"
       - "source/voice_runtime_probe.py"
+      - "source/voice_activity.py"
+      - "source/voice_activity_model.py"
+      - "source/meeting_audio_probe.py"
       - "source/summary_runtime_probe.py"
       - "source/embedding_runtime_probe.py"
       - "source/embedding_runtime_worker.py"
@@ -115,7 +118,7 @@ jobs:
           $env:PATH = "$pythonDirectory;$env:SystemRoot\System32;$env:SystemRoot"
           & $python -c "from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime; verify_clean_ffmpeg_runtime()"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests -v
+          & $python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests tests.test_mp3_workflow -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Probe Silero VAD asset and ONNX Runtime
@@ -236,7 +239,7 @@ jobs:
           test "${#wheel[@]}" -eq 1
           python -m pip install --no-index "${wheel[0]}"
           DYLD_LIBRARY_PATH= PYTHONPATH=source python -c "from clean_ffmpeg_runtime import verify_clean_ffmpeg_runtime; verify_clean_ffmpeg_runtime()"
-          DYLD_LIBRARY_PATH= PYTHONPATH=source python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests -v
+          DYLD_LIBRARY_PATH= PYTHONPATH=source python -m unittest tests.test_meeting_mp3.Mp3CodecIntegrationTests tests.test_mp3_workflow -v
 
       - name: Probe Silero VAD asset and ONNX Runtime
         run: |

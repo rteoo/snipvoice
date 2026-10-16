@@ -88,7 +88,10 @@ def fetch_voice_assets(output_dir: Path) -> tuple[Path, Path]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", type=Path, default=Path("build/voice-vad"))
+    parser.add_argument(
+        "--output-dir", type=Path,
+        default=Path(__file__).resolve().parents[1] / "build" / "voice-vad",
+    )
     args = parser.parse_args()
     model, license_path = fetch_voice_assets(args.output_dir)
     print(f"{model} sha256={_sha256(model)} bytes={model.stat().st_size}")

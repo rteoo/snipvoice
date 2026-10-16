@@ -53,8 +53,12 @@ To run from source with Python installed:
 git clone https://github.com/rteoo/snipvoice.git
 cd snipvoice\source
 python -m pip install -r requirements.txt -r requirements-voice.txt
+python ..\packaging\voice_activity_model.py
 python snipvoice.pyw
 ```
+
+The second command fetches the hash-pinned Silero speech detector into
+`build/voice-vad`; transcription refuses to run without it.
 
 Local summaries and semantic meeting search additionally require the
 [approved custom llama.cpp wheel](packaging/README.md#local-summary-and-embedding-runtime).

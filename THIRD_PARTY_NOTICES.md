@@ -15,6 +15,7 @@ The application depends on the following separately licensed projects:
 | Custom FFmpeg audio runtime | Shared native encoding of MP3 and decoding of MP3, AAC/M4A, FLAC, Ogg/Vorbis, Opus, WAV and related audio formats | LGPL-2.1-or-later; source, configuration, hashes, build evidence, and the exact license text are in `THIRD_PARTY_LICENSES/FFmpeg/` |
 | `transcribe-cpp` / `transcribe-cpp-native` | Optional local transcription runtime | [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) |
 | `llama-cpp-python` / `llama.cpp` | Built-in local summary and meeting-embedding inference | MIT; [llama-cpp-python](https://github.com/abetlen/llama-cpp-python), [llama.cpp](https://github.com/ggml-org/llama.cpp); native license and source/build identities are bundled in `llama_cpp/native-LICENSE.txt` and `llama_cpp/snipvoice-native.json` |
+| `onnxruntime` (with `protobuf` and `flatbuffers`) | CPU inference for local speech-activity detection | MIT; [ONNX Runtime](https://github.com/microsoft/onnxruntime); license and third-party notices are bundled in `onnxruntime/LICENSE` and `onnxruntime/ThirdPartyNotices.txt`; [protobuf](https://github.com/protocolbuffers/protobuf) BSD-3-Clause, [flatbuffers](https://github.com/google/flatbuffers) Apache-2.0 |
 | Silero VAD 6.2.2 | Local speech-activity detection | MIT; [source](https://github.com/snakers4/silero-vad/tree/v6.2.2), exact license text bundled beside `voice-vad/silero-vad.onnx` |
 
 The PyAV release wheel is built from hash-pinned source against Snipvoice's
