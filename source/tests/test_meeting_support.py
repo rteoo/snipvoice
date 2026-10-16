@@ -279,6 +279,27 @@ class MeetingControllerTests(unittest.TestCase):
         finally:
             controller._processing = False
 
+    def test_saved_audio_download_is_admitted_during_automatic_postprocessing(self):
+        controller, _store, session, previous, _payload = self._quiet_recording()
+        controller._state = "postprocessing"
+        controller._processing = True
+        controller._audio_export_progress = {"session_id": session, "stage": "completed", "percent": 100}
+        target = Path(self.temp.name) / "during-postprocessing.wav"
+        try:
+            self.assertEqual(controller.export_final_audio(session, target), str(target.absolute()))
+            self.assertEqual(target.read_bytes(), previous.read_bytes())
+            self.assertEqual(controller._state, "postprocessing")
+            controller._audio_export_progress = {"session_id": session, "stage": "encoding", "percent": 10}
+            with self.assertRaises(RuntimeError):
+                controller.export_final_audio(session, target)
+            controller._state = "recording"
+            controller._audio_export_progress = {}
+            with self.assertRaises(RuntimeError):
+                controller.export_final_audio(session, target)
+        finally:
+            controller._state = "idle"
+            controller._processing = False
+
     def test_final_copy_lease_blocks_mutation_and_shutdown_waits_for_copy(self):
         controller, _store, session, previous, _payload = self._quiet_recording()
         target = Path(self.temp.name) / "leased-copy.wav"

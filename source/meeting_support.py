@@ -1662,7 +1662,11 @@ class MeetingController:
         # A saved-file copy can overlap inference. Its own lease protects it
         # from retention/shutdown without changing inference cancellation.
         with self._lock:
-            if (self._closed or self._retention_active or self._state != "idle"
+            # Automatic post-recording work never rewrites a saved MP3 except
+            # through _export_audio, which publishes "preparing" and then
+            # waits for this lease, so copies may overlap it like manual work.
+            if (self._closed or self._retention_active
+                    or self._state not in {"idle", "postprocessing"}
                     or self._playback_active or (self._play_thread and self._play_thread.is_alive())
                     or self._final_copy_active):
                 raise RuntimeError(tr("Aguarde a gravação, reprodução ou outra cópia terminar."))
