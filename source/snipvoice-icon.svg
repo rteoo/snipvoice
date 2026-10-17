@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-labelledby="title desc">
+  <title id="title">SnipVoice</title>
+  <desc id="desc">A microphone between sound-wave bars with an orange recording dot on a rounded navy tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000080"/>
+      <stop offset="0.5" stop-color="#000066"/>
+      <stop offset="1" stop-color="#000033"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="glyph" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#F7F6F2"/>
+      <stop offset="1" stop-color="#AAB0FF"/>
+    </linearGradient>
+    <radialGradient id="halo">
+      <stop offset="0" stop-color="#FF8C00" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FF8C00" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tile-clip">
+      <rect x="64" y="64" width="896" height="896" rx="200"/>
+    </clipPath>
+  </defs>
+
+  <!-- Tile: navy-500 to navy-900, lit from above, with a navy-400 rim. -->
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#tile)"/>
+  <rect x="64" y="64" width="896" height="380" fill="url(#sheen)" clip-path="url(#tile-clip)"/>
+  <rect x="68" y="68" width="888" height="888" rx="196" fill="none" stroke="#7D86FF" stroke-opacity="0.35" stroke-width="8"/>
+
+  <!-- Sound: waveform bars either side of the microphone. -->
+  <path d="M196 468 V556 M268 410 V614 M756 410 V614 M828 468 V556" fill="none" stroke="#EEEEFF" stroke-opacity="0.9" stroke-width="44" stroke-linecap="round"/>
+  <!-- Microphone: capsule, cradle, stem and base. -->
+  <rect x="424" y="232" width="176" height="356" rx="88" fill="url(#glyph)"/>
+  <path d="M352 492 Q352 676 512 676 Q672 676 672 492 M512 676 V772 M416 784 H608" fill="none" stroke="url(#glyph)" stroke-width="56" stroke-linecap="round"/>
+  <!-- Recording: the one orange accent. -->
+  <circle cx="776" cy="252" r="120" fill="url(#halo)"/>
+  <circle cx="776" cy="252" r="56" fill="#FF8C00"/>
+</svg>
