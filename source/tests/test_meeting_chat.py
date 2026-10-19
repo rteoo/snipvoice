@@ -132,11 +132,15 @@ class MeetingChatTests(unittest.TestCase):
         self.assertGreater(self.chat._message_widgets[0][0].winfo_height(), 0)
         self.assertGreater(self.chat._message_widgets[1][0].winfo_height(), 0)
         self.assertLessEqual(self.chat._message_widgets[1][0].cget("width"), self.chat.canvas.winfo_width())
-        for message, _inset in self.chat._message_widgets[:2]:
+        for message, inset in self.chat._message_widgets[:2]:
+            # A full wrapped line plus its padding fits the space the turn
+            # leaves it, and the message gets everything it asks for. (A line
+            # of wide glyphs can wrap short of the configured width.)
             self.assertLessEqual(
                 int(message.cget("width")) + 2 * self.theme.space_sm,
-                message.winfo_width(),
+                message.master.winfo_width() - inset,
             )
+            self.assertLessEqual(message.winfo_reqwidth(), message.winfo_width())
         self.assertLessEqual(
             self.chat.send_button.winfo_rootx() + self.chat.send_button.winfo_width(),
             self.chat.winfo_rootx() + self.chat.winfo_width(),

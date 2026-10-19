@@ -348,12 +348,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 + widget.winfo_height()
                 for name, widget in actions.items()
                 if name in expected
-            }, {name: int(widget.cget("pady")) for name, widget in actions.items()
+            }, {name: widget.winfo_reqheight() for name, widget in actions.items()
                 if name in expected}
             root.destroy()
             return result
 
-        available_height, action_bottoms, action_padding = self._on_gui(measure)
+        available_height, action_bottoms, action_heights = self._on_gui(measure)
         self.assertGreater(available_height, 1)
         for name, bottom in action_bottoms.items():
             self.assertLessEqual(
@@ -362,8 +362,10 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 f"{name!r} is clipped below the voice tab",
             )
         if not IS_MAC:
-            for name, padding in action_padding.items():
-                self.assertGreaterEqual(padding, 6, f"{name!r} is too thin")
+            # Compact density: at least 32px, and one height for the whole row.
+            for name, height in action_heights.items():
+                self.assertGreaterEqual(height, 32, f"{name!r} is too thin")
+            self.assertEqual(len(set(action_heights.values())), 1, action_heights)
 
     def test_voice_tab_refresh_updates_install_labels_and_normalized_settings(self):
         voice = mock.Mock()

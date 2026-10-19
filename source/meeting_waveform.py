@@ -276,11 +276,11 @@ class MeetingWaveform(tk.Canvas):
             self._destroyed = True
 
     def _wave_color(self, track):
-        if self._state == "paused":
-            return self.ui.warning
-        if self._state == "idle":
-            return self.ui.text_muted
-        return self.ui.accent if track == "microphone" else self.ui.success
+        # Chart roles: the microphone is the primary series, the system the
+        # comparison; a paused or idle signal is context.
+        if self._state in {"paused", "idle"}:
+            return self.ui.chart_neutral
+        return self.ui.chart_primary if track == "microphone" else self.ui.chart_secondary
 
     def _redraw(self):
         self._redraw_pending = False
@@ -307,7 +307,7 @@ class MeetingWaveform(tk.Canvas):
             self.create_text(
                 margin_x, lane_top - label_height / 2.0,
                 text=tr(self.track_labels.get(track, track)), anchor="w",
-                fill=self.ui.text, font=self.ui.font(9, "bold"), tags=("labels",),
+                fill=self.ui.text, font=self.ui.body_strong(), tags=("labels",),
             )
             points = self.model.geometry(track, lane_width, lane_height, x=margin_x, y=lane_top)
             if points:
@@ -318,7 +318,7 @@ class MeetingWaveform(tk.Canvas):
                 )
         self.create_text(
             width - margin_x, 8, text=self.status_text, anchor="ne",
-            fill=self.ui.text_muted, font=self.ui.font(8), tags=("status",),
+            fill=self.ui.text_muted, font=self.ui.caption(), tags=("status",),
         )
 
     def _on_destroy(self, event):

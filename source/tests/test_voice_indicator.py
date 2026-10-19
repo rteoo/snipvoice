@@ -7,7 +7,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from voice_indicator import VISIBLE_STATES, indicator_content, indicator_subtitle, meeting_indicator_content
+import ui_theme
+from voice_indicator import (
+    OVERLAY_TONES, VISIBLE_STATES, indicator_content, indicator_subtitle, meeting_indicator_content,
+)
 
 
 MAIN_TK_AVAILABLE = (
@@ -26,9 +29,9 @@ class VoiceIndicatorContentTests(unittest.TestCase):
                 self.assertIsNotNone(indicator_content(state))
 
     def test_recording_explains_release_and_cancel(self):
-        title, accent = indicator_content("recording", "dictation")
+        title, tone = indicator_content("recording", "dictation")
         self.assertEqual(title, "Ouvindo")
-        self.assertEqual(accent, "warning")
+        self.assertEqual(tone, "live")
         self.assertIn("Solte para transcrever", indicator_subtitle("recording", "dictation"))
         self.assertIn("Esc cancela", indicator_subtitle("recording", "dictation"))
 
@@ -59,6 +62,28 @@ class VoiceIndicatorContentTests(unittest.TestCase):
                                                    "error": "device gap"})[1], "Verifique a gravação")
         self.assertIsNone(meeting_indicator_content({"state": "idle", "last_status": "completed"}))
         self.assertIsNone(meeting_indicator_content({"state": "idle"}))
+
+    def test_live_capture_is_copper_and_only_trouble_is_red(self):
+        self.assertEqual(indicator_content("recording", "command")[1], "live")
+        self.assertEqual(indicator_content("transcribing")[1], "busy")
+        self.assertEqual(indicator_content("routing")[1], "ok")
+        self.assertEqual(meeting_indicator_content({"state": "recording"})[2], "live")
+        self.assertEqual(meeting_indicator_content({"state": "paused"})[2], "muted")
+        self.assertEqual(meeting_indicator_content({"state": "postprocessing"})[2], "busy")
+        for snapshot in ({"state": "idle", "last_status": "interrupted"},
+                         {"state": "idle", "last_status": "failed"},
+                         {"state": "unavailable"},
+                         {"state": "idle", "error": "device gap"}):
+            self.assertEqual(meeting_indicator_content(snapshot)[2], "trouble", snapshot)
+
+    def test_every_tone_is_a_fixed_dark_overlay_token(self):
+        light = ui_theme.build_theme("windows", system="windows")
+        dark = ui_theme.build_theme("dark", system="windows")
+        self.assertEqual(OVERLAY_TONES, {"live", "busy", "ok", "trouble", "muted"})
+        for tone in OVERLAY_TONES:
+            self.assertEqual(getattr(light, f"overlay_{tone}"), getattr(dark, f"overlay_{tone}"))
+        self.assertEqual(dark.overlay_live, dark.accent)
+        self.assertEqual(dark.overlay_trouble, dark.danger)
 
     def test_meeting_starting_and_saving_do_not_claim_active_capture(self):
         for state in ("starting", "stopping", "postprocessing"):
@@ -92,10 +117,19 @@ class MacVoiceIndicatorRoutingTests(unittest.TestCase):
             indicator.hide()
             indicator.destroy()
 
-        panel.update.assert_called_once_with("Ouvindo", "warning")
+        panel.update.assert_called_once_with("Ouvindo", "live")
         panel.hide.assert_called_once_with()
         panel.destroy.assert_called_once_with()
         self.assertIsNone(indicator.window)
+
+    def test_an_unknown_tone_fails_loudly(self):
+        from voice_indicator import VoiceStatusIndicator
+
+        with mock.patch("voice_indicator.current_os", return_value="darwin"), \
+                mock.patch("voice_indicator.MacVoiceStatusPanel"):
+            indicator = VoiceStatusIndicator(mock.Mock())
+            with self.assertRaises(ValueError):
+                indicator._present("recording", "Ouvindo", "warning", "")
 
 
 @unittest.skipUnless(MAIN_TK_AVAILABLE, "Tk display not available")

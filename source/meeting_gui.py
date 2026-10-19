@@ -448,19 +448,18 @@ class SectionSwitcher:
     def add(self, key, title):
         bg = self.nav.cget("background")
         item = tk.Frame(self.nav, bg=bg)
-        marker = tk.Frame(item, bg=bg, width=3, height=2)
-        chrome = self.ui.button_chrome(compact=True)
-        if chrome:
-            # Keep the keyboard focus ring, but no idle border around each item.
-            chrome["highlightbackground"] = bg
+        # Windows selection indicator: a 3x16 pill beside a vertical item, a
+        # 2px underline below a horizontal one. No selection plane, no copper text.
+        marker = tk.Frame(item, bg=bg, width=3, height=16 if self.vertical else 2)
         button = tk.Button(
-            item, text=title, font=self.ui.font(9), command=lambda: self.select(key),
+            item, text=title, font=self.ui.body(), command=lambda: self.select(key),
             anchor="w" if self.vertical else "center",
-            **self.ui.nav_button_colors(bg), **chrome,
+            **self.ui.nav_button_colors(bg), **self.ui.button_chrome(compact=True, ring=False),
         )
+        ui_theme.focus_ring(button, self.ui)
         if self.vertical:
             item.pack(side="top", fill="x", pady=1)
-            marker.pack(side="left", fill="y")
+            marker.pack(side="left")
             button.pack(side="left", fill="x", expand=True)
         else:
             item.pack(side="left")
@@ -480,14 +479,12 @@ class SectionSwitcher:
         bg = self.nav.cget("background")
         if self.current is not None:
             self.frames[self.current].pack_forget()
-            self.buttons[self.current].configure(
-                font=self.ui.font(9), **self.ui.nav_button_colors(bg))
+            self.buttons[self.current].configure(font=self.ui.body())
             self.markers[self.current].configure(bg=bg)
         self.current = key
         self.frames[key].pack(fill="both", expand=True)
-        self.buttons[key].configure(
-            font=self.ui.font(9, "bold"), **self.ui.nav_button_colors(bg, selected=True))
-        self.markers[key].configure(bg=self.ui.accent)
+        self.buttons[key].configure(font=self.ui.body_strong())
+        self.markers[key].configure(bg=self.ui.accent_mark)
         if self.on_select is not None:
             self.on_select(key)
 
@@ -659,7 +656,9 @@ class MeetingWindow:
             if variable.get():
                 hint.place_forget()
             else:
-                hint.place(x=4, rely=0.5, anchor="w")
+                # Align with the entry text, inside its border and focus ring.
+                inset = int(entry.cget("borderwidth")) + int(entry.cget("highlightthickness"))
+                hint.place(x=inset, rely=0.5, anchor="w")
 
         variable.trace_add("write", refresh)
         refresh()
@@ -749,13 +748,13 @@ class MeetingWindow:
         self.search()
 
     def _button(self, parent, text, command, accent=False, danger=False):
-        return tk.Button(parent, text=text, command=command, font=self.ui.font(),
-                         **self.ui.button_colors(accent=accent, danger=danger),
-                         **self.ui.button_chrome(compact=True))
+        variant = "danger" if danger else "primary" if accent else "neutral"
+        return ui_theme.button(parent, text, command, variant, resolved=self.ui)
 
     def _entry(self, parent, variable, width=30):
-        return tk.Entry(parent, textvariable=variable, width=width, font=self.ui.font(),
-                        **self.ui.entry_colors(), **self.ui.entry_chrome())
+        entry = tk.Entry(parent, textvariable=variable, width=width, font=self.ui.body(),
+                         **self.ui.entry_colors(), **self.ui.entry_chrome())
+        return ui_theme.focus_ring(entry, self.ui, shrink=("bd",))
 
     def _card(self, parent, **kwargs):
         kwargs.setdefault("padx", self.ui.space_lg)
@@ -847,41 +846,10 @@ class MeetingWindow:
     def _build(self):
         style = ttk.Style(self.window)
         ui_theme.apply_ttk_theme(style, resolved=self.ui)
+        # Playback.Horizontal.TScale and Meeting.Treeview take their look from
+        # the shared manager styles.
         ui_theme.configure_manager_styles(style, self.ui)
-        style.configure(
-            "Playback.Horizontal.TScale",
-            background=self.ui.card,
-            troughcolor=self.ui.field,
-            bordercolor=self.ui.border,
-            lightcolor=self.ui.accent,
-            darkcolor=self.ui.accent,
-        )
         style.configure("Meeting.TFrame", background=self.ui.surface)
-        style.configure(
-            "Meeting.Treeview",
-            background=self.ui.card,
-            fieldbackground=self.ui.card,
-            foreground=self.ui.text,
-            rowheight=self.ui.tree_row_height,
-            font=self.ui.font(),
-            borderwidth=0,
-            bordercolor=self.ui.border,
-            lightcolor=self.ui.card,
-            darkcolor=self.ui.card,
-        )
-        style.map(
-            "Meeting.Treeview",
-            background=[("selected", self.ui.select_bg)],
-            foreground=[("selected", self.ui.select_fg)],
-        )
-        style.configure(
-            "Meeting.Treeview.Heading",
-            background=self.ui.surface_alt,
-            foreground=self.ui.text_strong,
-            font=self.ui.font(9, "bold"),
-            padding=(8, 8),
-            relief="flat",
-        )
         notebook = self.notebook
         if notebook is None:
             notebook = ttk.Notebook(self.window, style="Manager.TNotebook")
@@ -964,10 +932,10 @@ class MeetingWindow:
             summary, tr("Modelos de resumo de texto"),
             font=self.ui.font(11, "bold"), fg=self.ui.text_strong,
         ).pack(anchor="w", pady=(0, self.ui.space_xs))
-        self._label(
+        self._wrap_label(
             summary,
             tr("Baixe e escolha um modelo compacto para resumir sem enviar conteúdo à nuvem."),
-            anchor="w", justify="left", wraplength=900, fg=self.ui.text_muted,
+            anchor="w", justify="left", fg=self.ui.text_muted,
         ).pack(fill="x", pady=(0, self.ui.space_sm))
         self.record_title = tk.StringVar(self.window)
         self.input_enabled = tk.BooleanVar(self.window, self.settings.input_enabled)
@@ -991,11 +959,10 @@ class MeetingWindow:
             defaults, tr("Padrões de gravação"), bg=self.ui.card,
             fg=self.ui.text_strong, font=self.ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w")
-        self._label(
+        self._wrap_label(
             defaults,
             tr("Escolha os modelos, o idioma e o atalho usados em novas gravações."),
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-            wraplength=860,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
         self.profile_box = ttk.Combobox(
             defaults, textvariable=self.profile_display,
@@ -1170,7 +1137,12 @@ class MeetingWindow:
                 row=row, column=0, sticky="w", padx=(0, 18),
                 pady=3 if compact_recording else 6,
             )
-            meter = ttk.Progressbar(monitor, maximum=1.0)
+            # The same series colors as the waveform lanes above.
+            meter = ttk.Progressbar(
+                monitor, maximum=1.0,
+                style="Horizontal.TProgressbar" if track == "microphone"
+                else "Secondary.Horizontal.TProgressbar",
+            )
             meter.grid(row=row, column=1, sticky="ew")
             self.meters[track] = meter
         # Clock and transport sit under the signal they start: check that
@@ -1227,8 +1199,8 @@ class MeetingWindow:
                         f'{entry["license_id"]}', anchor="w",
                         bg=self.ui.card, fg=self.ui.text_strong,
                         font=self.ui.font(weight="bold")).pack(fill="x")
-            self._label(copy, tr(entry["description"]), anchor="w", wraplength=720,
-                        bg=self.ui.card, fg=self.ui.text_muted).pack(
+            self._wrap_label(copy, tr(entry["description"]), anchor="w", justify="left",
+                             bg=self.ui.card, fg=self.ui.text_muted).pack(
                             fill="x", pady=(2 if compact else 4, 0))
             button = self._button(row, "", lambda model_id=entry["id"]: self.toggle_summary_model(model_id))
             button.pack(side="right", anchor="n")
@@ -1237,8 +1209,8 @@ class MeetingWindow:
         actions.pack(fill="x", pady=(12 if compact else 18, 0))
         self._button(actions, tr("Cancelar download"), self.cancel_summary_download).pack(side="left")
         self.summary_model_status = tk.StringVar(self.window)
-        self._label(parent, "", textvariable=self.summary_model_status, anchor="w",
-                    wraplength=900).pack(fill="x", pady=12)
+        self._wrap_label(parent, "", textvariable=self.summary_model_status, anchor="w",
+                         justify="left").pack(fill="x", pady=12)
         self._refresh_summary_models()
 
     def _summary_display_changed(self, _event=None):
@@ -1353,7 +1325,8 @@ class MeetingWindow:
         self._label(cross_frame, "", textvariable=self.cross_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
         self.cross_answer = tk.Text(cross_frame, height=3, wrap="word", font=self.ui.font(),
-                                    **self.ui.text_colors())
+                                    **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True))
+        ui_theme.focus_ring(self.cross_answer, self.ui, shrink=("bd",))
         self.cross_answer.pack(fill="x", pady=(4, 0))
         self.cross_answer.configure(state="disabled")
         cross_citation_row = tk.Frame(cross_frame, bg=self.ui.card)
@@ -1361,7 +1334,9 @@ class MeetingWindow:
         self._label(cross_citation_row, tr("Citações"), bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
         self.cross_citations = tk.Listbox(cross_citation_row, height=2, width=10,
-                                          font=self.ui.font(), **self.ui.listbox_colors())
+                                          font=self.ui.font(), **self.ui.listbox_colors(),
+                                          **self.ui.entry_chrome())
+        ui_theme.focus_ring(self.cross_citations, self.ui, shrink=("bd",))
         self.cross_citations.pack(side="left", fill="x", expand=True)
         self.cross_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_cross_citation())
         self._button(cross_citation_row, tr("Ir à fonte"), self.jump_to_cross_citation).pack(side="left", padx=(6, 0))
@@ -1389,9 +1364,12 @@ class MeetingWindow:
 
         def place_sash(event):
             # The first layout splits by requested widths, which left the
-            # list wider than the recording it opens; start at about a third.
+            # list wider than the recording it opens; start at about a third,
+            # never narrower than the list's toolbar, and never so wide that
+            # the selected recording's controls are clipped.
             if event.width > 100 and len(panes.panes()) > 1:
-                panes.sashpos(0, max(360, int(event.width * 0.36)))
+                sash = max(left.winfo_reqwidth(), int(event.width * 0.36))
+                panes.sashpos(0, min(sash, event.width - right_outer.winfo_reqwidth()))
                 panes.unbind("<Configure>")
 
         panes.bind("<Configure>", place_sash)
@@ -1399,7 +1377,7 @@ class MeetingWindow:
         # Search and library actions sit above the list they act on, so the
         # selected recording gets the pane's full height. The cross-meeting
         # question and maintenance tools open on demand above both panes.
-        toolbar = self._card(left, pady=self.ui.space_sm, padx=self.ui.space_md)
+        toolbar = self._card(left, pady=self.ui.space_sm, padx=self.ui.space_sm)
         toolbar.pack(fill="x", pady=(0, self.ui.space_sm))
         search_row = tk.Frame(toolbar, bg=self.ui.card)
         search_row.pack(fill="x")
@@ -1595,7 +1573,7 @@ class MeetingWindow:
         self.transcript_style = tk.StringVar(self.window, tr("Texto completo"))
         self.transcript_style_box = ttk.Combobox(
             format_row, textvariable=self.transcript_style, values=[tr(label) for label in TRANSCRIPT_STYLES],
-            state="readonly", width=17,
+            state="readonly", width=14,
         )
         self.transcript_style_box.pack(side="left")
         self.transcript_style_box.bind("<<ComboboxSelected>>", self._transcript_style_changed)
@@ -1614,8 +1592,9 @@ class MeetingWindow:
         self.transcript_document = tk.Text(
             self.transcript_document_frame, height=8, wrap="word", font=self.ui.font(),
             padx=self.ui.space_md, pady=self.ui.space_md, spacing3=self.ui.space_sm,
-            **self.ui.text_colors(),
+            **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True),
         )
+        ui_theme.focus_ring(self.transcript_document, self.ui, shrink=("bd",))
         # Scrollbar first: pack serves requests in order, and the text's
         # 80-column request would otherwise squeeze it out of a narrow pane.
         document_scroll = ttk.Scrollbar(
@@ -1668,7 +1647,8 @@ class MeetingWindow:
             fg=self.ui.text_muted,
         ).pack(side="left")
         self.segment_text = tk.Text(self.timed_transcript, height=3, wrap="word", font=self.ui.font(),
-                                    **self.ui.text_colors())
+                                    **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True))
+        ui_theme.focus_ring(self.segment_text, self.ui, shrink=("bd",))
         self.segment_text.pack(fill="x", padx=(12, 0), pady=4)
         self.segment_text.configure(state="disabled")
         self.segments = {}
@@ -1703,8 +1683,9 @@ class MeetingWindow:
                     anchor="w").pack(fill="x")
         self.summary_focus = tk.Text(
             self.summary_focus_panel, height=2, wrap="word", font=self.ui.font(),
-            **self.ui.text_colors(),
+            **self.ui.text_colors(), **self.ui.entry_chrome(),
         )
+        ui_theme.focus_ring(self.summary_focus, self.ui, shrink=("bd",))
         self.summary_focus.pack(fill="x", pady=(2, 2))
         self._wrap_label(
             self.summary_focus_panel, tr("Ex.: priorize próximos passos e dúvidas que precisam de decisão."),
@@ -1731,7 +1712,8 @@ class MeetingWindow:
         self.summary = tk.Text(summary_body, height=12, wrap="word", font=self.ui.font(),
                                padx=self.ui.space_sm, pady=self.ui.space_sm,
                                spacing3=self.ui.space_sm,
-                               **self.ui.text_colors())
+                               **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True))
+        ui_theme.focus_ring(self.summary, self.ui, shrink=("bd",))
         summary_scroll = ttk.Scrollbar(summary_body, orient="vertical", command=self.summary.yview)
         summary_scroll.pack(side="right", fill="y")
         self.summary.pack(side="left", fill="both", expand=True)
@@ -1796,14 +1778,17 @@ class MeetingWindow:
         self._wrap_label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
                          fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=2)
         self.report_editor = tk.Text(report_frame, height=6, wrap="word", font=self.ui.font(),
-                                     **self.ui.text_colors())
+                                     **self.ui.text_colors(), **self.ui.entry_chrome())
+        ui_theme.focus_ring(self.report_editor, self.ui, shrink=("bd",))
         self.report_editor.pack(fill="x", pady=(4, 2))
         report_actions = tk.Frame(report_frame, bg=self.ui.card)
         report_actions.pack(fill="x", pady=2)
         self._button(report_actions, tr("Salvar revisão"), self.save_report_review, accent=True).pack(side="left")
         self._label(report_actions, tr("Citações"), bg=self.ui.card, fg=self.ui.text_muted).pack(side="left", padx=(12, 4))
         self.report_citations = tk.Listbox(report_actions, height=2, width=10,
-                                           font=self.ui.font(), **self.ui.listbox_colors())
+                                           font=self.ui.font(), **self.ui.listbox_colors(),
+                                           **self.ui.entry_chrome())
+        ui_theme.focus_ring(self.report_citations, self.ui, shrink=("bd",))
         self.report_citations.pack(side="left", fill="x", expand=True)
         self.report_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_report_citation())
         self._button(report_actions, tr("Ir à fonte"), self.jump_to_report_citation).pack(side="left", padx=(6, 0))
@@ -1990,9 +1975,9 @@ class MeetingWindow:
             card, spec["title"], bg=self.ui.card, fg=self.ui.text_strong,
             font=self.ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=3, sticky="w")
-        self._label(
+        self._wrap_label(
             card, spec["description"], bg=self.ui.card, fg=self.ui.text_muted,
-            anchor="w", justify="left", wraplength=760,
+            anchor="w", justify="left",
         ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
         display = tk.StringVar(self.window, info["path"])
         entry = self._entry(card, display)
@@ -2062,12 +2047,11 @@ class MeetingWindow:
             card, tr("Idioma"), bg=self.ui.card, fg=self.ui.text_strong,
             font=self.ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=3, sticky="w")
-        self._label(
+        self._wrap_label(
             card,
             tr("Idioma dos menus, botões e mensagens do SnipVoice. A mudança reconstrói "
                "esta janela sem reiniciar o aplicativo."),
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-            wraplength=760,
         ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
         # Language names stay in their own language so either one is findable.
         self.interface_language_display = tk.StringVar(
@@ -2128,7 +2112,7 @@ class MeetingWindow:
             fg=self.ui.text_strong,
             font=self.ui.font(11, "bold"),
         ).grid(row=0, column=0, columnspan=3, sticky="w")
-        self._label(
+        self._wrap_label(
             card,
             tr("Use o tema do sistema ou escolha uma aparência fixa. A mudança reconstrói "
                "esta janela sem reiniciar o SnipVoice."),
@@ -2136,7 +2120,6 @@ class MeetingWindow:
             fg=self.ui.text_muted,
             anchor="w",
             justify="left",
-            wraplength=760,
         ).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(self.ui.space_xs, self.ui.space_sm))
         preference = ui_theme.normalize_preference(
             getattr(self.ui, "preference", None),
@@ -3508,7 +3491,8 @@ class MeetingWindow:
                     fg=self.ui.text_muted, wraplength=560, justify="left", anchor="w").pack(
                     fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
         notice_box = tk.Text(dialog, height=8, width=72, wrap="word", font=self.ui.font(),
-                             **self.ui.text_colors())
+                             **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True))
+        ui_theme.focus_ring(notice_box, self.ui, shrink=("bd",))
         notice_box.pack(fill="both", expand=True, padx=self.ui.space_lg)
         notice_box.insert("1.0", notice)
         notice_box.configure(state="normal")

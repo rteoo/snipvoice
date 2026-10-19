@@ -6,6 +6,8 @@ with the non-activating style is the supported Cocoa surface for an overlay
 that must leave the dictation target frontmost.
 """
 
+import ui_theme
+
 
 def nonactivating_panel_style(appkit):
     """Return the two load-bearing style bits for the native overlay."""
@@ -101,9 +103,9 @@ class MacVoiceStatusPanel:
         self.dot = dot
         self.title = title
 
-    def update(self, title, accent_name):
+    def update(self, title, tone):
         self.title.setStringValue_(title)
-        self.dot.setTextColor_(self._accent_color(accent_name))
+        self.dot.setTextColor_(self._tone_color(tone))
         self._position()
         return order_panel_without_activation(self._appkit, self.panel)
 
@@ -117,12 +119,19 @@ class MacVoiceStatusPanel:
     def is_visible(self):
         return bool(self.panel.isVisible())
 
-    def _accent_color(self, name):
-        if name == "warning":
-            return self._appkit.NSColor.systemOrangeColor()
-        if name == "success":
-            return self._appkit.NSColor.systemGreenColor()
-        return self._appkit.NSColor.controlAccentColor()
+    def _tone_color(self, tone):
+        """The status dot: Ink & Copper for live capture, system colors otherwise."""
+        colors = self._appkit.NSColor
+        if tone == "live":
+            red, green, blue = ui_theme.rgb(ui_theme.theme().overlay_live)
+            return colors.colorWithSRGBRed_green_blue_alpha_(red, green, blue, 1.0)
+        if tone == "ok":
+            return colors.systemGreenColor()
+        if tone == "trouble":
+            return colors.systemRedColor()
+        if tone == "muted":
+            return colors.systemGrayColor()
+        return colors.controlAccentColor()
 
     def _position(self):
         screen = self._appkit.NSScreen.mainScreen()

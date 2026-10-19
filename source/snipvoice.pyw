@@ -424,15 +424,15 @@ class Snipvoice:
         tk.Label(
             privacy,
             text=tr("100% local"),
-            font=ui.font(8, "bold"),
+            font=ui.caption(),
             bg=ui.surface_alt,
-            fg=ui.success,
+            fg=ui.text_muted,
             anchor="w",
         ).pack(fill=tk.X)
         tk.Label(
             privacy,
             text=tr("sem upload automático"),
-            font=ui.font(8),
+            font=ui.caption(),
             bg=ui.surface_alt,
             fg=ui.text_muted,
             anchor="w",
@@ -529,29 +529,27 @@ class Snipvoice:
         for tab_id in notebook.tabs():
             item = tk.Frame(nav, bg=bg)
             item.pack(fill=tk.X, pady=1)
-            marker = tk.Frame(item, bg=bg, width=3)
-            marker.pack(side=tk.LEFT, fill=tk.Y)
-            chrome = ui.button_chrome(compact=True)
-            if chrome:
-                # Keep the keyboard focus ring, but no idle border around each item.
-                chrome["highlightbackground"] = bg
+            # Windows selection indicator: a 3x16 pill on the selection plane.
+            marker = tk.Frame(item, bg=bg, width=3, height=16)
+            marker.pack(side=tk.LEFT)
             button = tk.Button(
-                item, text=notebook.tab(tab_id, "text"), font=ui.font(10), anchor="w",
+                item, text=notebook.tab(tab_id, "text"), font=ui.body(), anchor="w",
                 command=lambda target=tab_id: notebook.select(target),
-                **ui.nav_button_colors(bg), **chrome,
+                **ui.nav_button_colors(bg), **ui.button_chrome(compact=True, ring=False),
             )
+            ui_theme.focus_ring(button, ui)
             button.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            items[str(tab_id)] = (button, marker)
+            items[str(tab_id)] = (item, button, marker)
 
         def highlight(_event=None):
             current = str(notebook.select())
-            for tab_id, (button, marker) in items.items():
+            for tab_id, (item, button, marker) in items.items():
                 selected = tab_id == current
-                button.configure(
-                    font=ui.font(10, "bold" if selected else None),
-                    **ui.nav_button_colors(bg, selected=selected),
-                )
-                marker.configure(bg=ui.accent if selected else bg)
+                colors = ui.nav_button_colors(bg, selected=selected)
+                plane = colors.get("bg", bg)
+                item.configure(bg=plane)
+                button.configure(font=ui.body_strong() if selected else ui.body(), **colors)
+                marker.configure(bg=ui.accent_mark if selected else plane)
 
         notebook.bind("<<NotebookTabChanged>>", highlight, add="+")
         highlight()
@@ -1103,12 +1101,8 @@ class Snipvoice:
         notice_text.insert("1.0", "\n\n".join(notices))
         notice_text.configure(state=tk.DISABLED)
 
-        tk.Button(
-            container,
-            text=tr("Fechar"),
-            width=ui.button_width(10),
-            command=dialog.destroy,
-            **ui.button_colors(),
+        ui_theme.button(
+            container, tr("Fechar"), dialog.destroy, width=ui.button_width(10), resolved=ui,
         ).grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -1146,7 +1140,9 @@ class Snipvoice:
             height=8,
             font=ui.mono_font(9),
             **ui.listbox_colors(),
+            **ui.entry_chrome(),
         )
+        ui_theme.focus_ring(listbox, ui, shrink=("bd",))
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
         listbox.configure(yscrollcommand=scrollbar.set)
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1225,12 +1221,7 @@ class Snipvoice:
             (tr("Editar"), edit_selected),
             (tr("Remover"), remove_entry),
         ):
-            tk.Button(
-                actions,
-                text=label,
-                command=command,
-                **ui.button_colors(),
-            ).pack(side=tk.LEFT, padx=(0, 6))
+            ui_theme.button(actions, label, command, resolved=ui).pack(side=tk.LEFT, padx=(0, 6))
 
         def save_and_close():
             checked = validate_replacements(replacements)
@@ -1251,18 +1242,10 @@ class Snipvoice:
             self.voice.settings.voice_replacements = checked
             dialog.destroy()
 
-        tk.Button(
-            actions,
-            text=tr("Salvar"),
-            command=save_and_close,
-            **ui.button_colors(accent=True),
-        ).pack(side=tk.RIGHT)
-        tk.Button(
-            actions,
-            text=tr("Cancelar"),
-            command=dialog.destroy,
-            **ui.button_colors(),
-        ).pack(side=tk.RIGHT, padx=(0, 6))
+        ui_theme.button(actions, tr("Salvar"), save_and_close, "primary",
+                        resolved=ui).pack(side=tk.RIGHT)
+        ui_theme.button(actions, tr("Cancelar"), dialog.destroy,
+                        resolved=ui).pack(side=tk.RIGHT, padx=(0, 6))
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
         redraw()
         center_on_screen(dialog)
@@ -1308,12 +1291,14 @@ class Snipvoice:
         empty_label.pack(anchor="w", pady=(ui.space_xs, ui.space_sm))
         tk.Label(container, text=tr("Frase falada"), bg=ui.surface, fg=ui.text,
                  font=ui.font()).pack(anchor="w")
-        phrase = tk.Entry(container, font=ui.font(), **ui.entry_colors(), **ui.entry_chrome())
+        phrase = tk.Entry(container, font=ui.body(), **ui.entry_colors(), **ui.entry_chrome())
+        ui_theme.focus_ring(phrase, ui, shrink=("bd",))
         phrase.pack(fill=tk.X, pady=(ui.space_xs, ui.space_sm))
         tk.Label(container, text=tr("Texto a inserir"), bg=ui.surface, fg=ui.text,
                  font=ui.font()).pack(anchor="w")
         text = tk.Text(container, height=5, wrap=tk.WORD, font=ui.font(),
-                       **ui.text_colors())
+                       **ui.text_colors(), **ui.entry_chrome())
+        ui_theme.focus_ring(text, ui, shrink=("bd",))
         text.pack(fill=tk.BOTH, expand=True, pady=(ui.space_xs, ui.space_sm))
 
         def redraw():
@@ -1375,8 +1360,7 @@ class Snipvoice:
         for label, callback in ((tr("Novo comando"), clear_form),
                                 (tr("Aplicar comando"), apply_command),
                                 (tr("Remover"), remove_command)):
-            button = tk.Button(actions, text=label, command=callback, font=ui.font(),
-                               **ui.button_colors(), **ui.button_chrome(compact=True))
+            button = ui_theme.button(actions, label, callback, resolved=ui)
             button.pack(side=tk.LEFT, padx=(0, ui.space_sm))
             controls.append(button)
 
@@ -1431,8 +1415,8 @@ class Snipvoice:
         footer.pack(fill=tk.X)
         for label, callback, accent in ((tr("Salvar comandos"), save, True),
                                          (tr("Cancelar"), close, False)):
-            button = tk.Button(footer, text=label, command=callback, font=ui.font(),
-                               **ui.button_colors(accent=accent), **ui.button_chrome())
+            button = ui_theme.button(footer, label, callback, "primary" if accent else "neutral",
+                                     resolved=ui)
             button.pack(side=tk.RIGHT, padx=(ui.space_sm, 0))
             controls.append(button)
         tree.bind("<<TreeviewSelect>>", selected)
@@ -1547,29 +1531,29 @@ class Snipvoice:
         for entry in visible:
             row = tk.Frame(models_card, bg=ui.card)
             row.pack(fill=tk.X, anchor="w", pady=ui.space_xs)
+            # The button is packed first so it keeps its size; the label
+            # requests no width and wraps at whatever the row leaves it.
+            download_button = ui_theme.button(
+                row, tr("Baixar"), lambda item=entry: download_model(item),
+                width=ui.button_width(10), resolved=ui,
+            )
+            download_button.pack(side=tk.RIGHT, padx=(8, 0))
+            download_buttons.append((download_button, entry))
             label = tk.Label(
                 row,
                 text=profile_label(entry),
                 anchor="w",
                 justify="left",
+                width=1,
                 wraplength=wrap - 110,
                 bg=ui.card,
                 fg=ui.text,
                 font=ui.font(9),
             )
+            label.bind("<Configure>", lambda event, item=label: item.configure(
+                wraplength=max(event.width, 120)))
             label.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor="w")
             profile_labels.append((label, entry))
-            download_button = tk.Button(
-                row,
-                text=tr("Baixar"),
-                width=ui.button_width(10),
-                command=lambda item=entry: download_model(item),
-                font=ui.font(),
-                **ui.button_colors(),
-                **ui.button_chrome(compact=True),
-            )
-            download_button.pack(side=tk.RIGHT, padx=(8, 0))
-            download_buttons.append((download_button, entry))
 
         def update_language_options(*_args):
             profile = selected.get()
@@ -1685,14 +1669,14 @@ class Snipvoice:
             fg=ui.text,
             font=ui.font(9),
         ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
-        tk.Entry(
+        ui_theme.focus_ring(tk.Entry(
             shortcut_frame,
             textvariable=hotkey,
-            font=ui.font(9),
+            font=ui.body(),
             width=28,
             **ui.entry_colors(),
             **ui.entry_chrome(),
-        ).grid(row=1, column=1, sticky="ew", pady=4)
+        ), ui, shrink=("bd",)).grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
             text=tr("Comando por voz:"),
@@ -1700,14 +1684,14 @@ class Snipvoice:
             fg=ui.text,
             font=ui.font(9),
         ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
-        tk.Entry(
+        ui_theme.focus_ring(tk.Entry(
             shortcut_frame,
             textvariable=command_hotkey,
-            font=ui.font(9),
+            font=ui.body(),
             width=28,
             **ui.entry_colors(),
             **ui.entry_chrome(),
-        ).grid(row=2, column=1, sticky="ew", pady=4)
+        ), ui, shrink=("bd",)).grid(row=2, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
             text=tr("Formato: ctrl+alt+space, ctrl+shift+f8, etc."),
@@ -1735,9 +1719,8 @@ class Snipvoice:
                  font=ui.font(11, "bold")).pack(side=tk.LEFT)
         commands_count = tk.Label(commands_card, bg=ui.card, fg=ui.text_muted, font=ui.font(9))
         commands_count.pack(side=tk.LEFT, padx=ui.space_sm)
-        tk.Button(commands_card, text=tr("Configurar comandos…"),
-                  command=lambda: self._show_voice_commands(owner), font=ui.font(),
-                  **ui.button_colors(), **ui.button_chrome(compact=True)).pack(side=tk.RIGHT)
+        ui_theme.button(commands_card, tr("Configurar comandos…"),
+                        lambda: self._show_voice_commands(owner), resolved=ui).pack(side=tk.RIGHT)
 
         def refresh_form():
             refresh_profile_labels()
@@ -1862,22 +1845,17 @@ class Snipvoice:
             self._refresh_manager_voice_tab()
 
         def action_button(text, command, accent=False):
-            return tk.Button(
-                buttons,
-                text=text,
-                command=command,
-                font=ui.font(),
-                **ui.button_colors(accent=accent),
-                **ui.button_chrome(),
-            )
+            return ui_theme.button(buttons, text, command, "primary" if accent else "neutral",
+                                   resolved=ui)
 
         buttons = tk.Frame(parent, bg=ui.surface)
         buttons.pack(fill=tk.X, pady=(ui.space_sm, 0))
         action_button(tr("Salvar e usar"), apply_voice_settings, accent=True).pack(side=tk.LEFT)
         more_button = tk.Menubutton(
-            buttons, text=tr("Mais opções ▾"), direction="below", font=ui.font(),
+            buttons, text=tr("Mais opções ▾"), direction="below", font=ui.body(),
             **ui.button_colors(), **ui.button_chrome(),
         )
+        ui_theme.focus_ring(more_button, ui)
         menu_colors = {}
         if ui.system != "darwin":
             menu_colors = {
@@ -2070,18 +2048,10 @@ class Snipvoice:
 
         actions = tk.Frame(outer, bg=ui.surface)
         actions.grid(row=2, column=0, sticky="w")
-        tk.Button(
-            actions,
-            text=tr("Tentar novamente"),
-            command=retry_selected,
-            **ui.button_colors(accent=True),
-        ).pack(side=tk.LEFT)
-        tk.Button(
-            actions,
-            text=tr("Copiar transcrição"),
-            command=copy_selected,
-            **ui.button_colors(),
-        ).pack(side=tk.LEFT, padx=(8, 0))
+        ui_theme.button(actions, tr("Tentar novamente"), retry_selected, "primary",
+                        resolved=ui).pack(side=tk.LEFT)
+        ui_theme.button(actions, tr("Copiar transcrição"), copy_selected,
+                        resolved=ui).pack(side=tk.LEFT, padx=(8, 0))
 
         refresh_rows()
         self._bind_mousewheel(tree, tree)

@@ -12,10 +12,10 @@ from platform_support import current_os
 
 VISIBLE_STATES = frozenset({"recording", "transcribing", "routing"})
 
-_OVERLAY_BG = "#18191C"
-_OVERLAY_BORDER = "#34363C"
-_OVERLAY_TEXT = "#F7F7F8"
-_OVERLAY_MUTED = "#A7A9AF"
+# Overlay tones, resolved through the fixed-dark ``overlay_*`` theme tokens:
+# live capture is copper, local work is the comparison blue, a finished
+# insertion is success green, and only trouble is red.
+OVERLAY_TONES = frozenset({"live", "busy", "ok", "trouble", "muted"})
 _WAVE_HEIGHTS = (
     (6, 12, 20, 12, 7),
     (10, 20, 12, 18, 9),
@@ -60,15 +60,15 @@ def _windows_user32():
 
 
 def indicator_content(state, mode=None):
-    """Return the visible copy and accent token for a voice state."""
+    """Return the visible copy and overlay tone for a voice state."""
     if state == "recording":
         if mode == "command":
-            return tr("Ouvindo comando"), "warning"
-        return tr("Ouvindo"), "warning"
+            return tr("Ouvindo comando"), "live"
+        return tr("Ouvindo"), "live"
     if state == "transcribing":
-        return tr("Transcrevendo"), "accent"
+        return tr("Transcrevendo"), "busy"
     if state == "routing":
-        return tr("Inserindo texto"), "success"
+        return tr("Inserindo texto"), "ok"
     return None
 
 
@@ -98,21 +98,21 @@ def meeting_indicator_content(snapshot):
         subtitle = tr("Gravação local em andamento")
         if snapshot.get("partial"):
             subtitle = tr("Abra Gravação para ver os detalhes")
-        return state, title, "warning", subtitle
+        return state, title, "live", subtitle
     if state == "paused":
-        return state, tr("Pausado · {time}", time=clock), "warning", tr("A gravação está pausada")
+        return state, tr("Pausado · {time}", time=clock), "muted", tr("A gravação está pausada")
     export = snapshot.get("audio_export") or {}
     if snapshot.get("processing") and export.get("stage") in {"preparing", "encoding", "finalizing"}:
-        return "transcribing", export["label"], "accent", tr("Os áudios originais estão preservados")
+        return "transcribing", export["label"], "busy", tr("Os áudios originais estão preservados")
     if state in {"starting", "stopping", "postprocessing"}:
         title = tr("Preparando gravação…") if state == "starting" else tr("Salvando gravação…")
         if state == "postprocessing":
             title = snapshot.get("postprocess") or tr("Processando localmente")
-        return "transcribing", title, "accent", tr("Processando localmente")
+        return "transcribing", title, "busy", tr("Processando localmente")
     if snapshot.get("last_status") in {"failed", "interrupted"} or state == "unavailable":
-        return "idle", tr("Gravação interrompida"), "warning", tr("Abra Gravação para ver os detalhes")
+        return "idle", tr("Gravação interrompida"), "trouble", tr("Abra Gravação para ver os detalhes")
     if snapshot.get("error"):
-        return "idle", tr("Verifique a gravação"), "warning", tr("Abra Gravação para ver os detalhes")
+        return "idle", tr("Verifique a gravação"), "trouble", tr("Abra Gravação para ver os detalhes")
     return None
 
 
@@ -137,8 +137,8 @@ class VoiceStatusIndicator:
         if content is None:
             self.hide()
             return
-        title, accent_name = content
-        self._present(state, title, accent_name, indicator_subtitle(state, mode))
+        title, tone = content
+        self._present(state, title, tone, indicator_subtitle(state, mode))
 
     def update_meeting(self, snapshot):
         content = meeting_indicator_content(snapshot)
@@ -147,20 +147,21 @@ class VoiceStatusIndicator:
             return
         self._present(*content)
 
-    def _present(self, state, title, accent_name, subtitle):
+    def _present(self, state, title, tone, subtitle):
+        if tone not in OVERLAY_TONES:
+            raise ValueError(f"unknown overlay tone: {tone!r}")
         if current_os() == "darwin":
             if self._mac_panel is None:
                 self._mac_panel = MacVoiceStatusPanel()
-            self._mac_panel.update(title, accent_name)
+            self._mac_panel.update(title, tone)
             return
         if self.window is None or not self._window_exists():
             self._build()
-        ui = ui_theme.theme()
-        accent = getattr(ui, accent_name)
+        color = getattr(ui_theme.theme(), f"overlay_{tone}")
         self.title_label.configure(text=title)
         self.subtitle_label.configure(text=subtitle)
         for item in self.waveform_bars:
-            self.waveform.itemconfigure(item, fill=accent)
+            self.waveform.itemconfigure(item, fill=color)
         self._state = state
         if state in VISIBLE_STATES:
             self._start_animation()
@@ -204,7 +205,7 @@ class VoiceStatusIndicator:
             window.attributes("-alpha", 0.96)
         except tk.TclError:
             pass
-        window.configure(bg=_OVERLAY_BG)
+        window.configure(bg=ui.overlay_bg)
 
         width = 286
         height = 58
@@ -214,10 +215,10 @@ class VoiceStatusIndicator:
 
         container = tk.Frame(
             window,
-            bg=_OVERLAY_BG,
+            bg=ui.overlay_bg,
             padx=14,
             pady=8,
-            highlightbackground=_OVERLAY_BORDER,
+            highlightbackground=ui.overlay_border,
             highlightthickness=1,
             bd=0,
         )
@@ -227,7 +228,7 @@ class VoiceStatusIndicator:
             container,
             width=48,
             height=30,
-            bg=_OVERLAY_BG,
+            bg=ui.overlay_bg,
             highlightthickness=0,
             bd=0,
         )
@@ -240,29 +241,29 @@ class VoiceStatusIndicator:
                 15 - height_value / 2,
                 x_position,
                 15 + height_value / 2,
-                fill=ui.warning,
+                fill=ui.overlay_live,
                 width=3,
                 capstyle=tk.ROUND,
             )
             self.waveform_bars.append(item)
 
-        copy = tk.Frame(container, bg=_OVERLAY_BG)
+        copy = tk.Frame(container, bg=ui.overlay_bg)
         copy.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.title_label = tk.Label(
             copy,
             text="",
-            bg=_OVERLAY_BG,
-            fg=_OVERLAY_TEXT,
-            font=ui.font(10, "bold"),
+            bg=ui.overlay_bg,
+            fg=ui.overlay_text,
+            font=ui.body_strong(),
             anchor="w",
         )
         self.title_label.pack(fill=tk.X, anchor="w")
         self.subtitle_label = tk.Label(
             copy,
             text="",
-            bg=_OVERLAY_BG,
-            fg=_OVERLAY_MUTED,
-            font=ui.font(8),
+            bg=ui.overlay_bg,
+            fg=ui.overlay_muted,
+            font=ui.caption(),
             anchor="w",
         )
         self.subtitle_label.pack(fill=tk.X, anchor="w", pady=(1, 0))

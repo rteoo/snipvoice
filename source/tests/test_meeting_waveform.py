@@ -7,6 +7,7 @@ from meeting_waveform import (
     AmplitudeRingBuffer, MeetingWaveform, MeetingWaveformModel, TRACKS,
     envelope_coordinates,
 )
+import ui_theme
 
 
 class AmplitudeRingBufferTests(unittest.TestCase):
@@ -114,6 +115,21 @@ class MeetingWaveformWidgetTests(unittest.TestCase):
             self.assertEqual(waveform.status_text, "Estado: Pausado")
             with self.assertRaises(ValueError):
                 waveform.set_state("stopped")
+        finally:
+            waveform.destroy()
+            self.root.update_idletasks()
+
+    def test_lanes_use_the_chart_roles(self):
+        theme = ui_theme.build_theme("dark", system="windows")
+        waveform = MeetingWaveform(self.root, theme=theme, poll_ms=1000)
+        try:
+            waveform.set_state("recording")
+            self.assertEqual(waveform._wave_color("microphone"), theme.chart_primary)
+            self.assertEqual(waveform._wave_color("system"), theme.chart_secondary)
+            for state in ("paused", "idle"):
+                waveform.set_state(state)
+                for track in TRACKS:
+                    self.assertEqual(waveform._wave_color(track), theme.chart_neutral)
         finally:
             waveform.destroy()
             self.root.update_idletasks()

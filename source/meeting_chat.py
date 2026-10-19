@@ -9,6 +9,7 @@ from __future__ import annotations
 import tkinter as tk
 
 from i18n import N_, tr
+import ui_theme
 
 
 SUGGESTIONS = (
@@ -107,8 +108,9 @@ class MeetingChat(tk.Frame):
         self._keyboard_hint.grid(row=1, column=0, sticky="w", pady=(1, theme.space_xs))
         self.composer = tk.Text(
             top, height=3, wrap="word", undo=True, font=theme.font(),
-            **theme.text_colors(),
+            **theme.text_colors(), **theme.entry_chrome(),
         )
+        ui_theme.focus_ring(self.composer, theme, shrink=("bd",))
         self.composer.grid(row=2, column=0, sticky="ew")
         self.composer.bind("<Return>", self._composer_return)
         self.composer.bind("<Control-Return>", self._send_event)
@@ -132,18 +134,8 @@ class MeetingChat(tk.Frame):
         self._set_empty(True)
 
     def _button(self, parent, text, command, accent=False):
-        colors = {
-            "bg": self.theme.accent if accent else self.theme.control,
-            "fg": self.theme.text_on_accent if accent else self.theme.text,
-            "activebackground": self.theme.accent_active if accent else self.theme.control_active,
-            "activeforeground": self.theme.text_on_accent if accent else self.theme.text,
-            "disabledforeground": self.theme.text_muted,
-            "font": self.theme.font(), "relief": "flat", "bd": 0,
-            "highlightthickness": 1, "highlightbackground": self.theme.control_border,
-            "highlightcolor": self.theme.focus_ring,
-            "padx": self.theme.space_sm, "pady": self.theme.space_xs,
-        }
-        return tk.Button(parent, text=text, command=command, **colors)
+        return ui_theme.button(parent, text, command, "primary" if accent else "neutral",
+                               resolved=self.theme)
 
     def _bind_scroll(self, widget):
         widget.bind("<MouseWheel>", self._mousewheel, add="+")
