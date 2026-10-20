@@ -1,5 +1,6 @@
 """Shared-root meeting workspace with bounded workers and Tk-only updates."""
 
+from datetime import datetime, timedelta, timezone
 from itertools import islice
 import copy
 import json
@@ -8,8 +9,9 @@ import os
 import queue
 import re
 import threading
+import types
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
 
 from clipboard_support import Clipboard
 import data_relocation
@@ -18,7 +20,10 @@ from i18n import N_, tr
 from meeting_files import report_export_projection
 from meeting_chat import MeetingChat
 from meeting_support import CAPTURE_STATES, PIPELINE_JOBS, processing_job_label, start_blocker
-from meeting_text import format_detailed_notes, format_summary
+from meeting_text import (
+    format_detailed_notes, format_expiry, format_local_timestamp, format_storage_size,
+    format_summary, seconds_until,
+)
 from meeting_titles import safe_filename_stem
 from meeting_settings import (
     FOLLOW_DICTATION, EndpointSelection, dictation_profile, resolve_meeting_settings,
@@ -83,6 +88,25 @@ PROFILE_LABELS = {"whisper-small": N_("Leve · Whisper Small"), "balanced": N_("
 LANGUAGE_LABELS = {"auto": N_("Automático"), "pt-BR": N_("Português (Brasil)"),
                    "en-US": N_("Inglês (Estados Unidos)")}
 TRACK_LABELS = {N_("Microfone"): "microphone", N_("Sistema"): "system"}
+# One written state per recording, shared by the library list and the detail
+# header (OPS-01 job words, feminine for "gravação"). The tone colors the word;
+# the word carries the meaning, because a selected row draws the selection text.
+SESSION_STATES = {
+    "completed": (N_("Concluída"), None),
+    "partial": (N_("Parcial"), "warning"),
+    "interrupted": (N_("Interrompida"), "warning"),
+    "failed": (N_("Falhou"), "danger"),
+    "cancelled": (N_("Cancelada"), "neutral"),
+    "recording": (N_("Gravando"), "info"),
+}
+UNKNOWN_SESSION_STATE = (N_("Desconhecido"), "neutral")
+PROCESSING_SESSION_STATE = (N_("Processando"), "info")
+# Jobs that work on a recording's own content, so its row reads "Processando".
+LIBRARY_PROCESSING_JOBS = PIPELINE_JOBS | {"report", "import"}
+PROCESSING_STAGES = ("audio", "transcription", "summary", "capture_cleanup")
+# The narrowest readable title column (about 20 characters); duration and date
+# give way first, so the title stays the recording's identity at the smallest window.
+SESSION_TITLE_MIN = 190
 SUMMARY_LABELS = {entry["id"]: entry["label"] for entry in summary_catalog()}
 
 
@@ -232,6 +256,30 @@ def annotations_for_revision(annotations, revision):
     }
 
 
+def elide(font, text, width):
+    """``text`` cut to ``width`` pixels in ``font`` with a trailing "…"."""
+    if font.measure(text) <= width:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if font.measure(text[:middle].rstrip() + "…") <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip() + "…"
+
+
+def _date_column_samples():
+    """Every date shape the library shows, for sizing its column in this language."""
+    base = datetime(2026, 12, 23, 23, 59, tzinfo=timezone.utc)
+    pairs = [(base, base), (base - timedelta(days=1), base), (base - timedelta(days=30), base),
+             (base.replace(year=2025), base)]
+    # Three days back from seven consecutive days names every weekday.
+    pairs += [(base + timedelta(days=day - 3), base + timedelta(days=day)) for day in range(7)]
+    return [format_local_timestamp(moment.isoformat(), now=now) for moment, now in pairs]
+
+
 def destination_display(path):
     """Describe the implicit local destination without changing its saved value."""
     return str(path or "").strip() or tr("Pasta local padrão (recordings)")
@@ -259,6 +307,23 @@ def _processing_failure_details(metadata):
         if isinstance(stage, dict) and stage.get("status") in {"failed", "cancelled"}:
             details.append(f"{name}: {str(stage.get('error') or stage['status'])[:1024]}")
     return "; ".join(details)
+
+
+def _stage_status(metadata, name):
+    """The persisted status of one processing stage, or "" when it never ran."""
+    stages = metadata.get("processing")
+    stage = stages.get(name) if isinstance(stages, dict) else None
+    return str(stage.get("status") or "") if isinstance(stage, dict) else ""
+
+
+def _processing_issue(metadata):
+    """The first failed or cancelled processing stage in pipeline order, or None."""
+    for name in PROCESSING_STAGES:
+        status = _stage_status(metadata, name)
+        if status in {"failed", "cancelled"}:
+            error = metadata["processing"][name].get("error")
+            return {"stage": name, "status": status, "error": str(error or "")[:4096]}
+    return None
 
 
 def format_recording_status(snapshot, start_held=False):
@@ -506,8 +571,10 @@ class MeetingWindow:
                  on_settings_changed=None, on_recording_state_changed=None,
                  on_appearance_changed=None, *,
                  window=None, notebook=None, data_location=None, relocate_data=None,
-                 models_location=None, relocate_models=None, on_language_changed=None):
+                 models_location=None, relocate_models=None, on_language_changed=None,
+                 set_window_icon=None):
         self.root, self.controller = root, controller
+        self.set_window_icon = set_window_icon
         self.data_location, self.relocate_data = data_location, relocate_data
         self.models_location, self.relocate_models = models_location, relocate_models
         self.settings_getter, self.persist_settings = settings_getter, persist_settings
@@ -605,6 +672,16 @@ class MeetingWindow:
         self.trash_dialog = None
         self.trash_tree = None
         self.trash_entries = []
+        self.trash_opener = None
+        self.trash_receipt = ""
+        # Library rows by session id, the recording a job is working on, and
+        # the selected recording's header state and processing issue.
+        self.session_items = {}
+        self.library_processing_session = None
+        self._session_title_fit = None
+        self.detail_state_item = None
+        self.processing_issue = None
+        self.transcription_status = ""
         self.retention_request = 0
         self.playback_generation = -1
         self.preview_signature = None
@@ -743,6 +820,21 @@ class MeetingWindow:
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         panel.lift()
 
+    def _place_library_sash(self, width):
+        """Split the library panes; False until both panes exist at a real width.
+
+        The list starts just under half, which shows its state, title and
+        date at the default window size, never narrower than its toolbar and
+        never so wide that the selected recording's controls clip. The list's
+        own request is no guide: its title column grows with the pane.
+        """
+        panes = self.library_panes
+        if width <= 100 or len(panes.panes()) < 2:
+            return False
+        sash = max(self.library_toolbar.winfo_reqwidth(), int(width * 0.47))
+        panes.sashpos(0, min(sash, width - self.library_detail_pane.winfo_reqwidth()))
+        return True
+
     def _set_library_detail_visible(self, visible):
         panes = getattr(self, "library_panes", None)
         detail = getattr(self, "library_detail_pane", None)
@@ -752,6 +844,9 @@ class MeetingWindow:
         present = str(detail) in panes.panes()
         if visible and not present:
             panes.add(detail, weight=3)
+            # The list had the whole width while it was empty; split again.
+            panes.update_idletasks()
+            self._place_library_sash(panes.winfo_width())
         elif not visible and present:
             panes.forget(detail)
         if visible and not pages.winfo_manager():
@@ -762,6 +857,224 @@ class MeetingWindow:
     def _clear_library_search(self):
         self.query.set("")
         self.search()
+
+    def _tone_fg(self, tone):
+        """Text color for a state tone; the quiet default reads as secondary text."""
+        return self.ui.text_muted if tone in (None, "neutral") else getattr(self.ui, tone)
+
+    def _configure_session_columns(self):
+        """Size state, date and duration to their widest value; the title takes the rest.
+
+        The list starts with state and title only, so its request never pushes
+        the detail; date and duration join once the pane has room for them.
+        """
+        tree = self.sessions
+        self._session_font = tkfont.Font(root=self.window, font=self.ui.body())
+        heading = tkfont.Font(root=self.window, font=self.ui.body_strong())
+        states = [tr(label) for label, _tone in
+                  (*SESSION_STATES.values(), UNKNOWN_SESSION_STATE, PROCESSING_SESSION_STATE)]
+        pad = 2 * self.ui.space_sm
+        self._session_column_widths = {}
+        for column, label, values, anchor in (
+            ("status", tr("Estado"), states, "w"),
+            ("title", tr("Gravação"), (), "w"),
+            ("date", tr("Data"), _date_column_samples(), "w"),
+            ("duration", tr("Duração"), (format_time(0),), "e"),
+        ):
+            tree.heading(column, text=label, anchor=anchor)
+            if column == "title":
+                tree.column(column, width=SESSION_TITLE_MIN, minwidth=SESSION_TITLE_MIN, stretch=False,
+                            anchor=anchor)
+                continue
+            width = pad + max([heading.measure(label)]
+                              + [self._session_font.measure(value) for value in values])
+            self._session_column_widths[column] = width
+            tree.column(column, width=width, minwidth=width, stretch=False, anchor=anchor)
+        tree.configure(displaycolumns=("status", "title"))
+        for tone in ("danger", "warning", "info", "neutral"):
+            tree.tag_configure(tone, foreground=self._tone_fg(tone))
+
+    def _fit_session_columns(self):
+        """Show date, then duration, while the title keeps its minimum; the title takes the rest.
+
+        The widths are set here rather than by Treeview stretch, which kept a
+        stretched title wide after the pane narrowed and pushed the date out.
+        """
+        widths = self._session_column_widths
+        # The Meeting.Treeview field edge is 2px on each side.
+        available = self.sessions.winfo_width() - 4
+        spare = available - widths["status"] - SESSION_TITLE_MIN
+        shown = {"status", "title"}
+        for column in ("date", "duration"):
+            if spare < widths[column]:
+                break
+            shown.add(column)
+            spare -= widths[column]
+        self.sessions.column("title", width=SESSION_TITLE_MIN + max(0, spare))
+        columns = tuple(column for column in self.sessions["columns"] if column in shown)
+        if tuple(self.sessions["displaycolumns"]) != columns:
+            self.sessions.configure(displaycolumns=columns)
+
+    def _schedule_session_title_fit(self, _event=None):
+        if self._session_title_fit is None and not self.closed:
+            self._session_title_fit = self.window.after_idle(self._fit_session_titles)
+
+    def _fit_session_titles(self):
+        """Re-cut every title to the title column, which follows the pane width."""
+        self._session_title_fit = None
+        if self.closed:
+            return
+        self._fit_session_columns()
+        for session_id in self.sessions.get_children():
+            self._render_session_row(session_id)
+
+    def _session_state(self, item):
+        """The (word, tone) of a recording: a job working on it, else its saved status."""
+        if item["id"] == self.library_processing_session:
+            label, tone = PROCESSING_SESSION_STATE
+        else:
+            label, tone = SESSION_STATES.get(item.get("status"), UNKNOWN_SESSION_STATE)
+        return tr(label), tone
+
+    def _render_session_row(self, session_id):
+        item = self.session_items.get(session_id)
+        if item is None or not self.sessions.exists(session_id):
+            return
+        label, tone = self._session_state(item)
+        # The cell's text sits inside a few pixels of padding on each side.
+        width = int(self.sessions.column("title", "width")) - 2 * self.ui.space_sm
+        title = " ".join(str(item.get("title") or "").split()) or tr("Sem título")
+        self.sessions.item(session_id, tags=(tone,) if tone else (), values=(
+            label, elide(self._session_font, title, width),
+            format_local_timestamp(item.get("created_at")), format_time(item.get("duration")),
+        ))
+
+    def _library_count_text(self, count):
+        """The visible recordings, plural-correct; the page appears once there are pages."""
+        if self.library_page_index == 0 and not self.library_next_cursor:
+            return tr("1 gravação") if count == 1 else tr("{count} gravações", count=count)
+        page = self.library_page_index + 1
+        if count == 1:
+            return tr("Página {page} · 1 gravação", page=page)
+        return tr("Página {page} · {count} gravações", page=page, count=count)
+
+    def _sync_library_processing(self, snapshot):
+        """Mark the recording a job works on as Processando, in its row and its header."""
+        live = None
+        if snapshot.get("processing") and snapshot.get("processing_kind") in LIBRARY_PROCESSING_JOBS:
+            live = snapshot.get("processing_session") or None
+        previous = self.library_processing_session
+        if live == previous:
+            return
+        self.library_processing_session = live
+        for session_id in (previous, live):
+            if session_id:
+                self._render_session_row(session_id)
+        if self.selected and self.selected in (previous, live):
+            self._render_detail_state()
+            if self.selected == live:
+                self._sync_empty_transcript_caption()
+                self._show_processing_issue(self.processing_issue)
+            else:
+                self._refresh_processing_issue(self.selected)
+
+    def _refresh_processing_issue(self, session_id):
+        """Replace the step failure shown for a recording whose job just ended.
+
+        The failure loaded before the job is stale now; the bar stays hidden and
+        the empty-transcript caption keeps saying Processando until the store's
+        current answer arrives, instead of flashing the old failure.
+        """
+        self._show_processing_issue(None)
+
+        def read():
+            raw = self.controller.get_session(session_id)
+            return _processing_issue(raw), _stage_status(raw, "transcription")
+
+        def loaded(data, error):
+            if self.selected != session_id or session_id == self.library_processing_session:
+                return
+            if error:
+                self._remember_operation_error(error)
+                self._sync_empty_transcript_caption()
+                self.status.set(tr("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação."))
+                return
+            issue, self.transcription_status = data
+            self._sync_empty_transcript_caption()
+            self._show_processing_issue(issue)
+
+        self._submit("processing_issue", read, loaded)
+
+    def _render_detail_state(self):
+        item = self.detail_state_item
+        if not item or item["id"] != self.selected:
+            self.detail_state.set("")
+            self.detail_meta.set("")
+            return
+        label, tone = self._session_state(item)
+        self.detail_state.set(label)
+        self.detail_state_label.configure(fg=self._tone_fg(tone))
+        self.detail_meta.set(" · " + format_local_timestamp(item.get("created_at"))
+                             + " · " + format_time(item.get("duration")))
+
+    def _processing_issue_copy(self, issue):
+        """(title, body, action) for a failed or cancelled step, in the words of its fix."""
+        stage, cancelled = issue["stage"], issue["status"] == "cancelled"
+        prepare = (tr("Preparar áudio final"), self.prepare_final_audio)
+        if stage == "audio":
+            title = tr("O áudio final foi cancelado") if cancelled else tr("O áudio final falhou")
+            return title, tr("A captura original foi preservada. Prepare o áudio final para ouvir, "
+                             "exportar e transcrever."), prepare
+        if stage == "transcription":
+            title = tr("A transcrição foi cancelada") if cancelled else tr("A transcrição falhou")
+            if getattr(self, "final_available", False):
+                return (title, tr("O áudio foi preservado e pode ser transcrito de novo."),
+                        (tr("Transcrever novamente"), self.transcribe))
+            return title, tr("O áudio foi preservado. Transcrever de novo requer o áudio final."), prepare
+        if stage == "summary":
+            title = tr("O resumo foi cancelado") if cancelled else tr("O resumo falhou")
+
+            def summarize():
+                self.detail_sections.select("summary")
+                self.summarize()
+
+            return title, tr("A transcrição continua disponível. Gere o resumo de novo."), (
+                tr("Gerar resumo"), summarize)
+        title = (tr("A liberação dos arquivos temporários foi cancelada") if cancelled
+                 else tr("A liberação dos arquivos temporários falhou"))
+        return title, tr("A gravação está completa. Os arquivos temporários continuam ocupando "
+                         "espaço no disco."), None
+
+    def _show_processing_issue(self, issue):
+        """A danger (failed) or warning (cancelled) InfoBar for the selected recording's step.
+
+        It stays hidden while a job works on the recording; the step's result
+        replaces it when the job ends.
+        """
+        self.processing_issue = issue
+        slot = self.processing_issue_slot
+        for child in slot.winfo_children():
+            child.destroy()
+        if not issue or (self.selected and self.selected == self.library_processing_session):
+            slot.pack_forget()
+            return
+        title, body, action = self._processing_issue_copy(issue)
+        details = _technical_error_detail(issue["error"]) if issue.get("error") else None
+        tone = "warning" if issue["status"] == "cancelled" else "danger"
+        ui_theme.info_bar(slot, self.ui, tone, title, body, action=action, details=details,
+                          copy=self._copy_issue_details).pack(fill="x")
+        slot.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0), before=self.detail_nav)
+
+    def _copy_issue_details(self, text, done):
+        """Copy an InfoBar's technical details off the GUI thread; ``done`` hears the outcome."""
+        if not self._submit("copy_issue_details", lambda: Clipboard.set_content(text),
+                            lambda copied, error: done(bool(copied) and not error)):
+            done(False)
+
+    def _dialog_icon(self, dialog):
+        """Give a dialog the app icon; no default icon reaches a transient window, so each asks."""
+        if self.set_window_icon is not None:
+            self.set_window_icon(dialog)
 
     def _button(self, parent, text, command, accent=False, danger=False):
         variant = "danger" if danger else "primary" if accent else "neutral"
@@ -1396,13 +1709,7 @@ class MeetingWindow:
         self.library_detail_pane = right_outer
 
         def place_sash(event):
-            # The first layout splits by requested widths, which left the
-            # list wider than the recording it opens; start at about a third,
-            # never narrower than the list's toolbar, and never so wide that
-            # the selected recording's controls are clipped.
-            if event.width > 100 and len(panes.panes()) > 1:
-                sash = max(left.winfo_reqwidth(), int(event.width * 0.36))
-                panes.sashpos(0, min(sash, event.width - right_outer.winfo_reqwidth()))
+            if self._place_library_sash(event.width):
                 panes.unbind("<Configure>")
 
         panes.bind("<Configure>", place_sash)
@@ -1412,6 +1719,7 @@ class MeetingWindow:
         # question and maintenance tools open on demand above both panes.
         toolbar = self._card(left, pady=self.ui.space_sm, padx=self.ui.space_sm)
         toolbar.pack(fill="x", pady=(0, self.ui.space_sm))
+        self.library_toolbar = toolbar
         search_row = tk.Frame(toolbar, bg=self.ui.card)
         search_row.pack(fill="x")
         self.query = tk.StringVar(self.window)
@@ -1450,15 +1758,18 @@ class MeetingWindow:
         # Recording list with an empty state drawn over the tree.
         list_frame = tk.Frame(left, bg=self.ui.surface)
         list_frame.pack(fill="both", expand=True)
-        self.sessions = ttk.Treeview(list_frame, columns=("title",), show="headings",
-                                     selectmode="browse", style="Meeting.Treeview", height=6)
-        self.sessions.heading("title", text=tr("Gravação"))
-        self.sessions.column("title", width=170)
+        # The written state leads each row, then the title, local date and
+        # duration; the title column takes whatever width the pane gives.
+        self.sessions = ttk.Treeview(list_frame, columns=("status", "title", "date", "duration"),
+                                     show="headings", selectmode="browse", style="Meeting.Treeview",
+                                     height=6)
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.sessions.yview)
+        self._configure_session_columns()
         self.sessions.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.sessions.pack(fill="both", expand=True)
         self.sessions.bind("<<TreeviewSelect>>", self._selection_changed)
+        self.sessions.bind("<Configure>", self._schedule_session_title_fit, add="+")
         self.library_empty = tk.StringVar(self.window)
         self.library_empty_panel = tk.Frame(list_frame, bg=self.ui.card)
         empty_content = tk.Frame(self.library_empty_panel, bg=self.ui.card)
@@ -1539,8 +1850,20 @@ class MeetingWindow:
         title_entry.pack(side="left", fill="x", expand=True)
         self._placeholder(title_entry, self.title, tr("Título da gravação"))
         self._button(title_row, tr("Salvar título"), self.save_title).pack(side="left", padx=(8, 0))
+        # The recording's state, in the list's word, then its date and length.
+        state_row = tk.Frame(self.detail_frame, bg=self.ui.surface)
+        state_row.pack(fill="x", padx=(12, 0), pady=(self.ui.space_xs, 0))
+        self.detail_state = tk.StringVar(self.window)
+        self.detail_state_label = self._label(state_row, "", textvariable=self.detail_state,
+                                              font=self.ui.body_strong())
+        self.detail_state_label.pack(side="left")
+        self.detail_meta = tk.StringVar(self.window)
+        self._label(state_row, "", textvariable=self.detail_meta, fg=self.ui.text_muted).pack(side="left")
+        # A failed or cancelled processing step shows here, above every section.
+        self.processing_issue_slot = tk.Frame(self.detail_frame, bg=self.ui.surface)
         detail_nav = tk.Frame(self.detail_frame, bg=self.ui.surface)
         detail_nav.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0))
+        self.detail_nav = detail_nav
         tk.Frame(self.detail_frame, bg=self.ui.border, height=1).pack(fill="x", padx=(12, 0))
         def fit_chat(_width, height):
             if hasattr(self, "meeting_chat"):
@@ -1618,7 +1941,7 @@ class MeetingWindow:
         )
         self._wrap_label(
             transcript_page, "", textvariable=self.transcript_document_status,
-            fg=self.ui.text_muted, anchor="w",
+            fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x", padx=12, pady=(0, self.ui.space_sm))
         self.transcript_document_frame = ttk.Frame(transcript_page, style="Meeting.TFrame")
         self.transcript_document_frame.pack(fill="both", expand=True, padx=(12, 0))
@@ -3502,11 +3825,9 @@ class MeetingWindow:
 
     def _processing_title(self, snapshot):
         """The library title of the recording the running job belongs to, or ""."""
-        session_id = snapshot.get("processing_session")
-        if not session_id or not self.sessions.exists(session_id):
-            return ""
-        title = " ".join(str(self.sessions.set(session_id, "title")).split())
-        if not title or title == session_id:
+        item = self.session_items.get(snapshot.get("processing_session"))
+        title = " ".join(str(item.get("title") or "").split()) if item else ""
+        if not title:
             return ""
         return title if len(title) <= 40 else title[:39].rstrip() + "…"
 
@@ -3890,23 +4211,22 @@ class MeetingWindow:
             self.library_next_cursor = None
             index_state = "compatibility"
         self.sessions.delete(*self.sessions.get_children())
+        self.session_items = {item["id"]: item for item in items}
         for item in items:
-            self.sessions.insert("", "end", iid=item["id"], values=(item.get("title") or item["id"],
-                tr(STATE_LABELS.get(item.get("status"), item.get("status", "")))))
-        self.previous_button.configure(state="normal" if self.library_page_index else "disabled")
-        self.next_button.configure(state="normal" if self.library_next_cursor else "disabled")
-        self.page_label.set(tr("Página {page} · {count} gravações", page=self.library_page_index + 1, count=len(items)))
+            self.sessions.insert("", "end", iid=item["id"])
+            self._render_session_row(item["id"])
         if self.library_cursor_reset:
             self.library_cursor = None
             self.library_back_stack = [None]
             self.library_page_index = 0
             self.offset = 0
-            self.previous_button.configure(state="disabled")
-            self.page_label.set(tr("Página {page} · {count} gravações", page=1, count=len(items)))
             self.index_status.set(tr("Índice de busca mudou; listagem reiniciada."))
         elif index_state:
             self.index_status.set(tr("Índice de busca: {state}",
                                      state=tr(INDEX_STATE_LABELS.get(index_state, index_state))))
+        self.previous_button.configure(state="normal" if self.library_page_index else "disabled")
+        self.next_button.configure(state="normal" if self.library_next_cursor else "disabled")
+        self.page_label.set(self._library_count_text(len(items)))
         self._render_library_empty_state(items)
         self._render_search_results(search_results)
         if self.selected in self.sessions.get_children():
@@ -4129,7 +4449,7 @@ class MeetingWindow:
         self._apply_search_resolution(value)
 
     def show_trash(self):
-        """Open a bounded trash manager; all mutations stay on the IO lane."""
+        """Open the trash: restore or permanently delete; every mutation runs on the IO lane."""
         if not getattr(self, "retention_ready", True):
             self.status.set(tr("A lixeira aguarda a recuperação do workspace."))
             return None
@@ -4144,50 +4464,87 @@ class MeetingWindow:
                 return dialog
         except tk.TclError:
             pass
+        try:
+            self.trash_opener = self.window.focus_get()
+        except (KeyError, tk.TclError):
+            # Tk cannot name a focused combobox popdown; there is nothing to return to.
+            self.trash_opener = None
         dialog = tk.Toplevel(self.window)
         self.trash_dialog = dialog
-        dialog.title(tr("Lixeira local"))
+        dialog.title(tr("Lixeira"))
         dialog.geometry("720x420")
-        dialog.minsize(560, 300)
         dialog.transient(self.window)
+        self._dialog_icon(dialog)
         dialog.configure(bg=self.ui.surface)
-        self._label(dialog, tr("Lixeira local"), font=self.ui.font(12, "bold"),
-                    fg=self.ui.text_strong).pack(anchor="w", padx=self.ui.space_lg,
-                    pady=(self.ui.space_lg, self.ui.space_xs))
-        self._label(
-            dialog,
-            tr("Restaurar retorna a reunião à biblioteca. Purga permanente exige uma segunda confirmação. “Esvaziar expirados” remove somente itens vencidos."),
-            fg=self.ui.text_muted, wraplength=660, justify="left", anchor="w",
-        ).pack(fill="x", padx=self.ui.space_lg, pady=(0, self.ui.space_sm))
+        pad = self.ui.space_lg
+        # Actions and the status line claim the bottom first, so a short
+        # window shrinks the list instead of clipping the buttons.
+        actions = tk.Frame(dialog, bg=self.ui.surface)
+        actions.pack(side="bottom", fill="x", padx=pad, pady=(self.ui.space_sm, pad))
+        self.trash_restore_button = self._button(actions, tr("Restaurar"), self.restore_selected_trash,
+                                                 accent=True)
+        self.trash_restore_button.pack(side="left")
+        self.trash_purge_button = self._button(actions, tr("Excluir definitivamente…"),
+                                               self.purge_selected_trash, danger=True)
+        self.trash_purge_button.pack(side="left", padx=(self.ui.space_sm, 0))
+        self.trash_empty_button = self._button(actions, tr("Esvaziar expirados…"),
+                                               self.empty_expired_trash, danger=True)
+        self.trash_empty_button.pack(side="right")
+        self._button(actions, tr("Atualizar"), self.refresh_trash).pack(
+            side="right", padx=(0, self.ui.space_sm))
+        self.trash_status = tk.StringVar(dialog, tr("Carregando lixeira…"))
+        self._wrap_label(dialog, "", textvariable=self.trash_status, fg=self.ui.text_muted,
+                         anchor="w", justify="left").pack(side="bottom", fill="x", padx=pad)
+        self._label(dialog, tr("Lixeira"), font=self.ui.heading(), fg=self.ui.text_strong).pack(
+            anchor="w", padx=pad, pady=(pad, self.ui.space_xs))
+        self._wrap_label(
+            dialog, tr("Restaurar devolve a gravação à Biblioteca. Excluir definitivamente apaga os "
+                       "arquivos do app e não pode ser desfeito."),
+            fg=self.ui.text_muted, anchor="w", justify="left",
+        ).pack(fill="x", padx=pad, pady=(0, self.ui.space_sm))
         frame = tk.Frame(dialog, bg=self.ui.surface)
-        frame.pack(fill="both", expand=True, padx=self.ui.space_lg)
+        frame.pack(fill="both", expand=True, padx=pad)
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
-        self.trash_tree = ttk.Treeview(
-            frame, columns=("meeting", "deleted", "purge", "bytes"),
-            show="headings", selectmode="browse", style="Meeting.Treeview",
-        )
-        for column, label, width in (
-            ("meeting", tr("Reunião"), 230), ("deleted", tr("Movida em"), 150),
-            ("purge", tr("Expira em"), 150), ("bytes", "Bytes", 90),
+        tree = ttk.Treeview(frame, columns=("meeting", "deleted", "expires", "size"), show="headings",
+                            selectmode="browse", style="Meeting.Treeview", height=6)
+        self.trash_tree = tree
+        body = tkfont.Font(root=dialog, font=self.ui.body())
+        heading = tkfont.Font(root=dialog, font=self.ui.body_strong())
+        column_pad = 2 * self.ui.space_md
+        for column, label, samples, anchor in (
+            ("meeting", tr("Gravação"), (), "w"),
+            ("deleted", tr("Movida em"), _date_column_samples(), "w"),
+            ("expires", tr("Expira"), (tr("em {count} d", count=30), tr("Expirada")), "w"),
+            ("size", tr("Tamanho"), ("999,9 MB",), "e"),
         ):
-            self.trash_tree.heading(column, text=label)
-            self.trash_tree.column(column, width=width, stretch=column == "meeting")
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.trash_tree.yview)
-        self.trash_tree.configure(yscrollcommand=scrollbar.set)
-        self.trash_tree.grid(row=0, column=0, sticky="nsew")
+            tree.heading(column, text=label, anchor=anchor)
+            width = max([heading.measure(label)] + [body.measure(value) for value in samples])
+            if column == "meeting":
+                tree.column(column, width=180, minwidth=120, stretch=True, anchor=anchor)
+            else:
+                tree.column(column, width=width + column_pad, minwidth=width + column_pad,
+                            stretch=False, anchor=anchor)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.trash_status = tk.StringVar(dialog, tr("Carregando lixeira…"))
-        self._label(dialog, "", textvariable=self.trash_status, fg=self.ui.text_muted,
-                    anchor="w").pack(fill="x", padx=self.ui.space_lg, pady=(self.ui.space_xs, 0))
-        actions = tk.Frame(dialog, bg=self.ui.surface)
-        actions.pack(fill="x", padx=self.ui.space_lg, pady=self.ui.space_md)
-        self._button(actions, tr("Atualizar"), self.refresh_trash).pack(side="left")
-        self._button(actions, tr("Restaurar selecionada"), self.restore_selected_trash).pack(side="left", padx=6)
-        self._button(actions, tr("Purgar selecionada…"), self.purge_selected_trash, danger=True).pack(side="left")
-        self._button(actions, tr("Esvaziar expirados…"), self.empty_expired_trash, danger=True).pack(side="right")
+        tree.bind("<<TreeviewSelect>>", lambda _event: self._sync_trash_actions())
+        for sequence, command in (("<Return>", self.restore_selected_trash),
+                                  ("<KP_Enter>", self.restore_selected_trash),
+                                  ("<Delete>", self.purge_selected_trash)):
+            tree.bind(sequence, lambda _event, command=command: (command(), "break")[1])
         dialog.protocol("WM_DELETE_WINDOW", self._close_trash_dialog)
         dialog.bind("<Escape>", lambda _event: self._close_trash_dialog())
+        self.trash_entries = []
+        self._sync_trash_actions()
+        ui_theme.apply_window_chrome(dialog, self.ui)
+        dialog.update_idletasks()
+        # The list gives up rows first (down to three); the action row and the
+        # status line never clip, and its two groups keep a gap.
+        dialog.minsize(actions.winfo_reqwidth() + 2 * pad + self.ui.space_lg,
+                       dialog.winfo_reqheight() - 3 * self.ui.tree_row_height)
+        tree.focus_set()
         self.refresh_trash()
         return dialog
 
@@ -4195,11 +4552,14 @@ class MeetingWindow:
         self.trash_request += 1
         dialog, self.trash_dialog = self.trash_dialog, None
         self.trash_tree = None
+        opener, self.trash_opener = getattr(self, "trash_opener", None), None
         if dialog is not None:
             try:
                 dialog.destroy()
             except tk.TclError:
                 pass
+        if opener is not None and opener.winfo_exists():
+            opener.focus_set()
 
     def refresh_trash(self):
         if self.closed:
@@ -4214,13 +4574,40 @@ class MeetingWindow:
                             lambda value, error: self._trash_loaded(value, error, request)):
             self.trash_status.set(tr("A lixeira está ocupada; tente novamente."))
 
+    @staticmethod
+    def _trash_name(session_id):
+        """A short, distinct handle for a trashed recording until the trash keeps titles.
+
+        Store ids start with the local date, which repeats within a day; the
+        random tail tells recordings apart.
+        """
+        return session_id if len(session_id) <= 9 else "…" + session_id[-8:]
+
+    def _trash_count_text(self, entries):
+        total = len(entries)
+        if not total:
+            return tr("A lixeira está vazia")
+        parts = [tr("1 gravação na lixeira") if total == 1
+                 else tr("{count} gravações na lixeira", count=total)]
+        expired = self._expired_trash_count(entries)
+        # The empty-expired button is disabled without one; the count says why.
+        parts.append(tr("nenhuma expirada") if not expired
+                     else tr("1 expirada") if expired == 1 else tr("{count} expiradas", count=expired))
+        return " · ".join(parts)
+
+    @staticmethod
+    def _expired_trash_count(entries):
+        remaining = (seconds_until(entry.get("purge_after")) for entry in entries)
+        return sum(1 for value in remaining if value is not None and value <= 0)
+
     def _trash_loaded(self, entries, error, request):
         if self.closed or request != self.trash_request or self.trash_tree is None:
             return
         if error:
             self._remember_operation_error(error)
-            self.trash_status.set(tr("Não foi possível carregar a lixeira."))
+            self.trash_status.set(tr("Não foi possível carregar a lixeira. Tente Atualizar."))
             return
+        previous = self._selected_trash_entry(quiet=True)
         projected = []
         for entry in list(entries or ())[:MAX_TRASH_ITEMS]:
             if isinstance(entry, dict):
@@ -4238,25 +4625,47 @@ class MeetingWindow:
                 "byte_estimate": max(0, int(get("byte_estimate", 0) or 0)),
             })
         self.trash_entries = projected
-        self.trash_tree.delete(*self.trash_tree.get_children())
+        tree = self.trash_tree
+        tree.delete(*tree.get_children())
         for index, entry in enumerate(projected):
-            self.trash_tree.insert(
-                "", "end", iid=str(index), values=(entry["session_id"], entry["deleted_at"],
-                entry["purge_after"], entry["byte_estimate"]),
-            )
-        self.trash_status.set(tr("{count} reunião(ões) na lixeira.", count=len(projected)))
+            tree.insert("", "end", iid=str(index), values=(
+                self._trash_name(entry["session_id"]), format_local_timestamp(entry["deleted_at"]),
+                format_expiry(entry["purge_after"]), format_storage_size(entry["byte_estimate"]),
+            ))
+        if projected:
+            # Keep the row the person was on; otherwise start at the top.
+            keep = next((index for index, entry in enumerate(projected)
+                         if previous and entry["session_id"] == previous["session_id"]), 0)
+            tree.selection_set(str(keep))
+            tree.focus(str(keep))
+            tree.see(str(keep))
+        self._sync_trash_actions()
+        # A finished action's receipt leads the refreshed count.
+        receipt, self.trash_receipt = getattr(self, "trash_receipt", ""), ""
+        count = self._trash_count_text(projected)
+        self.trash_status.set(f"{receipt} · {count}" if receipt else count)
 
-    def _selected_trash_entry(self):
+    def _sync_trash_actions(self):
+        """Restore and delete act on the selected row; emptying needs an expired one."""
+        selected = self.trash_tree is not None and bool(self.trash_tree.selection())
+        self.trash_restore_button.configure(state="normal" if selected else "disabled")
+        self.trash_purge_button.configure(state="normal" if selected else "disabled")
+        self.trash_empty_button.configure(
+            state="normal" if self._expired_trash_count(self.trash_entries) else "disabled")
+
+    def _selected_trash_entry(self, quiet=False):
         if self.trash_tree is None:
             return None
         selected = self.trash_tree.selection()
         if not selected:
-            self.trash_status.set(tr("Selecione uma reunião na lixeira."))
+            if not quiet:
+                self.trash_status.set(tr("Selecione uma gravação na lixeira."))
             return None
         try:
             entry = self.trash_entries[int(selected[0])]
         except (IndexError, TypeError, ValueError):
-            self.trash_status.set(tr("A seleção da lixeira ficou desatualizada; atualize a lista."))
+            if not quiet:
+                self.trash_status.set(tr("A lista da lixeira mudou; atualize e selecione de novo."))
             return None
         return entry
 
@@ -4265,13 +4674,14 @@ class MeetingWindow:
         if not entry:
             return
         session_id = entry["session_id"]
+        name = self._trash_name(session_id)
         request = self.trash_request
-        self.trash_status.set(tr("Restaurando reunião…"))
+        self.trash_status.set(tr("Restaurando {name}…", name=name))
         self._submit(
             "trash_restore",
             lambda: self.controller.restore_session(session_id),
             lambda value, error: self._trash_mutation_finished(
-                tr("Reunião(ões) restaurada; lixeira atualizada."), value, error, request),
+                tr("Gravação {name} restaurada na Biblioteca", name=name), value, error, request),
         )
 
     def purge_selected_trash(self):
@@ -4279,34 +4689,118 @@ class MeetingWindow:
         if not entry:
             return
         session_id = entry["session_id"]
-        if not messagebox.askyesno(
-                tr("Purgar permanentemente"),
-                tr("A purga permanente não pode ser desfeita e não promete apagamento forense de SSD. Continuar?"),
-                parent=self.trash_dialog):
+        name = self._trash_name(session_id)
+        facts = tr("Movida para a lixeira: {moved} · {size}",
+                   moved=format_local_timestamp(entry.get("deleted_at")),
+                   size=format_storage_size(entry.get("byte_estimate", 0)))
+        if not self._confirm_permanent_delete(
+                tr("Excluir “{name}” definitivamente?", name=name), facts):
+            return
+        if self.trash_tree is None:
             return
         request = self.trash_request
-        self.trash_status.set(tr("Purgando reunião…"))
+        self.trash_status.set(tr("Excluindo {name} definitivamente…", name=name))
         self._submit(
             "trash_purge",
             lambda: self.controller.purge_session(session_id, confirm=True),
             lambda value, error: self._trash_mutation_finished(
-                tr("Reunião(ões) purgada; lixeira atualizada."), value, error, request),
+                tr("Gravação {name} excluída definitivamente", name=name), value, error, request),
         )
 
     def empty_expired_trash(self):
-        if not messagebox.askyesno(
-                tr("Esvaziar itens expirados"),
-                tr("Somente reuniões cujo prazo da lixeira já venceu serão purgadas. Esta ação é permanente. Continuar?"),
-                parent=self.trash_dialog):
+        expired = self._expired_trash_count(self.trash_entries)
+        if not expired:
+            self.trash_status.set(tr("Nenhuma gravação da lixeira expirou ainda."))
+            return
+        question = (tr("Excluir 1 gravação expirada definitivamente?") if expired == 1
+                    else tr("Excluir {count} gravações expiradas definitivamente?", count=expired))
+        if not self._confirm_permanent_delete(
+                question, tr("Somente as gravações cujo prazo na lixeira já venceu.")):
+            return
+        if self.trash_tree is None:
             return
         request = self.trash_request
-        self.trash_status.set(tr("Purgando itens expirados…"))
+        self.trash_status.set(tr("Excluindo as gravações expiradas…"))
         self._submit(
             "trash_empty_expired",
             lambda: self.controller.empty_trash(confirm=True),
             lambda value, error: self._trash_mutation_finished(
-                tr("Reunião(ões) expirados purgados; lixeira atualizada."), value, error, request),
+                tr("Gravações expiradas excluídas definitivamente"), value, error, request),
         )
+
+    def _typed_confirmation(self, question, facts):
+        """Build the irreversible-delete dialog: it confirms only once the word is typed."""
+        owner = self.trash_dialog or self.window
+        word = tr("EXCLUIR")
+        pad = self.ui.space_lg
+        dialog = tk.Toplevel(owner)
+        dialog.title(tr("Excluir definitivamente"))
+        dialog.transient(owner)
+        self._dialog_icon(dialog)
+        dialog.resizable(False, False)
+        # A fixed width; the height follows the wrapped text.
+        dialog.minsize(480, 0)
+        dialog.configure(bg=self.ui.surface)
+        confirmation = types.SimpleNamespace(dialog=dialog, word=word, confirmed=False)
+        self._wrap_label(dialog, question, font=self.ui.heading(), fg=self.ui.text_strong,
+                         anchor="w", justify="left").pack(fill="x", padx=pad, pady=(pad, self.ui.space_xs))
+        self._wrap_label(dialog, facts, fg=self.ui.text_muted, anchor="w", justify="left").pack(
+            fill="x", padx=pad)
+        ui_theme.info_bar(
+            dialog, self.ui, "danger", tr("Isso não pode ser desfeito."),
+            tr("Os arquivos são apagados do app para sempre. Isso não garante apagamento forense do disco."),
+        ).pack(fill="x", padx=pad, pady=(self.ui.space_md, 0))
+        self._label(dialog, tr("Digite {word} para confirmar.", word=word), anchor="w").pack(
+            fill="x", padx=pad, pady=(self.ui.space_md, self.ui.space_xs))
+        typed = tk.StringVar(dialog)
+        confirmation.typed = typed
+        entry = self._entry(dialog, typed, 24)
+        entry.pack(anchor="w", padx=pad)
+        confirmation.entry = entry
+        actions = tk.Frame(dialog, bg=self.ui.surface)
+        actions.pack(fill="x", padx=pad, pady=pad)
+
+        def matches():
+            return typed.get().strip().casefold() == word.casefold()
+
+        def close():
+            if dialog.winfo_exists():
+                dialog.grab_release()
+                dialog.destroy()
+
+        def confirm():
+            if matches():
+                confirmation.confirmed = True
+                close()
+
+        cancel = self._button(actions, tr("Cancelar"), close)
+        cancel.pack(side="right")
+        button = self._button(actions, tr("Excluir definitivamente"), confirm, danger=True)
+        button.configure(state="disabled")
+        button.pack(side="right", padx=(0, self.ui.space_sm))
+        confirmation.confirm_button = button
+        typed.trace_add("write", lambda *_args: button.configure(
+            state="normal" if matches() else "disabled"))
+        entry.bind("<Return>", lambda _event: (confirm(), "break")[1])
+        entry.bind("<KP_Enter>", lambda _event: (confirm(), "break")[1])
+        dialog.bind("<Escape>", lambda _event: close())
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        ui_theme.apply_window_chrome(dialog, self.ui)
+        dialog.update_idletasks()
+        x = owner.winfo_rootx() + (owner.winfo_width() - max(480, dialog.winfo_reqwidth())) // 2
+        y = owner.winfo_rooty() + (owner.winfo_height() - dialog.winfo_reqheight()) // 3
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        entry.focus_set()
+        return confirmation
+
+    def _confirm_permanent_delete(self, question, facts):
+        """Ask before an irreversible delete; True only after the confirmation word is typed."""
+        confirmation = self._typed_confirmation(question, facts)
+        confirmation.dialog.grab_set()
+        confirmation.dialog.wait_window()
+        if self.trash_tree is not None:
+            self.trash_tree.focus_set()
+        return confirmation.confirmed
 
     def _trash_mutation_finished(self, message, value, error, request):
         if self.closed or request != self.trash_request or self.trash_tree is None:
@@ -4314,9 +4808,9 @@ class MeetingWindow:
         if error or value is False:
             if error:
                 self._remember_operation_error(error)
-            self.trash_status.set(tr("A mutação da lixeira falhou; atualize para confirmar o estado."))
+            self.trash_status.set(tr("A lixeira não confirmou a ação. Atualize a lista para ver o estado atual."))
             return
-        self.trash_status.set(message)
+        self.trash_receipt = message
         self.refresh_trash()
         self.refresh_library()
 
@@ -4465,6 +4959,11 @@ class MeetingWindow:
         self.speaker_labels = {}
         self.highlights = []
         self.selected_segment_id = None
+        # The list row already knows the state, date and length; the read below refreshes them.
+        self.detail_state_item = self.session_items.get(session_id)
+        self._render_detail_state()
+        self.transcription_status = ""
+        self._show_processing_issue(None)
         self.delete_button.configure(state="disabled")
         self.play_button.configure(state="disabled")
         self.replay_stop_button.configure(state="disabled")
@@ -4486,8 +4985,11 @@ class MeetingWindow:
         self.bridge.invalidate("transcript_page")
         def read():
             raw = self.controller.get_session(session_id)
-            metadata = {key: raw.get(key) for key in ("id", "title", "status", "duration", "error")}
+            metadata = {key: raw.get(key) for key in ("id", "title", "status", "duration", "error",
+                                                      "created_at")}
             metadata["processing_details"] = _processing_failure_details(raw)
+            metadata["processing_issue"] = _processing_issue(raw)
+            metadata["transcription_status"] = _stage_status(raw, "transcription")
             final = raw.get("final_audio")
             final_path = final.get("path") if isinstance(final, dict) else None
             metadata["final_available"] = bool(isinstance(final_path, str) and os.path.isfile(final_path))
@@ -4566,6 +5068,11 @@ class MeetingWindow:
         self.audio_overview.set(format_time(self.playback_duration))
         self.audio_sizes = metadata.get("audio_sizes") or {}
         self._set_audio_capabilities(metadata.get("tracks", {}), metadata.get("final_available", False))
+        self.detail_state_item = {"id": session_id, **{
+            key: metadata.get(key) for key in ("status", "created_at", "duration")}}
+        self._render_detail_state()
+        self.transcription_status = metadata.get("transcription_status", "")
+        self._show_processing_issue(metadata.get("processing_issue"))
         self.detail_ready = True
         self._sync_qa_controls()
         self.delete_button.configure(
@@ -4842,11 +5349,33 @@ class MeetingWindow:
             self.transcript_document_status.set(
                 tr("Transcrição extensa: prévia limitada. Exportar salva o texto completo.")
                 if self.transcript_document_truncated else
-                tr("A transcrição aparecerá após o processamento com um modelo local.") if not text else
+                self._empty_transcript_text() if not text else
                 tr("Formato aplicado. Copiar e Exportar usam esta apresentação.")
             )
 
         self._submit("transcript_document", read, loaded)
+
+    def _sync_empty_transcript_caption(self):
+        """Re-say why an empty transcript is empty; a loaded transcript keeps its own caption."""
+        if (not hasattr(self, "transcript_document") or not self.transcript_document_ready
+                or self.transcript_document_truncated
+                or self.transcript_document.get("1.0", "end-1c")):
+            return
+        self.transcript_document_status.set(self._empty_transcript_text())
+
+    def _empty_transcript_text(self):
+        """Why the selected recording shows no text: it is processing, failed, stopped, or is due.
+
+        A job outranks the saved status: a failure loaded before the job is stale.
+        """
+        if self.selected and self.selected == self.library_processing_session:
+            return tr("Processando esta gravação. O resultado aparecerá aqui ao terminar.")
+        status = getattr(self, "transcription_status", "")
+        if status == "failed":
+            return tr("A transcrição falhou e esta gravação não tem texto.")
+        if status == "cancelled":
+            return tr("A transcrição foi cancelada antes de terminar; esta gravação não tem texto.")
+        return tr("A transcrição aparecerá após o processamento com um modelo local.")
 
     def copy_transcript(self):
         if not self.transcript_document_ready:
@@ -5037,6 +5566,10 @@ class MeetingWindow:
         self.bridge.invalidate("transcript_page")
         self.transcript_request += 1
         self.selected = None
+        self.detail_state_item = None
+        self._render_detail_state()
+        self.transcription_status = ""
+        self._show_processing_issue(None)
         self._render_chat()
         self._reset_transcript_document()
         self._show_summary("")
@@ -5313,7 +5846,8 @@ class MeetingWindow:
             path = final.get("path") if isinstance(final, dict) else None
             final_available = bool(isinstance(path, str) and os.path.isfile(path))
             return (summary, page, annotations_for_revision(annotations, current_revision),
-                    raw.get("tracks", {}), final_available, _processing_failure_details(raw))
+                    raw.get("tracks", {}), final_available, _processing_failure_details(raw),
+                    _processing_issue(raw), _stage_status(raw, "transcription"))
         def loaded(data, error):
             if self.selected != session_id or not self.detail_ready:
                 return
@@ -5321,10 +5855,13 @@ class MeetingWindow:
                 self._remember_operation_error(error)
                 self.status.set(tr("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação."))
                 return
-            summary, page, annotations, tracks, final_available, processing_details = data
+            (summary, page, annotations, tracks, final_available, processing_details,
+             processing_issue, transcription_status) = data
             if processing_details:
                 self._remember_operation_error(processing_details)
             self._set_audio_capabilities(tracks, final_available)
+            self.transcription_status = transcription_status
+            self._show_processing_issue(processing_issue)
             if getattr(self, "_adjusted_audio_target", None) == session_id:
                 self._adjusted_audio_target = None
                 if final_available:
@@ -5556,6 +6093,7 @@ class MeetingWindow:
             )
             self._sync_start_blocked(self.snapshot, start_ready)
             self._sync_processing_cancel(self.snapshot)
+            self._sync_library_processing(self.snapshot)
             if self.start_after_interrupt and start_ready:
                 origin, self.start_after_interrupt = self.start_after_interrupt, None
                 self.request_start(origin)
@@ -5706,6 +6244,9 @@ class MeetingWindow:
         if self.after_id is not None:
             self.root.after_cancel(self.after_id)
             self.after_id = None
+        if getattr(self, "_session_title_fit", None) is not None:
+            self.window.after_cancel(self._session_title_fit)
+            self._session_title_fit = None
         if destroy:
             self.window.destroy()
         if after_close is not None:
@@ -5725,7 +6266,8 @@ def add_meeting_tabs(root, window, notebook, controller, settings_getter,
                      persist_settings, on_settings_changed=None,
                      on_recording_state_changed=None, on_appearance_changed=None,
                      data_location=None, relocate_data=None,
-                     models_location=None, relocate_models=None, on_language_changed=None):
+                     models_location=None, relocate_models=None, on_language_changed=None,
+                     set_window_icon=None):
     """Attach recording and library tabs to the shared application window."""
     view = MeetingWindow(
         root, controller, settings_getter, persist_settings, on_settings_changed,
@@ -5733,7 +6275,7 @@ def add_meeting_tabs(root, window, notebook, controller, settings_getter,
         window=window, notebook=notebook,
         data_location=data_location, relocate_data=relocate_data,
         models_location=models_location, relocate_models=relocate_models,
-        on_language_changed=on_language_changed,
+        on_language_changed=on_language_changed, set_window_icon=set_window_icon,
     )
     window._meeting_view = view
     return view

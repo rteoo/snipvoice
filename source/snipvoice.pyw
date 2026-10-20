@@ -455,6 +455,7 @@ class Snipvoice:
             on_language_changed=lambda language: self._reopen_manager_for_language(
                 root, language,
             ),
+            set_window_icon=self._set_window_icon,
             data_location=self.data_location,
             relocate_data=self.request_data_relocation,
             models_location=self.models_location,

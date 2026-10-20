@@ -35,6 +35,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
 
+from i18n import tr
 from platform_support import current_os
 
 
@@ -1082,6 +1083,82 @@ def button(parent, text, command, variant="neutral", *, resolved=None, **options
     widget = _ThemedButton(parent, ui, variant, _surface_of(parent), text=text,
                            command=command, **{**ui.button_chrome(compact=True), **options})
     return focus_ring(widget, ui)
+
+
+INFO_BAR_TONES = ("danger", "warning", "info", "success")
+# A shape per severity, so the bar never depends on its color alone. Tk falls
+# back to a symbol face for glyphs the text face lacks.
+_INFO_BAR_GLYPHS = {"danger": "⊗", "warning": "⚠", "info": "ⓘ", "success": "✓"}
+
+
+def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None):
+    """A Windows-family InfoBar: tone pair, glyph, title, body, one action, Detalhes.
+
+    ``title`` says what happened, ``body`` what it affects and what to do.
+    ``action`` is one ``(label, command)`` pair. ``details`` is technical text
+    kept behind a "Detalhes" disclosure and selectable. ``copy(text, done)``
+    adds a Copiar button; it owns the clipboard write and calls ``done(ok)`` on
+    the GUI thread, so the bar reports a copy that failed instead of assuming it.
+    """
+    if tone not in INFO_BAR_TONES:
+        raise ValueError(f"unknown info bar tone: {tone!r}")
+    fg, bg = getattr(ui, tone), getattr(ui, f"{tone}_bg")
+    # The tone fill is barely lighter than the page, so a 1px tone edge
+    # carries the bar's boundary.
+    bar = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=fg,
+                   highlightcolor=fg, bd=0, padx=ui.space_md, pady=ui.space_sm)
+    bar.columnconfigure(1, weight=1)
+    tk.Label(bar, text=_INFO_BAR_GLYPHS[tone], font=ui.body_strong(), bg=bg, fg=fg).grid(
+        row=0, column=0, sticky="nw", padx=(0, ui.space_sm))
+    tk.Label(bar, text=title, font=ui.body_strong(), bg=bg, fg=ui.text, anchor="w",
+             justify="left").grid(row=0, column=1, sticky="ew")
+    # width=1 keeps the wrapped body from requesting width back from the page.
+    message = tk.Label(bar, text=body, font=ui.body(), bg=bg, fg=ui.text, anchor="w",
+                       justify="left", width=1, wraplength=360)
+    message.bind("<Configure>", lambda event: message.configure(wraplength=max(event.width, 120)))
+    message.grid(row=1, column=1, sticky="ew")
+    if not (action or details):
+        return bar
+    actions = tk.Frame(bar, bg=bg)
+    actions.grid(row=2, column=1, sticky="w", pady=(ui.space_sm, 0))
+    if action:
+        label, command = action
+        button(actions, label, command, resolved=ui).pack(side="left", padx=(0, ui.space_sm))
+    if details:
+        panel = tk.Frame(bar, bg=bg)
+        text = tk.Text(panel, height=3, wrap="word", font=ui.body(), **ui.text_colors(),
+                       **ui.entry_chrome(readonly=True))
+        focus_ring(text, ui, shrink=("bd",))
+        text.insert("1.0", details)
+        # Disabled still allows selecting and Ctrl+C; it only blocks edits.
+        text.configure(state="disabled")
+        text.pack(fill="x")
+
+        if copy:
+            def copied(ok):
+                if not copy_button.winfo_exists():
+                    return
+                copy_button.configure(text=tr("Copiado") if ok else tr("Copiar"))
+                copy_hint.configure(text="" if ok else tr("Selecione o texto e pressione Ctrl+C"))
+
+            copy_row = tk.Frame(panel, bg=bg)
+            copy_row.pack(anchor="w", pady=(ui.space_xs, 0))
+            copy_button = button(copy_row, tr("Copiar"), lambda: copy(details, copied), resolved=ui)
+            copy_button.pack(side="left")
+            copy_hint = tk.Label(copy_row, text="", font=ui.caption(), bg=bg, fg=ui.text)
+            copy_hint.pack(side="left", padx=(ui.space_sm, 0))
+
+        def toggle():
+            if panel.winfo_manager():
+                panel.grid_remove()
+                toggle_button.configure(text=f"{tr('Detalhes')} ▾")
+            else:
+                panel.grid(row=3, column=1, sticky="ew", pady=(ui.space_sm, 0))
+                toggle_button.configure(text=f"{tr('Detalhes')} ▴")
+
+        toggle_button = button(actions, f"{tr('Detalhes')} ▾", toggle, "quiet", resolved=ui)
+        toggle_button.pack(side="left")
+    return bar
 
 
 # ---------------------------------------------------------------------------

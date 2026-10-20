@@ -739,6 +739,15 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(selected, "Escuro")
         self.assertEqual(choices, ("Sistema", "Claro", "Escuro"))
 
+    def test_manager_dialogs_take_the_app_icon_from_the_host(self):
+        _ensure_voice(self.app)
+
+        def build(shared_root):
+            self.app._show_manager_window(shared_root)
+            return self.app._manager_meeting_view.set_window_icon
+
+        self.assertEqual(self._on_gui(build), self.app._set_window_icon)
+
     def _general_data_card(self, shared_root):
         self.app._show_manager_window(shared_root)
         view = self.app._manager_meeting_view

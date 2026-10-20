@@ -115,6 +115,38 @@ them to the named roles.
   columns), so a selected first row never merges into the heading. Meters and
   the waveform use the chart roles (microphone primary, system secondary, idle
   or paused neutral).
+- The Biblioteca list reads Estado · Gravação · Data · Duração. The state is a
+  written word (see *Recording states*) whose row takes its tone; the title is
+  cut with "…" to its column; the date is local (`meeting_text.
+  format_local_timestamp`); the duration is right-aligned. A selected row
+  draws the selection text, so the word, not the color, carries the state.
+  The title keeps at least 190px (about 20 characters): as the list narrows,
+  Duração goes first, then Data, and a column shows only when the title
+  keeps that minimum. The widths follow the language, so the sizes are a
+  guide: in pt-BR the minimum and default windows show Estado · Gravação and
+  1440×900 shows all four. The list starts at 47% of the panes, never
+  narrower than its toolbar and never so wide that the selected recording's
+  controls clip, also when a first recording arrives in an empty library.
+  The count under the list is plural-correct ("1 gravação", "12 gravações")
+  and names the page only when there are pages.
+- `ui_theme.info_bar(parent, ui, tone, title, body, action, details, copy)` is the
+  in-page message: tone fill with a 1px tone edge (the fill alone is 1.0–1.14:1
+  against the page), a glyph per tone (⊗ ⚠ ⓘ ✓, until the app adopts an icon
+  set), a semibold title (what happened), a body (what it
+  affects and what to do), at most one neutral action, and technical text behind
+  "Detalhes". "Copiar" appears when the caller passes `copy(text, done)`, which
+  writes through the app's clipboard backend off the GUI thread; the bar says
+  "Copiado" only after it succeeds and otherwise "Selecione o texto e pressione
+  Ctrl+C". Tones: danger, warning, info, success.
+- The selected recording's header shows its state word in its tone, then its
+  date and duration. A failed processing step raises a danger InfoBar under it,
+  a cancelled one a warning InfoBar, with the step's own fix: "Transcrever
+  novamente", "Preparar áudio final" (also when a retranscription needs the
+  final audio first) or "Gerar resumo". The bar steps aside while a job works on
+  the recording; when the job ends the bar returns only with the store's
+  current answer, never the failure it replaced. An empty transcript says why:
+  processing now (read from the same job as the header, so it never repeats the
+  failure the job replaced), failed, cancelled, or not yet processed.
 - Win32 shows a Tk button's active colors only while it is pressed, so
   `accent_active` is the pressed role. Tk has no hover state for these
   buttons; the primary stays `accent` under the pointer.
@@ -132,6 +164,7 @@ Spacing follows the 4/8/12/16/24 portion of the system scale.
 | Fluent icons in navigation | Text-only navigation | Not adopted yet. |
 | Copper selection pill in lists | Selection plane only | Not adopted yet. A Treeview can carry the pill as an image in its tree column (`#0`); until a list adopts it, the plane alone marks selection. In Light the plane is 1.25:1 against white content (a DS 2.7.1 gap). |
 | Copper selection pill in combobox popdowns | Selection plane only | The popdown is a Tk listbox, which cannot draw a marker or an image. |
+| State tone on one list cell | The whole row takes the state's tone; Concluída rows stay in text color | Only Tk 9 can tone one cell (`tag cell`), and the release bundles ship Python 3.12 with Tk 8.6. On Tk 8.6.12 and 9.0.4 a selected row draws `select_fg` over any tag (probed), which keeps dark danger off the selection plane (4.02:1). |
 | Hover on filled and neutral buttons | No hover face on Windows | Win32 Tk paints a button's active colors only while it is pressed. |
 | Checkbox focus ring | Win32's dotted focus rectangle | Tk checkboxes draw no highlight ring on Windows. |
 
@@ -187,7 +220,22 @@ On navigation / page / content / selection:
   moves among detail sections.
 - The main destinations support `Ctrl+1` through `Ctrl+4` in displayed order.
 - Destructive operations retain their existing explicit confirmation and
-  recoverable recording behavior.
+  recoverable recording behavior. Deleting from the trash is permanent, so
+  "Excluir definitivamente…" and "Esvaziar expirados…" open a themed dialog that
+  names the target (the recording, or how many expired), states that it cannot
+  be undone and is not a forensic erase, and enables its danger button only
+  after "EXCLUIR" ("DELETE" in English) is typed. Cancelar is the safe way out.
+- The trash opens at 720×420 with every action visible: its action row and
+  status line claim the bottom first and the list gives up rows. The first row
+  is selected; Enter restores, Delete asks to delete permanently, Esc closes and
+  returns focus to the control that opened it. "Restaurar" is the primary and,
+  like "Excluir definitivamente…", needs a selected row; "Esvaziar expirados…"
+  needs an expired one, and the count says so when none has expired
+  ("2 gravações na lixeira · nenhuma expirada"). A finished action's receipt
+  leads the refreshed count ("Gravação …1c2a9e8b restaurada na Biblioteca · 1
+  gravação na lixeira · 1 expirada"). The trash and the typed-confirmation
+  dialog take the app icon from the host window (`set_window_icon`); Tk's
+  default icon never reaches a transient dialog.
 - Closing or rebuilding the manager (theme or language change) never
   cancels a recording's work: its capture, final audio, transcript and summary
   keep running. A close stops only the chat, cross-recording and summary
@@ -220,6 +268,27 @@ Adopted as project rules ahead of the cross-app operations layer; they reuse
 |---|---|
 | OPS-01 one state per view | "Pronto" only when Start works. An idle recorder held by a job reads Processando (Testando for a source test); held by anything else, Aguardando. The status line and the waveform caption always show the same word. |
 | OPS-08 jobs | Closing never cancels. A blocked command names its blocker and offers an override that states its consequence ("Interromper e gravar"); the tray label and the hotkey message say the same. The controller names its running job and current step (`processing_kind` in its snapshot). |
+| OPS-01 recording states | Every recording has one written state in the library list and in its header (table below). A job working on it (its own pipeline, a generated summary, an import) reads Processando until it ends. |
+| OPS-04 failure is not pending | A failed or cancelled processing step is an InfoBar with its reason behind Detalhes and its fix; an empty transcript says whether it is being processed, failed, was cancelled or is still due. |
+| OPS-05 time, size, identity | Library and trash dates are local ("Hoje 14:02", "Ontem 09:10", "qua. 14/10 09:10", "14/10 09:10", "14/10/2025"); trash expiry counts down ("em 23 d", then "Expirada"); sizes are decimal with the locale's mark ("46,2 MB"); a missing, malformed or unconvertible date reads "Sem data"; a size rounds before it picks its unit ("100 MB", "1,0 MB", never "1000 kB"). The trash shows a short id ("…1c2a9e8b", the id's random tail) until trashed recordings keep their titles. |
+| OPS-07 confirmation ladder | Moving to the trash stays a single confirmation; deleting from it (one recording or every expired one) needs the typed word. |
+
+Recording states, in the list column and the detail header:
+
+| Saved status | pt-BR | en | Tone |
+|---|---|---|---|
+| A job is working on it | Processando | Processing | info |
+| `recording` | Gravando | Recording | info |
+| `completed` | Concluída | Done | none (text color in the list, secondary text in the header) |
+| `partial` | Parcial | Partial | warning |
+| `interrupted` | Interrompida | Interrupted | warning |
+| `failed` | Falhou | Failed | danger |
+| `cancelled` | Cancelada | Cancelled | neutral (secondary text) |
+| anything else | Desconhecido | Unknown | neutral |
+
+The list reads the capture outcome the library index stores. A failed or
+cancelled transcription or summary shows in the recording's header, not in its
+row, until the index carries processing outcomes.
 
 Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execução: …":
 
@@ -248,7 +317,7 @@ scratch-harness screenshot cannot pass a packaged-build gate.
 | Dark and Light appearance | Passed (source build) | Real manager built from source with synthetic data, both appearances, Gravação, Biblioteca detail, Ditado and every Configurações section. |
 | Live System appearance changes | Failed | The manager re-reads the OS theme only when it is rebuilt. |
 | Windows contrast themes | Not tested | Palette does not yet yield to high-contrast system colors. |
-| Minimum window 1040 × 700 and default 1120 × 820 | Passed (source build, 100% scale) | No control narrower or shorter than requested at either size; the recording page fits without scrolling at the minimum (`tests/test_voice_gui.py`). |
+| Minimum window 1040 × 700 and default 1120 × 820 | Passed (source build, 100% scale) | No control narrower or shorter than requested at either size; the recording page fits without scrolling at the minimum (`tests/test_voice_gui.py`). The library with a selected recording and its InfoBar clips nothing at 1040×700, 1120×820 and 1440×900 in both appearances (scratch harness on the source build). |
 | Compact 32px density | Passed | Buttons, menu buttons, entries and comboboxes measure 33px, list rows 32px, at 96 DPI; `tests/test_ui_theme.py` and `tests/test_voice_gui.py` check that the Ditado action row keeps one height. |
 | Visible keyboard focus | Passed (source build) for buttons, menu buttons, comboboxes, entries, text fields, list boxes, lists, the slider and navigation | Before/after captures in both appearances, including the chat composer, the summary focus field and the citation list; `tests/test_ui_theme.py` checks that text fields and list boxes keep their size through focus. Checkboxes keep Win32's dotted rectangle. |
 | Full keyboard path, tab order | Not tested | |

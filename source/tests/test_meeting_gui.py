@@ -1,5 +1,6 @@
 """Workspace concurrency, selection, persistence, and shared-root smoke checks."""
 
+from datetime import datetime, timedelta, timezone
 import gc
 import os
 import sys
@@ -18,8 +19,11 @@ from meeting_gui import (
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_time, meter_value, open_meeting_window, playback_sources,
     retention_plan_projection, validated_settings, _append_detail_once,
+    _processing_issue, _stage_status,
 )
 from meeting_index import INDEX_STATES
+import meeting_text
+from meeting_text import format_local_timestamp
 from meeting_settings import EndpointSelection, resolve_meeting_settings
 import ui_theme
 
@@ -516,7 +520,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.trash_request = 7
         view.trash_tree = mock.Mock()
         view.trash_tree.selection.return_value = ("0",)
-        view.trash_entries = [{"session_id": "meeting-1"}]
+        view.trash_entries = [{"session_id": "meeting-1", "deleted_at": "2026-09-01T12:00:00Z",
+                               "purge_after": "2026-10-01T12:00:00Z", "byte_estimate": 48_213_377}]
         view.trash_status = Variable()
         view.trash_dialog = object()
         view.controller = mock.Mock()
@@ -528,17 +533,122 @@ class MeetingGuiLogicTests(unittest.TestCase):
         restore_call.args[1]()
         view.controller.restore_session.assert_called_once_with("meeting-1")
 
-        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True):
-            view.purge_selected_trash()
-            purge_call = view._submit.call_args
-            self.assertEqual(purge_call.args[0], "trash_purge")
-            purge_call.args[1]()
-            view.empty_expired_trash()
-            empty_call = view._submit.call_args
-            self.assertEqual(empty_call.args[0], "trash_empty_expired")
-            empty_call.args[1]()
+        # Without the typed word nothing is submitted.
+        view._submit.reset_mock()
+        view._confirm_permanent_delete = mock.Mock(return_value=False)
+        view.purge_selected_trash()
+        view.empty_expired_trash()
+        view._submit.assert_not_called()
+
+        view._confirm_permanent_delete = mock.Mock(return_value=True)
+        view.purge_selected_trash()
+        question, facts = view._confirm_permanent_delete.call_args.args
+        self.assertEqual(question, "Excluir “meeting-1” definitivamente?")
+        self.assertIn("48,2 MB", facts)
+        purge_call = view._submit.call_args
+        self.assertEqual(purge_call.args[0], "trash_purge")
+        purge_call.args[1]()
+        view.empty_expired_trash()
+        self.assertEqual(view._confirm_permanent_delete.call_args.args[0],
+                         "Excluir 1 gravação expirada definitivamente?")
+        empty_call = view._submit.call_args
+        self.assertEqual(empty_call.args[0], "trash_empty_expired")
+        empty_call.args[1]()
         view.controller.purge_session.assert_called_once_with("meeting-1", confirm=True)
         view.controller.empty_trash.assert_called_once_with(confirm=True)
+
+        # Nothing expired: no dialog and no purge.
+        view.trash_entries[0]["purge_after"] = "2999-01-01T00:00:00Z"
+        view._confirm_permanent_delete.reset_mock()
+        view.empty_expired_trash()
+        view._confirm_permanent_delete.assert_not_called()
+        self.assertEqual(view.trash_status.get(), "Nenhuma gravação da lixeira expirou ainda.")
+
+    def test_library_columns_give_way_duration_first_and_the_title_takes_the_rest(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view._session_column_widths = {"status": 110, "date": 129, "duration": 74}
+        tree = view.sessions = mock.MagicMock()
+        state = {"displaycolumns": ("status", "title")}
+        tree.__getitem__.side_effect = lambda key: (
+            ("status", "title", "date", "duration") if key == "columns" else state[key])
+        tree.configure.side_effect = state.update
+        # The tree draws a 2px edge on each side; the title keeps 190px.
+        for width, shown, title in (
+            (560, ("status", "title", "date", "duration"), 243),
+            (450, ("status", "title", "date"), 207),
+            # The smallest list keeps the title whole before it shows the date.
+            (370, ("status", "title"), 256),
+            # Room for the duration but not the date shows neither.
+            (334, ("status", "title"), 220),
+            (250, ("status", "title"), 190),
+        ):
+            with self.subTest(width=width):
+                tree.winfo_width.return_value = width
+                view._fit_session_columns()
+                self.assertEqual(state["displaycolumns"], shown)
+                tree.column.assert_called_with("title", width=title)
+
+    def test_closing_the_trash_returns_focus_to_its_opener(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.trash_request = 3
+        dialog = view.trash_dialog = mock.Mock()
+        view.trash_tree = mock.Mock()
+        opener = view.trash_opener = mock.Mock()
+        opener.winfo_exists.return_value = True
+        view._close_trash_dialog()
+        dialog.destroy.assert_called_once_with()
+        opener.focus_set.assert_called_once_with()
+        self.assertIsNone(view.trash_tree)
+        self.assertIsNone(view.trash_opener)
+        self.assertEqual(view.trash_request, 4)
+
+    def test_trash_names_tell_same_day_recordings_apart(self):
+        # Store ids open with the local date, which repeats within a day.
+        self.assertEqual(MeetingWindow._trash_name("20261020-091500-4f1c2a9e8b"), "…1c2a9e8b")
+        self.assertEqual(MeetingWindow._trash_name("20261020-101500-77aa00bb11"), "…aa00bb11")
+        self.assertEqual(MeetingWindow._trash_name("meeting-1"), "meeting-1")
+
+    def test_detail_reads_the_first_failed_or_cancelled_step_in_pipeline_order(self):
+        raw = {"processing": {
+            "audio": {"status": "completed"},
+            "summary": {"status": "failed", "error": "model unavailable"},
+            "transcription": {"status": "cancelled", "error": None},
+            "capture_cleanup": {"status": "skipped", "error": "kept"},
+        }}
+        self.assertEqual(_processing_issue(raw),
+                         {"stage": "transcription", "status": "cancelled", "error": ""})
+        self.assertEqual(_stage_status(raw, "transcription"), "cancelled")
+        self.assertEqual(_stage_status(raw, "missing"), "")
+        self.assertIsNone(_processing_issue({"processing": {"summary": {"status": "completed"}}}))
+        self.assertIsNone(_processing_issue({}))
+
+    def test_failed_and_pending_transcripts_explain_their_empty_text_differently(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected, view.library_processing_session = "s1", None
+        texts = {}
+        for status in ("", "pending", "processing", "failed", "cancelled"):
+            view.transcription_status = status
+            texts[status] = view._empty_transcript_text()
+        self.assertEqual(texts[""], "A transcrição aparecerá após o processamento com um modelo local.")
+        self.assertEqual(texts["pending"], texts[""])
+        self.assertEqual(texts["processing"], texts[""])
+        self.assertEqual(texts["failed"], "A transcrição falhou e esta gravação não tem texto.")
+        self.assertIn("cancelada", texts["cancelled"])
+        self.assertEqual(len({texts[""], texts["failed"], texts["cancelled"]}), 3)
+
+    def test_a_job_on_the_selected_recording_outranks_a_saved_failure_in_the_empty_copy(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "s1"
+        working = "Processando esta gravação. O resultado aparecerá aqui ao terminar."
+        for status in ("", "pending", "failed", "cancelled"):
+            view.transcription_status = status
+            view.library_processing_session = "s1"
+            self.assertEqual(view._empty_transcript_text(), working, status)
+            # A job on another recording says nothing about this one.
+            view.library_processing_session = "s2"
+            self.assertNotEqual(view._empty_transcript_text(), working, status)
+        view.selected, view.library_processing_session = None, None
+        self.assertNotEqual(view._empty_transcript_text(), working)
 
     def test_label_allows_an_explicit_font_override(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1216,6 +1326,9 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.summary = Text()
         view.summary_model_installed = {}
         view.segments = {}
+        view.session_items = {}
+        view._render_detail_state = mock.Mock()
+        view._show_processing_issue = mock.Mock()
         view.controller.get_session.return_value = {
             "id": "two", "notes": "Legacy notes",
             "bookmarks": [{"timestamp": 1, "label": "Legacy bookmark"}],
@@ -1393,6 +1506,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._update_transcript_paging_controls = mock.Mock()
         view._load_transcript_document = mock.Mock()
         view.refresh_reports = mock.Mock()
+        view._show_processing_issue = mock.Mock()
         view._submit = mock.Mock()
         with mock.patch("meeting_gui.os.path.isfile", return_value=True):
             view.refresh_outputs("meeting-1")
@@ -1421,12 +1535,15 @@ class MeetingGuiLogicTests(unittest.TestCase):
                 for name in ("_set_audio_capabilities", "_show_summary", "_render_transcript",
                              "_render_annotations", "_update_transcript_paging_controls",
                              "_load_transcript_document", "refresh_reports", "_submit",
-                             "_remember_operation_error"):
+                             "_remember_operation_error", "_show_processing_issue"):
                     setattr(view, name, mock.Mock())
                 view.refresh_outputs("meeting-1")
                 operation, callback = view._submit.call_args.args[1:]
                 callback(operation(), None)
                 self.assertEqual("uma etapa não foi concluída" in view.status.get(), incomplete)
+                view._show_processing_issue.assert_called_once_with(
+                    {"stage": "summary", "status": stage_status, "error": "model unavailable"}
+                    if incomplete else None)
                 if incomplete:
                     view._remember_operation_error.assert_called_once_with("summary: model unavailable")
                 else:
@@ -1822,7 +1939,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             manager.destroy()
             self.root.update()
 
-    def _embedded_view(self, geometry="1120x820"):
+    def _embedded_view(self, geometry="1120x820", **options):
         controller = mock.Mock()
         controller.snapshot.return_value = {
             "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
@@ -1841,7 +1958,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         notebook = ttk.Notebook(manager)
         notebook.pack(fill="both", expand=True, padx=24)
         view = add_meeting_tabs(
-            self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+            self.root, manager, notebook, controller, lambda: {}, mock.Mock(), **options,
         )
         self.addCleanup(self.root.update)
         self.addCleanup(manager.destroy)
@@ -1921,7 +2038,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
 
     def test_processing_hold_offers_interrupt_then_records_once_the_job_stops(self):
         view, _notebook = self._ready_recorder()
-        view.sessions.insert("", "end", iid="s1", values=("Revisão semanal",))
+        view._library_loaded([{"id": "s1", "title": "Revisão semanal", "status": "completed"}], None)
         busy = {"state": "idle", "levels": {}, "elapsed": 0, "processing": True,
                 "processing_kind": "summary", "processing_session": "s1"}
         self._poll_once(view, busy)
@@ -2526,6 +2643,366 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view.close_without_prompt(destroy=False)
             manager.destroy()
             self.root.update()
+
+
+    def _library_view(self, geometry="1120x820", **options):
+        view, notebook = self._embedded_view(geometry, **options)
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        wait_for(lambda: (self.root.update(), view.bridge.drain(), not view.bridge.callbacks)[2])
+        return view, notebook
+
+    def _drain(self, view):
+        wait_for(lambda: (self.root.update(), view.bridge.drain(), not view.bridge.callbacks)[2])
+        self.root.update()
+
+    def test_library_rows_lead_with_a_written_toned_state_date_and_duration(self):
+        view, _notebook = self._library_view()
+        created = "2026-10-20T12:10:00Z"
+        long_title = "Planejamento trimestral de operações e lançamentos " * 6
+        view._library_loaded([
+            {"id": "s1", "title": "Falha na captura", "status": "failed", "created_at": created,
+             "duration": 2465},
+            {"id": "s2", "title": "Queda de energia", "status": "interrupted", "created_at": created,
+             "duration": 60},
+            {"id": "s3", "title": "Fonte perdida", "status": "partial", "created_at": created,
+             "duration": 61},
+            {"id": "s4", "title": long_title, "status": "completed", "created_at": created,
+             "duration": 3725},
+            {"id": "s5", "title": "", "status": "cancelled", "created_at": None, "duration": None},
+        ], None)
+        self.root.update()
+        tree = view.sessions
+        self.assertEqual(tuple(tree["columns"]), ("status", "title", "date", "duration"))
+        self.assertEqual(str(tree.column("duration", "anchor")), "e")
+        # The default size shows the date; every shown column fits the list.
+        shown = tuple(tree["displaycolumns"])
+        self.assertEqual(shown[:3], ("status", "title", "date"))
+        self.assertLessEqual(sum(int(tree.column(column, "width")) for column in shown),
+                             tree.winfo_width())
+
+        def row(iid):
+            return tuple(tree.item(iid, "values")), tuple(tree.item(iid, "tags"))
+
+        date = format_local_timestamp(created)
+        self.assertEqual(row("s1"), (("Falhou", "Falha na captura", date, "00:41:05"), ("danger",)))
+        self.assertEqual(row("s2"), (("Interrompida", "Queda de energia", date, "00:01:00"), ("warning",)))
+        self.assertEqual(row("s3")[0][0], "Parcial")
+        self.assertEqual(row("s3")[1], ("warning",))
+        self.assertEqual(row("s5"), (("Cancelada", "Sem título", "Sem data", "00:00:00"), ("neutral",)))
+        values, tags = row("s4")
+        self.assertEqual((values[0], tags), ("Concluída", ()))
+        # The cut title still fits its column, and the full title keeps naming the job.
+        self.assertTrue(values[1].endswith("…"))
+        self.assertLessEqual(view._session_font.measure(values[1]), int(tree.column("title", "width")))
+        self.assertEqual(view.session_items["s4"]["title"], long_title)
+        self.assertEqual(str(tree.tag_configure("danger", "foreground")), view.ui.danger)
+        self.assertEqual(str(tree.tag_configure("warning", "foreground")), view.ui.warning)
+        self.assertEqual(view.page_label.get(), "5 gravações")
+
+        # A job working on a recording shows on its row until it ends; an
+        # export does not change what the recording is.
+        busy = {"state": "idle", "levels": {}, "elapsed": 0, "processing": True,
+                "processing_kind": "transcription", "processing_session": "s4"}
+        self._poll_once(view, busy)
+        self.assertEqual(row("s4")[0][0], "Processando")
+        self.assertEqual(row("s4")[1], ("info",))
+        self._poll_once(view, {**busy, "processing_kind": "export"})
+        self.assertEqual(row("s4")[0][0], "Concluída")
+        self._poll_once(view, {**busy, "processing": False, "processing_session": None})
+        self.assertEqual(row("s4"), (values, ()))
+
+        view._library_loaded([{"id": "s1", "title": "Falha na captura", "status": "failed"}], None)
+        self.assertEqual(view.page_label.get(), "1 gravação")
+
+    def test_a_date_the_platform_cannot_convert_leaves_the_other_rows_and_the_header_intact(self):
+        view, _notebook = self._library_view()
+        real_parse = meeting_text._parse_timestamp
+
+        def parse(value):
+            if value != "unconvertible":
+                return real_parse(value)
+            moment = mock.Mock()
+            moment.astimezone.side_effect = OSError(22, "Invalid argument")
+            return moment
+
+        items = [{"id": f"s{i}", "title": f"Registro {i}", "status": "completed",
+                  "created_at": "unconvertible" if i == 2 else "2026-10-20T12:10:00Z", "duration": 60}
+                 for i in (1, 2, 3)]
+        with mock.patch("meeting_text._parse_timestamp", side_effect=parse):
+            view._library_loaded(items, None)
+            view.detail_state_item, view.selected = items[1], "s2"
+            view._render_detail_state()
+        self.assertEqual(view.sessions.get_children(), ("s1", "s2", "s3"))
+        self.assertEqual(view.sessions.item("s2", "values")[2], "Sem data")
+        self.assertEqual(view.sessions.item("s3", "values")[1], "Registro 3")
+        self.assertEqual(view.page_label.get(), "3 gravações")
+        self.assertEqual(view.detail_meta.get(), " · Sem data · 00:01:00")
+
+    def test_failed_transcription_shows_its_reason_and_retry_and_its_own_empty_copy(self):
+        view, _notebook = self._library_view()
+        created = "2026-10-20T12:10:00Z"
+        items = [{"id": "s1", "title": "Revisão", "status": "completed",
+                  "created_at": created, "duration": 125}]
+        # A job's end reloads the list, which must still hold the selected recording.
+        view.controller.list_sessions_page.return_value = {
+            "items": items, "next_cursor": None, "cursor_reset": False, "index_state": "ready"}
+        view._library_loaded(items, None)
+        view._show_library_detail(True)
+        view.selected = "s1"
+        view.transcribe = mock.Mock()
+        view.prepare_final_audio = mock.Mock()
+        view.controller.get_transcript_preview.return_value = {"text": "", "truncated": False}
+        view.controller.list_reports.return_value = []
+        metadata = {
+            "status": "completed", "duration": 125, "created_at": created, "final_available": True,
+            "tracks": {}, "summary": "", "processing_details": "transcription: runtime failed",
+            "processing_issue": {"stage": "transcription", "status": "failed",
+                                 "error": r"runtime failed at C:\Users\someone\model.bin"},
+            "transcription_status": "failed",
+        }
+        view._detail_loaded("s1", (metadata, []), None)
+        self._drain(view)
+        slot = view.processing_issue_slot
+        self.assertTrue(slot.winfo_ismapped())
+        bar = slot.winfo_children()[0]
+        self.assertEqual(bar.cget("bg"), view.ui.danger_bg)
+        labels = [w.cget("text") for w in descendants(bar) if isinstance(w, tk.Label)]
+        self.assertIn("A transcrição falhou", labels)
+        buttons = {w.cget("text"): w for w in descendants(bar) if isinstance(w, tk.Button)}
+        buttons["Transcrever novamente"].invoke()
+        view.transcribe.assert_called_once_with()
+        details = [w.get("1.0", "end-1c") for w in descendants(bar) if isinstance(w, tk.Text)]
+        self.assertEqual(len(details), 1)
+        self.assertIn("runtime failed", details[0])
+        self.assertNotIn("C:\\Users", details[0])
+        # Copiar goes through the app's clipboard backend and reports its outcome.
+        copy = buttons["Copiar"]
+        with mock.patch("meeting_gui.Clipboard.set_content", return_value=False) as write:
+            copy.invoke()
+            self._drain(view)
+        write.assert_called_once_with(details[0])
+        self.assertEqual(copy.cget("text"), "Copiar")
+        hints = [w.cget("text") for w in descendants(bar) if isinstance(w, tk.Label)]
+        self.assertIn("Selecione o texto e pressione Ctrl+C", hints)
+        with mock.patch("meeting_gui.Clipboard.set_content", return_value=True) as write:
+            copy.invoke()
+            self._drain(view)
+        write.assert_called_once_with(details[0])
+        self.assertEqual(copy.cget("text"), "Copiado")
+        hints = [w.cget("text") for w in descendants(bar) if isinstance(w, tk.Label)]
+        self.assertNotIn("Selecione o texto e pressione Ctrl+C", hints)
+        self.assertEqual((view.detail_state.get(), view.detail_meta.get()),
+                         ("Concluída", f" · {format_local_timestamp(created)} · 00:02:05"))
+        failed_copy = view.transcript_document_status.get()
+        self.assertEqual(failed_copy, "A transcrição falhou e esta gravação não tem texto.")
+
+        metadata.update(processing_issue=None, transcription_status="pending", processing_details="")
+        view._detail_loaded("s1", (metadata, []), None)
+        self._drain(view)
+        self.assertFalse(slot.winfo_ismapped())
+        pending_copy = view.transcript_document_status.get()
+        self.assertEqual(pending_copy, "A transcrição aparecerá após o processamento com um modelo local.")
+        self.assertNotEqual(failed_copy, pending_copy)
+
+        # Without the final audio the prerequisite is the action; a cancel is a warning.
+        metadata.update(final_available=False, transcription_status="cancelled",
+                        processing_issue={"stage": "transcription", "status": "cancelled", "error": ""})
+        view._detail_loaded("s1", (metadata, []), None)
+        self._drain(view)
+        bar = slot.winfo_children()[0]
+        self.assertEqual(bar.cget("bg"), view.ui.warning_bg)
+        labels = [w.cget("text") for w in descendants(bar) if isinstance(w, tk.Label)]
+        self.assertIn("O áudio foi preservado. Transcrever de novo requer o áudio final.", labels)
+        buttons = {w.cget("text"): w for w in descendants(bar) if isinstance(w, tk.Button)}
+        self.assertEqual(set(buttons), {"Preparar áudio final"})
+        buttons["Preparar áudio final"].invoke()
+        view.prepare_final_audio.assert_called_once_with()
+
+        # While a job works on the recording the bar steps aside and the header says so.
+        busy = {"state": "idle", "levels": {}, "elapsed": 0, "processing": True,
+                "processing_kind": "transcription", "processing_session": "s1"}
+        self._poll_once(view, busy)
+        self.assertFalse(slot.winfo_ismapped())
+        self.assertEqual(view.detail_state.get(), "Processando")
+        # The caption under the format row stops reporting the cancelled run.
+        working_copy = "Processando esta gravação. O resultado aparecerá aqui ao terminar."
+        self.assertEqual(view.transcript_document_status.get(), working_copy)
+        # When it ends the failure loaded before the job is not shown again: the
+        # bar and the caption wait for the store's current answer, here a new reason.
+        view.controller.get_session.return_value = {"processing": {
+            "transcription": {"status": "failed", "error": "novo erro depois de transcrever de novo"}}}
+        self._poll_once(view, {**busy, "processing": False, "processing_session": None})
+        self.assertFalse(slot.winfo_ismapped())
+        self.assertEqual(view.detail_state.get(), "Concluída")
+        self.assertEqual(view.transcript_document_status.get(), working_copy)
+        self._drain(view)
+        self.assertTrue(slot.winfo_ismapped())
+        self.assertEqual(view.transcript_document_status.get(), failed_copy)
+        bar = slot.winfo_children()[0]
+        self.assertEqual(bar.cget("bg"), view.ui.danger_bg)
+        details = [w.get("1.0", "end-1c") for w in descendants(bar) if isinstance(w, tk.Text)]
+        self.assertIn("novo erro depois de transcrever de novo", details[0])
+
+        # A job that fixed it leaves no bar and no failure caption at all.
+        self._poll_once(view, busy)
+        self.assertEqual(view.transcript_document_status.get(), working_copy)
+        view.controller.get_session.return_value = {"processing": {"transcription": {"status": "completed"}}}
+        self._poll_once(view, {**busy, "processing": False, "processing_session": None})
+        self._drain(view)
+        self.assertFalse(slot.winfo_ismapped())
+        self.assertEqual(slot.winfo_children(), [])
+        self.assertEqual(view.transcript_document_status.get(), pending_copy)
+
+        # A recording that has text keeps its format caption through a job.
+        view.transcript_document.configure(state="normal")
+        view.transcript_document.insert("1.0", "Texto sintético da reunião.")
+        view.transcript_document.configure(state="disabled")
+        view.transcript_document_status.set("Formato aplicado. Copiar e Exportar usam esta apresentação.")
+        self._poll_once(view, busy)
+        self.assertEqual(view.transcript_document_status.get(),
+                         "Formato aplicado. Copiar e Exportar usam esta apresentação.")
+        self._poll_once(view, {**busy, "processing": False, "processing_session": None})
+        self._drain(view)
+        self.assertEqual(view.transcript_document_status.get(),
+                         "Formato aplicado. Copiar e Exportar usam esta apresentação.")
+
+    def test_trash_keeps_every_action_visible_at_its_default_size(self):
+        view, _notebook = self._library_view()
+        now = datetime.now(timezone.utc)
+        moved = (now - timedelta(days=2)).isoformat()
+        view.controller.list_trash.return_value = [
+            {"session_id": "20261020-091500-4f1c2a9e8b", "deleted_at": moved,
+             "purge_after": (now + timedelta(days=23, hours=1)).isoformat(), "byte_estimate": 48_213_377},
+            {"session_id": "20260901-101500-9a7b6c5d4e", "deleted_at": (now - timedelta(days=40)).isoformat(),
+             "purge_after": (now - timedelta(days=10)).isoformat(), "byte_estimate": 1_288_490_188},
+        ]
+        dialog = view.show_trash()
+        wait_for(lambda: (self.root.update(), view.bridge.drain(), view.trash_entries)[2])
+        self.root.update()
+        self.assertEqual((dialog.winfo_width(), dialog.winfo_height()), (720, 420))
+        refresh = next(w for w in descendants(dialog)
+                       if isinstance(w, tk.Button) and w.cget("text") == "Atualizar")
+        bottom = dialog.winfo_rooty() + dialog.winfo_height()
+        for button in (view.trash_restore_button, view.trash_purge_button,
+                       view.trash_empty_button, refresh):
+            self.assertEqual(button.winfo_ismapped(), 1, button.cget("text"))
+            self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), bottom)
+            self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth())
+        tree = view.trash_tree
+        self.assertEqual(tuple(tree.item("0", "values")),
+                         ("…1c2a9e8b", format_local_timestamp(moved), "em 23 d", "48,2 MB"))
+        self.assertEqual(tuple(tree.item("1", "values"))[2:], ("Expirada", "1,3 GB"))
+        self.assertEqual(str(tree.column("size", "anchor")), "e")
+        self.assertEqual(tree.selection(), ("0",))
+        self.assertEqual(view.trash_restore_button.cget("bg"), view.ui.accent)
+        self.assertEqual(str(view.trash_purge_button.cget("state")), "normal")
+        self.assertEqual(str(view.trash_empty_button.cget("state")), "normal")
+        self.assertEqual(view.trash_status.get(), "2 gravações na lixeira · 1 expirada")
+        for sequence in ("<Return>", "<KP_Enter>", "<Delete>"):
+            self.assertTrue(tree.bind(sequence), sequence)
+        self.assertTrue(dialog.bind("<Escape>"))
+
+        tree.selection_set(())
+        self.root.update()
+        self.assertEqual(str(view.trash_restore_button.cget("state")), "disabled")
+        self.assertNotEqual(view.trash_restore_button.cget("bg"), view.ui.accent)
+        self.assertEqual(str(view.trash_purge_button.cget("state")), "disabled")
+
+        # A restore's receipt leads the refreshed count.
+        tree.selection_set("0")
+        view.controller.restore_session.return_value = True
+        view.controller.list_trash.return_value = view.controller.list_trash.return_value[1:]
+        view.restore_selected_trash()
+        wait_for(lambda: (self.root.update(), view.bridge.drain(), len(view.trash_entries) == 1)[2])
+        self._drain(view)
+        view.controller.restore_session.assert_called_once_with("20261020-091500-4f1c2a9e8b")
+        self.assertEqual(view.trash_status.get(),
+                         "Gravação …1c2a9e8b restaurada na Biblioteca · 1 gravação na lixeira · 1 expirada")
+        view._close_trash_dialog()
+        self.assertFalse(dialog.winfo_exists())
+
+    def test_trash_says_why_emptying_is_disabled_when_nothing_expired(self):
+        view, _notebook = self._library_view()
+        now = datetime.now(timezone.utc)
+        view.controller.list_trash.return_value = [
+            {"session_id": "20261020-091500-4f1c2a9e8b", "deleted_at": (now - timedelta(days=2)).isoformat(),
+             "purge_after": (now + timedelta(days=23)).isoformat(), "byte_estimate": 48_213_377},
+        ]
+        view.show_trash()
+        wait_for(lambda: (self.root.update(), view.bridge.drain(), view.trash_entries)[2])
+        self.assertEqual(str(view.trash_empty_button.cget("state")), "disabled")
+        self.assertEqual(view.trash_status.get(), "1 gravação na lixeira · nenhuma expirada")
+        view._close_trash_dialog()
+
+    def test_the_trash_and_the_typed_confirmation_take_the_app_icon(self):
+        # Tk's default icon never reaches a transient dialog, so each one asks the host.
+        hook = mock.Mock()
+        view, _notebook = self._library_view(set_window_icon=hook)
+        self.assertIs(view.set_window_icon, hook)
+        view.controller.list_trash.return_value = []
+        dialog = view.show_trash()
+        self._drain(view)
+        hook.assert_called_once_with(dialog)
+        hook.reset_mock()
+        confirmation = view._typed_confirmation("Excluir?", "Fatos")
+        self.addCleanup(lambda: confirmation.dialog.winfo_exists() and confirmation.dialog.destroy())
+        hook.assert_called_once_with(confirmation.dialog)
+        view._close_trash_dialog()
+
+    def test_dialogs_open_without_an_icon_hook(self):
+        view, _notebook = self._library_view()
+        self.assertIsNone(view.set_window_icon)
+        view.controller.list_trash.return_value = []
+        self.assertTrue(view.show_trash().winfo_exists())
+        self._drain(view)
+        view._close_trash_dialog()
+
+    def test_permanent_delete_needs_the_typed_word(self):
+        view, _notebook = self._library_view()
+        view.controller.list_trash.return_value = []
+        view.show_trash()
+        self._drain(view)
+        confirmation = view._typed_confirmation("Excluir “…1c2a9e8b” definitivamente?", "Movida para a lixeira")
+        self.addCleanup(lambda: confirmation.dialog.winfo_exists() and confirmation.dialog.destroy())
+        self.root.update()
+        button = confirmation.confirm_button
+        self.assertEqual(str(button.cget("state")), "disabled")
+        button.invoke()
+        self.assertFalse(confirmation.confirmed)
+        confirmation.typed.set("excluir isso")
+        self.assertEqual(str(button.cget("state")), "disabled")
+        confirmation.typed.set(" excluir ")
+        self.assertEqual(str(button.cget("state")), "normal")
+        self.assertEqual(button.cget("bg"), view.ui.danger_bg)
+        confirmation.typed.set("EXCLUIR")
+        button.invoke()
+        self.assertTrue(confirmation.confirmed)
+        self.assertFalse(confirmation.dialog.winfo_exists())
+
+        # The blocking form returns the person's answer once the dialog closes.
+        build = view._typed_confirmation
+        for word, cancel, expected in (("EXCLUIR", False, True), ("EXCLUIR", True, False),
+                                       ("EXCLUI", False, False)):
+            def answering(question, facts, word=word, cancel=cancel):
+                pending = build(question, facts)
+
+                def answer():
+                    pending.typed.set(word)
+                    if cancel:
+                        next(w for w in descendants(pending.dialog)
+                             if isinstance(w, tk.Button) and w.cget("text") == "Cancelar").invoke()
+                    else:
+                        pending.confirm_button.invoke()
+                        if pending.dialog.winfo_exists():
+                            pending.dialog.destroy()
+
+                self.root.after(50, answer)
+                return pending
+
+            view._typed_confirmation = answering
+            self.assertEqual(view._confirm_permanent_delete("Excluir?", "Fatos"), expected, (word, cancel))
+        view._close_trash_dialog()
 
 
 if __name__ == "__main__":

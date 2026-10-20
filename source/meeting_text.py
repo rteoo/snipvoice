@@ -5,8 +5,11 @@ call a model, mutate a meeting, or impose a UI-sized limit on full exports.
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import math
 from typing import Iterable, Iterator, Mapping, Optional
 
+import i18n
 from i18n import N_, tr
 
 
@@ -23,6 +26,18 @@ _TRACK_LABELS = {
     "microphone": N_("Microfone"),
     "system": N_("Áudio do sistema"),
     "final": N_("Áudio final"),
+}
+
+_WEEKDAYS = (N_("seg."), N_("ter."), N_("qua."), N_("qui."), N_("sex."), N_("sáb."), N_("dom."))
+_MONTHS = (N_("jan."), N_("fev."), N_("mar."), N_("abr."), N_("maio"), N_("jun."),
+           N_("jul."), N_("ago."), N_("set."), N_("out."), N_("nov."), N_("dez."))
+# Field order and the decimal mark differ by language, so they are locale data
+# rather than catalog strings (a catalog entry must keep its placeholders).
+_LOCALE_FORMATS = {
+    "pt-BR": {"day_month": "{day:02d}/{month:02d}", "full": "{day:02d}/{month:02d}/{year}",
+              "decimal": ","},
+    "en-US": {"day_month": "{month_name} {day}", "full": "{month_name} {day}, {year}",
+              "decimal": "."},
 }
 
 
@@ -305,3 +320,112 @@ def format_summary(value) -> str:
     if detailed:
         sections.append("\n".join([f"{tr(_DETAILED_NOTES_LABEL)}:", detailed]))
     return "\n\n".join(sections)
+
+
+def _locale_format():
+    return _LOCALE_FORMATS[i18n.current_language()]
+
+
+def _parse_timestamp(value):
+    """An ISO-8601 instant as an aware datetime, or None for missing or malformed text.
+
+    The store writes UTC with a trailing ``Z``; a value without an offset is
+    read as UTC too, never as local time.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _aware_now(now):
+    if now is None:
+        return datetime.now(timezone.utc)
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware.")
+    return now
+
+
+def format_local_timestamp(value, now=None):
+    """A stored UTC instant as local time for a list or a record.
+
+    "Hoje 14:02", "Ontem 09:10", "qua. 14/10 09:10" within the last week,
+    "14/10 09:10" this year, "14/10/2025" before it (en: "Today 14:02",
+    "Wed Oct 14 09:10", "Oct 14, 2025"). Missing, malformed or out-of-range
+    input reads "Sem data", never a made-up time. ``now`` (aware) fixes the
+    clock and the local time zone for tests; by default each instant gets the
+    system zone's own offset, so daylight saving changes do not shift older
+    records.
+    """
+    moment = _parse_timestamp(value)
+    if moment is None:
+        return tr("Sem data")
+    try:
+        local = moment.astimezone() if now is None else moment.astimezone(_aware_now(now).tzinfo)
+    except (OverflowError, OSError):
+        # A well-formed instant the platform's local-time conversion cannot
+        # hold (Windows raises for 1960 and for 3001); one stored value like
+        # that must not break the list it sits in.
+        return tr("Sem data")
+    if now is None:
+        now = datetime.now().astimezone()
+    clock = f"{local.hour:02d}:{local.minute:02d}"
+    days = (now.date() - local.date()).days
+    if days == 0:
+        return tr("Hoje {time}", time=clock)
+    if days == 1:
+        return tr("Ontem {time}", time=clock)
+    layout = _locale_format()
+    fields = {"day": local.day, "month": local.month, "year": local.year,
+              "month_name": tr(_MONTHS[local.month - 1])}
+    day_month = layout["day_month"].format(**fields)
+    if 1 < days < 7:
+        return f"{tr(_WEEKDAYS[local.weekday()])} {day_month} {clock}"
+    if local.year == now.year:
+        return f"{day_month} {clock}"
+    return layout["full"].format(**fields)
+
+
+def seconds_until(value, now=None):
+    """Seconds from ``now`` until the stored instant (negative once past), or None."""
+    moment = _parse_timestamp(value)
+    if moment is None:
+        return None
+    return (moment - _aware_now(now)).total_seconds()
+
+
+def format_expiry(value, now=None):
+    """Time left before a deadline: "em 23 d", "em 3 h", "em 4 min", or "Expirada"."""
+    remaining = seconds_until(value, now)
+    if remaining is None:
+        return tr("Sem data")
+    if remaining <= 0:
+        return tr("Expirada")
+    if remaining >= 86400:
+        return tr("em {count} d", count=int(remaining // 86400))
+    if remaining >= 3600:
+        return tr("em {count} h", count=int(remaining // 3600))
+    return tr("em {count} min", count=max(1, int(remaining // 60)))
+
+
+def format_storage_size(size_bytes):
+    """Decimal storage size: "512 B", "46,2 MB", "1,3 GB" (en "1.3 GB").
+
+    One decimal below 100 of a unit, none above, so a column of sizes keeps
+    three significant digits. The choice follows the rounded number: 99.96 MB
+    reads "100 MB" and 999.96 kB reads "1,0 MB".
+    """
+    if (isinstance(size_bytes, bool) or not isinstance(size_bytes, (int, float))
+            or not math.isfinite(size_bytes) or size_bytes < 0):
+        raise ValueError("size_bytes must be a non-negative number.")
+    if size_bytes < 1e3:
+        return f"{int(size_bytes)} B"
+    for unit, scale in (("kB", 1e3), ("MB", 1e6), ("GB", 1e9)):
+        value = size_bytes / scale
+        digits = 1 if round(value, 1) < 100 else 0
+        shown = round(value, digits)
+        if shown < 1000 or unit == "GB":
+            return f"{shown:.{digits}f}".replace(".", _locale_format()["decimal"]) + f" {unit}"

@@ -201,6 +201,26 @@ class ContrastTests(unittest.TestCase):
             for role in ("accent_mark", "focus_ring"):
                 self.assertGreaterEqual(contrast(colors[role], colors["select_bg"]), 3.0, role)
 
+    def test_list_state_words_read_on_rows_and_selected_rows_use_the_selection_text(self):
+        # A toned row draws its tag color on the content plane; a selected row
+        # draws select_fg (the style map wins over tags on Tk 8.6 and 9), which
+        # matters for dark danger: 4.02:1 on the selection plane.
+        for colors in self._themes():
+            for role in ("danger", "warning", "info", "text_muted"):
+                self.assertGreaterEqual(contrast(colors[role], colors["card"]), 4.5, role)
+            self.assertGreaterEqual(contrast(colors["select_fg"], colors["select_bg"]), 4.5)
+
+    def test_info_bar_text_and_edges_read_on_their_tone(self):
+        for colors in self._themes():
+            for tone in ui_theme.INFO_BAR_TONES:
+                fill = colors[f"{tone}_bg"]
+                for role in ("text", "link"):
+                    self.assertGreaterEqual(contrast(colors[role], fill), 4.5, (tone, role))
+                # The tone fill is close to the page, so the tone edge draws the bar.
+                for surface in ("surface", "card"):
+                    self.assertGreaterEqual(contrast(colors[tone], colors[surface]), 3.0, (tone, surface))
+                self.assertGreaterEqual(contrast(colors["control_border"], fill), 3.0, tone)
+
     def test_primary_label_reads_on_copper(self):
         for colors in self._themes():
             for fill in ("accent", "accent_active"):
@@ -1036,6 +1056,81 @@ class ThemedControlTests(unittest.TestCase):
                     self.assertEqual(int(widget.cget("highlightthickness")), 1)
                     self.assertEqual((widget.winfo_reqwidth(), widget.winfo_reqheight()), rest)
                     widget.destroy()
+
+    def _descendants(self, widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from self._descendants(child)
+
+    def test_info_bar_pairs_tone_glyph_title_body_action_and_details(self):
+        for theme in (self.theme, self.light):
+            with self.subTest(kind=theme.kind):
+                acted, copied, outcome = [], [], [False]
+                bar = ui_theme.info_bar(
+                    self.card, theme, "danger", "A transcrição falhou",
+                    "O áudio foi preservado e pode ser transcrito de novo.",
+                    action=("Transcrever novamente", lambda: acted.append(True)),
+                    details="Detalhes técnicos: runtime unavailable",
+                    copy=lambda text, done: (copied.append(text), done(outcome[0])),
+                )
+                self.addCleanup(bar.destroy)
+                for sibling in self.card.pack_slaves():
+                    if sibling is not bar:
+                        sibling.destroy()
+                bar.pack(fill="x")
+                self.root.update()
+                self.assertEqual(bar.cget("bg"), theme.danger_bg)
+                self.assertEqual(bar.cget("highlightbackground"), theme.danger)
+                labels = {w.cget("text"): w for w in self._descendants(bar) if isinstance(w, tk.Label)}
+                self.assertEqual(labels["A transcrição falhou"].cget("fg"), theme.text)
+                self.assertIn("O áudio foi preservado e pode ser transcrito de novo.", labels)
+                glyph = next(w for text, w in labels.items() if len(text) == 1)
+                self.assertEqual(glyph.cget("fg"), theme.danger)
+                buttons = {w.cget("text"): w for w in self._descendants(bar) if isinstance(w, tk.Button)}
+                buttons["Transcrever novamente"].invoke()
+                self.assertEqual(acted, [True])
+                texts = [w for w in self._descendants(bar) if isinstance(w, tk.Text)]
+                self.assertEqual(len(texts), 1)
+                self.assertFalse(texts[0].winfo_ismapped())
+                buttons["Detalhes ▾"].invoke()
+                self.root.update()
+                self.assertTrue(texts[0].winfo_ismapped())
+                self.assertEqual(texts[0].get("1.0", "end-1c"), "Detalhes técnicos: runtime unavailable")
+                self.assertEqual(str(texts[0].cget("state")), "disabled")
+                self.assertEqual(buttons["Detalhes ▾"].cget("text"), "Detalhes ▴")
+                copy = next(w for w in self._descendants(bar)
+                            if isinstance(w, tk.Button) and w.cget("text") == "Copiar")
+                # The bar never touches the clipboard itself; the caller's copy does,
+                # and a failure is said instead of shown as a copy.
+                copy.invoke()
+                self.assertEqual(copied, ["Detalhes técnicos: runtime unavailable"])
+                self.assertEqual(copy.cget("text"), "Copiar")
+                labels = [w.cget("text") for w in self._descendants(bar) if isinstance(w, tk.Label)]
+                self.assertIn("Selecione o texto e pressione Ctrl+C", labels)
+                outcome[0] = True
+                copy.invoke()
+                self.assertEqual(copy.cget("text"), "Copiado")
+                labels = [w.cget("text") for w in self._descendants(bar) if isinstance(w, tk.Label)]
+                self.assertNotIn("Selecione o texto e pressione Ctrl+C", labels)
+                buttons["Detalhes ▾"].invoke()
+                self.root.update()
+                self.assertFalse(texts[0].winfo_ismapped())
+
+    def test_info_bar_details_without_a_copy_callable_offer_no_copy_button(self):
+        bar = ui_theme.info_bar(self.card, self.theme, "danger", "Título", "Corpo.", details="Texto técnico")
+        self.addCleanup(bar.destroy)
+        buttons = [w.cget("text") for w in self._descendants(bar) if isinstance(w, tk.Button)]
+        self.assertEqual(buttons, ["Detalhes ▾"])
+
+    def test_info_bar_without_action_or_details_has_no_button_row(self):
+        bar = ui_theme.info_bar(self.card, self.theme, "warning", "Título", "Corpo.")
+        self.addCleanup(bar.destroy)
+        self.assertEqual(bar.cget("bg"), self.theme.warning_bg)
+        self.assertEqual([w for w in self._descendants(bar) if isinstance(w, (tk.Button, tk.Text))], [])
+
+    def test_info_bar_rejects_an_unknown_tone(self):
+        with self.assertRaises(ValueError):
+            ui_theme.info_bar(self.card, self.theme, "error", "Título", "Corpo.")
 
     def test_a_menubutton_shares_the_button_row_height(self):
         # The Ditado footer puts the primary and its "more" menu in one row.
