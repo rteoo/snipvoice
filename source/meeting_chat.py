@@ -28,15 +28,17 @@ UNCERTAINTY_LABELS = {
 class MeetingChat(tk.Frame):
     """Scrollable conversation with a fixed multiline composer."""
 
-    def __init__(self, parent, theme, *, on_send, on_new, on_save, on_copy, on_source):
+    def __init__(self, parent, theme, *, on_send, on_cancel, on_new, on_save, on_copy, on_source):
         self.theme = theme
         self.on_send = on_send
+        self.on_cancel = on_cancel
         self.on_new = on_new
         self.on_save = on_save
         self.on_copy = on_copy
         self.on_source = on_source
         self.status = tk.StringVar(parent, "")
         self._busy = False
+        self._pending = False
         self._can_save = True
         self._can_send = True
         self._message_widgets = []
@@ -128,6 +130,9 @@ class MeetingChat(tk.Frame):
         self.new_button.pack(side="left")
         self.send_button = self._button(actions, tr("Enviar"), self._send, accent=True)
         self.send_button.pack(side="right")
+        self.cancel_button = self._button(actions, tr("Cancelar"), self._cancel)
+        self.cancel_button.configure(state="disabled")
+        self.cancel_button.pack(side="right", padx=(0, theme.space_xs))
         composer.bind("<Configure>", self._composer_changed)
 
         self._empty.pack(fill="x", padx=theme.space_lg)
@@ -238,13 +243,20 @@ class MeetingChat(tk.Frame):
     def _new(self):
         self.on_new()
 
+    def _cancel(self):
+        if self._pending:
+            self.on_cancel()
+
     def _use_suggestion(self, value):
         self.set_question(value)
         self.focus_composer()
 
-    def set_controls(self, *, busy=False, can_save=True, can_send=True):
+    def set_controls(self, *, busy=False, pending=False, can_save=True, can_send=True):
+        """``pending``: this conversation waits for an answer that Cancel can stop."""
         self._busy, self._can_save, self._can_send = bool(busy), bool(can_save), bool(can_send)
+        self._pending = bool(pending)
         self.send_button.configure(state="normal" if self._can_send and not self._busy else "disabled")
+        self.cancel_button.configure(state="normal" if self._pending else "disabled")
         self.new_button.configure(state="normal" if not self._busy else "disabled")
         for status, copy_button, save_button, saving, saved in self._answer_controls:
             complete = status == "complete"

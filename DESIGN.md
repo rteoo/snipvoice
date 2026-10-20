@@ -188,8 +188,54 @@ On navigation / page / content / selection:
 - The main destinations support `Ctrl+1` through `Ctrl+4` in displayed order.
 - Destructive operations retain their existing explicit confirmation and
   recoverable recording behavior.
+- Closing or rebuilding the manager (theme or language change) never
+  cancels a recording's work: its capture, final audio, transcript and summary
+  keep running. A close stops only the chat, cross-recording and summary
+  answers that window asked for. The processing, summary, cross-recording and
+  chat Cancel controls are enabled only while their job runs. The processing
+  one is a plain "Cancelar" under a line that names the running step ("Em
+  execução: a transcrição.") and wraps at any width, so no job name can clip
+  the button at the 1040x700 minimum; the chat one returns the question to the
+  composer.
+- A held Start names its holder under the button: "Aguardando o resumo de
+  “Reunião 14/10”." The recorder status never reads "Pronto" while Start is
+  disabled; it leads with Processando, Testando or Aguardando, and the waveform
+  caption ("Estado: Processando") repeats that word. When processing holds it,
+  the secondary "Interromper e gravar" confirms the consequence and records as
+  soon as the job stops. For a step of the recording's own pipeline (final audio,
+  transcription, summary, temporary file cleanup) it says the original audio
+  stays and the step is redone in Biblioteca; for any other job (chat answer,
+  export, import, source test) it says only that the task stops and can be run
+  again later. The tray item reads "Iniciar gravação (aguardando o
+  resumo)", and a refused hotkey start names the holder.
 - Focus, selection, status, and disabled state must remain visually distinct.
   Never use color as the only explanation of an error or recording state.
+
+## Operations extensions (proposed DS 2.8)
+
+Adopted as project rules ahead of the cross-app operations layer; they reuse
+2.7.1 tokens only.
+
+| Rule | Snipvoice adoption |
+|---|---|
+| OPS-01 one state per view | "Pronto" only when Start works. An idle recorder held by a job reads Processando (Testando for a source test); held by anything else, Aguardando. The status line and the waveform caption always show the same word. |
+| OPS-08 jobs | Closing never cancels. A blocked command names its blocker and offers an override that states its consequence ("Interromper e gravar"); the tray label and the hotkey message say the same. The controller names its running job and current step (`processing_kind` in its snapshot). |
+
+Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execução: …":
+
+| Job | pt-BR | en |
+|---|---|---|
+| Final audio (automatic or recovered) | o áudio final | the final audio |
+| Transcription | a transcrição | the transcription |
+| Summary (automatic or generated) | o resumo | the summary |
+| Raw capture cleanup | a liberação dos arquivos temporários | the temporary file cleanup |
+| Chat answer | a resposta do chat | the chat answer |
+| Cross-recording question | a pergunta entre gravações | the cross-recording question |
+| Saving an answer | o salvamento da resposta | saving the answer |
+| Audio import / model import | a importação de áudio / do modelo | the audio / model import |
+| Text, audio or report export | a exportação | the export |
+| Source test | o teste das fontes | the source test |
+| Leases without a job | a cópia do áudio final · a reprodução · a retenção local | the final audio copy · playback · local retention |
 
 ## Release gates
 

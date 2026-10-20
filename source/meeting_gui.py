@@ -17,6 +17,7 @@ import i18n
 from i18n import N_, tr
 from meeting_files import report_export_projection
 from meeting_chat import MeetingChat
+from meeting_support import CAPTURE_STATES, PIPELINE_JOBS, processing_job_label, start_blocker
 from meeting_text import format_detailed_notes, format_summary
 from meeting_titles import safe_filename_stem
 from meeting_settings import (
@@ -260,16 +261,27 @@ def _processing_failure_details(metadata):
     return "; ".join(details)
 
 
-def format_recording_status(snapshot):
-    """Return bounded user-facing state without exposing paths or native errors."""
+def format_recording_status(snapshot, start_held=False):
+    """Return bounded user-facing state without exposing paths or native errors.
+
+    An idle recorder that cannot start never reads "Pronto": it reads the work
+    that holds it (testing or processing) or "Aguardando". ``start_held`` adds
+    the window's own holds (settings, privacy, recovery) to the snapshot's.
+    """
     state = snapshot.get("state", "idle")
-    state_label = tr(STATE_LABELS.get(state, state))
+    if state == "idle" and snapshot.get("previewing"):
+        state_label = tr("Testando")
+    elif state == "idle" and snapshot.get("processing"):
+        state_label = tr(STATE_LABELS["postprocessing"])
+    elif state == "idle" and (start_held or start_blocker(snapshot)):
+        state_label = tr("Aguardando")
+    else:
+        state_label = tr(STATE_LABELS.get(state, state))
     parts = [state_label,
              format_time(snapshot.get("elapsed"))]
-    if snapshot.get("processing"):
-        export = snapshot.get("audio_export") or {}
-        parts.append(export["label"] if export.get("stage") in {"preparing", "encoding", "finalizing"}
-                     else tr("Processando localmente"))
+    export = snapshot.get("audio_export") or {}
+    if snapshot.get("processing") and export.get("stage") in {"preparing", "encoding", "finalizing"}:
+        parts.append(export["label"])
     health_states = {value.get("state") for value in (snapshot.get("capture_health") or {}).values()
                      if isinstance(value, dict)}
     if state in {"starting", "recording", "paused", "stopping"} and "disconnected" in health_states:
@@ -582,6 +594,9 @@ class MeetingWindow:
         self.retention_ready = True
         self.startup_status = ""
         self.pending_start_origin = None
+        # The origin of a start that waits for an interrupted job to stop.
+        self.start_after_interrupt = None
+        self._start_blocked_key = None
         self.recording_notice_dialog = None
         self.raw_unavailable_tracks = set()
         self.raw_capabilities = {"playback": True, "retranscription": True,
@@ -600,6 +615,7 @@ class MeetingWindow:
         self.citation_request = 0
         self.search_request = 0
         self.cross_request = 0
+        self.cross_pending = None
         self.cross_citation_request = 0
         self.rebuild_cancel = None
         self.rebuild_progress = {"done": 0, "total": None, "state": "idle"}
@@ -1164,11 +1180,28 @@ class MeetingWindow:
         self.pause_button.pack(side="left", padx=(0, 8))
         self.stop_button = self._button(transport, tr("Parar e preservar"), self.stop)
         self.stop_button.pack(side="left")
+        # Shown only while something holds Start: it names the holder and,
+        # for processing, offers the override with its consequence.
+        self.start_blocked_row = tk.Frame(monitor, bg=self.ui.card)
+        self.start_blocked_row.grid(row=6, column=0, columnspan=2, sticky="ew",
+                                    pady=(self.ui.space_sm, 0))
+        self.start_blocked_row.columnconfigure(0, weight=1)
+        self.start_blocked_reason = tk.StringVar(self.window, "")
+        self._wrap_label(
+            self.start_blocked_row, "", textvariable=self.start_blocked_reason, anchor="w",
+            justify="left", bg=self.ui.card, fg=self.ui.text,
+        ).grid(row=0, column=0, sticky="ew")
+        self.interrupt_start_button = self._button(
+            self.start_blocked_row, tr("Interromper e gravar"), self.interrupt_and_record,
+        )
+        self.interrupt_start_button.grid(row=0, column=1, sticky="e", padx=(self.ui.space_sm, 0))
+        self.interrupt_start_button.grid_remove()
+        self.start_blocked_row.grid_remove()
         self.preview_status = tk.StringVar(
             self.window, tr("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas."),
         )
         status_row = tk.Frame(monitor, bg=self.ui.card)
-        status_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
+        status_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
         self._wrap_label(status_row, "", textvariable=self.preview_status, anchor="w",
                          justify="left", bg=self.ui.card, fg=self.ui.text_muted).pack(
                              side="left", fill="x", expand=True)
@@ -1610,10 +1643,26 @@ class MeetingWindow:
         # Processing is independent of the selected presentation format.
         actions = ttk.Frame(transcript_page, style="Meeting.TFrame")
         actions.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        actions.columnconfigure(0, weight=1)
         self.transcript_processing_actions = actions
-        self.transcribe_button = self._button(actions, tr("Transcrever novamente"), self.transcribe)
+        # The running step is named above the buttons, in a line that wraps at
+        # any width: a step-named button clipped at the minimum size, and the
+        # buttons must not move when a job starts.
+        self.processing_job_status = tk.StringVar(self.window)
+        self.processing_job_label = self._wrap_label(
+            actions, "", textvariable=self.processing_job_status, fg=self.ui.text_muted, anchor="w",
+        )
+        self.processing_job_label.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.processing_job_label.grid_remove()
+        action_buttons = ttk.Frame(actions, style="Meeting.TFrame")
+        action_buttons.grid(row=1, column=0, sticky="w")
+        self.transcribe_button = self._button(action_buttons, tr("Transcrever novamente"), self.transcribe)
         self.transcribe_button.pack(side="left", padx=(0, 6))
-        self._button(actions, tr("Cancelar processamento"), lambda: self._action("cancel_processing", urgent=True)).pack(side="left")
+        self.cancel_processing_button = self._button(
+            action_buttons, tr("Cancelar"), lambda: self._action("cancel_processing", urgent=True),
+        )
+        self.cancel_processing_button.configure(state="disabled")
+        self.cancel_processing_button.pack(side="left")
         self.transcript_timing = tk.StringVar(
             self.window, tr("Dois cliques ou Enter para ouvir; horários marcam blocos de áudio, não palavras."),
         )
@@ -1698,7 +1747,8 @@ class MeetingWindow:
         )
         self.regenerate_summary_button.pack(side="left")
         self.cancel_summary_button = self._button(
-            generate_row, tr("Cancelar"), lambda: self._action("cancel_processing", urgent=True),
+            generate_row, tr("Cancelar"),
+            lambda: self._action("cancel_processing", kinds=frozenset({"report"}), urgent=True),
         )
         self.cancel_summary_button.pack(side="left", padx=6)
         self.cancel_summary_button.configure(state="disabled")
@@ -1795,7 +1845,8 @@ class MeetingWindow:
         self._set_report_profiles([])
 
         self.meeting_chat = MeetingChat(
-            ask_page, self.ui, on_send=lambda _text: self.ask_this_meeting(), on_new=self.new_chat,
+            ask_page, self.ui, on_send=lambda _text: self.ask_this_meeting(),
+            on_cancel=self.cancel_chat_answer, on_new=self.new_chat,
             on_save=self.save_answer, on_copy=self.copy_chat_answer,
             on_source=self.jump_to_ask_citation,
         )
@@ -2260,10 +2311,12 @@ class MeetingWindow:
         chat = getattr(self, "meeting_chat", None)
         if chat is not None:
             snapshot = getattr(self, "snapshot", {})
-            busy = bool(getattr(self, "ask_pending", None) or snapshot.get("processing")
+            pending = getattr(self, "ask_pending", None)
+            busy = bool(pending or snapshot.get("processing")
                         or snapshot.get("state", "idle") != "idle")
             chat.set_controls(
-                busy=busy, can_save=mode == "explicit_save",
+                busy=busy, pending=bool(pending and pending[0] == self.selected),
+                can_save=mode == "explicit_save",
                 can_send=bool(self.selected and self.detail_ready and self.transcript_revision),
             )
 
@@ -2964,6 +3017,27 @@ class MeetingWindow:
             self._answer_loaded(session_id, request, question, None, tr("Fila de operações ocupada."))
         self.meeting_chat.focus_composer()
 
+    def cancel_chat_answer(self):
+        """Stop the pending answer and give its question back to the composer."""
+        if not self.ask_pending:
+            return
+        session_id, request = self.ask_pending
+        self.ask_pending = None
+        self.controller.cancel_processing(kinds=frozenset({"ask"}))
+        turn = self._chat_turn(session_id, request)
+        if turn is not None:
+            self.ask_conversations[session_id].remove(turn)
+        if session_id == self.selected:
+            restored = turn is not None and not self.meeting_chat.get_question().strip()
+            if restored:
+                self.meeting_chat.set_question(turn["question"])
+            self.ask_status.set(tr("Resposta cancelada. A pergunta voltou para o campo de texto.")
+                                if restored else tr("Resposta cancelada."))
+            self._render_chat()
+            self.meeting_chat.focus_composer()
+        else:
+            self._sync_qa_controls()
+
     def _answer_loaded(self, session_id, request, question, value, error):
         if self.closed or self.ask_pending != (session_id, request):
             return
@@ -3412,6 +3486,122 @@ class MeetingWindow:
             return None
         return settings, title
 
+    def _start_hold(self, snapshot):
+        """Name the window's own reason an idle recorder cannot start, or ""."""
+        if snapshot.get("state", "idle") != "idle":
+            return ""
+        if not self.settings_loaded:
+            return tr("Carregando as configurações de gravação…")
+        if not self.retention_ready:
+            return self.startup_status or tr("A gravação aguarda a recuperação do workspace.")
+        if self.privacy_save_inflight:
+            return tr("Aguarde a atualização de privacidade antes de iniciar a gravação.")
+        if not self.privacy_ready:
+            return tr("A gravação aguarda a privacidade local.")
+        return ""
+
+    def _processing_title(self, snapshot):
+        """The library title of the recording the running job belongs to, or ""."""
+        session_id = snapshot.get("processing_session")
+        if not session_id or not self.sessions.exists(session_id):
+            return ""
+        title = " ".join(str(self.sessions.set(session_id, "title")).split())
+        if not title or title == session_id:
+            return ""
+        return title if len(title) <= 40 else title[:39].rstrip() + "…"
+
+    def _start_blocked_text(self, snapshot):
+        """One sentence naming what holds Start, or "" when nothing does."""
+        job = start_blocker(snapshot)
+        if not job:
+            return self._start_hold(snapshot)
+        if self.start_after_interrupt:
+            return tr("Interrompendo {job}; a gravação começa em seguida.", job=job)
+        title = self._processing_title(snapshot)
+        if title:
+            return tr("Aguardando {job} de “{title}”.", job=job, title=title)
+        return tr("Aguardando {job}.", job=job)
+
+    def _sync_start_blocked(self, snapshot, start_ready):
+        """Show the hold under Start and, for processing, the interrupt override."""
+        state = snapshot.get("state", "idle")
+        reason = "" if start_ready or state not in {"idle", "postprocessing"} \
+            else self._start_blocked_text(snapshot)
+        interruptible = bool(reason and processing_job_label(snapshot))
+        key = (reason, interruptible, bool(self.start_after_interrupt))
+        if key == self._start_blocked_key:
+            return
+        self._start_blocked_key = key
+        self.start_blocked_reason.set(reason)
+        if reason:
+            self.start_blocked_row.grid()
+        else:
+            self.start_blocked_row.grid_remove()
+        if interruptible:
+            self.interrupt_start_button.configure(
+                state="disabled" if self.start_after_interrupt else "normal",
+            )
+            self.interrupt_start_button.grid()
+        else:
+            self.interrupt_start_button.grid_remove()
+
+    def _sync_processing_cancel(self, snapshot):
+        """Offer Cancel only for a running job of this recording or of no recording.
+
+        The step it stops is named in the line above the buttons.
+        """
+        button = getattr(self, "cancel_processing_button", None)
+        if button is None:
+            return
+        session_id = snapshot.get("processing_session")
+        job = processing_job_label(snapshot) if snapshot.get("state", "idle") not in CAPTURE_STATES else ""
+        mine = bool(job) and (session_id is None or session_id == self.selected)
+        button.configure(state="normal" if mine else "disabled")
+        step = tr("Em execução: {job}.", job=job) if mine else ""
+        if step != self.processing_job_status.get():
+            self.processing_job_status.set(step)
+            if step:
+                self.processing_job_label.grid()
+            else:
+                self.processing_job_label.grid_remove()
+
+    def interrupt_and_record(self):
+        """Stop the job holding Start, after naming what stops, then record."""
+        if self.closed or self.start_after_interrupt:
+            return
+        snapshot = self.controller.snapshot()
+        job = processing_job_label(snapshot)
+        if not job or snapshot.get("state", "idle") not in {"idle", "postprocessing"}:
+            return
+        title = self._processing_title(snapshot)
+        if snapshot.get("processing_kind") in PIPELINE_JOBS:
+            consequence = tr(
+                "O áudio original fica preservado. Refaça essa etapa depois, na Biblioteca. "
+                "A gravação começa assim que o processamento parar."
+            )
+        else:
+            consequence = tr(
+                "Essa tarefa para antes de terminar. Execute-a de novo depois. "
+                "A gravação começa assim que ela parar."
+            )
+        question = (tr("Interromper {job} de “{title}” e começar a gravar?", job=job, title=title)
+                    if title else tr("Interromper {job} e começar a gravar?", job=job))
+        if not messagebox.askokcancel(tr("Interromper e gravar"), question + "\n\n" + consequence,
+                                      parent=self.window):
+            return
+        self.start_after_interrupt = "window"
+        self.status.set(tr("Interrompendo {job}; a gravação começa em seguida.", job=job))
+
+        def cancelled(_issued, error):
+            if error:
+                self.start_after_interrupt = None
+                self._remember_operation_error(error)
+                self.status.set(tr("Não foi possível interromper o processamento, e a gravação não começou. "
+                                   "Tente novamente."))
+
+        if not self._submit("control", self.controller.cancel_processing, cancelled, urgent=True):
+            self.start_after_interrupt = None
+
     def request_start(self, origin="window"):
         """Shared GUI-thread start path for window, hotkey, and tray origins."""
         if self.closed:
@@ -3568,12 +3758,22 @@ class MeetingWindow:
             self._remember_operation_error(error)
             self.status.set(tr("Não foi possível iniciar a gravação. Veja os detalhes na aba Gravação."))
         else:
-            if not accepted:
-                revoke = getattr(self.controller, "revoke_recording_consent", None)
-                if callable(revoke):
-                    revoke()
-            self.status.set(tr("Gravação solicitada.") if accepted else
-                            tr("Não foi possível iniciar. Verifique o estado da gravação."))
+            if accepted:
+                self.status.set(tr("Gravação solicitada."))
+                return
+            revoke = getattr(self.controller, "revoke_recording_consent", None)
+            if callable(revoke):
+                revoke()
+            # Name what refused the start (a hotkey press lands here too).
+            snapshot = self.controller.snapshot()
+            job = start_blocker(snapshot)
+            if not job:
+                self.status.set(tr("Não foi possível iniciar. Verifique o estado da gravação."))
+            elif processing_job_label(snapshot):
+                self.status.set(tr("Gravação não iniciada: aguardando {job}. Para gravar agora, "
+                                   "use Interromper e gravar.", job=job))
+            else:
+                self.status.set(tr("Gravação não iniciada: aguardando {job}.", job=job))
 
     def stop(self):
         self._action("stop", urgent=True)
@@ -3849,24 +4049,29 @@ class MeetingWindow:
             return
         self.cross_request += 1
         request = self.cross_request
+        self.cross_pending = request
         self.cross_cancel_button.configure(state="normal")
         self.cross_status.set(tr("Processando evidência local; a resposta não será salva automaticamente."))
         filters = {}
-        self._submit(
+        submitted = self._submit(
             "cross_question",
             lambda: self.controller.ask_across_meetings(
                 question, self.summary_model.get(), filters=filters,
             ),
             lambda value, error: self._cross_answer_loaded(request, value, error),
         )
+        if not submitted:
+            self.cross_pending = None
+            self.cross_cancel_button.configure(state="disabled")
 
     def cancel_cross_question(self):
-        self.controller.cancel_processing()
+        self.controller.cancel_processing(kinds=frozenset({"cross_question"}))
         self.cross_status.set(tr("Cancelamento solicitado; a resposta anterior foi preservada."))
 
     def _cross_answer_loaded(self, request, value, error):
         if self.closed or request != self.cross_request:
             return
+        self.cross_pending = None
         self.cross_cancel_button.configure(state="disabled")
         if error:
             self._remember_operation_error(error)
@@ -5343,14 +5548,23 @@ class MeetingWindow:
             self._sync_qa_controls()
             self._apply_playback_snapshot(self.snapshot)
             state = self.snapshot.get("state", "idle")
-            active = state in ("starting", "recording", "paused", "stopping")
+            active = state in CAPTURE_STATES
             processing = self.snapshot.get("processing")
             start_ready = (
-                state == "idle" and not processing and self.settings_loaded
-                and self.retention_ready and self.privacy_ready
-                and not self.privacy_save_inflight
-                and not self.snapshot.get("playback", {}).get("active")
+                state == "idle" and not start_blocker(self.snapshot)
+                and not self._start_hold(self.snapshot)
             )
+            self._sync_start_blocked(self.snapshot, start_ready)
+            self._sync_processing_cancel(self.snapshot)
+            if self.start_after_interrupt and start_ready:
+                origin, self.start_after_interrupt = self.start_after_interrupt, None
+                self.request_start(origin)
+            elif self.start_after_interrupt and state == "unavailable":
+                self.start_after_interrupt = None
+                self.status.set(tr("A gravação não foi iniciada: os recursos de áudio ainda estão em uso."))
+            elif self.start_after_interrupt and active:
+                # Another path (hotkey, tray) already started the recording.
+                self.start_after_interrupt = None
             self.start_button.configure(state="normal" if start_ready else "disabled")
             self.preview_button.configure(state="normal" if start_ready else "disabled")
             self.stop_button.configure(state="normal" if active else "disabled")
@@ -5362,7 +5576,9 @@ class MeetingWindow:
             )
             self._sync_summary_controls()
             error = self.snapshot.get("error")
-            self.record_status.set(format_recording_status(self.snapshot))
+            self.record_status.set(format_recording_status(
+                self.snapshot, start_held=state == "idle" and not start_ready,
+            ))
             self._sync_audio_export_progress()
             details = [self.operation_details] if self.operation_details else []
             if self.snapshot.get("final_audio"):
@@ -5379,9 +5595,13 @@ class MeetingWindow:
             for track, values in self.snapshot.get("waveforms", {}).items():
                 if track in ("microphone", "system"):
                     self.waveform.append_block(track, values)
+            # The caption follows the status lead: a held Start reads the job
+            # (Processando), a source test (Testando) or, with neither, Aguardando.
             waveform_state = ("checking" if self.snapshot.get("previewing") else
                               "paused" if state == "paused" else "recording"
-                              if state in ("starting", "recording", "stopping") else "idle")
+                              if state in ("starting", "recording", "stopping") else "idle"
+                              if start_ready else "processing"
+                              if processing or state == "postprocessing" else "waiting")
             self.waveform.set_state(waveform_state)
             for track, meter in self.meters.items():
                 value = float(self.snapshot.get("levels", {}).get(track, 0) or 0)
@@ -5430,6 +5650,13 @@ class MeetingWindow:
         if self.closed:
             return
         self.closed = True
+        # Closing never cancels a recording's work (its capture, final audio,
+        # transcript or summary); it stops only answers this view would show.
+        interactive = {kind for kind, pending in (
+            ("ask", getattr(self, "ask_pending", None)),
+            ("cross_question", getattr(self, "cross_pending", None)),
+            ("report", getattr(self, "summary_pending", None)),
+        ) if pending}
         self.report_request = getattr(self, "report_request", 0) + 1
         self.ask_request = getattr(self, "ask_request", 0) + 1
         self.citation_request = getattr(self, "citation_request", 0) + 1
@@ -5439,9 +5666,11 @@ class MeetingWindow:
         self.trash_request = getattr(self, "trash_request", 0) + 1
         self.retention_request = getattr(self, "retention_request", 0) + 1
         self.pending_start_origin = None
+        self.start_after_interrupt = None
         if hasattr(self, "ask_conversations"):
             self.ask_conversations.clear()
         self.ask_pending = None
+        self.cross_pending = None
         self.playback_generation = getattr(self, "playback_generation", -1) + 1
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:
@@ -5450,10 +5679,14 @@ class MeetingWindow:
             event = getattr(self, name, None)
             if event is not None:
                 event.set()
-        try:
-            self.controller.cancel_processing()
-        except (AttributeError, RuntimeError):
-            pass
+        if interactive:
+            try:
+                # Those jobs run only while the recorder is idle; the kinds keep
+                # the cancel off post-processing even if the state moves on.
+                if self.controller.snapshot().get("state") == "idle":
+                    self.controller.cancel_processing(kinds=frozenset(interactive))
+            except (AttributeError, RuntimeError):
+                pass
         try:
             self.controller.stop_playback()
         except (AttributeError, RuntimeError):

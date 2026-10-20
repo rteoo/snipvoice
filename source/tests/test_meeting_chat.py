@@ -40,6 +40,7 @@ class MeetingChatTests(unittest.TestCase):
         self.chat = MeetingChat(
             self.window, self.theme,
             on_send=lambda value: self.events.append(("send", value)),
+            on_cancel=lambda: self.events.append(("cancel",)),
             on_new=lambda: self.events.append(("new",)),
             on_save=lambda value: self.events.append(("save", value)),
             on_copy=lambda value: self.events.append(("copy", value)),
@@ -116,6 +117,18 @@ class MeetingChatTests(unittest.TestCase):
         self.chat.set_controls(busy=True, can_save=True, can_send=True)
         self.assertEqual(self._buttons("Copiar")[0].cget("state"), "normal")
         self.assertEqual(self._buttons("Salvar")[0].cget("state"), "disabled")
+
+    def test_cancel_is_offered_only_while_an_answer_is_pending(self):
+        self.assertEqual(self.chat.cancel_button.cget("state"), "disabled")
+        self.chat._cancel()
+        self.assertEqual(self.events, [])
+        self.chat.set_controls(busy=True, pending=True, can_send=True)
+        self.assertEqual(self.chat.cancel_button.cget("state"), "normal")
+        self.assertEqual(self.chat.send_button.cget("state"), "disabled")
+        self.chat.cancel_button.invoke()
+        self.assertEqual(self.events, [("cancel",)])
+        self.chat.set_controls(busy=True, pending=False, can_send=True)
+        self.assertEqual(self.chat.cancel_button.cget("state"), "disabled")
 
     def test_long_turn_wraps_and_composer_stays_visible_at_small_height(self):
         self.chat.set_height(320)

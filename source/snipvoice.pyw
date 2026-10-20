@@ -105,7 +105,7 @@ from voice_dispatch import VoiceTarget
 from voice_indicator import VoiceStatusIndicator
 from voice_support import VoiceController
 from meeting_library import MeetingLibrary
-from meeting_support import MeetingController
+from meeting_support import CAPTURE_STATES, MeetingController, start_blocker
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "1.2.1"
@@ -181,6 +181,7 @@ class Snipvoice:
         self._manager_library_tab = None
         self.voice_status_indicator = None
         self._recording_indicator_after = None
+        self._meeting_menu_key = None
         self._quitting = threading.Event()
         self._autostart_state = platform_support.AUTOSTART_ABSENT
         self._notification_lock = threading.Lock()
@@ -889,11 +890,15 @@ class Snipvoice:
     def _meeting_menu_label(self, _item=None):
         try:
             snapshot = self.meetings.snapshot()
-            state = snapshot.get("state", "idle") if isinstance(snapshot, dict) else "idle"
+            if not isinstance(snapshot, dict):
+                snapshot = {}
         except Exception:
-            state = "idle"
-        if state in {"starting", "recording", "paused", "stopping"}:
+            snapshot = {}
+        if snapshot.get("state", "idle") in CAPTURE_STATES:
             return tr("Gravação em andamento")
+        job = start_blocker(snapshot)
+        if job:
+            return tr("Iniciar gravação (aguardando {job})", job=job)
         return tr("Iniciar gravação")
 
     def _meeting_start_enabled(self, _item=None):
@@ -901,8 +906,7 @@ class Snipvoice:
             return False
         try:
             snapshot = self.meetings.snapshot()
-            state = snapshot.get("state", "idle")
-            return state == "idle" and not snapshot.get("processing", False)
+            return snapshot.get("state", "idle") == "idle" and not start_blocker(snapshot)
         except Exception:
             return False
 
@@ -962,6 +966,11 @@ class Snipvoice:
             return
         snapshot = self.meetings.snapshot()
         voice = self.voice.status_snapshot()
+        # The tray menu names what holds Start; redraw it only when that changes.
+        menu_key = (snapshot.get("state"), start_blocker(snapshot))
+        if menu_key != self._meeting_menu_key:
+            self._meeting_menu_key = menu_key
+            self.refresh_tray_menu()
         if (snapshot.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
                 or snapshot.get("processing") and (snapshot.get("audio_export") or {}).get("stage")
                 in {"preparing", "encoding", "finalizing"}

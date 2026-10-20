@@ -787,6 +787,57 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIn("Sem áudio de uma fonte", status)
         self.assertNotIn("Reconectando áudio", status)
 
+    def test_recording_status_never_reads_ready_while_start_is_held(self):
+        held = (
+            ({"state": "idle", "processing": True, "processing_kind": "report"}, False, "Processando"),
+            ({"state": "postprocessing", "processing": True, "processing_kind": "summary"}, False,
+             "Processando"),
+            ({"state": "idle", "processing": True, "previewing": True, "processing_kind": "preview"}, False,
+             "Testando"),
+            ({"state": "idle", "final_copy": True}, False, "Aguardando"),
+            ({"state": "idle", "playback": {"active": True}}, False, "Aguardando"),
+            ({"state": "idle"}, True, "Aguardando"),
+        )
+        for snapshot, start_held, lead in held:
+            status = format_recording_status(snapshot, start_held=start_held)
+            self.assertTrue(status.startswith(lead + " · "), status)
+        self.assertTrue(format_recording_status({"state": "idle"}).startswith("Pronto · "))
+        # The lead names the processing, so the generic suffix no longer repeats it.
+        self.assertEqual(format_recording_status(held[0][0]), "Processando · 00:00:00")
+
+    @staticmethod
+    def _closing_view(state):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed = False
+        view.controller = mock.Mock()
+        view.controller.snapshot.return_value = {"state": state, "processing": state == "postprocessing"}
+        view.bridge = mock.Mock()
+        view.root = mock.Mock()
+        view.window = mock.Mock()
+        view.after_id = None
+        view._unbind_mousewheel_regions = mock.Mock()
+        return view
+
+    def test_close_never_cancels_a_capture_or_its_post_processing(self):
+        for state in ("starting", "recording", "paused", "stopping", "postprocessing"):
+            view = self._closing_view(state)
+            # Even a chat or summary request this view still tracks.
+            view.ask_pending, view.cross_pending, view.summary_pending = ("s1", 1), 2, ("s1", 3)
+            view.close_without_prompt(destroy=False)
+            view.controller.cancel_processing.assert_not_called()
+            view.bridge.close.assert_called_once_with()
+        view = self._closing_view("idle")
+        view.close_without_prompt(destroy=False)
+        view.controller.cancel_processing.assert_not_called()
+
+    def test_close_cancels_only_this_views_interactive_jobs_while_idle(self):
+        view = self._closing_view("idle")
+        view.ask_pending, view.summary_pending = ("s1", 4), ("s2", 5)
+        view.close_without_prompt(destroy=False)
+        view.controller.cancel_processing.assert_called_once_with(kinds=frozenset({"ask", "report"}))
+        self.assertIsNone(view.ask_pending)
+        self.assertIsNone(view.cross_pending)
+
     def test_export_progress_is_scoped_to_selection_and_refreshes_final_before_asr_finishes(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "session"
@@ -1796,6 +1847,279 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.addCleanup(manager.destroy)
         self.addCleanup(view.close_without_prompt, destroy=False)
         return view, notebook
+
+    def _poll_once(self, view, snapshot):
+        """Run one manager poll against ``snapshot`` without the repeating timer."""
+        if view.after_id is not None:
+            self.root.after_cancel(view.after_id)
+            view.after_id = None
+        view.controller.snapshot.return_value = snapshot
+        view._poll()
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        self.root.update()
+
+    def _ready_recorder(self):
+        view, notebook = self._embedded_view()
+        notebook.select(view.recording_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        # Deliver the startup reads (settings, privacy, library) before a test
+        # adds its own rows or readiness.
+        wait_for(lambda: (self.root.update(), view.bridge.drain(), not view.bridge.callbacks)[2])
+        view.privacy_ready = True
+        return view, notebook
+
+    def test_held_start_is_disabled_named_and_never_reads_ready(self):
+        view, _notebook = self._ready_recorder()
+        free = {"state": "idle", "levels": {}, "elapsed": 0, "processing": False}
+        self._poll_once(view, free)
+        self.assertEqual(str(view.start_button.cget("state")), "normal")
+        self.assertTrue(view.record_status.get().startswith("Pronto · "))
+        self.assertFalse(view.start_blocked_row.winfo_ismapped())
+        self.assertEqual(view.waveform.state, "idle")
+
+        held = (
+            {"processing": True, "processing_kind": "report", "processing_session": "s1"},
+            {"state": "postprocessing", "processing": True, "processing_kind": "transcription",
+             "processing_session": "s1"},
+            {"processing": True, "previewing": True, "processing_kind": "preview"},
+            {"final_copy": True},
+            {"playback": {"active": True}},
+            {"retention_active": True},
+            {"state": "recording", "elapsed": 5},
+            {"state": "unavailable"},
+        )
+        for change in held:
+            self._poll_once(view, {**free, **change})
+            self.assertEqual(str(view.start_button.cget("state")), "disabled", change)
+            self.assertFalse(view.record_status.get().startswith("Pronto"), change)
+            self.assertNotEqual(view.waveform.state, "idle", change)
+            if change.get("state") in (None, "postprocessing"):
+                # One state per view: the caption repeats the status lead.
+                lead = view.record_status.get().split(" · ")[0]
+                self.assertEqual(view.waveform.status_text, f"Estado: {lead}", change)
+            if change.get("state") in (None, "postprocessing"):
+                self.assertTrue(view.start_blocked_row.winfo_ismapped(), change)
+                self.assertTrue(view.start_blocked_reason.get().startswith("Aguardando "), change)
+            else:
+                self.assertFalse(view.start_blocked_row.winfo_ismapped(), change)
+        for name, value in (("settings_loaded", False), ("retention_ready", False),
+                            ("privacy_save_inflight", True), ("privacy_ready", False)):
+            original = getattr(view, name)
+            setattr(view, name, value)
+            try:
+                self._poll_once(view, free)
+                self.assertEqual(str(view.start_button.cget("state")), "disabled", name)
+                self.assertTrue(view.record_status.get().startswith("Aguardando · "), name)
+                self.assertTrue(view.start_blocked_row.winfo_ismapped(), name)
+                self.assertTrue(view.start_blocked_reason.get(), name)
+                self.assertFalse(view.interrupt_start_button.winfo_ismapped(), name)
+            finally:
+                setattr(view, name, original)
+        self._poll_once(view, free)
+        self.assertEqual(str(view.start_button.cget("state")), "normal")
+
+    def test_processing_hold_offers_interrupt_then_records_once_the_job_stops(self):
+        view, _notebook = self._ready_recorder()
+        view.sessions.insert("", "end", iid="s1", values=("Revisão semanal",))
+        busy = {"state": "idle", "levels": {}, "elapsed": 0, "processing": True,
+                "processing_kind": "summary", "processing_session": "s1"}
+        self._poll_once(view, busy)
+        self.assertEqual(view.start_blocked_reason.get(), "Aguardando o resumo de “Revisão semanal”.")
+        self.assertTrue(view.interrupt_start_button.winfo_ismapped())
+        self.assertEqual(str(view.interrupt_start_button.cget("state")), "normal")
+        self.assertEqual(view.waveform.state, "processing")
+        self.assertTrue(view.record_status.get().startswith("Processando · "))
+        self.assertEqual(view.waveform.status_text, "Estado: Processando")
+
+        view.request_start = mock.Mock(return_value=True)
+        with mock.patch("meeting_gui.messagebox.askokcancel", return_value=False):
+            view.interrupt_and_record()
+        self.assertIsNone(view.start_after_interrupt)
+        with mock.patch("meeting_gui.messagebox.askokcancel", return_value=True) as confirm:
+            view.interrupt_and_record()
+        message = confirm.call_args.args[1]
+        self.assertIn("Interromper o resumo de “Revisão semanal” e começar a gravar?", message)
+        self.assertIn("O áudio original fica preservado", message)
+        self.assertIn("na Biblioteca", message)
+        wait_for(lambda: view.controller.cancel_processing.called)
+        view.controller.cancel_processing.assert_called_once_with()
+
+        self._poll_once(view, busy)
+        self.assertEqual(view.start_blocked_reason.get(),
+                         "Interrompendo o resumo; a gravação começa em seguida.")
+        self.assertEqual(str(view.interrupt_start_button.cget("state")), "disabled")
+        view.request_start.assert_not_called()
+        self._poll_once(view, {**busy, "processing": False, "processing_kind": None,
+                               "processing_session": None})
+        view.request_start.assert_called_once_with("window")
+        self.assertIsNone(view.start_after_interrupt)
+        self.assertFalse(view.start_blocked_row.winfo_ismapped())
+
+    def test_interrupt_confirmation_states_the_consequence_of_each_job_class(self):
+        from meeting_support import JOB_LABELS, PIPELINE_JOBS
+        view, _notebook = self._ready_recorder()
+        view.request_start = mock.Mock(return_value=True)
+        self.assertEqual(PIPELINE_JOBS, {"final_audio", "transcription", "summary", "capture_cleanup"})
+        for kind in JOB_LABELS:
+            view.controller.snapshot.return_value = {
+                "state": "idle", "levels": {}, "elapsed": 0, "processing": True,
+                "processing_kind": kind,
+            }
+            with mock.patch("meeting_gui.messagebox.askokcancel", return_value=False) as confirm:
+                view.interrupt_and_record()
+            message = confirm.call_args.args[1]
+            self.assertIn("A gravação começa assim que", message, kind)
+            if kind in PIPELINE_JOBS:
+                self.assertIn("O áudio original fica preservado. Refaça essa etapa depois, "
+                              "na Biblioteca.", message, kind)
+            else:
+                # A model import, chat answer, export or source test has no
+                # recording audio to keep and is not redone in the Library.
+                self.assertIn("Essa tarefa para antes de terminar. Execute-a de novo depois.",
+                              message, kind)
+                self.assertNotIn("áudio original", message, kind)
+                self.assertNotIn("Biblioteca", message, kind)
+            self.assertIsNone(view.start_after_interrupt, kind)
+        view.controller.cancel_processing.assert_not_called()
+
+    def test_refused_start_names_its_blocker(self):
+        view, _notebook = self._ready_recorder()
+        view.controller.snapshot.return_value = {"state": "postprocessing", "processing": True,
+                                                 "processing_kind": "summary"}
+        view._started(False, None, "hotkey")
+        self.assertEqual(view.status.get(), "Gravação não iniciada: aguardando o resumo. "
+                                            "Para gravar agora, use Interromper e gravar.")
+        view.controller.snapshot.return_value = {"state": "idle", "playback": {"active": True}}
+        view._started(False, None, "hotkey")
+        self.assertEqual(view.status.get(), "Gravação não iniciada: aguardando a reprodução.")
+
+    def test_cancel_processing_is_offered_only_for_this_recordings_running_job(self):
+        view, _notebook = self._ready_recorder()
+        button = view.cancel_processing_button
+        step = view.processing_job_label
+        view.selected = "s1"
+        base = {"state": "idle", "levels": {}, "elapsed": 0}
+        self._poll_once(view, {**base, "processing": False})
+        self.assertEqual((str(button.cget("state")), button.cget("text")), ("disabled", "Cancelar"))
+        self.assertEqual(view.processing_job_status.get(), "")
+        # The Library page is hidden behind the recorder tab, so read the grid
+        # membership rather than whether the line is on screen.
+        self.assertFalse(step.grid_info())
+        self._poll_once(view, {**base, "state": "postprocessing", "processing": True,
+                               "processing_kind": "transcription", "processing_session": "s1"})
+        self.assertEqual((str(button.cget("state")), button.cget("text")), ("normal", "Cancelar"))
+        self.assertEqual(view.processing_job_status.get(), "Em execução: a transcrição.")
+        self.assertTrue(step.grid_info())
+        self._poll_once(view, {**base, "processing": True, "processing_kind": "export",
+                               "processing_session": "s2"})
+        self.assertEqual(str(button.cget("state")), "disabled")
+        self.assertEqual(view.processing_job_status.get(), "")
+        self.assertFalse(step.grid_info())
+        self._poll_once(view, {**base, "processing": True, "processing_kind": "import",
+                               "processing_session": None})
+        self.assertEqual((str(button.cget("state")), button.cget("text")), ("normal", "Cancelar"))
+        self.assertEqual(view.processing_job_status.get(), "Em execução: a importação de áudio.")
+        for state in ("starting", "recording", "paused", "stopping"):
+            self._poll_once(view, {**base, "state": state, "processing": True,
+                                   "processing_kind": "export", "processing_session": "s1"})
+            self.assertEqual(str(button.cget("state")), "disabled", state)
+            self.assertEqual(view.processing_job_status.get(), "", state)
+
+    # Same fonts-and-metrics caveat as the library minimum-width test above.
+    @unittest.skipUnless(sys.platform == "win32", "layout fit is verified on Windows metrics")
+    def test_processing_cancel_names_every_job_and_fits_the_minimum_size(self):
+        import i18n
+        from meeting_support import JOB_LABELS
+        _geometry, min_width, min_height = ui_theme.build_theme(
+            "windows", system="windows").manager_window_size
+        for language in ("pt-BR", "en-US"):
+            i18n.set_language(language)
+            self.addCleanup(i18n.set_language, i18n.DEFAULT_LANGUAGE)
+            controller = mock.Mock()
+            controller.snapshot.return_value = {
+                "state": "idle", "levels": {}, "elapsed": 0, "processing": False,
+            }
+            controller.devices.return_value = []
+            controller.list_sessions.return_value = []
+            controller.read_workspace.return_value = {
+                "generation": 0, "collections": [], "series": [],
+            }
+            manager = tk.Toplevel(self.root)
+            manager.geometry(f"{min_width}x{min_height}")
+            # The manager's sidebar takes about 211px of the minimum width.
+            tk.Frame(manager, width=211).pack(side="left", fill="y")
+            notebook = ttk.Notebook(manager)
+            notebook.pack(side="left", fill="both", expand=True)
+            view = add_meeting_tabs(
+                self.root, manager, notebook, controller, lambda: {}, mock.Mock(),
+            )
+            try:
+                notebook.select(view.library_tab)
+                wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+                # Deliver the startup reads first: an empty library hides the detail.
+                wait_for(lambda: (self.root.update(), view.bridge.drain(),
+                                  not view.bridge.callbacks)[2])
+                view._show_library_detail(True)
+                view.selected = "s1"
+                view.detail_sections.select("transcript")
+                self.root.update()
+                button, step = view.cancel_processing_button, view.processing_job_label
+                for kind, label in JOB_LABELS.items():
+                    self._poll_once(view, {"state": "idle", "levels": {}, "elapsed": 0,
+                                           "processing": True, "processing_kind": kind,
+                                           "processing_session": "s1"})
+                    where = (language, kind)
+                    self.assertEqual(str(button.cget("state")), "normal", where)
+                    self.assertTrue(button.winfo_ismapped(), where)
+                    self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth(), where)
+                    self.assertTrue(step.winfo_ismapped(), where)
+                    self.assertIn(i18n.tr(label), view.processing_job_status.get(), where)
+                    # A wrapping line grows instead of cutting the step name.
+                    self.assertGreaterEqual(step.winfo_height(), step.winfo_reqheight(), where)
+                    self.assertLessEqual(step.winfo_width(), view.transcript_processing_actions.winfo_width())
+                    self.assertLessEqual(
+                        view.transcript_processing_actions.winfo_rooty()
+                        + view.transcript_processing_actions.winfo_height(),
+                        manager.winfo_rooty() + manager.winfo_height(), where)
+            finally:
+                view.close_without_prompt(destroy=False)
+                manager.destroy()
+                self.root.update()
+
+    def test_chat_cancel_stops_only_the_pending_answer_and_restores_the_question(self):
+        view, notebook = self._embedded_view(geometry="920x700")
+        notebook.select(view.library_tab)
+        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
+        view._show_library_detail(True)
+        view.selected = "synthetic-session"
+        view.detail_ready = True
+        view.transcript_revision = "revision-1"
+        view.summary_model.set("synthetic-model")
+        view.summary_model_installed = {"synthetic-model": True}
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def late_answer(*_args, **_kwargs):
+            release.wait(2)
+            return {"answer": "Resposta tardia.", "citations": []}
+
+        view.controller.ask_this_meeting.side_effect = late_answer
+        view.meeting_chat.set_question("Quem decide o prazo?")
+        view.ask_this_meeting()
+        self.root.update()
+        chat = view.meeting_chat
+        self.assertEqual(str(chat.cancel_button.cget("state")), "normal")
+        chat.cancel_button.invoke()
+        view.controller.cancel_processing.assert_called_once_with(kinds=frozenset({"ask"}))
+        self.assertIsNone(view.ask_pending)
+        self.assertEqual(view.ask_conversations["synthetic-session"], [])
+        self.assertEqual(chat.get_question(), "Quem decide o prazo?")
+        self.assertEqual(view.ask_status.get(), "Resposta cancelada. A pergunta voltou para o campo de texto.")
+        self.assertEqual(str(chat.cancel_button.cget("state")), "disabled")
+        release.set()
+        wait_for(lambda: (self.root.update(), "ask_this_meeting" not in view.bridge.callbacks)[1])
+        self.assertEqual(view.ask_conversations["synthetic-session"], [])
 
     def test_settings_show_one_section_at_a_time(self):
         view, notebook = self._embedded_view()

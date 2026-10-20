@@ -160,9 +160,12 @@ class MeetingWaveform(tk.Canvas):
     redraws, so the audio callback never paints or calls Tcl.
     """
 
-    STATES = ("idle", "checking", "recording", "paused")
+    # "processing" and "waiting": idle, but a job or another hold keeps the
+    # recorder from starting, so it is not "Pronto".
+    STATES = ("idle", "processing", "waiting", "checking", "recording", "paused")
     _DEFAULT_TRACK_LABELS = {"microphone": N_("Microfone"), "system": N_("Sistema")}
-    _DEFAULT_STATE_LABELS = {"idle": N_("Pronto"), "checking": N_("Testando"),
+    _DEFAULT_STATE_LABELS = {"idle": N_("Pronto"), "processing": N_("Processando"),
+                             "waiting": N_("Aguardando"), "checking": N_("Testando"),
                              "recording": N_("Gravando"), "paused": N_("Pausado")}
 
     def __init__(self, master, model=None, *, theme=None, poll_ms=40,
@@ -277,8 +280,8 @@ class MeetingWaveform(tk.Canvas):
 
     def _wave_color(self, track):
         # Chart roles: the microphone is the primary series, the system the
-        # comparison; a paused or idle signal is context.
-        if self._state in {"paused", "idle"}:
+        # comparison; a paused, idle, processing or waiting signal is context.
+        if self._state in {"paused", "idle", "processing", "waiting"}:
             return self.ui.chart_neutral
         return self.ui.chart_primary if track == "microphone" else self.ui.chart_secondary
 

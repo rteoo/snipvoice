@@ -113,6 +113,10 @@ class MeetingWaveformWidgetTests(unittest.TestCase):
             self.assertEqual(waveform.status_text, "Estado: Gravando")
             waveform.set_state("paused")
             self.assertEqual(waveform.status_text, "Estado: Pausado")
+            waveform.set_state("waiting")
+            self.assertEqual(waveform.status_text, "Estado: Aguardando")
+            waveform.set_state("processing")
+            self.assertEqual(waveform.status_text, "Estado: Processando")
             with self.assertRaises(ValueError):
                 waveform.set_state("stopped")
         finally:
@@ -126,7 +130,7 @@ class MeetingWaveformWidgetTests(unittest.TestCase):
             waveform.set_state("recording")
             self.assertEqual(waveform._wave_color("microphone"), theme.chart_primary)
             self.assertEqual(waveform._wave_color("system"), theme.chart_secondary)
-            for state in ("paused", "idle"):
+            for state in ("paused", "idle", "waiting", "processing"):
                 waveform.set_state(state)
                 for track in TRACKS:
                     self.assertEqual(waveform._wave_color(track), theme.chart_neutral)

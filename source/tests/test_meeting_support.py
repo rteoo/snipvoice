@@ -22,8 +22,8 @@ from meeting_store import MeetingStore, TrackUnavailableError
 from meeting_mixdown import MixdownCancelled, export_mixdown
 from meeting_storage import compact_capture
 from meeting_support import (
-    MeetingController, REPORT_HISTORY_LIMIT, WAVEFORM_POINTS, _amplitude_envelope,
-    _final_audio_path,
+    JOB_LABELS, MeetingController, REPORT_HISTORY_LIMIT, WAVEFORM_POINTS, _amplitude_envelope,
+    _final_audio_path, processing_job_label, start_blocker,
 )
 
 
@@ -823,7 +823,7 @@ class MeetingControllerTests(unittest.TestCase):
         def work():
             entered.set()
             self.controller._cancel.wait(2)
-        self.assertTrue(self.controller._launch_processing(work))
+        self.assertTrue(self.controller._launch_processing(work, kind="transcription"))
         self.assertTrue(entered.wait(1))
         self.assertFalse(self.controller.start(MeetingSettings()))
         self.controller.cancel_processing()
@@ -1096,6 +1096,89 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertEqual(snapshot["postprocess"], "Processamento interrompido; tente novamente.")
         self.assertIn("cancelado", snapshot["error"])
 
+    def test_cancel_during_capture_never_reaches_the_recordings_post_processing(self):
+        # Regression: closing the manager mid-recording called cancel_processing()
+        # and the shared event skipped the final MP3, transcript and summary.
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_installed_summary_model", return_value=None), \
+                patch("meeting_transcription.transcribe_meeting") as transcribe:
+            self.assertTrue(self.controller.start(MeetingSettings(destination=self.temp.name)))
+            self.assertTrue(self.capture.started.wait(2))
+            self.assertFalse(self.controller.cancel_processing())
+            self.assertFalse(self.controller._cancel.is_set())
+            self.assertTrue(self.controller.stop())
+            self.assertFalse(self.controller.cancel_processing())
+            self.controller._thread.join(5)
+
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot["state"], "idle")
+        self.assertEqual(snapshot["error"], "")
+        self.final_export.assert_called_once()
+        transcribe.assert_called_once()
+        processing = self.controller.store.get(snapshot["session_id"])["processing"]
+        self.assertEqual(processing["audio"]["status"], "completed")
+        self.assertEqual(processing["transcription"]["status"], "completed")
+
+    def test_post_processing_reports_its_step_and_stays_cancellable(self):
+        seen = {}
+
+        def transcribe(*_args, cancel_event=None, **_kwargs):
+            snapshot = self.controller.snapshot()
+            seen.update(state=snapshot["state"], kind=snapshot["processing_kind"],
+                        session=snapshot["processing_session"], blocker=start_blocker(snapshot))
+            # A start-blocked person interrupts the job ("Interromper e gravar").
+            seen["issued"] = self.controller.cancel_processing()
+            seen["event"] = cancel_event.is_set()
+
+        with patch.object(self.controller, "_installed_voice_profile", return_value="balanced"), \
+                patch.object(self.controller, "_installed_summary_model", return_value="qwen3.5-2b-q4"), \
+                patch("meeting_transcription.transcribe_meeting", side_effect=transcribe), \
+                patch("meeting_summary.summarize_meeting") as summarize:
+            self.assertTrue(self.controller.start(MeetingSettings(destination=self.temp.name)))
+            self.assertTrue(self.capture.started.wait(2))
+            self.controller.stop()
+            self.controller._thread.join(5)
+
+        session = self.controller.snapshot()["session_id"]
+        self.assertEqual(seen, {"state": "postprocessing", "kind": "transcription", "session": session,
+                                "blocker": "a transcrição", "issued": True, "event": True})
+        summarize.assert_not_called()
+        snapshot = self.controller.snapshot()
+        self.assertEqual(snapshot["state"], "idle")
+        self.assertIsNone(snapshot["processing_kind"])
+        self.assertIsNone(snapshot["processing_session"])
+        # A cancel belongs to the job it stopped; later default reads are clean.
+        self.assertFalse(self.controller._cancel.is_set())
+        processing = self.controller.store.get(session)["processing"]
+        self.assertEqual(processing["audio"]["status"], "completed")
+        self.assertEqual(processing["transcription"]["status"], "cancelled")
+
+    def test_cancel_targets_only_the_named_job_kinds(self):
+        entered, release = threading.Event(), threading.Event()
+
+        def work():
+            entered.set()
+            release.wait(2)
+
+        self.assertTrue(self.controller._launch_processing(work, session_id="s1", kind="report"))
+        try:
+            self.assertTrue(entered.wait(1))
+            snapshot = self.controller.snapshot()
+            self.assertEqual((snapshot["processing_kind"], snapshot["processing_session"]), ("report", "s1"))
+            self.assertEqual(start_blocker(snapshot), "o resumo")
+            self.assertFalse(self.controller.cancel_processing(kinds=frozenset({"ask", "cross_question"})))
+            self.assertFalse(self.controller._cancel.is_set())
+            self.assertTrue(self.controller.cancel_processing(kinds=frozenset({"report"})))
+            self.assertTrue(self.controller._cancel.is_set())
+        finally:
+            release.set()
+            self.controller._processing_thread.join(2)
+        self.assertFalse(self.controller._cancel.is_set())
+
+    def test_cancel_without_a_running_job_is_refused(self):
+        self.assertFalse(self.controller.cancel_processing())
+        self.assertFalse(self.controller._cancel.is_set())
+
     def test_transcript_pages_are_bounded_and_navigable_past_the_legacy_limit(self):
         session = self.controller.store.begin(
             {"tracks": {"microphone": {"segments": []}}, "duration": 600}, "Long"
@@ -1206,6 +1289,50 @@ class MeetingControllerTests(unittest.TestCase):
             ])
             self.controller.stop_playback()
             self.controller._play_thread.join(2)
+
+
+class StartBlockerTests(unittest.TestCase):
+    def test_capture_and_a_free_recorder_have_no_blocker(self):
+        self.assertEqual(start_blocker({"state": "idle"}), "")
+        for state in ("starting", "recording", "paused", "stopping", "unavailable"):
+            self.assertEqual(start_blocker({"state": state, "processing": True,
+                                            "processing_kind": "export"}), "")
+
+    def test_running_jobs_name_their_step(self):
+        self.assertEqual(start_blocker({"state": "postprocessing", "processing": True,
+                                        "processing_kind": "final_audio"}), "o áudio final")
+        self.assertEqual(start_blocker({"state": "idle", "processing": True,
+                                        "processing_kind": "ask"}), "a resposta do chat")
+        # A snapshot without a kind still names the lane rather than reading free.
+        self.assertEqual(start_blocker({"state": "idle", "processing": True}), "o processamento")
+        self.assertEqual(start_blocker({"state": "postprocessing"}), "o processamento")
+        self.assertEqual(processing_job_label({"state": "idle", "processing": False,
+                                               "processing_kind": "ask"}), "")
+
+    def test_leases_without_a_job_block_start_by_name(self):
+        self.assertEqual(start_blocker({"state": "idle", "final_copy": True}), "a cópia do áudio final")
+        self.assertEqual(start_blocker({"state": "idle", "playback": {"active": True}}), "a reprodução")
+        self.assertEqual(start_blocker({"state": "idle", "retention_active": True}), "a retenção local")
+
+    def test_every_job_kind_the_controller_reports_has_a_label(self):
+        import ast
+        source = Path(__file__).resolve().parents[1] / "meeting_support.py"
+        kinds = set()
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call):
+                for keyword in node.keywords:
+                    if keyword.arg == "kind" and isinstance(keyword.value, ast.Constant):
+                        kinds.add(keyword.value.value)
+                if (getattr(node.func, "attr", "") == "_processing_step" and node.args
+                        and isinstance(node.args[0], ast.Constant)):
+                    kinds.add(node.args[0].value)
+            if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+                    and node.value.value is not None
+                    and any(isinstance(target, ast.Attribute) and target.attr == "_processing_kind"
+                            for target in node.targets)):
+                kinds.add(node.value.value)
+        self.assertGreaterEqual(len(kinds), 10)
+        self.assertEqual(sorted(kinds - set(JOB_LABELS)), [])
 
 
 class MeetingLibraryControllerWiringTests(unittest.TestCase):
