@@ -1,10 +1,15 @@
 """Conversation isolation, async replies, and per-answer provenance in the GUI."""
 
 import json
+import os
+import sys
 import unittest
 from unittest.mock import Mock
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from meeting_gui import MAX_CHAT_TURNS, MeetingWindow
+from message_support import new_view, said
 
 
 class Variable:
@@ -20,8 +25,7 @@ class Variable:
 
 class MeetingChatFlowTests(unittest.TestCase):
     def setUp(self):
-        self.view = view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        self.view = view = new_view()
         view.selected = "recording-1"
         view.detail_ready = True
         view.transcript_revision = "revision-1"
@@ -33,10 +37,8 @@ class MeetingChatFlowTests(unittest.TestCase):
         view.ask_request = 0
         view.qa_mode = Variable("explicit_save")
         view.ask_status = Variable()
-        view.status = Variable()
         view.controller = Mock()
         view.refresh_reports = Mock()
-        view._remember_operation_error = Mock()
         view._submit = Mock(return_value=True)
         self.draft = Variable("What was decided?")
         view.meeting_chat = Mock()
@@ -95,6 +97,54 @@ class MeetingChatFlowTests(unittest.TestCase):
         self.assertEqual(view.ask_conversations[view.selected][0]["status"], "error")
         self.assertEqual(self.draft.get(), "What was decided?")
         self.assertIsNone(view.ask_pending)
+
+    def test_failed_reply_is_written_for_the_person_with_the_cause_kept_apart(self):
+        view = self.view
+        view.ask_this_meeting()
+        view._submit.call_args.args[2](None, r"Local model failed at C:\Users\Alice\model.gguf")
+        turn = view.ask_conversations[view.selected][0]
+        self.assertEqual(turn["error"], "Nada foi salvo. Tente enviar a pergunta de novo.")
+        self.assertIn("Local model failed", turn["details"])
+        self.assertNotIn("Alice", turn["details"])
+        self.assertNotIn("Local model failed", turn["error"])
+
+    def test_retry_replaces_the_failed_turn_with_a_new_pending_one(self):
+        view = self.view
+        view.ask_this_meeting()
+        view._submit.call_args.args[2](None, "Local model failed")
+        failed = view.ask_conversations[view.selected][0]
+        view._submit.reset_mock()
+        view.retry_chat_answer(failed["id"])
+        turns = view.ask_conversations[view.selected]
+        self.assertEqual([turn["status"] for turn in turns], ["pending"])
+        self.assertEqual(turns[0]["question"], "What was decided?")
+        view._submit.assert_called_once()
+        # Only a failed turn can be retried, and never while an answer is pending.
+        view._submit.reset_mock()
+        view.retry_chat_answer(turns[0]["id"])
+        view._submit.assert_not_called()
+
+    def test_missing_model_is_a_notice_that_opens_the_models_page(self):
+        view = self.view
+        view.summary_model_installed = {}
+        view.notebook, view.settings_sections, view.model_sections = Mock(), Mock(), Mock()
+        view.settings_tab = ".settings"
+        view.ask_this_meeting()
+        view._submit.assert_not_called()
+        title, body = view.meeting_chat.show_notice.call_args.args[1:3]
+        self.assertEqual(title, "Falta um modelo de resumo")
+        self.assertNotIn("aba", body)
+        label, command = view.meeting_chat.show_notice.call_args.kwargs["action"]
+        self.assertEqual(label, "Abrir Configurações › Modelos")
+        command()
+        view.notebook.select.assert_called_once_with(".settings")
+        view.settings_sections.select.assert_called_once_with("models")
+        view.model_sections.select.assert_called_once_with("summary")
+        # An installed model clears the notice and sends.
+        view.summary_model_installed = {"local-model": True}
+        view.ask_this_meeting()
+        view.meeting_chat.clear_notice.assert_called()
+        view._submit.assert_called_once()
 
     def test_queue_rejection_recovers_send_state(self):
         self.view._submit.return_value = False
@@ -157,6 +207,7 @@ class MeetingChatFlowTests(unittest.TestCase):
         view._jump_to_citation("segment-1", "original-revision")
         operation, callback = view._submit.call_args.args[1:]
         callback(operation(), None)
+        self.assertEqual(said(view)[:2], ("receipt", "Fonte da citação segment-1 carregada."))
         self.assertEqual(view.controller.get_transcript_page.call_args.kwargs["revision"],
                          "original-revision")
         self.assertEqual(view.transcript_revision, "original-revision")

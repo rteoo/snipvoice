@@ -974,8 +974,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             canvas_box = (canvas.winfo_rootx(), canvas.winfo_rooty(),
                           canvas.winfo_rootx() + canvas.winfo_width(),
                           canvas.winfo_rooty() + canvas.winfo_height())
-            controls = [*view.meters.values(), view.start_button, view.stop_button,
-                        view.record_details_button, view.preview_button]
+            # Idle: Iniciar gravação is the one transport control on show.
+            self.assertTrue(view.start_button.winfo_ismapped())
+            self.assertFalse(view.stop_button.winfo_ismapped())
+            self.assertFalse(view.pause_button.winfo_ismapped())
+            controls = [*view.meters.values(), view.record_chip, view.start_button,
+                        view.preview_button]
             boxes = [(widget.winfo_rootx(), widget.winfo_rooty(),
                       widget.winfo_rootx() + widget.winfo_width(),
                       widget.winfo_rooty() + widget.winfo_height()) for widget in controls]
@@ -988,6 +992,60 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             self.assertGreaterEqual(top, canvas_box[1])
             self.assertLessEqual(right, canvas_box[2])
             self.assertLessEqual(bottom, canvas_box[3])
+
+    def test_lost_source_warning_keeps_stop_visible_at_minimum_size(self):
+        health = {"microphone": {"state": "receiving", "reason": "", "last_packet_age": 0.0},
+                  "system": {"state": "disconnected", "reason": "endpoint removed",
+                             "last_packet_age": 65.0}}
+        snapshot = {"state": "recording", "levels": {}, "elapsed": 2754, "processing": False,
+                    "capture_health": health,
+                    "error": "A gravação não está recebendo áudio do sistema."}
+
+        def measure(shared_root):
+            self.app._show_manager_window(shared_root)
+            manager = self.app.manager_window
+            _geometry, min_width, min_height = ui_theme.theme().manager_window_size
+            manager.geometry(f"{min_width}x{min_height}")
+            manager.update()
+            view = self.app._manager_meeting_view
+            # One poll against the synthetic snapshot, without the repeating timer.
+            shared_root.after_cancel(view.after_id)
+            with mock.patch.object(view.controller, "snapshot", return_value=snapshot):
+                view._poll()
+            shared_root.after_cancel(view.after_id)
+            manager.update()
+            canvas = view.recording_canvas
+            titles = [widget.cget("text") for widget in _descendants(view.recording_trouble)
+                      if isinstance(widget, tk.Label)]
+            return {
+                "yview": canvas.yview(),
+                "stop": (view.stop_button.winfo_ismapped(),
+                         view.stop_button.winfo_rooty() + view.stop_button.winfo_height(),
+                         str(view.stop_button.cget("bg"))),
+                "start": view.start_button.winfo_ismapped(),
+                "pause": view.pause_button.winfo_ismapped(),
+                "canvas_bottom": canvas.winfo_rooty() + canvas.winfo_height(),
+                "primary": ui_theme.theme().accent,
+                "trouble": titles,
+                "captions": {key: caption.cget("text") for key, caption in view.source_captions.items()},
+                "status": view.record_status.get(),
+            }
+
+        measured = self._on_gui(measure)
+        # The page has not scrolled away from the top: the line under the recorder
+        # may sit below the fold at this height, the meters, the warning and the
+        # transport do not.
+        self.assertEqual(measured["yview"][0], 0.0)
+        mapped, bottom, background = measured["stop"]
+        self.assertTrue(mapped)
+        self.assertLessEqual(bottom, measured["canvas_bottom"])
+        # Parar e salvar is the copper action while recording, beside Pausar.
+        self.assertEqual(background, measured["primary"])
+        self.assertFalse(measured["start"])
+        self.assertTrue(measured["pause"])
+        self.assertIn("Sem áudio do sistema há 1 min 05 s", measured["trouble"])
+        self.assertEqual(measured["captions"]["system"], "Sem áudio · há 1 min 05 s")
+        self.assertEqual(measured["status"], "Gravando · 00:45:54 · Áudio do sistema: sem áudio")
 
     def test_sidebar_navigates_pages_in_tab_order(self):
         def navigate(shared_root):

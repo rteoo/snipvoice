@@ -1,9 +1,13 @@
 """Summary template generation, saved versions, and stale callbacks."""
 
+import os
+import sys
 import unittest
 from unittest.mock import Mock
 
-from meeting_gui import MeetingWindow
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from message_support import new_view, said
 
 
 class Variable:
@@ -19,8 +23,7 @@ class Variable:
 
 class SummaryFlowTests(unittest.TestCase):
     def setUp(self):
-        self.view = view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        self.view = view = new_view()
         view.selected = "session-1"
         view.detail_ready = True
         view.transcript_revision = "revision-1"
@@ -28,7 +31,6 @@ class SummaryFlowTests(unittest.TestCase):
         view.summary_model_installed = {"local-model": True}
         view.summary_focus = Variable("Prioritize confirmed next steps.")
         view.summary_status = Variable()
-        view.status = Variable()
         view.summary_pending = None
         view.summary_generation = 0
         view.snapshot = {"state": "idle", "processing": False}
@@ -39,7 +41,6 @@ class SummaryFlowTests(unittest.TestCase):
         view._submit = Mock(return_value=True)
         view._sync_summary_controls = Mock()
         view._show_summary = Mock()
-        view._remember_operation_error = Mock()
         view.refresh_reports = Mock()
 
     def test_generation_captures_template_focus_model_and_revision(self):
@@ -91,7 +92,13 @@ class SummaryFlowTests(unittest.TestCase):
         view._submit.call_args.args[2](None, "Model failed")
         self.assertIsNone(view.summary_pending)
         view._show_summary.assert_not_called()
-        self.assertIn("preservado", view.summary_status.get())
+        # The failure is written on Biblioteca with the cause behind Detalhes;
+        # the summary line goes back to its own hint.
+        kind, title, body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível gerar o resumo"))
+        self.assertIn("preservado", body)
+        self.assertIn("Model failed", details)
+        self.assertNotIn("preservado", view.summary_status.get())
         view._submit.return_value = False
         view.generate_report()
         self.assertIsNone(view.summary_pending)

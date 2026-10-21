@@ -12,13 +12,17 @@ import unittest
 from tkinter import ttk
 from unittest import mock
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from message_support import new_view, said
 from meeting_gui import (
-    APPEARANCE_LABELS, BackgroundBridge, INDEX_STATE_LABELS, MAX_PAGE_BACKSTACK,
-    MeetingWindow, PROFILE_LABELS,
-    TRANSCRIPT_PAGE_SIZE,
+    APPEARANCE_LABELS, BackgroundBridge, INDEX_STATE_LABELS, MAX_MESSAGE_DETAILS,
+    MAX_MESSAGE_TEXT, MAX_PAGE_BACKSTACK, MeetingWindow, Messages, PROFILE_LABELS,
+    RECORDING_HINT, SOURCE_TEST_HINT, TRANSCRIPT_PAGE_SIZE,
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
-    format_time, meter_value, open_meeting_window, playback_sources,
-    retention_plan_projection, validated_settings, _append_detail_once,
+    format_silence, format_time, hotkey_display, lost_sources, meter_value,
+    open_meeting_window, playback_sources, recording_tone, retention_plan_projection,
+    source_health, validated_settings, _append_detail_once,
     _processing_issue, _stage_status,
 )
 from meeting_index import INDEX_STATES
@@ -221,37 +225,43 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIn("válida", view.appearance_status.get())
 
     def test_operation_error_redacts_drive_unc_and_spaced_paths(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.record_details_button = mock.Mock()
-        view._remember_operation_error(
-            r"failed C:\Users\Alice Smith\meeting; then \\server\share\Bob Jones\audio"
-        )
-        self.assertNotIn("Alice", view.record_details)
-        self.assertNotIn("server", view.record_details)
-        self.assertNotIn("Bob", view.record_details)
-        self.assertEqual(view.record_details.count("[caminho local]"), 2)
+        view = new_view()
+        view._fail("library", "Falhou",
+                   error=r"failed C:\Users\Alice Smith\meeting; then \\server\share\Bob Jones\audio")
+        details = said(view)[3]
+        self.assertNotIn("Alice", details)
+        self.assertNotIn("server", details)
+        self.assertNotIn("Bob", details)
+        self.assertEqual(details.count("[caminho local]"), 2)
 
     def test_start_waits_for_inflight_privacy_save(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        view = new_view("recording")
         view.privacy_save_inflight = True
-        view.status = Variable()
         view._validated_recording_request = mock.Mock()
         self.assertFalse(view.request_start("hotkey"))
         view._validated_recording_request.assert_not_called()
-        self.assertIn("privacidade", view.status.get())
+        kind, title, body, _details = said(view, "recording")
+        self.assertEqual((kind, title), ("problem", "Gravação não iniciada"))
+        self.assertIn("privacidade", body)
 
     def test_startup_failure_disables_recording_and_retention_controls(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        view = new_view("recording")
         view.start_button = mock.Mock()
         view.delete_button = mock.Mock()
-        view.status = Variable("Preparando privacidade e recuperação local…")
         view.privacy_status = Variable()
         view.set_startup_status(False, r"failed at C:\Users\private\meeting")
         view.start_button.configure.assert_called_with(state="disabled")
         view.delete_button.configure.assert_called_with(state="disabled")
-        self.assertNotIn("C:\\Users", view.status.get())
+        _kind, title, body, _details = said(view, "recording")
+        self.assertEqual(title, "A gravação aguarda a recuperação local")
+        self.assertNotIn("C:\\Users", body)
+        # It states a standing condition: leaving the page does not clear it,
+        # and it cannot be dismissed, but recovery ends it.
+        view.messages.leave("recording")
+        self.assertIsNotNone(view.messages.current("recording"))
+        self.assertTrue(view.messages.current("recording").sticky)
+        view.set_startup_status(True, "")
+        self.assertIsNone(view.messages.current("recording"))
 
     def test_shared_start_path_routes_window_hotkey_and_tray_to_notice(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -262,26 +272,24 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.controller.recording_notice_required.return_value = True
         view._validated_recording_request = mock.Mock(return_value=("settings", "title"))
         view._show_recording_notice = mock.Mock()
-        view.status = Variable()
         for origin in ("window", "hotkey", "tray"):
             view.request_start(origin)
         self.assertEqual([item.args[0] for item in view._show_recording_notice.call_args_list],
                          ["window", "hotkey", "tray"])
 
     def test_start_consent_cancel_never_submits_and_confirm_is_one_start(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        view = new_view("recording")
         view.retention_ready = True
         view.privacy_ready = True
         view.controller = mock.Mock()
         view.controller.recording_notice_required.return_value = False
-        view._validated_recording_request = mock.Mock(return_value=("settings", "title"))
+        settings = types.SimpleNamespace(sources="both")
+        view._validated_recording_request = mock.Mock(return_value=(settings, "title"))
         view._submit = mock.Mock(return_value=True)
-        view.status = Variable()
         self.assertTrue(view.request_start("hotkey"))
         operation = view._submit.call_args.args[1]
         operation()
-        view.controller.start.assert_called_once_with("settings", title="title")
+        view.controller.start.assert_called_once_with(settings, title="title")
         view._started(False, None, "hotkey")
         view.controller.revoke_recording_consent.assert_called_once_with()
 
@@ -382,7 +390,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.final_available = True
         view.recovery_needed = True
         view.controller = mock.Mock()
-        view.status = Variable()
         view._action = mock.Mock()
         view.prepare_final_audio()
         self.assertEqual(view._action.call_args.args[:2], ("recover_audio", "meeting-1"))
@@ -448,9 +455,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIn("memory_only", view.ask_status.get())
 
     def test_copy_summary_uses_rendered_readable_text(self):
-        view = MeetingWindow.__new__(MeetingWindow)
+        view = new_view()
         view.summary_text = "Resumo legível\n\nDecisões:\n• Enviar relatório"
-        view.status = Variable()
         view._submit = mock.Mock(return_value=True)
         with mock.patch("meeting_gui.Clipboard.set_content", return_value=True) as copy:
             view.copy_summary()
@@ -459,7 +465,20 @@ class MeetingGuiLogicTests(unittest.TestCase):
             operation()
             callback(True, None)
         copy.assert_called_once_with(view.summary_text)
-        self.assertEqual(view.status.get(), "Resumo copiado.")
+        self.assertEqual(said(view)[:2], ("receipt", "Resumo copiado."))
+
+    def test_a_failed_copy_is_trouble_on_the_page_not_a_quiet_line(self):
+        view = new_view()
+        view.summary_text = "Resumo"
+        view._submit = mock.Mock(return_value=True)
+        view.copy_summary()
+        callback = view._submit.call_args.args[2]
+        callback(False, None)
+        kind, title, body, _details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível copiar o resumo"))
+        self.assertIn("Tente de novo", body)
+        callback(False, "clipboard busy")
+        self.assertIn("clipboard busy", said(view)[3])
 
     def test_stale_trash_result_is_ignored_after_close_or_refresh(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -472,8 +491,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.trash_tree.delete.assert_not_called()
 
     def test_retention_delete_previews_and_applies_the_exact_plan(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        view = new_view()
         view.selected = "meeting-1"
         view.detail_ready = True
         view.retention_ready = True
@@ -481,9 +499,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.controller = mock.Mock()
         view.title = Variable("Planning")
         view.delete_button = mock.Mock()
-        view.status = Variable()
         view.window = object()
-        view._remember_operation_error = mock.Mock()
         view._submit = mock.Mock(return_value=True)
         plan = {
             "session_id": "meeting-1",
@@ -728,7 +744,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.change_page(-1)
         self.assertEqual(view.library_cursor, view.library_back_stack[-1])
 
-        stale = MeetingWindow.__new__(MeetingWindow)
+        stale = new_view()
         stale.library_filter_generation = 4
         stale.sessions = mock.Mock()
         stale._library_loaded(({"items": [], "next_cursor": None}, [], 3), None)
@@ -866,11 +882,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
             "error": "native_discontinuity: HRESULT 0x88890004",
         })
 
-        self.assertEqual(
-            status,
-            "Pronto · 00:00:31 · "
-            "Gravação preservada · Ver detalhes",
-        )
+        # The technical detail lives behind the page's Detalhes, not in the state line.
+        self.assertEqual(status, "Pronto · 00:00:31 · Gravação preservada")
         self.assertNotIn("opaque-id", status)
         self.assertNotIn("HRESULT", status)
 
@@ -882,20 +895,25 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIn("Criando áudio final · 42%", status)
         self.assertNotIn("Processando localmente", status)
 
-    def test_recording_status_reports_recovery_without_native_error_text(self):
+    def test_recording_status_names_the_source_that_lost_its_audio(self):
         snapshot = {"state": "recording", "elapsed": 15, "capture_health": {
             "system": {"state": "recovering", "reason": "HRESULT synthetic-native-detail"}}}
         status = format_recording_status(snapshot)
-        self.assertIn("Reconectando áudio", status)
+        self.assertIn("Áudio do sistema: reconectando", status)
         self.assertNotIn("HRESULT", status)
-        snapshot["capture_health"]["system"]["state"] = "receiving"
-        self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
-        snapshot["capture_health"]["system"]["state"] = "quiet"
-        self.assertNotIn("Reconectando áudio", format_recording_status(snapshot))
+        for healthy in ("receiving", "quiet", "waiting", "paused"):
+            snapshot["capture_health"]["system"]["state"] = healthy
+            self.assertNotIn("Áudio do sistema", format_recording_status(snapshot), healthy)
         snapshot["capture_health"]["system"]["state"] = "disconnected"
         status = format_recording_status(snapshot)
-        self.assertIn("Sem áudio de uma fonte", status)
-        self.assertNotIn("Reconectando áudio", status)
+        self.assertEqual(status, "Gravando · 00:00:15 · Áudio do sistema: sem áudio")
+        snapshot["capture_health"]["microphone"] = {"state": "disconnected", "reason": ""}
+        self.assertEqual(
+            format_recording_status(snapshot),
+            "Gravando · 00:00:15 · Microfone: sem áudio · Áudio do sistema: sem áudio")
+        # Outside a capture nothing is lost, whatever the last health said.
+        snapshot["state"] = "idle"
+        self.assertNotIn("sem áudio", format_recording_status(snapshot))
 
     def test_recording_status_never_reads_ready_while_start_is_held(self):
         held = (
@@ -1040,18 +1058,17 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertGreater(len(rendered), 65536)
 
     def test_oversized_report_review_is_rejected_without_truncation(self):
-        view = MeetingWindow.__new__(MeetingWindow)
+        view = new_view()
         view.selected = "session"
         view.selected_report = {"id": "report", "reviewed_artifact": {"generation": 2}}
         view.report_section_choice = Variable("summary")
         view.report_editor = mock.Mock()
         view.report_editor.get.return_value = "x" * 65537
-        view.status = Variable()
         view._action = mock.Mock()
 
         view.save_report_review()
 
-        self.assertIn("Exporte a seção completa", view.status.get())
+        self.assertIn("Exporte a seção completa", said(view)[1])
         view._action.assert_not_called()
 
     def test_short_report_review_still_saves_in_full(self):
@@ -1061,7 +1078,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.report_section_choice = Variable("summary")
         view.report_editor = mock.Mock()
         view.report_editor.get.return_value = "Reviewed text"
-        view.status = Variable()
         view._action = mock.Mock()
 
         view.save_report_review()
@@ -1110,21 +1126,18 @@ class MeetingGuiLogicTests(unittest.TestCase):
             view.destination_label.get(), "Pasta local padrão (recordings)",
         )
 
-    def test_processing_errors_are_hidden_behind_recording_details(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.status = Variable()
-        view.record_details = ""
-        view.record_details_button = mock.Mock()
+    def test_processing_errors_are_written_on_the_page_with_the_cause_behind_details(self):
+        view = new_view()
 
         view._processing_launched("meeting", False, "HRESULT 0x88890004")
 
-        self.assertEqual(
-            view.status.get(),
-            "Não foi possível iniciar o processamento local. Veja os detalhes na aba Gravação.",
-        )
-        self.assertNotIn("HRESULT", view.status.get())
-        self.assertIn("HRESULT", view.record_details)
-        view.record_details_button.configure.assert_called_with(state="normal")
+        kind, title, body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível iniciar o processamento local"))
+        self.assertNotIn("HRESULT", title + body)
+        self.assertIn("HRESULT", details)
+        # What happened, what it affects, what to do: and no pointer to another tab.
+        self.assertNotIn("aba", body)
+        self.assertEqual(view.messages.current("library").session, "meeting")
 
     def test_repeated_worker_error_detail_is_shown_once(self):
         details = ["Detalhes técnicos: native discontinuity"]
@@ -1147,7 +1160,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def test_summary_download_shows_license_and_uses_background_job(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.window = mock.Mock()
-        view.status = Variable()
         view.summary_model_installed = {}
         view.summary_model_buttons = {"gemma-4-e2b-q4": mock.Mock()}
         view.summary_model_status = Variable()
@@ -1167,7 +1179,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def test_liquidai_first_download_requires_nonstandard_license_acceptance(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.window = mock.Mock()
-        view.status = Variable()
         view.summary_model_installed = {}
         view.summary_model_buttons = {"lfm2.5-2.6b-q4": mock.Mock()}
         view.summary_model_status = Variable()
@@ -1195,9 +1206,9 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.endpoint_vars = {track: Variable("old default") for track in ("microphone", "system")}
         view.endpoint_boxes = {track: mock.Mock() for track in ("microphone", "system")}
         for name in ("profile", "language", "profile_display", "language_display", "hotkey",
-                     "summary_model", "summary_display", "status", "destination",
-                     "destination_label"):
+                     "summary_model", "summary_display", "destination", "destination_label"):
             setattr(view, name, Variable())
+        view.shortcut_hint = mock.Mock()
         view.input_enabled, view.output_enabled = Variable(True), Variable(True)
         view.auto_transcribe, view.auto_summary = Variable(False), Variable(False)
         view.voice_boost = Variable(False)
@@ -1232,11 +1243,10 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertTrue(settings.voice_boost)
 
     def make_edit_view(self):
-        view = MeetingWindow.__new__(MeetingWindow)
+        view = new_view()
         view.selected, view.detail_ready = "one", True
         view.dirty = True
         view.title = Variable("Title")
-        view.status = Variable()
         view.controller = mock.Mock()
         view.refresh_library = mock.Mock()
         view._submit = mock.Mock(return_value=True)
@@ -1251,7 +1261,9 @@ class MeetingGuiLogicTests(unittest.TestCase):
         callback(False, None)
         self.assertTrue(view.dirty)
         after.assert_not_called()
-        self.assertIn("salvar", view.status.get())
+        kind, title, body, _details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível salvar o título"))
+        self.assertIn("continua salvo", body)
 
     def test_edit_during_save_is_not_cleared_or_discarded(self):
         view = self.make_edit_view()
@@ -1299,7 +1311,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         callback(True, None)
         view._clear_library_detail.assert_called_once_with()
         view.refresh_library.assert_called_once_with()
-        self.assertIn("lixeira", view.status.get())
+        self.assertEqual(said(view)[:2], ("receipt", "Gravação movida para a lixeira do app."))
 
     def test_delete_selected_cancel_preserves_the_recording(self):
         view = self.make_edit_view()
@@ -1424,6 +1436,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._action.assert_called_once_with(
             "export_transcript", "meeting-1", "export.txt",
             style="timestamped", revision="revision-2",
+            receipt="Exportação da transcrição iniciada.",
         )
 
     def test_final_audio_download_copies_the_saved_file_format(self):
@@ -1433,13 +1446,15 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.audio_sizes = {"final": 1024, "final_format": "MP3"}
         view.title = Variable("Reunião")
         view.window = mock.Mock()
-        view.status = Variable()
         view._action = mock.Mock()
         with mock.patch("meeting_gui.filedialog.asksaveasfilename", return_value="final.mp3") as dialog:
             view.export_audio()
         self.assertEqual(dialog.call_args.kwargs["defaultextension"], ".mp3")
         self.assertEqual(dialog.call_args.kwargs["filetypes"], (("Áudio MP3", "*.mp3"),))
-        view._action.assert_called_once_with("export_final_audio", "meeting-1", "final.mp3")
+        view._action.assert_called_once_with(
+            "export_final_audio", "meeting-1", "final.mp3",
+            receipt="Exportação do áudio final iniciada.",
+        )
 
     def test_audio_download_suggestions_keep_titles_out_of_paths(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1447,7 +1462,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.final_available = True
         view.audio_sizes = {"final_format": "MP3"}
         view.window = mock.Mock()
-        view.status = Variable()
         view._action = mock.Mock()
         for title, stem in (
             ("Reunião 14/10/2026", "Reunião 14-10-2026"),
@@ -1482,13 +1496,12 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(view.summary.state, "disabled")
 
     def test_refresh_outputs_selects_final_audio_only_for_adjusted_recording(self):
-        view = MeetingWindow.__new__(MeetingWindow)
+        view = new_view()
         view.selected = "meeting-1"
         view.detail_ready = True
         view.transcript_revision = "revision-1"
         view.transcript_offset = 0
         view.audio_source = Variable("Microfone")
-        view.status = Variable()
         view._adjusted_audio_target = "meeting-1"
         view.controller = mock.Mock()
         view.controller.get_session.return_value = {
@@ -1515,16 +1528,15 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(view.audio_source.get(), "Áudio final")
         self.assertIsNone(view._adjusted_audio_target)
 
-    def test_output_footer_uses_selected_processing_stages_not_capture_error(self):
+    def test_refreshed_outputs_report_the_selected_processing_stage_not_the_capture_error(self):
         for stage_status, incomplete in (("completed", False), ("skipped", False),
                                          ("failed", True), ("cancelled", True)):
             with self.subTest(stage_status=stage_status):
-                view = MeetingWindow.__new__(MeetingWindow)
+                view = new_view()
                 view.selected = "meeting-1"
                 view.detail_ready = True
                 view.transcript_revision = "revision-1"
                 view.transcript_offset = 0
-                view.status = Variable()
                 view.snapshot = {"error": "native_discontinuity" if not incomplete else ""}
                 view.controller = mock.Mock()
                 view.controller.get_session.return_value = {
@@ -1535,23 +1547,22 @@ class MeetingGuiLogicTests(unittest.TestCase):
                 for name in ("_set_audio_capabilities", "_show_summary", "_render_transcript",
                              "_render_annotations", "_update_transcript_paging_controls",
                              "_load_transcript_document", "refresh_reports", "_submit",
-                             "_remember_operation_error", "_show_processing_issue"):
+                             "_show_processing_issue"):
                     setattr(view, name, mock.Mock())
                 view.refresh_outputs("meeting-1")
                 operation, callback = view._submit.call_args.args[1:]
                 callback(operation(), None)
-                self.assertEqual("uma etapa não foi concluída" in view.status.get(), incomplete)
+                # A failed stage is the processing InfoBar's to show, with its fix; the
+                # capture's own error is not repeated, and the refresh itself is one quiet line.
                 view._show_processing_issue.assert_called_once_with(
                     {"stage": "summary", "status": stage_status, "error": "model unavailable"}
                     if incomplete else None)
-                if incomplete:
-                    view._remember_operation_error.assert_called_once_with("summary: model unavailable")
-                else:
-                    view._remember_operation_error.assert_not_called()
+                self.assertEqual(said(view)[:2], (
+                    "receipt", "Resultado local atualizado. Revise a transcrição e o resumo."))
                 view.selected = "meeting-2"
-                view.status.set("Selected another recording")
+                view.messages.receipt("library", "Selected another recording")
                 callback(operation(), None)
-                self.assertEqual(view.status.get(), "Selected another recording")
+                self.assertEqual(said(view)[1], "Selected another recording")
 
     def test_recording_finished_opens_clean_new_recording_and_tracks_processing(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1610,7 +1621,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
         label = view.report_profile_choice.get()
         self.assertIn("desativado", label)
-        view.status = Variable()
         view.controller = mock.Mock()
         view._submit = mock.Mock(return_value=True)
         view.enable_report_profile()
@@ -1623,7 +1633,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
     def test_builtin_profile_can_be_duplicated_as_an_enabled_custom_copy(self):
         view = MeetingWindow.__new__(MeetingWindow)
-        view.status = Variable()
         view.window = mock.Mock()
         view.report_profile_choice = Variable("Geral · v1")
         view.report_profile_by_label = {
@@ -1766,6 +1775,165 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertFalse(view.closed)
         view.bridge.close.assert_not_called()
         after_close.assert_not_called()
+
+
+class PageMessageTests(unittest.TestCase):
+    """The per-page message slots: what a page says, how long, and about which recording."""
+
+    def messages(self):
+        self.drawn = []
+        return Messages(lambda page, message: self.drawn.append((page, message and message.kind)),
+                        clock=lambda: datetime(2026, 10, 20, 14, 2))
+
+    def test_each_page_holds_one_message_and_a_receipt_replaces_trouble(self):
+        messages = self.messages()
+        messages.problem("library", "Falhou", "Corpo.", error="boom")
+        messages.receipt("library", "Título salvo.")
+        messages.receipt("settings", "Configurações salvas.")
+        self.assertEqual(messages.current("library").kind, "receipt")
+        self.assertEqual(messages.current("settings").title, "Configurações salvas.")
+        self.assertIsNone(messages.current("recording"))
+        self.assertEqual(messages.current("library").when, datetime(2026, 10, 20, 14, 2))
+        self.assertEqual(self.drawn, [("library", "problem"), ("library", "receipt"),
+                                      ("settings", "receipt")])
+        with self.assertRaises(KeyError):
+            messages.current("ditado")
+
+    def test_details_and_receipts_are_bounded_and_redacted(self):
+        messages = self.messages()
+        messages.problem("library", "Falhou", error="x" * 20000)
+        self.assertEqual(len(messages.current("library").details), MAX_MESSAGE_DETAILS)
+        messages.problem("library", "Falhou", error=r"failed at C:\Users\Alice\meeting")
+        self.assertNotIn("Alice", messages.current("library").details)
+        messages.receipt("library", "uma linha " * 100 + "\n com quebra")
+        line = messages.current("library").title
+        self.assertLessEqual(len(line), MAX_MESSAGE_TEXT)
+        self.assertNotIn("\n", line)
+
+    def test_a_message_about_one_recording_goes_when_another_is_chosen(self):
+        messages = self.messages()
+        messages.problem("library", "Sobre A", session="a")
+        messages.problem("settings", "Sem gravação")
+        messages.problem("recording", "Sobre B", session="b")
+        messages.drop_other_sessions("b")
+        self.assertIsNone(messages.current("library"))
+        self.assertEqual(messages.current("settings").title, "Sem gravação")
+        self.assertEqual(messages.current("recording").title, "Sobre B")
+        messages.drop_other_sessions()
+        self.assertIsNone(messages.current("recording"))
+        self.assertEqual(messages.current("settings").title, "Sem gravação")
+
+    def test_leaving_a_page_clears_it_except_for_a_standing_condition(self):
+        messages = self.messages()
+        messages.problem("library", "Falhou")
+        messages.problem("recording", "Recuperação pendente", key="startup", sticky=True)
+        messages.leave("library")
+        messages.leave("recording")
+        self.assertIsNone(messages.current("library"))
+        self.assertEqual(messages.current("recording").title, "Recuperação pendente")
+        # A keyed clear only removes the message it names.
+        messages.clear("recording", key="other")
+        self.assertIsNotNone(messages.current("recording"))
+        messages.clear("recording", key="startup")
+        self.assertIsNone(messages.current("recording"))
+
+    def test_actions_end_in_a_receipt_or_a_written_failure(self):
+        view = new_view("library")
+        view._done(True, None, "Exportação iniciada.")
+        self.assertEqual(said(view)[:2], ("receipt", "Exportação iniciada."))
+        # Routine success without a receipt says nothing and leaves the page as it is.
+        view._done(True, None)
+        self.assertEqual(said(view)[:2], ("receipt", "Exportação iniciada."))
+        view._done(False, None)
+        self.assertEqual(said(view)[:2], ("problem", "A operação não foi aceita"))
+        self.assertEqual(view.messages.current("library").tone, "warning")
+        view._done(None, "disk full")
+        kind, title, _body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível concluir a operação"))
+        self.assertIn("disk full", details)
+        # With no page of its own, the outcome lands on the page in view.
+        view._destination = "settings"
+        view._done(None, "settings failure")
+        self.assertIn("settings failure", said(view, "settings")[3])
+
+    def test_a_capture_that_ended_badly_says_so_for_that_recording(self):
+        view = new_view("library")
+        view._explain_capture("s1", {"status": "completed"})
+        self.assertIsNone(view.messages.current("library"))
+        for status, tone, title in (("failed", "danger", "A captura falhou"),
+                                    ("interrupted", "warning", "A captura foi interrompida"),
+                                    ("partial", "warning", "A captura teve problemas")):
+            with self.subTest(status=status):
+                view._explain_capture("s1", {"status": status, "error": "native_discontinuity"})
+                message = view.messages.current("library")
+                self.assertEqual((message.tone, message.title, message.session), (tone, title, "s1"))
+                self.assertIn("native_discontinuity", message.details)
+
+
+class RecordingFeedbackLogicTests(unittest.TestCase):
+    """Source health, silence and the recorder's tone, as pure projections of its snapshot."""
+
+    @staticmethod
+    def snapshot(state="recording", **health):
+        return {"state": state, "capture_health": {
+            track: {"state": value, "reason": "synthetic"} for track, value in health.items()}}
+
+    def test_silence_is_written_with_at_most_two_units(self):
+        self.assertEqual([format_silence(value) for value in (-3, 0, 12, 59.9, 65, 3599, 3725)],
+                         ["0 s", "0 s", "12 s", "59 s", "1 min 05 s", "59 min 59 s", "1 h 02 min"])
+
+    def test_only_a_running_capture_has_lost_sources(self):
+        self.assertEqual(lost_sources(self.snapshot(system="disconnected")),
+                         [("system", "disconnected")])
+        self.assertEqual(
+            lost_sources(self.snapshot("paused", microphone="recovering", system="disconnected")),
+            [("microphone", "recovering"), ("system", "disconnected")])
+        for state in ("idle", "postprocessing", "unavailable"):
+            self.assertEqual(lost_sources(self.snapshot(state, system="disconnected")), [], state)
+        for healthy in ("receiving", "quiet", "waiting", "paused", "failed"):
+            self.assertEqual(lost_sources(self.snapshot(system=healthy)), [], healthy)
+        self.assertEqual(lost_sources({"state": "recording", "capture_health": {"system": "bad"}}), [])
+
+    def test_each_source_writes_its_health_under_its_meter(self):
+        def both(value):
+            return self.snapshot(microphone=value, system=value)
+
+        self.assertEqual(source_health("system", self.snapshot("idle", system="receiving"), "both"),
+                         ("", "text_muted"))
+        for value, text, role in (
+                ("receiving", "Recebendo sinal", "text_muted"),
+                ("quiet", "Conectado · sem som no momento", "text_muted"),
+                ("waiting", "Aguardando sinal…", "text_muted"),
+                ("paused", "Em pausa", "text_muted"),
+                ("disconnected", "Sem áudio", "warning"),
+                ("recovering", "Reconectando…", "warning"),
+                ("failed", "A captura desta fonte falhou", "danger")):
+            with self.subTest(value=value):
+                self.assertEqual(source_health("system", both(value), "both"), (text, role))
+        self.assertEqual(source_health("system", both("disconnected"), "both", 65),
+                         ("Sem áudio · há 1 min 05 s", "warning"))
+        # A source this recording left out says so, whatever its device does.
+        self.assertEqual(source_health("system", both("receiving"), "microphone"),
+                         ("Não incluído nesta gravação", "text_muted"))
+        self.assertEqual(source_health("microphone", both("receiving"), "microphone")[0],
+                         "Recebendo sinal")
+
+    def test_the_status_dot_is_copper_only_while_recording(self):
+        ready = {"state": "idle"}
+        self.assertEqual(recording_tone(ready, True), "success")
+        self.assertEqual(recording_tone(ready, False), "info")
+        self.assertEqual(recording_tone({"state": "idle", "processing": True}, True), "info")
+        self.assertEqual(recording_tone({"state": "recording"}, True), "accent_mark")
+        self.assertEqual(recording_tone({"state": "paused"}, True), "text_muted")
+        self.assertEqual(recording_tone({"state": "unavailable"}, False), "warning")
+        self.assertEqual(recording_tone({"state": "failed"}, False), "danger")
+        self.assertEqual(recording_tone(self.snapshot(system="disconnected"), True), "warning")
+
+    def test_a_shortcut_is_written_the_way_people_type_it(self):
+        self.assertEqual(hotkey_display("ctrl+alt+r"), "Ctrl+Alt+R")
+        self.assertEqual(hotkey_display("ctrl+shift+f12"), "Ctrl+Shift+F12")
+        self.assertEqual(hotkey_display(""), "")
+        self.assertEqual(hotkey_display(None), "")
 
 
 class BackgroundBridgeTests(unittest.TestCase):
@@ -1918,12 +2086,18 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         )
         try:
             notebook.select(view.library_tab)
+            # The worst case for the page's own message slot: trouble with its
+            # action and Detalhes, drawn above the list at the minimum size.
+            view._fail("library", "Não foi possível carregar a biblioteca",
+                       "A lista abaixo pode estar desatualizada. Tente novamente.",
+                       error="OSError: index is locked", action=("Tentar novamente", lambda: None))
             self.root.update()
-            self.assertTrue(view.status_footer.winfo_ismapped())
-            self.assertLessEqual(
-                view.status_footer.winfo_rooty() + view.status_footer.winfo_height(),
-                manager.winfo_rooty() + manager.winfo_height(),
-            )
+            bar = view.message_bars["library"]
+            self.assertTrue(bar.winfo_ismapped())
+            self.assertLessEqual(bar.winfo_rooty() + bar.winfo_height(),
+                                 manager.winfo_rooty() + manager.winfo_height())
+            self.assertLessEqual(bar.winfo_rootx() + bar.winfo_width(),
+                                 manager.winfo_rootx() + manager.winfo_width())
             # Pack clips an overflowing row by shrinking its last widgets below
             # their requested width rather than pushing them off the edge.
             clipped = [
@@ -2105,11 +2279,13 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.controller.snapshot.return_value = {"state": "postprocessing", "processing": True,
                                                  "processing_kind": "summary"}
         view._started(False, None, "hotkey")
-        self.assertEqual(view.status.get(), "Gravação não iniciada: aguardando o resumo. "
-                                            "Para gravar agora, use Interromper e gravar.")
+        kind, title, body, _details = said(view, "recording")
+        self.assertEqual((kind, title), ("problem", "Gravação não iniciada"))
+        self.assertEqual(body, "Aguardando o resumo. Para gravar agora, use Interromper e gravar.")
         view.controller.snapshot.return_value = {"state": "idle", "playback": {"active": True}}
         view._started(False, None, "hotkey")
-        self.assertEqual(view.status.get(), "Gravação não iniciada: aguardando a reprodução.")
+        self.assertEqual(said(view, "recording")[1:3],
+                         ("Gravação não iniciada", "Aguardando a reprodução."))
 
     def test_cancel_processing_is_offered_only_for_this_recordings_running_job(self):
         view, _notebook = self._ready_recorder()
@@ -2117,31 +2293,37 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         step = view.processing_job_label
         view.selected = "s1"
         base = {"state": "idle", "levels": {}, "elapsed": 0}
+        view.detail_ready = True
+        view.final_available = True
+        # Cancel exists only while a job of this recording (or of none) runs. The
+        # Library page is hidden behind the recorder tab, so read the manager
+        # (pack/grid membership) rather than whether a widget is on screen.
         self._poll_once(view, {**base, "processing": False})
-        self.assertEqual((str(button.cget("state")), button.cget("text")), ("disabled", "Cancelar"))
+        self.assertFalse(button.winfo_manager())
         self.assertEqual(view.processing_job_status.get(), "")
-        # The Library page is hidden behind the recorder tab, so read the grid
-        # membership rather than whether the line is on screen.
         self.assertFalse(step.grid_info())
         self._poll_once(view, {**base, "state": "postprocessing", "processing": True,
                                "processing_kind": "transcription", "processing_session": "s1"})
-        self.assertEqual((str(button.cget("state")), button.cget("text")), ("normal", "Cancelar"))
+        self.assertEqual((button.winfo_manager(), str(button.cget("state")), button.cget("text")),
+                         ("pack", "normal", "Cancelar"))
         self.assertEqual(view.processing_job_status.get(), "Em execução: a transcrição.")
         self.assertTrue(step.grid_info())
+        # Another recording's job: no Cancel here, and the line says what holds the recovery controls.
         self._poll_once(view, {**base, "processing": True, "processing_kind": "export",
                                "processing_session": "s2"})
-        self.assertEqual(str(button.cget("state")), "disabled")
-        self.assertEqual(view.processing_job_status.get(), "")
-        self.assertFalse(step.grid_info())
+        self.assertFalse(button.winfo_manager())
+        self.assertEqual(view.processing_job_status.get(), "Aguarde a exportação terminar.")
+        self.assertEqual(str(view.transcribe_button.cget("state")), "disabled")
         self._poll_once(view, {**base, "processing": True, "processing_kind": "import",
                                "processing_session": None})
-        self.assertEqual((str(button.cget("state")), button.cget("text")), ("normal", "Cancelar"))
+        self.assertEqual((button.winfo_manager(), button.cget("text")), ("pack", "Cancelar"))
         self.assertEqual(view.processing_job_status.get(), "Em execução: a importação de áudio.")
         for state in ("starting", "recording", "paused", "stopping"):
             self._poll_once(view, {**base, "state": state, "processing": True,
                                    "processing_kind": "export", "processing_session": "s1"})
-            self.assertEqual(str(button.cget("state")), "disabled", state)
-            self.assertEqual(view.processing_job_status.get(), "", state)
+            self.assertFalse(button.winfo_manager(), state)
+            self.assertEqual(view.processing_job_status.get(), "Finalize a gravação em andamento primeiro.",
+                             state)
 
     # Same fonts-and-metrics caveat as the library minimum-width test above.
     @unittest.skipUnless(sys.platform == "win32", "layout fit is verified on Windows metrics")
@@ -2226,6 +2408,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.ask_this_meeting()
         self.root.update()
         chat = view.meeting_chat
+        self.assertEqual(chat.cancel_button.winfo_manager(), "pack")
         self.assertEqual(str(chat.cancel_button.cget("state")), "normal")
         chat.cancel_button.invoke()
         view.controller.cancel_processing.assert_called_once_with(kinds=frozenset({"ask"}))
@@ -2233,7 +2416,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertEqual(view.ask_conversations["synthetic-session"], [])
         self.assertEqual(chat.get_question(), "Quem decide o prazo?")
         self.assertEqual(view.ask_status.get(), "Resposta cancelada. A pergunta voltou para o campo de texto.")
-        self.assertEqual(str(chat.cancel_button.cget("state")), "disabled")
+        self.root.update()
+        self.assertEqual(chat.cancel_button.winfo_manager(), "")
         release.set()
         wait_for(lambda: (self.root.update(), "ask_this_meeting" not in view.bridge.callbacks)[1])
         self.assertEqual(view.ask_conversations["synthetic-session"], [])
@@ -2272,7 +2456,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertTrue(view.audio_export_progress.winfo_ismapped())
         self.assertLessEqual(view.audio_export_progress.winfo_rooty() + view.audio_export_progress.winfo_height(),
                              view.window.winfo_rooty() + view.window.winfo_height())
-        self.assertGreater(view.stop_button.winfo_rooty(), view.audio_export_progress.winfo_rooty())
+        # The export holds Start: the transport (a disabled Iniciar) stays under the bar.
+        self.assertFalse(view.stop_button.winfo_ismapped())
+        self.assertGreater(view.start_button.winfo_rooty(), view.audio_export_progress.winfo_rooty())
         self.assertEqual(float(view.audio_export_progress.cget("value")), 42)
         self.assertEqual(float(view.final_audio_progress.cget("value")), 42)
         self.assertEqual(view.final_audio_status.get(), "Criando áudio final · 42%")
@@ -2397,12 +2583,12 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.root.update()
         self.assertEqual(view.audio_overview.get(), "00:00:41")
         self.assertEqual(metadata["status"], "partial")
-        self.assertNotIn("Uma etapa anterior", view.status.get())
-        self.assertIn("native_discontinuity", view.operation_details)
-        metadata["processing_details"] = "summary: model unavailable"
-        view._detail_loaded("synthetic-session", (metadata, []), None)
-        self.assertIn("Uma etapa anterior não foi concluída", view.status.get())
-        self.assertIn("summary: model unavailable", view.operation_details)
+        # The capture's diagnostics are written on Biblioteca for this recording,
+        # with the cause behind Detalhes.
+        kind, title, _body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "A captura teve problemas"))
+        self.assertIn("native_discontinuity", details)
+        self.assertEqual(view.messages.current("library").session, "synthetic-session")
 
     def test_processing_completion_preserves_another_selected_recordings_details(self):
         view, _notebook = self._embedded_view()
@@ -2412,15 +2598,16 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.selected = "new-recording"
         view.processing_target = "old-recording"
         view.previous_processing = False
-        view.operation_details = "Selected recording details"
-        view.status.set("Selected another recording")
+        view._fail("library", "Selected recording trouble", error="Selected recording details",
+                   session="new-recording")
         view.controller.snapshot.return_value["error"] = "Old recording capture diagnostic"
-        with mock.patch.object(view, "_remember_operation_error") as remember:
-            view._poll()
+        view._poll()
         self.assertIsNone(view.processing_target)
-        remember.assert_not_called()
-        self.assertEqual(view.operation_details, "Selected recording details")
-        self.assertEqual(view.status.get(), "Selected another recording")
+        # Another recording's processing diagnostics never replace this recording's message.
+        kind, title, _body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "Selected recording trouble"))
+        self.assertIn("Selected recording details", details)
+        self.assertNotIn("Old recording", details)
 
     def test_chat_send_button_keeps_conversation_and_composer_visible(self):
         callback_errors = []
@@ -3003,6 +3190,342 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view._typed_confirmation = answering
             self.assertEqual(view._confirm_permanent_delete("Excluir?", "Fatos"), expected, (word, cancel))
         view._close_trash_dialog()
+
+    # -- Feedback: page messages, recording trouble, the transport swap ------------------------
+
+    def _recording_snapshot(self, state="recording", system="receiving", system_age=0.0, **extra):
+        return {"state": state, "levels": {}, "elapsed": 2754, "processing": False,
+                "capture_health": {
+                    "microphone": {"state": "receiving", "reason": "", "last_packet_age": 0.0},
+                    "system": {"state": system, "reason": "endpoint removed",
+                               "last_packet_age": system_age}},
+                **extra}
+
+    def test_a_page_message_is_drawn_on_its_page_and_leaves_with_the_user(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.library_tab)
+        self.root.update()
+        view._fail("library", "Falhou aqui", "Corpo.", error="boom")
+        self.root.update()
+        bar = view.message_bars["library"]
+        self.assertTrue(bar.winfo_ismapped())
+        texts = [w.cget("text") for w in descendants(bar) if isinstance(w, tk.Label)]
+        self.assertIn("Falhou aqui", texts)
+        self.assertTrue(any(text.startswith("Erro às ") for text in texts), texts)
+        for other in ("recording", "settings"):
+            self.assertEqual(view.message_bars[other].winfo_manager(), "", other)
+        # Navigating away clears it for good: it does not wait on another page.
+        notebook.select(view.recording_tab)
+        self.root.update()
+        self.assertIsNone(view.messages.current("library"))
+        self.assertEqual(bar.winfo_manager(), "")
+        notebook.select(view.library_tab)
+        self.root.update()
+        self.assertEqual(bar.winfo_manager(), "")
+
+    def test_a_message_written_while_the_user_is_elsewhere_waits_on_its_page(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.settings_tab)
+        self.root.update()
+        view._fail("library", "Falhou em segundo plano", "Corpo.")
+        self.root.update()
+        self.assertEqual(view.message_bars["library"].winfo_manager(), "pack")
+        notebook.select(view.library_tab)
+        self.root.update()
+        self.assertEqual(view.messages.current("library").title, "Falhou em segundo plano")
+        self.assertTrue(view.message_bars["library"].winfo_ismapped())
+
+    def test_a_library_load_error_is_inline_with_a_retry_and_ends_when_it_loads(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.library_tab)
+        view.refresh_library = mock.Mock()
+        view._library_loaded(None, "OSError: index is locked")
+        self.root.update()
+        kind, title, body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível carregar a biblioteca"))
+        self.assertIn("pode estar desatualizada", body)
+        self.assertIn("index is locked", details)
+        bar = view.message_bars["library"]
+        self.assertTrue(bar.winfo_ismapped())
+        retry = next(w for w in descendants(bar) if isinstance(w, tk.Button)
+                     and w.cget("text") == "Tentar novamente")
+        retry.invoke()
+        view.refresh_library.assert_called_once_with()
+        view._library_loaded([{"id": "s1", "title": "Revisão", "status": "completed"}], None)
+        self.root.update()
+        self.assertIsNone(view.messages.current("library"))
+        self.assertEqual(bar.winfo_manager(), "")
+
+    def test_a_failed_start_is_written_on_the_recording_page_and_a_new_start_clears_it(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.recording_tab)
+        view._started(None, "WASAPI 0x88890004", "window")
+        self.root.update()
+        kind, title, body, details = said(view, "recording")
+        self.assertEqual((kind, title), ("problem", "Não foi possível iniciar a gravação"))
+        self.assertIn("WASAPI", details)
+        self.assertNotIn("aba", body)
+        self.assertTrue(view.message_bars["recording"].winfo_ismapped())
+        view._submit = mock.Mock(return_value=True)
+        settings = view._current_settings()
+        view._submit_start(settings, "")
+        self.assertIsNone(view.messages.current("recording"))
+        self.assertEqual(view._recording_sources, settings.sources)
+
+    def test_a_polling_failure_is_written_once_and_ends_when_polling_recovers(self):
+        view, _notebook = self._ready_recorder()
+        self.root.after_cancel(view.after_id)
+        view.controller.snapshot.side_effect = RuntimeError("synthetic poll failure")
+        view._poll()
+        self.root.after_cancel(view.after_id)
+        first = view.messages.current("recording")
+        self.assertEqual((first.kind, first.key), ("problem", "poll"))
+        self.assertIn("synthetic poll failure", first.details)
+        view._poll()
+        self.root.after_cancel(view.after_id)
+        self.assertIs(view.messages.current("recording"), first)
+        view.controller.snapshot.side_effect = None
+        view._poll()
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        self.assertIsNone(view.messages.current("recording"))
+
+    def test_transport_shows_only_the_controls_that_can_act(self):
+        view, _notebook = self._ready_recorder()
+        free = {"state": "idle", "levels": {}, "elapsed": 0, "processing": False}
+
+        def shown():
+            return {name: (button.winfo_ismapped(), str(button.cget("state")))
+                    for name, button in (("start", view.start_button), ("pause", view.pause_button),
+                                         ("stop", view.stop_button))}
+
+        self._poll_once(view, free)
+        self.assertEqual(shown(), {"start": (True, "normal"), "pause": (False, "disabled"),
+                                   "stop": (False, "disabled")})
+        self.assertEqual(view.start_button.cget("bg"), view.ui.accent)
+        start_x = view.start_button.winfo_rootx()
+        # While recording, Parar e salvar takes the primary's place, with Pausar beside it.
+        self._poll_once(view, self._recording_snapshot())
+        self.assertEqual(shown(), {"start": (False, "disabled"), "pause": (True, "normal"),
+                                   "stop": (True, "normal")})
+        self.assertEqual((view.stop_button.cget("text"), view.stop_button.cget("bg")),
+                         ("Parar e salvar", view.ui.accent))
+        self.assertEqual(view.stop_button.winfo_rootx(), start_x)
+        self.assertEqual(view.pause_button.cget("text"), "Pausar")
+        self.assertNotEqual(view.pause_button.cget("bg"), view.ui.accent)
+        self._poll_once(view, self._recording_snapshot("paused"))
+        self.assertEqual(view.pause_button.cget("text"), "Retomar")
+        self.assertTrue(view.pause_button.winfo_ismapped())
+        # Starting and stopping have nothing to pause.
+        for state in ("starting", "stopping"):
+            self._poll_once(view, self._recording_snapshot(state))
+            self.assertEqual((view.stop_button.winfo_ismapped(), view.pause_button.winfo_ismapped(),
+                              view.start_button.winfo_ismapped()), (True, False, False), state)
+        # Work holding Start keeps the transport on Iniciar, disabled and not copper.
+        self._poll_once(view, {**free, "state": "postprocessing", "processing": True,
+                               "processing_kind": "summary", "processing_session": "s1"})
+        self.assertEqual(shown()["start"], (True, "disabled"))
+        self.assertFalse(shown()["stop"][0])
+        self.assertNotEqual(view.start_button.cget("bg"), view.ui.accent)
+        self._poll_once(view, free)
+        self.assertEqual(shown()["start"], (True, "normal"))
+        self.assertEqual(view.start_button.cget("bg"), view.ui.accent)
+
+    def test_the_shortcut_is_named_beside_the_transport_when_one_is_set(self):
+        import dataclasses
+        view, _notebook = self._ready_recorder()
+        self.assertEqual(view.shortcut_hint.cget("text"), "")
+        view.settings = dataclasses.replace(view.settings, hotkey="ctrl+alt+r")
+        view._sync_shortcut_hint()
+        self.root.update()
+        self.assertEqual(view.shortcut_hint.cget("text"), "Atalho: Ctrl+Alt+R")
+
+        def beside(button):
+            hint = view.shortcut_hint
+            # On the button's own row, to its right: the shortcut costs no height.
+            self.assertGreaterEqual(hint.winfo_rootx(), button.winfo_rootx() + button.winfo_width())
+            self.assertLess(abs((hint.winfo_rooty() + hint.winfo_height() // 2)
+                                - (button.winfo_rooty() + button.winfo_height() // 2)),
+                            button.winfo_height() // 2)
+
+        beside(view.start_button)
+        self._poll_once(view, self._recording_snapshot())
+        beside(view.pause_button)
+        view.settings = dataclasses.replace(view.settings, hotkey="")
+        view._sync_shortcut_hint()
+        self.assertEqual(view.shortcut_hint.cget("text"), "")
+
+    def test_the_status_chip_and_the_line_under_it_follow_the_recorder(self):
+        view, _notebook = self._ready_recorder()
+        dot = next(w for w in view.record_chip.winfo_children() if isinstance(w, tk.Canvas))
+
+        def tone():
+            return dot.itemcget(dot.find_all()[0], "fill")
+
+        free = {"state": "idle", "levels": {}, "elapsed": 0, "processing": False}
+        self._poll_once(view, free)
+        self.assertEqual((view.record_chip.label.cget("text"), tone()),
+                         ("Pronto · 00:00:00", view.ui.success))
+        self._poll_once(view, self._recording_snapshot())
+        self.assertEqual((view.record_chip.label.cget("text"), tone()),
+                         ("Gravando · 00:45:54", view.ui.accent_mark))
+        self.assertEqual(view.preview_status.get(), RECORDING_HINT)
+        self._poll_once(view, self._recording_snapshot(system="disconnected", system_age=9.0))
+        self.assertEqual(view.record_chip.label.cget("text"),
+                         "Gravando · 00:45:54 · Áudio do sistema: sem áudio")
+        self.assertEqual(tone(), view.ui.warning)
+        self._poll_once(view, free)
+        self.assertEqual(view.preview_status.get(), SOURCE_TEST_HINT)
+
+    def test_a_lost_source_raises_a_warning_that_names_it_and_counts_the_silence(self):
+        view, _notebook = self._ready_recorder()
+        view._recording_sources = "both"
+        trouble = view.recording_trouble
+        view._sync_recording_trouble(self._recording_snapshot(), now=100.0)
+        self.assertIsNone(trouble.kind)
+        self.assertEqual({track: label.cget("text") for track, label in view.source_captions.items()},
+                         {"microphone": "Recebendo sinal", "system": "Recebendo sinal"})
+        # A moment of silence is a device switch mending itself: the caption says it, no bar yet.
+        view._sync_recording_trouble(self._recording_snapshot(system="disconnected"), now=101.0)
+        self.assertIsNone(trouble.kind)
+        self.assertEqual(view.source_captions["system"].cget("text"), "Sem áudio")
+        # Past the grace period the warning names the source and how long it has been silent.
+        view._sync_recording_trouble(self._recording_snapshot(system="disconnected"), now=165.0)
+        self.root.update()
+        self.assertEqual(trouble.kind, "problem")
+        texts = [w.cget("text") for w in descendants(trouble) if isinstance(w, (tk.Label, tk.Button))]
+        self.assertIn("Sem áudio do sistema há 1 min 04 s", texts)
+        self.assertIn("Trocar dispositivo", texts)
+        self.assertEqual(view.source_captions["system"].cget("text"), "Sem áudio · há 1 min 04 s")
+        self.assertEqual(view.source_captions["microphone"].cget("text"), "Recebendo sinal")
+        self.assertEqual(str(view.source_captions["system"].cget("fg")), view.ui.warning)
+        bar = trouble.winfo_children()[0]
+        # The silence keeps counting in the same bar instead of rebuilding it.
+        view._sync_recording_trouble(self._recording_snapshot(system="disconnected"), now=166.0)
+        self.assertIs(trouble.winfo_children()[0], bar)
+        self.assertEqual(bar.title_label.cget("text"), "Sem áudio do sistema há 1 min 05 s")
+        # The action goes to the selector and says when a new choice applies.
+        next(w for w in descendants(trouble) if isinstance(w, tk.Button)
+             and w.cget("text") == "Trocar dispositivo").invoke()
+        self.assertIn("a partir da próxima gravação", view.preview_status.get())
+        # The source returns: the bar and the warning caption go.
+        view._sync_recording_trouble(self._recording_snapshot(), now=170.0)
+        self.root.update()
+        self.assertIsNone(trouble.kind)
+        self.assertEqual(trouble.winfo_manager(), "")
+        self.assertEqual(view.source_captions["system"].cget("text"), "Recebendo sinal")
+
+    def test_both_lost_sources_are_named_and_a_capture_that_ended_clears_the_captions(self):
+        view, _notebook = self._ready_recorder()
+        view._recording_sources = "both"
+        snapshot = self._recording_snapshot(system="recovering", system_age=20.0)
+        snapshot["capture_health"]["microphone"] = {"state": "disconnected", "reason": "",
+                                                    "last_packet_age": 20.0}
+        view._sync_recording_trouble(snapshot, now=500.0)
+        texts = [w.cget("text") for w in descendants(view.recording_trouble)
+                 if isinstance(w, tk.Label)]
+        self.assertIn("Sem áudio do microfone e do sistema há 20 s", texts)
+        self.assertEqual(view.source_captions["microphone"].cget("text"), "Sem áudio · há 20 s")
+        self.assertEqual(view.source_captions["system"].cget("text"), "Reconectando… · há 20 s")
+        view._sync_recording_trouble({**snapshot, "state": "idle"}, now=501.0)
+        self.assertIsNone(view.recording_trouble.kind)
+        self.assertEqual([label.cget("text") for label in view.source_captions.values()], ["", ""])
+
+    def test_a_source_left_out_of_the_recording_is_captioned_as_such(self):
+        view, _notebook = self._ready_recorder()
+        view._recording_sources = "microphone"
+        view._sync_recording_trouble(self._recording_snapshot(), now=10.0)
+        self.assertEqual(view.source_captions["system"].cget("text"), "Não incluído nesta gravação")
+        self.assertEqual(view.source_captions["microphone"].cget("text"), "Recebendo sinal")
+
+    def test_a_capture_error_stays_dismissed_only_while_it_lasts(self):
+        view, _notebook = self._ready_recorder()
+        view._recording_sources = "both"
+        snapshot = self._recording_snapshot(error="Verifique a captura de áudio: gap")
+        view._sync_recording_trouble(snapshot, now=10.0)
+        trouble = view.recording_trouble
+        self.assertEqual(trouble.kind, "problem")
+        self.assertIn("Detalhes técnicos: Verifique a captura de áudio: gap",
+                      [w.get("1.0", "end-1c") for w in descendants(trouble) if isinstance(w, tk.Text)])
+        next(w for w in descendants(trouble) if isinstance(w, tk.Button)
+             and w.cget("text") == "Fechar").invoke()
+        self.assertIsNone(trouble.kind)
+        # The same trouble stays dismissed while it lasts ...
+        view._sync_recording_trouble(snapshot, now=11.0)
+        self.assertIsNone(trouble.kind)
+        # ... and a later recording that hits it again shows it again.
+        view._sync_recording_trouble({**snapshot, "error": ""}, now=12.0)
+        view._sync_recording_trouble(snapshot, now=13.0)
+        self.assertEqual(trouble.kind, "problem")
+
+    def test_cancel_controls_exist_only_while_their_job_runs(self):
+        view, _notebook = self._ready_recorder()
+        for button_name, attribute, running in (
+                ("semantic_cancel_button", "semantic_cancel", threading.Event()),
+                ("rebuild_cancel_button", "rebuild_cancel", threading.Event()),
+                ("cross_cancel_button", "cross_pending", 3),
+                ("cancel_summary_button", "summary_pending", ("s1", 1)),
+                ("summary_download_cancel_button", "summary_download_cancel", threading.Event())):
+            with self.subTest(button=button_name):
+                button = getattr(view, button_name)
+                self.assertEqual(button.winfo_manager(), "")
+                setattr(view, attribute, running)
+                view._sync_job_cancels()
+                self.assertNotEqual(button.winfo_manager(), "")
+                self.assertEqual(str(button.cget("state")), "normal")
+                setattr(view, attribute, None)
+                view._sync_job_cancels()
+                self.assertEqual(button.winfo_manager(), "")
+
+    def test_the_download_cancel_comes_and_goes_without_moving_what_is_below_it(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.settings_tab)
+        view.settings_sections.select("models")
+        view.model_sections.select("summary")
+        self.root.update()
+        button = view.summary_download_cancel_button
+        row = button.master
+        height = row.winfo_height()
+        before = [w.winfo_rooty() for w in row.master.pack_slaves()]
+        view.summary_download_cancel = threading.Event()
+        view._sync_job_cancels()
+        self.root.update()
+        self.assertTrue(button.winfo_ismapped())
+        self.assertEqual(row.winfo_height(), height)
+        self.assertEqual([w.winfo_rooty() for w in row.master.pack_slaves()], before)
+        view.summary_download_cancel = None
+        view._sync_job_cancels()
+        self.root.update()
+        self.assertFalse(button.winfo_ismapped())
+        self.assertEqual(row.winfo_height(), height)
+
+    def test_disabled_recovery_controls_name_what_they_wait_for(self):
+        view, _notebook = self._ready_recorder()
+        view.selected, view.detail_ready = "s1", True
+        view.final_available, view.recovery_needed, view.playback_choices = False, True, ()
+        base = {"state": "idle", "levels": {}, "elapsed": 0, "processing": False}
+        self._poll_once(view, base)
+        self.assertEqual(str(view.transcribe_button.cget("state")), "disabled")
+        self.assertEqual(view.processing_job_status.get(),
+                         "Transcrever de novo requer o áudio final. Use Preparar áudio final, em Arquivos.")
+        self.assertEqual(str(view.play_button.cget("state")), "disabled")
+        self.assertEqual(view.playback_status.get(), "Esta gravação ainda não tem áudio final para ouvir.")
+        self.assertEqual(str(view.recover_audio_button.cget("state")), "normal")
+        # A job of another recording holds all three, and the page names it.
+        self._poll_once(view, {**base, "processing": True, "processing_kind": "summary",
+                               "processing_session": "s2"})
+        self.assertEqual(str(view.recover_audio_button.cget("state")), "disabled")
+        self.assertEqual(view.recover_audio_note.cget("text"), "Aguarde o resumo terminar.")
+        self.assertEqual(view.playback_status.get(), "Aguarde o resumo terminar.")
+        # Nothing to recover is also said, not just greyed out.
+        view.final_available, view.recovery_needed, view.playback_choices = True, False, ("Áudio final",)
+        self._poll_once(view, base)
+        self.assertEqual(view.recover_audio_note.cget("text"),
+                         "O áudio final está completo; não há nada a recuperar.")
+        self.assertEqual(str(view.recover_audio_button.cget("state")), "disabled")
+        self.assertEqual((str(view.transcribe_button.cget("state")), str(view.play_button.cget("state"))),
+                         ("normal", "normal"))
+        self.assertEqual(view.playback_status.get(), "Pronto para ouvir.")
 
 
 if __name__ == "__main__":

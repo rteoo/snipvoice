@@ -129,15 +129,25 @@ them to the named roles.
   controls clip, also when a first recording arrives in an empty library.
   The count under the list is plural-correct ("1 gravação", "12 gravações")
   and names the page only when there are pages.
-- `ui_theme.info_bar(parent, ui, tone, title, body, action, details, copy)` is the
-  in-page message: tone fill with a 1px tone edge (the fill alone is 1.0–1.14:1
-  against the page), a glyph per tone (⊗ ⚠ ⓘ ✓, until the app adopts an icon
-  set), a semibold title (what happened), a body (what it
-  affects and what to do), at most one neutral action, and technical text behind
-  "Detalhes". "Copiar" appears when the caller passes `copy(text, done)`, which
-  writes through the app's clipboard backend off the GUI thread; the bar says
-  "Copiado" only after it succeeds and otherwise "Selecione o texto e pressione
-  Ctrl+C". Tones: danger, warning, info, success.
+- `ui_theme.info_bar(parent, ui, tone, title, body, action, details, copy, when,
+  dismiss)` is the in-page message: tone fill with a 1px tone edge (the fill
+  alone is 1.0–1.14:1 against the page), a glyph per tone (⊗ ⚠ ⓘ ✓, until the
+  app adopts an icon set), a semibold title (what happened; it wraps), an
+  optional body (what it affects and what to do), at most one neutral action,
+  and technical text behind "Detalhes". "Copiar" appears when the caller passes
+  `copy(text, done)`, which writes through the app's clipboard backend off the
+  GUI thread; the bar says "Copiado" only after it succeeds and otherwise
+  "Selecione o texto e pressione Ctrl+C". `when` writes the severity word and the
+  local time at the right of the title, which wraps to make room ("Erro às
+  14:02", "Aviso às 14:02"; Informação, Concluído), so the severity never rests
+  on color or glyph alone.
+  `dismiss` adds a quiet "Fechar". Tones: danger, warning, info, success.
+- `ui_theme.MessageBar` is a page's one feedback slot. It has no height until the
+  page has something to say; trouble is an InfoBar and everything else one quiet
+  caption line ("Título salvo · 14:02"). A new message replaces the last, so a
+  page never stacks a history. `StatusChip` writes the recorder's state beside a
+  drawn tone dot ("● Gravando · 00:45:54"): the word carries the meaning, the dot
+  only the tone, and copper means live.
 - The selected recording's header shows its state word in its tone, then its
   date and duration. A failed processing step raises a danger InfoBar under it,
   a cancelled one a warning InfoBar, with the step's own fix: "Transcrever
@@ -184,7 +194,13 @@ On navigation / page / content / selection:
 ## Product structure
 
 - **Gravação:** check sources, record, and read the current state. Keep the
-  primary recording action and recovery state visible together.
+  primary recording action and recovery state visible together. Idle shows one
+  transport control, **Iniciar gravação** (copper, with the shortcut beside it
+  when one is set). While capturing, **Parar e salvar** takes its place as the
+  copper action beside **Pausar** (**Retomar** while paused); a control that
+  cannot act is not drawn. Each source's meter carries a written health line
+  ("Recebendo sinal", "Sem áudio · há 1 min 05 s", "Não incluído nesta
+  gravação").
 - **Biblioteca:** search and select a recording, then read the full transcript.
   Full text with paragraphs is the default; users can switch to timestamps
   afterward without running transcription again. Copy and export use that
@@ -215,6 +231,45 @@ On navigation / page / content / selection:
 
 - The current state appears beside the action it governs. Errors identify a
   next step, and technical detail is available on demand.
+- **Feedback is written on the page where it happens.** There is no global footer.
+  Each destination (Gravação, Biblioteca, Configurações) owns one message slot
+  (`MessageBar`) above its content. What went wrong is a toned InfoBar with what
+  happened, what it affects, one action and the cause behind Detalhes (with
+  Copiar); a routine outcome is one quiet line with its time; success without a
+  receipt says nothing. A slot empties when the user leaves the page, when the
+  next message replaces it, and, for a message about one recording, when another
+  recording is chosen. Only a standing condition (local recovery pending) outlives
+  navigation, and it cannot be dismissed. A message written while the user is
+  elsewhere waits on its own page. The technical text is bounded (4 KiB, paths
+  redacted) and kept per page and recording, never in one shared string; no
+  message sends the user to another tab ("veja a aba Gravação" is gone, and
+  `tests/test_i18n.py` fails if it returns).
+- **Recording trouble is loud and names its source.** A source that delivers no
+  audio shows a warning InfoBar above the recorder state once it has been silent
+  for 3 seconds (a headset switch mends itself in less): "Sem áudio do sistema
+  há 1 min 05 s", that the recording continues and resumes by itself, and
+  **Trocar dispositivo**, which takes the user to that source's selector and says
+  a new choice only applies to the next recording (the capture helper cannot
+  switch endpoints live). The same source reads "Sem áudio · há …" under its
+  meter and in the state line ("Gravando · 00:45:54 · Áudio do sistema: sem
+  áudio"); the dot turns warning. An error the recorder reports with no source
+  lost stays as a dismissable bar until it is dismissed or ends. At 1040×700 the
+  meters, the warning and the transport stay in view; only the hint line under the
+  recorder may move below the fold.
+- **Cancel exists only while there is something to cancel.** The semantic-index,
+  index-repair, cross-recording, summary and model-download Cancel controls, and
+  the processing one, are drawn only while their job runs, parked at the end of
+  their row or in a cell the row already reserves, so the controls beside them
+  and the page below do not move. A control that cannot act says what it waits
+  for in the line beside it ("Aguarde o resumo terminar.", "Transcrever de novo
+  requer o áudio final. Use Preparar áudio final, em Arquivos.", "O áudio final
+  está completo; não há nada a recuperar.").
+- **Chat answers fail visibly.** A failed answer is a danger InfoBar in the
+  conversation ("Não foi possível responder", **Tentar novamente**, the cause
+  behind Detalhes); retry puts the question back and sends it again. A missing
+  summary model is a warning notice above the composer with **Abrir Configurações
+  › Modelos**. The uncertainty label is always written and takes its tone from the
+  level: low is secondary text, medium warning, high danger.
 - Recording and model work stays off the GUI and keyboard callback threads.
 - Search and the selected recording preserve context while the user
   moves among detail sections.
@@ -240,11 +295,11 @@ On navigation / page / content / selection:
   cancels a recording's work: its capture, final audio, transcript and summary
   keep running. A close stops only the chat, cross-recording and summary
   answers that window asked for. The processing, summary, cross-recording and
-  chat Cancel controls are enabled only while their job runs. The processing
-  one is a plain "Cancelar" under a line that names the running step ("Em
-  execução: a transcrição.") and wraps at any width, so no job name can clip
-  the button at the 1040x700 minimum; the chat one returns the question to the
-  composer.
+  chat Cancel controls exist only while their job runs (see the Cancel rule
+  below). The processing one is a plain "Cancelar" under a line that names the
+  running step ("Em execução: a transcrição.") and wraps at any width, so no job
+  name can clip the button at the 1040x700 minimum; the chat one returns the
+  question to the composer.
 - A held Start names its holder under the button: "Aguardando o resumo de
   “Reunião 14/10”." The recorder status never reads "Pronto" while Start is
   disabled; it leads with Processando, Testando or Aguardando, and the waveform
@@ -272,6 +327,9 @@ Adopted as project rules ahead of the cross-app operations layer; they reuse
 | OPS-04 failure is not pending | A failed or cancelled processing step is an InfoBar with its reason behind Detalhes and its fix; an empty transcript says whether it is being processed, failed, was cancelled or is still due. |
 | OPS-05 time, size, identity | Library and trash dates are local ("Hoje 14:02", "Ontem 09:10", "qua. 14/10 09:10", "14/10 09:10", "14/10/2025"); trash expiry counts down ("em 23 d", then "Expirada"); sizes are decimal with the locale's mark ("46,2 MB"); a missing, malformed or unconvertible date reads "Sem data"; a size rounds before it picks its unit ("100 MB", "1,0 MB", never "1000 kB"). The trash shows a short id ("…1c2a9e8b", the id's random tail) until trashed recordings keep their titles. |
 | OPS-07 confirmation ladder | Moving to the trash stays a single confirmation; deleting from it (one recording or every expired one) needs the typed word. |
+| OPS-06 feedback channels | One `MessageBar` per destination, cleared on navigation; trouble is an InfoBar with Detalhes and one action, a routine outcome one quiet line. Project extension of the receipt: `<outcome> · HH:MM`, local 24-hour time (the proposal's "Salvo às 14:32" form). A refused command says why and points to its blocker on its own page. |
+| OPS-07 busy and disabled | Cancel exists only while its job runs and never moves a sibling; a disabled recovery control names its prerequisite beside it. Not adopted yet: a busy control keeping its label (Gerar resumo still reads "Gerando…"). |
+| OPS-01 recording words | The recorder's state word and its tone dot: Gravando (copper), Pausado (secondary), Pronto (success), Processando and Aguardando (info), a lost source or audio resources still in use (warning), a failed recorder (danger). A lost source adds its name after the word. |
 
 Recording states, in the list column and the detail header:
 
@@ -289,6 +347,18 @@ Recording states, in the list column and the detail header:
 The list reads the capture outcome the library index stores. A failed or
 cancelled transcription or summary shows in the recording's header, not in its
 row, until the index carries processing outcomes.
+
+Feedback words, one per concept (the shared glossary of the operations layer):
+
+| Concept | pt-BR | en |
+|---|---|---|
+| Severity beside the time | Erro · Aviso · Informação · Concluído | Error · Warning · Information · Done |
+| Retry a failed thing | Tentar novamente | Retry |
+| Technical detail, copy it | Detalhes · Copiar · Copiado | Details · Copy · Copied |
+| Dismiss a message | Fechar | Close |
+| Stop and keep a recording | Parar e salvar | Stop and save |
+| Change a lost source's device | Trocar dispositivo | Switch device |
+| Go to where a model is installed | Abrir Configurações › Modelos | Open Settings › Models |
 
 Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execução: …":
 
@@ -317,7 +387,7 @@ scratch-harness screenshot cannot pass a packaged-build gate.
 | Dark and Light appearance | Passed (source build) | Real manager built from source with synthetic data, both appearances, Gravação, Biblioteca detail, Ditado and every Configurações section. |
 | Live System appearance changes | Failed | The manager re-reads the OS theme only when it is rebuilt. |
 | Windows contrast themes | Not tested | Palette does not yet yield to high-contrast system colors. |
-| Minimum window 1040 × 700 and default 1120 × 820 | Passed (source build, 100% scale) | No control narrower or shorter than requested at either size; the recording page fits without scrolling at the minimum (`tests/test_voice_gui.py`). The library with a selected recording and its InfoBar clips nothing at 1040×700, 1120×820 and 1440×900 in both appearances (scratch harness on the source build). |
+| Minimum window 1040 × 700 and default 1120 × 820 | Passed (source build, 100% scale) | No control narrower or shorter than requested at either size; the recording page fits without scrolling at the minimum (`tests/test_voice_gui.py`). The library with a selected recording and its InfoBar clips nothing at 1040×700, 1120×820 and 1440×900 in both appearances (scratch harness on the source build). With a lost source the recording page keeps meters, warning and transport in view at 1040×700 (`tests/test_voice_gui.py`); a Library message bar fits at the minimum width (`tests/test_meeting_gui.py`). |
 | Compact 32px density | Passed | Buttons, menu buttons, entries and comboboxes measure 33px, list rows 32px, at 96 DPI; `tests/test_ui_theme.py` and `tests/test_voice_gui.py` check that the Ditado action row keeps one height. |
 | Visible keyboard focus | Passed (source build) for buttons, menu buttons, comboboxes, entries, text fields, list boxes, lists, the slider and navigation | Before/after captures in both appearances, including the chat composer, the summary focus field and the citation list; `tests/test_ui_theme.py` checks that text fields and list boxes keep their size through focus. Checkboxes keep Win32's dotted rectangle. |
 | Full keyboard path, tab order | Not tested | |

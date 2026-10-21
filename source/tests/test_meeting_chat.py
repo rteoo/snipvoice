@@ -45,6 +45,8 @@ class MeetingChatTests(unittest.TestCase):
             on_save=lambda value: self.events.append(("save", value)),
             on_copy=lambda value: self.events.append(("copy", value)),
             on_source=lambda turn, source: self.events.append(("source", turn, source)),
+            on_retry=lambda turn_id: self.events.append(("retry", turn_id)),
+            copy_details=lambda text, done: (self.events.append(("copy_details", text)), done(True)),
         )
         self.chat.pack(fill="both", expand=True)
         self.root.update()
@@ -83,8 +85,8 @@ class MeetingChatTests(unittest.TestCase):
             {"id": 12, "question": "Q2", "answer": "", "status": "pending",
              "citations": [], "saved": False, "saving": False},
             {"id": 13, "question": "Q3", "answer": "", "status": "error",
-             "error": "Falhou", "uncertainty": "Tente novamente.", "citations": [],
-             "saved": False, "saving": False},
+             "error": "Nada foi salvo.", "details": "RuntimeError: runtime unavailable",
+             "citations": [], "saved": False, "saving": False},
         ])
         self.root.update()
         self.assertFalse(self.chat._empty.winfo_ismapped())
@@ -98,8 +100,65 @@ class MeetingChatTests(unittest.TestCase):
         self.assertIn(("save", 11), self.events)
         messages = [item.cget("text") for item in descendants(self.chat) if isinstance(item, tk.Message)]
         self.assertIn("Pensando…", messages)
-        self.assertIn("Falhou", messages)
-        self.assertIn("Tente novamente.", messages)
+        # A failed answer is an InfoBar, not a red line under an empty bubble.
+        self.assertNotIn("Nada foi salvo.", messages)
+        labels = [item.cget("text") for item in descendants(self.chat) if isinstance(item, tk.Label)]
+        self.assertIn("Não foi possível responder", labels)
+        self.assertIn("Nada foi salvo.", labels)
+
+    def test_failed_answer_is_a_danger_infobar_with_retry_and_copyable_details(self):
+        self.chat.render([
+            {"id": 21, "question": "Q", "answer": "", "status": "error",
+             "error": "Nada foi salvo.", "details": "RuntimeError: runtime unavailable",
+             "citations": [], "saved": False, "saving": False},
+        ])
+        self.root.update()
+        bars = [item for item in descendants(self.chat) if isinstance(item, tk.Frame)
+                and str(item.cget("highlightbackground")) == self.theme.danger
+                and str(item.cget("bg")) == self.theme.danger_bg]
+        self.assertEqual(len(bars), 1)
+        self._buttons("Tentar novamente")[0].invoke()
+        self.assertEqual(self.events, [("retry", 21)])
+        # The cause stays behind Detalhes, with a Copiar that reaches the clipboard seam.
+        self._buttons("Detalhes ▾")[0].invoke()
+        self.root.update()
+        self._buttons("Copiar")[-1].invoke()
+        self.assertIn(("copy_details", "RuntimeError: runtime unavailable"), self.events)
+
+    def test_uncertainty_tone_follows_the_level_and_always_writes_it(self):
+        self.chat.render([
+            {"id": index, "question": "Q", "answer": "A", "status": "complete",
+             "citations": [], "saved": False, "saving": False, "uncertainty": level}
+            for index, level in enumerate(("low", "medium", "high", "Talvez"), 1)
+        ])
+        self.root.update()
+        expected = {"Incerteza baixa", "Incerteza média", "Incerteza alta", "Talvez"}
+        tones = {item.cget("text"): str(item.cget("fg")) for item in descendants(self.chat)
+                 if isinstance(item, tk.Message) and item.cget("text") in expected}
+        self.assertEqual(tones, {
+            "Incerteza baixa": self.theme.text_muted,
+            "Incerteza média": self.theme.warning,
+            "Incerteza alta": self.theme.danger,
+            "Talvez": self.theme.text_muted,
+        })
+
+    def test_notice_sits_above_the_composer_and_takes_no_room_until_shown(self):
+        self.assertFalse(self.chat._notice.winfo_ismapped())
+        self.chat.show_notice("warning", "Falta um modelo de resumo", "Instale um modelo.",
+                              action=("Abrir Configurações › Modelos",
+                                      lambda: self.events.append(("open_models",))))
+        self.root.update()
+        self.assertTrue(self.chat._notice.winfo_ismapped())
+        self.assertLess(self.chat._notice.winfo_rooty(), self.chat._composer.winfo_rooty())
+        self._buttons("Abrir Configurações › Modelos")[0].invoke()
+        self.assertEqual(self.events, [("open_models",)])
+        # A second notice replaces the first.
+        self.chat.show_notice("danger", "Outro", "Texto.")
+        self.assertEqual(len(self.chat._notice.winfo_children()), 1)
+        self.chat.clear_notice()
+        self.root.update()
+        self.assertFalse(self.chat._notice.winfo_ismapped())
+        self.assertEqual(self.chat._notice.winfo_children(), [])
 
     def test_controls_disable_send_during_busy_and_save_when_not_allowed(self):
         self.chat.set_question("pergunta")
@@ -118,17 +177,24 @@ class MeetingChatTests(unittest.TestCase):
         self.assertEqual(self._buttons("Copiar")[0].cget("state"), "normal")
         self.assertEqual(self._buttons("Salvar")[0].cget("state"), "disabled")
 
-    def test_cancel_is_offered_only_while_an_answer_is_pending(self):
-        self.assertEqual(self.chat.cancel_button.cget("state"), "disabled")
+    def test_cancel_exists_only_while_an_answer_is_pending(self):
+        self.assertFalse(self.chat.cancel_button.winfo_ismapped())
         self.chat._cancel()
         self.assertEqual(self.events, [])
+        send_x = self.chat.send_button.winfo_rootx()
         self.chat.set_controls(busy=True, pending=True, can_send=True)
+        self.root.update()
+        self.assertTrue(self.chat.cancel_button.winfo_ismapped())
         self.assertEqual(self.chat.cancel_button.cget("state"), "normal")
         self.assertEqual(self.chat.send_button.cget("state"), "disabled")
+        # Enviar keeps its place while Cancelar comes and goes beside it.
+        self.assertEqual(self.chat.send_button.winfo_rootx(), send_x)
         self.chat.cancel_button.invoke()
         self.assertEqual(self.events, [("cancel",)])
         self.chat.set_controls(busy=True, pending=False, can_send=True)
-        self.assertEqual(self.chat.cancel_button.cget("state"), "disabled")
+        self.root.update()
+        self.assertFalse(self.chat.cancel_button.winfo_ismapped())
+        self.assertEqual(self.chat.send_button.winfo_rootx(), send_x)
 
     def test_long_turn_wraps_and_composer_stays_visible_at_small_height(self):
         self.chat.set_height(320)

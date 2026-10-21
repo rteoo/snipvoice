@@ -6,6 +6,7 @@ seam remains platform-native.
 """
 
 import ast
+from datetime import datetime
 import os
 import re
 import sys
@@ -1131,6 +1132,102 @@ class ThemedControlTests(unittest.TestCase):
     def test_info_bar_rejects_an_unknown_tone(self):
         with self.assertRaises(ValueError):
             ui_theme.info_bar(self.card, self.theme, "error", "Título", "Corpo.")
+
+    def test_info_bar_writes_the_severity_and_local_time_and_wraps_its_title(self):
+        moment = datetime(2026, 10, 20, 14, 2)
+        for tone, word in (("danger", "Erro"), ("warning", "Aviso"), ("info", "Informação"),
+                           ("success", "Concluído")):
+            with self.subTest(tone=tone):
+                closed = []
+                title = "Sem áudio do sistema há 1 min 05 s e um título longo o bastante para quebrar"
+                bar = ui_theme.info_bar(self.card, self.theme, tone, title, "Corpo.",
+                                        when=moment, dismiss=lambda: closed.append(True))
+                self.addCleanup(bar.destroy)
+                bar.pack(fill="x")
+                self.root.update()
+                labels = {w.cget("text"): w for w in self._descendants(bar) if isinstance(w, tk.Label)}
+                stamp = labels[f"{word} às 14:02"]
+                title_label = labels[title]
+                self.assertIs(title_label, bar.title_label)
+                # The stamp sits at the right of the title row, inside the bar ...
+                self.assertGreaterEqual(stamp.winfo_rootx(),
+                                        title_label.winfo_rootx() + title_label.winfo_width())
+                self.assertLessEqual(stamp.winfo_rootx() + stamp.winfo_width(),
+                                     bar.winfo_rootx() + bar.winfo_width())
+                # ... and the title wraps to make room instead of pushing it out.
+                line = tkfont.Font(root=self.root, font=title_label.cget("font")).metrics("linespace")
+                self.assertGreater(title_label.winfo_height(), line)
+                buttons = {w.cget("text"): w for w in self._descendants(bar) if isinstance(w, tk.Button)}
+                buttons["Fechar"].invoke()
+                self.assertEqual(closed, [True])
+                bar.destroy()
+
+    def test_info_bar_without_a_body_shows_only_its_title(self):
+        bar = ui_theme.info_bar(self.card, self.theme, "warning", "Só o título", "")
+        self.addCleanup(bar.destroy)
+        labels = [w.cget("text") for w in self._descendants(bar) if isinstance(w, tk.Label)]
+        self.assertEqual([text for text in labels if len(text) > 1], ["Só o título"])
+
+    def test_message_bar_takes_no_room_until_a_page_has_something_to_say(self):
+        content = tk.Frame(self.card, height=40, bg=self.theme.card)
+        content.pack(fill="x")
+        bar = ui_theme.MessageBar(self.card, self.theme)
+        with self.assertRaises(ValueError):
+            bar.receipt("Antes de attach()")
+        bar.attach(side="top", fill="x", before=content)
+        self.root.update()
+        self.assertEqual((bar.winfo_manager(), bar.kind), ("", None))
+        moment = datetime(2026, 10, 20, 14, 2)
+        bar.problem("danger", "Não foi possível carregar a biblioteca", "Tente de novo.",
+                    action=("Tentar novamente", lambda: None), details="OSError: locked", when=moment)
+        self.root.update()
+        self.assertEqual((bar.winfo_manager(), bar.kind), ("pack", "problem"))
+        self.assertLess(bar.winfo_rooty(), content.winfo_rooty())
+        texts = [w.cget("text") for w in self._descendants(bar) if isinstance(w, (tk.Label, tk.Button))]
+        for expected in ("Não foi possível carregar a biblioteca", "Erro às 14:02", "Tentar novamente",
+                         "Detalhes ▾"):
+            self.assertIn(expected, texts)
+        # One message at a time: a routine outcome is a quiet line, not a second bar.
+        bar.receipt("Título salvo.", moment)
+        self.root.update()
+        self.assertEqual((bar.kind, len(bar.winfo_children())), ("receipt", 1))
+        line = bar.winfo_children()[0]
+        self.assertEqual((line.cget("text"), line.cget("fg")), ("Título salvo · 14:02", self.theme.text_muted))
+        bar.retitle("Ignorado: não há problema à vista")
+        self.assertEqual(line.cget("text"), "Título salvo · 14:02")
+        bar.problem("warning", "Primeiro", "Corpo.")
+        bar.retitle("Segundo")
+        self.assertEqual(bar.winfo_children()[0].title_label.cget("text"), "Segundo")
+        bar.clear()
+        self.root.update()
+        self.assertEqual((bar.winfo_manager(), bar.kind, bar.winfo_children()), ("", None, []))
+
+    def test_message_bar_can_sit_in_a_grid_cell(self):
+        host = tk.Frame(self.card, bg=self.theme.card)
+        host.pack(fill="both", expand=True)
+        host.columnconfigure(0, weight=1)
+        bar = ui_theme.MessageBar(host, self.theme)
+        bar.attach(grid=True, row=2, column=0, sticky="ew")
+        bar.receipt("Pronto.")
+        self.root.update()
+        self.assertEqual((bar.winfo_manager(), bar.grid_info()["row"]), ("grid", 2))
+        bar.clear()
+        self.root.update()
+        self.assertEqual(bar.winfo_manager(), "")
+
+    def test_status_chip_writes_the_state_and_colors_only_its_dot(self):
+        chip = ui_theme.StatusChip(self.card, self.theme, bg=self.theme.card, font=self.theme.heading())
+        chip.pack(fill="x")
+        chip.set("Gravando · 00:45:54", "accent_mark")
+        self.root.update()
+        dot = next(w for w in chip.winfo_children() if isinstance(w, tk.Canvas))
+        shape = dot.find_all()[0]
+        self.assertEqual(chip.label.cget("text"), "Gravando · 00:45:54")
+        self.assertEqual(dot.itemcget(shape, "fill"), self.theme.accent_mark)
+        self.assertEqual(chip.label.cget("fg"), self.theme.text_strong)
+        chip.set("Pronto · 00:00:00", "success")
+        self.assertEqual(dot.itemcget(shape, "fill"), self.theme.success)
+        self.assertEqual(chip.label.cget("fg"), self.theme.text_strong)
 
     def test_a_menubutton_shares_the_button_row_height(self):
         # The Ditado footer puts the primary and its "more" menu in one row.

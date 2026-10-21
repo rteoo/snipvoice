@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import threading
+import time
 import types
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
@@ -108,6 +109,18 @@ PROCESSING_STAGES = ("audio", "transcription", "summary", "capture_cleanup")
 # give way first, so the title stays the recording's identity at the smallest window.
 SESSION_TITLE_MIN = 190
 SUMMARY_LABELS = {entry["id"]: entry["label"] for entry in summary_catalog()}
+# The pages that own a message slot: what happens on one is written on that page.
+DESTINATIONS = ("recording", "library", "settings")
+# The recording sources, named as the page names them and as prose ("sem áudio do sistema").
+SOURCE_LABELS = {"microphone": N_("Microfone"), "system": N_("Áudio do sistema")}
+SOURCE_PROSE = {"microphone": N_("do microfone"), "system": N_("do sistema")}
+# A source silent for less than this is a device switch that mends itself; the
+# warning bar waits so a headset change does not flash it.
+LOST_SOURCE_GRACE = 3.0
+MAX_MESSAGE_TEXT = 320
+MAX_MESSAGE_DETAILS = 4096
+SOURCE_TEST_HINT = N_("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas.")
+RECORDING_HINT = N_("Trocar um dispositivo vale na próxima gravação.")
 
 
 def profile_display_label(profile):
@@ -296,6 +309,75 @@ def _append_detail_once(details, value):
         details.append(value)
 
 
+class Message:
+    """What one page says now: a quiet receipt, or trouble with its cause and a way on."""
+
+    __slots__ = ("kind", "tone", "title", "body", "details", "action", "session", "key", "when",
+                 "sticky")
+
+    def __init__(self, kind, title, *, tone=None, body="", details="", action=None,
+                 session=None, key=None, when=None, sticky=False):
+        self.kind, self.tone, self.title, self.body = kind, tone, title, body
+        self.details, self.action, self.session, self.key, self.when = (
+            details, action, session, key, when)
+        self.sticky = sticky
+
+
+class Messages:
+    """The one message each page shows, with the technical details that belong to it.
+
+    Bounded by construction: one slot per destination, one message in it, its
+    details cut at 4 KiB. A message about one recording (``session``) goes when
+    another recording is chosen; the window clears a page's slot when its user
+    leaves the page, except a ``sticky`` one, which states a standing condition
+    (recovery pending) and ends only when the condition does.
+    """
+
+    def __init__(self, render, clock=datetime.now):
+        self._render = render
+        self._clock = clock
+        self._current = dict.fromkeys(DESTINATIONS)
+
+    def current(self, destination):
+        return self._current[destination]
+
+    def _set(self, destination, message):
+        self._current[destination] = message
+        self._render(destination, message)
+
+    def receipt(self, destination, text, *, session=None):
+        """A routine outcome as one quiet line with its local time."""
+        line = " ".join(str(text).split())[:MAX_MESSAGE_TEXT]
+        self._set(destination, Message("receipt", line, session=session, when=self._clock()))
+
+    def problem(self, destination, title, body="", *, tone="danger", error=None, details="",
+                action=None, session=None, key=None, sticky=False):
+        """Trouble: what happened, what it affects, one action, the cause behind Detalhes."""
+        if error:
+            details = _technical_error_detail(error)
+        self._set(destination, Message(
+            "problem", title, tone=tone, body=body, details=str(details or "")[:MAX_MESSAGE_DETAILS],
+            action=action, session=session, key=key, when=self._clock(), sticky=sticky))
+
+    def clear(self, destination, key=None):
+        """Empty a page's slot; with ``key``, only when it holds that message."""
+        message = self._current[destination]
+        if message is not None and (key is None or message.key == key):
+            self._set(destination, None)
+
+    def leave(self, destination):
+        """The user left a page: what it said goes, unless it states a standing condition."""
+        message = self._current[destination]
+        if message is not None and not message.sticky:
+            self._set(destination, None)
+
+    def drop_other_sessions(self, keep=None):
+        """Forget every message about a recording other than ``keep``."""
+        for destination, message in self._current.items():
+            if message is not None and message.session is not None and message.session != keep:
+                self._set(destination, None)
+
+
 def _processing_failure_details(metadata):
     """Keep retained capture diagnostics separate from persisted processing failures."""
     stages = metadata.get("processing")
@@ -347,17 +429,91 @@ def format_recording_status(snapshot, start_held=False):
     export = snapshot.get("audio_export") or {}
     if snapshot.get("processing") and export.get("stage") in {"preparing", "encoding", "finalizing"}:
         parts.append(export["label"])
-    health_states = {value.get("state") for value in (snapshot.get("capture_health") or {}).values()
-                     if isinstance(value, dict)}
-    if state in {"starting", "recording", "paused", "stopping"} and "disconnected" in health_states:
-        parts.append(tr("Sem áudio de uma fonte"))
-    elif state in {"starting", "recording", "paused", "stopping"} and "recovering" in health_states:
-        parts.append(tr("Reconectando áudio"))
+    for track, health in lost_sources(snapshot):
+        parts.append(f"{tr(SOURCE_LABELS[track])}: "
+                     + (tr("reconectando") if health == "recovering" else tr("sem áudio")))
     if snapshot.get("final_audio"):
         parts.append(tr("Gravação preservada"))
-    if snapshot.get("error"):
-        parts.append(tr("Ver detalhes"))
     return " · ".join(parts)
+
+
+def recording_tone(snapshot, start_ready):
+    """The ``Theme`` color of the dot beside the recorder's written state.
+
+    Copper means live; the other tones follow the OPS-01 ladder (success for a
+    recorder that can start, info for work in progress, warning for a lost
+    source or a blocked recorder, danger for failure).
+    """
+    state = snapshot.get("state", "idle")
+    if lost_sources(snapshot) or state in {"unavailable", "teardown_blocked"}:
+        return "warning"
+    if state == "failed":
+        return "danger"
+    if state == "recording":
+        return "accent_mark"
+    if state == "paused":
+        return "text_muted"
+    if state == "idle" and start_ready and not snapshot.get("processing") \
+            and not snapshot.get("previewing"):
+        return "success"
+    return "info"
+
+
+def lost_sources(snapshot):
+    """``[(track, health)]`` for each source of a running capture that delivers no audio.
+
+    ``disconnected`` means the endpoint is gone; ``recovering`` that the helper
+    keeps trying to reopen it. Outside a capture nothing is lost.
+    """
+    if snapshot.get("state") not in CAPTURE_STATES:
+        return []
+    health = snapshot.get("capture_health") or {}
+    return [(track, health[track]["state"]) for track in ("microphone", "system")
+            if isinstance(health.get(track), dict)
+            and health[track].get("state") in {"disconnected", "recovering"}]
+
+
+def format_silence(seconds):
+    """How long a source has been silent, with at most two units ("12 s", "1 min 05 s")."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return tr("{seconds} s", seconds=seconds)
+    if seconds < 3600:
+        return tr("{minutes} min {seconds:02d} s", minutes=seconds // 60, seconds=seconds % 60)
+    return tr("{hours} h {minutes:02d} min", hours=seconds // 3600, minutes=seconds % 3600 // 60)
+
+
+def source_health(track, snapshot, sources, silent_for=0):
+    """``(text, color_role)``: the written health of one source, shown under its meter.
+
+    A source left out of this recording says so; a lost one says how long it has
+    been silent. Nothing shows while the recorder is not capturing.
+    """
+    if snapshot.get("state") not in CAPTURE_STATES:
+        return "", "text_muted"
+    if sources not in ("both", track):
+        return tr("Não incluído nesta gravação"), "text_muted"
+    health = (snapshot.get("capture_health") or {}).get(track)
+    value = health.get("state") if isinstance(health, dict) else None
+    since = " · " + tr("há {duration}", duration=format_silence(silent_for)) if silent_for >= 1 else ""
+    if value == "disconnected":
+        return tr("Sem áudio") + since, "warning"
+    if value == "recovering":
+        return tr("Reconectando…") + since, "warning"
+    if value == "failed":
+        return tr("A captura desta fonte falhou"), "danger"
+    if value == "paused":
+        return tr("Em pausa"), "text_muted"
+    if value == "quiet":
+        return tr("Conectado · sem som no momento"), "text_muted"
+    if value == "receiving":
+        return tr("Recebendo sinal"), "text_muted"
+    return tr("Aguardando sinal…"), "text_muted"
+
+
+def hotkey_display(spec):
+    """A stored chord ("ctrl+alt+r") as people write it ("Ctrl+Alt+R")."""
+    return "+".join(part.capitalize() for part in str(spec or "").split("+") if part)
 
 
 def _endpoint_name(device, track):
@@ -708,6 +864,22 @@ class MeetingWindow:
         self.ask_conversations = {}
         self.ask_pending = None
         self._mousewheel_bindings = []
+        # Each page writes what happened on it into its own message slot.
+        self.message_bars = {}
+        self.messages = Messages(self._render_message)
+        self._destination = "recording"
+        # The sources the running capture was started with, when this window started it.
+        self._recording_sources = None
+        self._lost_since = {}
+        self._silent_for = {}
+        self._trouble_key = None
+        self._trouble_dismissed = None
+        self._transport_key = None
+        self._recording_hint = False
+        self._play_reason = ""
+        self._summary_reason = ""
+        self._playback_failure = None
+        self.summary_text = ""
         self._build()
         if not self.embedded:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -995,9 +1167,8 @@ class MeetingWindow:
             if self.selected != session_id or session_id == self.library_processing_session:
                 return
             if error:
-                self._remember_operation_error(error)
                 self._sync_empty_transcript_caption()
-                self.status.set(tr("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação."))
+                self._results_not_refreshed(error, session_id)
                 return
             issue, self.transcription_status = data
             self._sync_empty_transcript_caption()
@@ -1070,6 +1241,63 @@ class MeetingWindow:
         if not self._submit("copy_issue_details", lambda: Clipboard.set_content(text),
                             lambda copied, error: done(bool(copied) and not error)):
             done(False)
+
+    def _render_message(self, destination, message):
+        """Draw a destination's message, or empty its slot; ``Messages`` owns no widgets."""
+        bar = self.message_bars.get(destination)
+        if bar is None or self.closed:
+            return
+        if message is None:
+            bar.clear()
+        elif message.kind == "receipt":
+            bar.receipt(message.title, message.when)
+        else:
+            bar.problem(message.tone, message.title, message.body, action=message.action,
+                        details=message.details or None, when=message.when,
+                        dismiss=None if message.sticky
+                        else lambda: self.messages.clear(destination))
+
+    def _say(self, destination, text, *, session=None):
+        """A routine outcome or a hint as one quiet line on ``destination``'s page."""
+        self.messages.receipt(destination, text, session=session)
+
+    def _fail(self, destination, title, body="", **options):
+        """Trouble on ``destination``'s page: what happened, what it affects, the cause behind Detalhes."""
+        self.messages.problem(destination, title, body, **options)
+
+    def _copied(self, receipt, failure, copied, error):
+        """Settle a clipboard write: one quiet line, or the failure written on the Biblioteca page."""
+        if copied and not error:
+            self._say("library", receipt)
+        else:
+            self._fail("library", failure, tr("Nada foi copiado. Tente de novo."), error=error)
+
+    def _visible_destination(self):
+        """The message page the user is looking at, or None on a page this view does not own."""
+        try:
+            selected = str(self.notebook.select())
+        except tk.TclError:
+            return None
+        return {str(self.recording_tab): "recording", str(self.library_tab): "library",
+                str(self.settings_tab): "settings"}.get(selected)
+
+    def _here(self):
+        """Where an outcome with no page of its own is written: the page in view."""
+        return self._visible_destination() or self._destination
+
+    def _destination_changed(self, _event=None):
+        """Leaving a page empties its message slot; what it said stays true only there."""
+        current = self._visible_destination()
+        left = self._destination
+        if current:
+            self._destination = current
+        if left != current:
+            self.messages.leave(left)
+
+    def _results_not_refreshed(self, error, session_id):
+        self._fail("library", tr("Não foi possível atualizar os resultados"),
+                   tr("O que aparece aqui pode estar desatualizado. Selecione a gravação de novo."),
+                   error=error, session=session_id)
 
     def _dialog_icon(self, dialog):
         """Give a dialog the app icon; no default icon reaches a transient window, so each asks."""
@@ -1193,15 +1421,6 @@ class MeetingWindow:
         notebook.add(self.recording_tab, text=tr("Gravação"))
         notebook.add(self.library_tab, text=tr("Biblioteca"))
         notebook.add(self.settings_tab, text=tr("Configurações"))
-        self.status = tk.StringVar(self.window, tr("Carregando configurações…"))
-        footer = tk.Frame(self.window, bg=self.ui.surface_alt)
-        self.status_footer = footer
-        footer.pack(side="bottom", fill="x", before=notebook)
-        tk.Frame(footer, bg=self.ui.divider, height=1).pack(fill="x")
-        self._wrap_label(
-            footer, "", textvariable=self.status, anchor="w", justify="left",
-            bg=self.ui.surface_alt, fg=self.ui.text_muted, font=self.ui.font(8),
-        ).pack(fill="x", padx=self.ui.space_xl, pady=self.ui.space_sm)
         # No per-page headers: the manager's navigation already names the page,
         # and every row they used came out of the recording, list, or model area.
         page_pad = self.ui.space_lg
@@ -1217,6 +1436,15 @@ class MeetingWindow:
         settings_view.pack(fill="both", expand=True, padx=self.ui.space_lg, pady=self.ui.space_lg)
         settings_view.columnconfigure(1, weight=1)
         settings_view.rowconfigure(0, weight=1)
+        # A page's messages sit above its content and leave with the user: what
+        # went wrong on a page is written on that page, never on another.
+        for key, tab, content in (("recording", self.recording_tab, recording_view),
+                                  ("library", self.library_tab, library),
+                                  ("settings", self.settings_tab, settings_view)):
+            bar = ui_theme.MessageBar(tab, self.ui, copy=self._copy_issue_details)
+            bar.attach(side="top", fill="x", padx=page_pad, pady=(page_pad, 0), before=content)
+            self.message_bars[key] = bar
+        self.notebook.bind("<<NotebookTabChanged>>", self._destination_changed, add="+")
         settings_nav = tk.Frame(settings_view, bg=self.ui.surface)
         settings_nav.grid(row=0, column=0, sticky="nsw", padx=(0, self.ui.space_lg))
         settings_scroll, settings_canvas, _holder, settings_content = self._scroll_area(settings_view)
@@ -1459,12 +1687,15 @@ class MeetingWindow:
         self.waveform.grid(row=0, column=0, columnspan=2, sticky="nsew",
                            pady=(0, recording_gap))
         self.meters = {}
+        self.source_captions = {}
         meters = (("microphone", tr("Nível do microfone")),
                   ("system", tr("Nível do sistema")))
-        for row, (track, label) in enumerate(meters, 1):
+        caption_height = tkfont.Font(root=self.window, font=self.ui.caption()).metrics("linespace") + 2
+        for index, (track, label) in enumerate(meters):
+            row = 1 + 2 * index
             self._label(monitor, label, anchor="w", bg=self.ui.card).grid(
                 row=row, column=0, sticky="w", padx=(0, 18),
-                pady=3 if compact_recording else 6,
+                pady=(3 if compact_recording else 6, 0),
             )
             # The same series colors as the waveform lanes above.
             meter = ttk.Progressbar(
@@ -1472,31 +1703,47 @@ class MeetingWindow:
                 style="Horizontal.TProgressbar" if track == "microphone"
                 else "Secondary.Horizontal.TProgressbar",
             )
-            meter.grid(row=row, column=1, sticky="ew")
+            meter.grid(row=row, column=1, sticky="ew", pady=(3 if compact_recording else 6, 0))
             self.meters[track] = meter
-        # Clock and transport sit under the signal they start: check that
-        # both sources move, then press Start without leaving the meters.
+            # The source's written health sits under its meter; the row keeps its
+            # height while the recorder is idle so starting never moves the page.
+            caption = self._label(monitor, "", anchor="w", bg=self.ui.card, fg=self.ui.text_muted,
+                                  font=self.ui.caption())
+            caption.grid(row=row + 1, column=1, sticky="ew")
+            monitor.rowconfigure(row + 1, minsize=caption_height)
+            self.source_captions[track] = caption
+        # The recorder's written state, then its transport, sit under the signal
+        # they start: check that both sources move, then press Start without
+        # leaving the meters. A lost source raises its warning right above.
+        self.recording_trouble = ui_theme.MessageBar(monitor, self.ui, copy=self._copy_issue_details)
+        self.recording_trouble.attach(grid=True, row=5, column=0, columnspan=2, sticky="ew",
+                                      pady=(self.ui.space_md, 0))
         self.record_status = tk.StringVar(self.window, tr("Pronto") + " · 00:00:00")
-        self._wrap_label(
-            monitor, "", textvariable=self.record_status, justify="center",
-            bg=self.ui.card, fg=self.ui.text_strong, font=self.ui.font(14, "bold"),
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_md, self.ui.space_sm))
+        self.record_chip = ui_theme.StatusChip(monitor, self.ui, bg=self.ui.card,
+                                               font=self.ui.heading())
+        self.record_chip.set(self.record_status.get(), "success")
+        self.record_chip.grid(row=6, column=0, columnspan=2, sticky="ew",
+                              pady=(self.ui.space_md, self.ui.space_sm))
         self.audio_export_progress = ttk.Progressbar(monitor, maximum=100, mode="determinate")
-        self.audio_export_progress.grid(row=4, column=0, columnspan=2, sticky="ew",
+        self.audio_export_progress.grid(row=7, column=0, columnspan=2, sticky="ew",
                                         pady=(0, self.ui.space_sm))
         self.audio_export_progress.grid_remove()
+        # One primary at a time: Start while idle, Stop while capturing.
         transport = tk.Frame(monitor, bg=self.ui.card)
-        transport.grid(row=5, column=0, columnspan=2)
+        transport.grid(row=8, column=0, columnspan=2, sticky="w")
         self.start_button = self._button(transport, tr("Iniciar gravação"), self.start, accent=True)
-        self.start_button.pack(side="left", padx=(0, 8))
         self.pause_button = self._button(transport, tr("Pausar"), self.pause_resume)
-        self.pause_button.pack(side="left", padx=(0, 8))
-        self.stop_button = self._button(transport, tr("Parar e preservar"), self.stop)
-        self.stop_button.pack(side="left")
+        self.stop_button = self._button(transport, tr("Parar e salvar"), self.stop, accent=True)
+        # The shortcut sits beside the buttons, on their row, and costs no height.
+        self.shortcut_hint = self._label(transport, "", anchor="w", bg=self.ui.card,
+                                         fg=self.ui.text_muted, font=self.ui.caption())
+        self.shortcut_hint.pack(side="left", padx=(self.ui.space_md, 0))
+        self.start_button.pack(side="left", before=self.shortcut_hint)
+        self._transport_key = (False, False)
         # Shown only while something holds Start: it names the holder and,
         # for processing, offers the override with its consequence.
         self.start_blocked_row = tk.Frame(monitor, bg=self.ui.card)
-        self.start_blocked_row.grid(row=6, column=0, columnspan=2, sticky="ew",
+        self.start_blocked_row.grid(row=9, column=0, columnspan=2, sticky="ew",
                                     pady=(self.ui.space_sm, 0))
         self.start_blocked_row.columnconfigure(0, weight=1)
         self.start_blocked_reason = tk.StringVar(self.window, "")
@@ -1510,27 +1757,52 @@ class MeetingWindow:
         self.interrupt_start_button.grid(row=0, column=1, sticky="e", padx=(self.ui.space_sm, 0))
         self.interrupt_start_button.grid_remove()
         self.start_blocked_row.grid_remove()
-        self.preview_status = tk.StringVar(
-            self.window, tr("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas."),
-        )
+        self.preview_status = tk.StringVar(self.window, tr(SOURCE_TEST_HINT))
         status_row = tk.Frame(monitor, bg=self.ui.card)
-        status_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
+        status_row.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
         self._wrap_label(status_row, "", textvariable=self.preview_status, anchor="w",
                          justify="left", bg=self.ui.card, fg=self.ui.text_muted).pack(
                              side="left", fill="x", expand=True)
-        self.record_details = ""
-        self.operation_details = ""
-        self.record_details_button = self._button(
-            status_row, tr("Ver detalhes"), self.show_recording_details,
-        )
-        self.record_details_button.configure(state="disabled")
-        self.record_details_button.pack(side="right", padx=(self.ui.space_sm, 0))
         self._profile_changed()
         self._sync_source_controls()
         self.options.clear()
         self._render_devices()
         self._build_library(library)
         self._build_summary_models(summary)
+
+    @staticmethod
+    def _park_cancel(button, manager, **options):
+        """Place a Cancel where it will appear, then take it out: it exists only while its job runs.
+
+        Parking it at the end of its row (or in a cell the row already
+        reserves) means it appears without moving a sibling.
+        """
+        button._cancel_manager, button._cancel_options = manager, options
+        getattr(button, manager)(**options)
+        (button.pack_forget if manager == "pack" else button.grid_remove)()
+
+    @staticmethod
+    def _show_cancel(button, running):
+        if running == bool(button.winfo_manager()):
+            return
+        if running:
+            getattr(button, button._cancel_manager)(**button._cancel_options)
+        else:
+            (button.pack_forget if button._cancel_manager == "pack" else button.grid_remove)()
+
+    def _sync_job_cancels(self):
+        """Show each Cancel while, and only while, the job it stops runs."""
+        for name, running in (
+            ("semantic_cancel_button", getattr(self, "semantic_cancel", None) is not None),
+            ("rebuild_cancel_button", getattr(self, "rebuild_cancel", None) is not None),
+            ("cross_cancel_button", bool(getattr(self, "cross_pending", None))),
+            ("cancel_summary_button", bool(getattr(self, "summary_pending", None))),
+            ("summary_download_cancel_button",
+             getattr(self, "summary_download_cancel", None) is not None),
+        ):
+            button = getattr(self, name, None)
+            if button is not None:
+                self._show_cancel(button, running)
 
     def _build_summary_models(self, parent):
         self.summary_model_buttons = {}
@@ -1551,12 +1823,19 @@ class MeetingWindow:
             button = self._button(row, "", lambda model_id=entry["id"]: self.toggle_summary_model(model_id))
             button.pack(side="right", anchor="n")
             self.summary_model_buttons[entry["id"]] = button
-        actions = ttk.Frame(parent, style="Meeting.TFrame")
-        actions.pack(fill="x", pady=(12 if compact else 18, 0))
-        self._button(actions, tr("Cancelar download"), self.cancel_summary_download).pack(side="left")
+        # The status line and the download's Cancel share one row that keeps the
+        # button's height, so a download starting moves nothing below it.
+        status_row = ttk.Frame(parent, style="Meeting.TFrame")
+        status_row.pack(fill="x", pady=(12 if compact else 18, 12))
+        status_row.columnconfigure(0, weight=1)
+        self.summary_download_cancel_button = self._button(
+            status_row, tr("Cancelar download"), self.cancel_summary_download)
+        status_row.rowconfigure(0, minsize=self.summary_download_cancel_button.winfo_reqheight())
         self.summary_model_status = tk.StringVar(self.window)
-        self._wrap_label(parent, "", textvariable=self.summary_model_status, anchor="w",
-                         justify="left").pack(fill="x", pady=12)
+        self._wrap_label(status_row, "", textvariable=self.summary_model_status, anchor="w",
+                         justify="left").grid(row=0, column=0, sticky="ew")
+        self._park_cancel(self.summary_download_cancel_button, "grid", row=0, column=1,
+                          padx=(self.ui.space_sm, 0))
         self._refresh_summary_models()
 
     def _summary_display_changed(self, _event=None):
@@ -1585,7 +1864,7 @@ class MeetingWindow:
     def toggle_summary_model(self, model_id):
         entry = summary_catalog_entry(model_id)
         if entry is None:
-            self.status.set(tr("O modelo de resumo selecionado não existe no catálogo."))
+            self._say("settings", tr("O modelo de resumo selecionado não existe no catálogo."))
             return
         if self.summary_model_installed.get(model_id):
             if not messagebox.askyesno(tr("Remover modelo"), tr("Remover {name} deste computador?", name=entry["name"]),
@@ -1621,6 +1900,7 @@ class MeetingWindow:
         for button in self.summary_model_buttons.values():
             button.configure(state="disabled")
         self.summary_model_status.set(tr("Baixando {name} com verificação SHA-256…", name=entry["name"]))
+        self._sync_job_cancels()
         submitted = self._submit(
             "summary_model",
             lambda: download_summary_model(model_id, cancel_event=self.summary_download_cancel,
@@ -1629,6 +1909,7 @@ class MeetingWindow:
         )
         if not submitted:
             self.summary_download_cancel = None
+            self._sync_job_cancels()
             self._refresh_summary_models()
 
     def cancel_summary_download(self):
@@ -1644,6 +1925,7 @@ class MeetingWindow:
 
     def _summary_model_finished(self, entry, error, removed=False):
         self.summary_download_cancel = None
+        self._sync_job_cancels()
         with self.summary_progress_lock:
             self.summary_progress = None
         self._refresh_summary_models()
@@ -1665,8 +1947,7 @@ class MeetingWindow:
         self._entry(question_row, self.cross_question, 12).pack(side="left", fill="x", expand=True)
         self._button(question_row, tr("Perguntar"), self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
         self.cross_cancel_button = self._button(question_row, tr("Cancelar"), self.cancel_cross_question)
-        self.cross_cancel_button.configure(state="disabled")
-        self.cross_cancel_button.pack(side="left", padx=(6, 0))
+        self._park_cancel(self.cross_cancel_button, "pack", side="left", padx=(6, 0))
         self.cross_status = tk.StringVar(self.window, tr("Resposta cruzada fica somente na memória."))
         self._label(cross_frame, "", textvariable=self.cross_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
@@ -1692,8 +1973,8 @@ class MeetingWindow:
         self.rebuild_button = self._button(tools_panel, tr("Reparar busca"), self.rebuild_index)
         self.rebuild_button.pack(side="left", padx=(6, 0))
         self.rebuild_cancel_button = self._button(tools_panel, tr("Cancelar"), self.cancel_rebuild_index)
-        self.rebuild_cancel_button.configure(state="disabled")
-        self.rebuild_cancel_button.pack(side="left", padx=(6, 0))
+        # At the far end of the row: the index status keeps its place either way.
+        self._park_cancel(self.rebuild_cancel_button, "pack", side="right")
         self.index_status = tk.StringVar(self.window, tr("Índice de busca: estado desconhecido"))
         self._label(tools_panel, "", textvariable=self.index_status, bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="left", padx=(8, 0))
@@ -1739,7 +2020,9 @@ class MeetingWindow:
         semantic_controls.pack(fill="x")
         self._button(semantic_controls, tr("Instalar modelo…"), self.install_embedding_model).pack(side="left")
         self._button(semantic_controls, tr("Reindexar"), self.rebuild_semantic_index).pack(side="left", padx=(4, 0))
-        self._button(semantic_controls, tr("Cancelar"), self.cancel_semantic_operation).pack(side="left", padx=(4, 0))
+        self.semantic_cancel_button = self._button(
+            semantic_controls, tr("Cancelar"), self.cancel_semantic_operation)
+        self._park_cancel(self.semantic_cancel_button, "pack", side="left", padx=(4, 0))
         self.semantic_status = tk.StringVar(self.window, tr("Busca por palavras ativa."))
         self._wrap_label(toolbar, "", textvariable=self.semantic_status, bg=self.ui.card,
                          fg=self.ui.text_muted).pack(fill="x")
@@ -1984,8 +2267,7 @@ class MeetingWindow:
         self.cancel_processing_button = self._button(
             action_buttons, tr("Cancelar"), lambda: self._action("cancel_processing", urgent=True),
         )
-        self.cancel_processing_button.configure(state="disabled")
-        self.cancel_processing_button.pack(side="left")
+        self._park_cancel(self.cancel_processing_button, "pack", side="left")
         self.transcript_timing = tk.StringVar(
             self.window, tr("Dois cliques ou Enter para ouvir; horários marcam blocos de áudio, não palavras."),
         )
@@ -2073,8 +2355,7 @@ class MeetingWindow:
             generate_row, tr("Cancelar"),
             lambda: self._action("cancel_processing", kinds=frozenset({"report"}), urgent=True),
         )
-        self.cancel_summary_button.pack(side="left", padx=6)
-        self.cancel_summary_button.configure(state="disabled")
+        self._park_cancel(self.cancel_summary_button, "pack", side="left", padx=6)
         self.summary_status = tk.StringVar(
             self.window, tr("Escolha um formato. Cada resumo é salvo como uma nova versão nesta gravação."),
         )
@@ -2171,7 +2452,8 @@ class MeetingWindow:
             ask_page, self.ui, on_send=lambda _text: self.ask_this_meeting(),
             on_cancel=self.cancel_chat_answer, on_new=self.new_chat,
             on_save=self.save_answer, on_copy=self.copy_chat_answer,
-            on_source=self.jump_to_ask_citation,
+            on_source=self.jump_to_ask_citation, on_retry=self.retry_chat_answer,
+            copy_details=self._copy_issue_details,
         )
         self.meeting_chat.pack(fill="both", expand=True, padx=(12, 0))
         self.ask_status = self.meeting_chat.status
@@ -2199,6 +2481,11 @@ class MeetingWindow:
         self.recover_audio_button = self._button(audio, tr("Preparar áudio final"), self.prepare_final_audio)
         self.recover_audio_button.grid(row=2, column=1, sticky="e", padx=(self.ui.space_md, 0), pady=(self.ui.space_sm, 0))
         self.recover_audio_button.configure(state="disabled")
+        # Why the button cannot act, when it cannot.
+        self.recover_audio_note = self._wrap_label(
+            audio, "", bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
+            font=self.ui.caption())
+        self.recover_audio_note.grid(row=2, column=0, sticky="ew", pady=(self.ui.space_sm, 0))
         self.final_audio_progress = ttk.Progressbar(audio, maximum=100, mode="determinate")
         self.final_audio_progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
         self.final_audio_progress.grid_remove()
@@ -2467,8 +2754,9 @@ class MeetingWindow:
 
     def _language_saved(self, language, error):
         if error:
-            self._remember_operation_error(error)
-            self.interface_language_status.set(tr("Não foi possível salvar o idioma."))
+            self.interface_language_status.set("")
+            self._fail("settings", tr("Não foi possível salvar o idioma"),
+                       tr("O idioma anterior continua em uso. Aplique de novo."), error=error)
             return
         self.raw_settings["language"] = language
         if self.on_language_changed:
@@ -2551,8 +2839,10 @@ class MeetingWindow:
 
     def _appearance_saved(self, preference, error):
         if error:
-            self._remember_operation_error(error)
-            self.appearance_status.set(tr("Não foi possível salvar a aparência."))
+            self.appearance_status.set(
+                tr(APPEARANCE_STATUS[ui_theme.normalize_preference(self.ui.preference)]))
+            self._fail("settings", tr("Não foi possível salvar a aparência"),
+                       tr("A aparência anterior continua em uso. Aplique de novo."), error=error)
             return
         preference = ui_theme.normalize_preference(preference)
         self.raw_settings["appearance"] = preference
@@ -2709,8 +2999,10 @@ class MeetingWindow:
         if self.closed:
             return
         if error:
-            self._remember_operation_error(error)
-            self.privacy_status.set(tr("Não foi possível salvar privacidade; recarregue o workspace."))
+            self.privacy_status.set("")
+            self._fail("settings", tr("Não foi possível salvar a privacidade"),
+                       tr("As opções anteriores continuam valendo. Salve de novo ou reabra a janela."),
+                       error=error)
             return
         if isinstance(value, dict):
             self._apply_workspace_settings(value)
@@ -2726,17 +3018,22 @@ class MeetingWindow:
     def _submit(self, key, operation, callback=None, urgent=False):
         if not self.bridge.submit(key, operation, callback or self._done, urgent):
             if not self.closed:
-                self.status.set(tr("Há operações pendentes. Aguarde e tente novamente."))
+                self._fail(self._here(), tr("Há operações pendentes"),
+                           tr("Aguarde a operação atual terminar e tente de novo."), tone="warning")
             return False
         return True
 
-    def _done(self, _value, error):
+    def _done(self, value, error, receipt=None):
+        """Settle an action that has no outcome of its own: trouble is written, success is quiet."""
+        destination = self._here()
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível concluir a operação. Veja os detalhes na aba Gravação."))
-        else:
-            self.status.set(tr("A operação não foi aceita. Verifique o estado atual.")
-                            if _value is False else tr("Operação concluída."))
+            self._fail(destination, tr("Não foi possível concluir a operação"),
+                       tr("Nada foi alterado. Tente de novo."), error=error)
+        elif value is False:
+            self._fail(destination, tr("A operação não foi aceita"),
+                       tr("Verifique o estado atual e tente de novo."), tone="warning")
+        elif receipt:
+            self._say(destination, receipt)
 
     # -- Local report profiles, history, and Q&A ----------------------
 
@@ -2758,7 +3055,10 @@ class MeetingWindow:
             if self.closed:
                 return
             if error or not isinstance(profiles, list):
-                self._remember_operation_error(error) if error else None
+                if error:
+                    self._fail("library", tr("Não foi possível carregar os formatos de resumo"),
+                               tr("Os formatos internos continuam disponíveis."),
+                               tone="warning", error=error)
                 self._set_report_profiles([])
                 return
             self._set_report_profiles(profiles)
@@ -2825,10 +3125,10 @@ class MeetingWindow:
 
     def _profile_saved(self, value, error):
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível salvar o perfil. Veja os detalhes na aba Gravação."))
+            self._fail("library", tr("Não foi possível salvar o perfil"),
+                       tr("O perfil de relatório não foi alterado. Tente salvar de novo."), error=error)
             return
-        self.status.set(tr("Perfil de relatório salvo."))
+        self._say("library", tr("Perfil de relatório salvo."))
         self.refresh_report_profiles()
 
     def create_report_profile(self):
@@ -2856,7 +3156,7 @@ class MeetingWindow:
     def duplicate_report_profile(self):
         current = self._selected_report_profile()
         if not current:
-            self.status.set(tr("Selecione um perfil para duplicar."))
+            self._say("library", tr("Selecione um perfil para duplicar."))
             return
         identifier = simpledialog.askstring(tr("Duplicar perfil"), tr("Novo identificador:"), parent=self.window)
         if not identifier:
@@ -2874,7 +3174,7 @@ class MeetingWindow:
     def edit_report_profile(self):
         current = self._selected_report_profile()
         if not current or current.get("builtin"):
-            self.status.set(tr("Perfis internos não podem ser editados; duplique um para personalizar."))
+            self._say("library", tr("Perfis internos não podem ser editados; duplique um para personalizar."))
             return
         name = simpledialog.askstring(tr("Editar perfil"), tr("Nome:"), initialvalue=current.get("name", ""), parent=self.window)
         if name is None:
@@ -2895,7 +3195,7 @@ class MeetingWindow:
     def disable_report_profile(self):
         current = self._selected_report_profile()
         if not current or current.get("builtin"):
-            self.status.set(tr("Selecione um perfil personalizado para desativar."))
+            self._say("library", tr("Selecione um perfil personalizado para desativar."))
             return
         identifier = current.get("id")
         self._submit("disable_report_profile",
@@ -2905,7 +3205,7 @@ class MeetingWindow:
     def enable_report_profile(self):
         current = self._selected_report_profile()
         if not current or current.get("builtin"):
-            self.status.set(tr("Selecione um perfil personalizado desativado para ativar."))
+            self._say("library", tr("Selecione um perfil personalizado desativado para ativar."))
             return
         identifier = current.get("id")
         self._submit("enable_report_profile",
@@ -2915,7 +3215,7 @@ class MeetingWindow:
     def delete_report_profile(self):
         current = self._selected_report_profile()
         if not current or current.get("builtin"):
-            self.status.set(tr("Selecione um perfil personalizado para excluir."))
+            self._say("library", tr("Selecione um perfil personalizado para excluir."))
             return
         if not messagebox.askyesno(tr("Excluir perfil"), tr("Excluir este perfil personalizado?"), parent=self.window):
             return
@@ -2928,7 +3228,7 @@ class MeetingWindow:
         if getattr(self, "summary_pending", None):
             return
         if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         profile = self._selected_report_profile()
         if not profile:
@@ -2976,9 +3276,10 @@ class MeetingWindow:
         if self.selected != session_id:
             return
         if error or not isinstance(value, dict):
-            if error:
-                self._remember_operation_error(error)
-            self.summary_status.set(tr("Não foi possível gerar. O resumo anterior foi preservado. Veja os detalhes na Gravação."))
+            self.summary_status.set(self._summary_hint(getattr(self, "summary_text", "")))
+            self._fail("library", tr("Não foi possível gerar o resumo"),
+                       tr("O resumo anterior foi preservado. Gere de novo quando quiser."),
+                       error=error, session=session_id)
             return
         self._show_summary(value)
         self.summary_status.set(tr("Resumo salvo nesta gravação. Você pode copiar ou gerar outra versão."))
@@ -2998,8 +3299,9 @@ class MeetingWindow:
             if self.closed or request != self.report_request or session_id != self.selected:
                 return
             if error:
-                self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível carregar o histórico de relatórios."))
+                self._fail("library", tr("Não foi possível carregar as versões do resumo"),
+                           tr("O resumo mostrado continua disponível. Atualize a lista para tentar de novo."),
+                           error=error, session=session_id)
                 return
             self._set_report_history(reports, preferred_report_id=preferred_report_id)
 
@@ -3089,8 +3391,9 @@ class MeetingWindow:
             if self.closed or request != self.report_request or session_id != self.selected:
                 return
             if error:
-                self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível abrir este relatório."))
+                self._fail("library", tr("Não foi possível abrir este relatório"),
+                           tr("Escolha outra versão ou atualize a lista."),
+                           error=error, session=session_id)
                 return
             self._show_report(report)
 
@@ -3174,7 +3477,7 @@ class MeetingWindow:
 
     def copy_report_section(self):
         if not self.selected_report:
-            self.status.set(tr("Selecione um relatório primeiro."))
+            self._say("library", tr("Selecione um relatório primeiro."))
             return
         try:
             projection = report_export_projection(
@@ -3182,25 +3485,23 @@ class MeetingWindow:
             )
             text = json.dumps(projection["sections"], ensure_ascii=False, indent=2)
         except (TypeError, ValueError) as exc:
-            self.status.set(str(exc))
+            self._say("library", str(exc))
             return
-        if not Clipboard.set_content(text):
-            self.status.set(tr("Não foi possível copiar a seção para a área de transferência."))
-            return
-        self.status.set(tr("Seção copiada sem alterar o relatório gerado."))
+        self._copied(tr("Seção copiada sem alterar o relatório gerado."),
+                     tr("Não foi possível copiar a seção"), Clipboard.set_content(text), None)
 
     def save_report_review(self):
         if not self.selected or not self.selected_report:
-            self.status.set(tr("Selecione um relatório estruturado primeiro."))
+            self._say("library", tr("Selecione um relatório estruturado primeiro."))
             return
         report_id = self.selected_report.get("id")
         section = self.report_section_choice.get()
         if not report_id or report_id == "legacy-summary" or not section:
-            self.status.set(tr("O resumo legado não aceita revisão por seção; gere um relatório novo."))
+            self._say("library", tr("O resumo legado não aceita revisão por seção; gere um relatório novo."))
             return
         text = self.report_editor.get("1.0", "end-1c")
         if len(text) > MAX_REPORT_REVIEW_CHARS:
-            self.status.set(tr("Esta revisão é longa demais para salvar. Exporte a seção completa."))
+            self._say("library", tr("Esta revisão é longa demais para salvar. Exporte a seção completa."))
             return
         artifact = self.selected_report.get("reviewed_artifact")
         expected = artifact.get("generation", 0) if isinstance(artifact, dict) else 0
@@ -3210,10 +3511,11 @@ class MeetingWindow:
             if self.closed or session_id != self.selected:
                 return
             if error:
-                self._remember_operation_error(error)
-                self.status.set(tr("A revisão não foi salva; o relatório gerado continua intacto."))
+                self._fail("library", tr("A revisão não foi salva"),
+                           tr("O relatório gerado continua intacto. Tente salvar de novo."),
+                           error=error, session=session_id)
                 return
-            self.status.set(tr("Revisão salva separadamente do relatório gerado."))
+            self._say("library", tr("Revisão salva separadamente do relatório gerado."), session=session_id)
             self.refresh_reports(session_id)
 
         self._action("review_report", session_id, report_id, {section: text},
@@ -3221,7 +3523,7 @@ class MeetingWindow:
 
     def export_report(self):
         if not self.selected or not self.selected_report:
-            self.status.set(tr("Selecione um relatório primeiro."))
+            self._say("library", tr("Selecione um relatório primeiro."))
             return
         path = filedialog.asksaveasfilename(
             parent=self.window, title=tr("Exportar relatório"), defaultextension=".md",
@@ -3239,10 +3541,12 @@ class MeetingWindow:
         if self.closed or session_id != self.selected:
             return
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível exportar o relatório."))
+            self._fail("library", tr("Não foi possível exportar o relatório"),
+                       tr("Nenhum arquivo foi gravado. Tente de novo ou escolha outra pasta."),
+                       error=error, session=session_id)
         else:
-            self.status.set(tr("Relatório exportado atomicamente sem caminhos locais."))
+            self._say("library", tr("Relatório exportado atomicamente sem caminhos locais."),
+                      session=session_id)
 
     def _chat_turn(self, session_id, turn_id):
         return next((turn for turn in self.ask_conversations.get(session_id, [])
@@ -3285,7 +3589,7 @@ class MeetingWindow:
 
     def ask_this_meeting(self):
         if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         if self.ask_pending:
             return
@@ -3301,8 +3605,13 @@ class MeetingWindow:
             return
         model = self.summary_model.get().strip()
         if not self.summary_model_installed.get(model):
-            self.ask_status.set(tr("Instale um modelo de resumo em Configurações → Modelos para conversar."))
+            self.ask_status.set("")
+            self.meeting_chat.show_notice(
+                "warning", tr("Falta um modelo de resumo"),
+                tr("O chat responde com um modelo local. Instale um para conversar sobre esta gravação."),
+                action=(tr("Abrir Configurações › Modelos"), self.open_summary_models))
             return
+        self.meeting_chat.clear_notice()
         session_id = self.selected
         if session_id not in self.ask_conversations:
             # ceiling: retain eight temporary recording chats per window.
@@ -3340,6 +3649,22 @@ class MeetingWindow:
             self._answer_loaded(session_id, request, question, None, tr("Fila de operações ocupada."))
         self.meeting_chat.focus_composer()
 
+    def open_summary_models(self):
+        """Take the user to where a summary model is installed."""
+        self.notebook.select(self.settings_tab)
+        self.settings_sections.select("models")
+        self.model_sections.select("summary")
+
+    def retry_chat_answer(self, turn_id):
+        """Send a failed question again: the failed turn goes, the question goes back to the composer."""
+        turns = self.ask_conversations.get(self.selected, [])
+        turn = self._chat_turn(self.selected, turn_id)
+        if turn is None or turn.get("status") != "error" or self.ask_pending:
+            return
+        turns.remove(turn)
+        self.meeting_chat.set_question(turn["question"])
+        self.ask_this_meeting()
+
     def cancel_chat_answer(self):
         """Stop the pending answer and give its question back to the composer."""
         if not self.ask_pending:
@@ -3370,9 +3695,8 @@ class MeetingWindow:
             self._sync_qa_controls()
             return
         if error or not isinstance(value, dict) or not isinstance(value.get("answer"), str):
-            turn.update(status="error", error=tr("Não consegui responder. Envie a pergunta novamente para tentar."))
-            if error:
-                self._remember_operation_error(error)
+            turn.update(status="error", error=tr("Nada foi salvo. Tente enviar a pergunta de novo."),
+                        details=_technical_error_detail(error) if error else "")
         else:
             turn.update(status="complete", answer=value["answer"][:MAX_ANSWER_CHARS],
                         citations=[item for item in value.get("citations", [])
@@ -3422,7 +3746,9 @@ class MeetingWindow:
             turn["saving"] = False
             if error or value is False:
                 if error:
-                    self._remember_operation_error(error)
+                    self._fail("library", tr("A resposta não foi salva"),
+                               tr("Ela continua nesta conversa. Tente salvar de novo."),
+                               error=error, session=session_id)
             else:
                 turn["saved"] = True
             if session_id == self.selected:
@@ -3475,7 +3801,8 @@ class MeetingWindow:
             if self.closed or request != self.citation_request or session_id != self.selected:
                 return
             if error or not page:
-                self.status.set(tr("A fonte {source} não está disponível na revisão selecionada.", source=identifier[:128]))
+                self._fail("library", tr("A fonte {source} não está disponível na revisão selecionada.",
+                                         source=identifier[:128]), tone="warning", session=session_id)
                 return
             self.transcript_offset = int(page.get("offset", 0))
             self.transcript_revision = revision
@@ -3494,7 +3821,7 @@ class MeetingWindow:
                     except (tk.TclError, AttributeError):
                         pass
                     break
-            self.status.set(tr("Fonte da citação {source} carregada.", source=identifier[:128]))
+            self._say("library", tr("Fonte da citação {source} carregada.", source=identifier[:128]))
 
         self._submit("citation_jump", read, loaded)
 
@@ -3505,8 +3832,9 @@ class MeetingWindow:
 
     def _settings_loaded(self, raw, error):
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível carregar as configurações. Veja os detalhes na aba Gravação."))
+            self._fail("recording", tr("Não foi possível carregar as configurações"),
+                       tr("A gravação fica bloqueada até elas carregarem. Reabra a janela para tentar de novo."),
+                       error=error)
             return
         self.raw_settings = dict(raw or {})
         if hasattr(self, "appearance_display"):
@@ -3516,7 +3844,8 @@ class MeetingWindow:
         try:
             settings = resolve_meeting_settings(self.raw_settings)
         except ValueError as exc:
-            self.status.set(str(exc))
+            self._fail("recording", tr("As configurações de gravação são inválidas"), str(exc),
+                       tone="warning")
             return
         self.settings = settings
         self.input_enabled.set(settings.input_enabled)
@@ -3538,10 +3867,7 @@ class MeetingWindow:
         self.settings_loaded = True
         if hasattr(self, "controller"):
             self.refresh_report_profiles()
-        self.status.set(
-            self.startup_status if not getattr(self, "retention_ready", True)
-            else tr("Gravações ficam neste computador. Inicie somente quando quiser gravar.")
-        )
+        self._sync_shortcut_hint()
 
     def set_startup_status(self, ready, message):
         """Apply app-level recovery admission without exposing private paths."""
@@ -3557,20 +3883,22 @@ class MeetingWindow:
                 widget.configure(state="disabled")
         if hasattr(self, "privacy_status") and not ready:
             self.privacy_status.set(self.startup_status or tr("Recuperação local pendente."))
-        if hasattr(self, "status") and not ready:
-            self.status.set(self.startup_status or tr("Recuperação local pendente; ações destrutivas estão bloqueadas."))
-        elif hasattr(self, "status") and ready and self.status.get() in {
-                tr("Preparando privacidade e recuperação local…"),
-                tr("Recuperação local pendente; ações destrutivas estão bloqueadas."),
-            }:
-            self.status.set(tr("Privacidade e recuperação local verificadas. Inicie somente quando quiser gravar."))
+        if not ready:
+            self._fail("recording", tr("A gravação aguarda a recuperação local"),
+                       self.startup_status
+                       or tr("Recuperação local pendente; ações destrutivas estão bloqueadas."),
+                       tone="warning", key="startup", sticky=True)
+        else:
+            self.messages.clear("recording", key="startup")
 
     def _privacy_loaded(self, value, error):
         if self.closed:
             return
         if error or not isinstance(value, dict):
             if error:
-                self._remember_operation_error(error)
+                self._fail("settings", tr("Privacidade local indisponível"),
+                           tr("A gravação fica bloqueada até ela carregar. Reabra a janela para tentar de novo."),
+                           error=error)
             self.privacy_ready = False
             if hasattr(self, "privacy_status"):
                 self.privacy_status.set(tr("Privacidade indisponível; gravação bloqueada até recarregar."))
@@ -3620,7 +3948,10 @@ class MeetingWindow:
 
     def _source_selection_changed(self, _event=None):
         self._refresh_source_hints()
-        self.preview_status.set(tr("Fontes alteradas. Teste novamente antes de gravar."))
+        self.preview_status.set(
+            tr("Fontes alteradas. Valem a partir da próxima gravação.")
+            if self.snapshot.get("state") in CAPTURE_STATES
+            else tr("Fontes alteradas. Teste novamente antes de gravar."))
 
     def _refresh_source_hints(self):
         for track, hint in getattr(self, "endpoint_hints", {}).items():
@@ -3659,17 +3990,6 @@ class MeetingWindow:
         self.destination.set("")
         self.destination_label.set(destination_display(""))
 
-    def show_recording_details(self):
-        if self.record_details:
-            messagebox.showinfo(
-                tr("Detalhes da gravação"), self.record_details, parent=self.window,
-            )
-
-    def _remember_operation_error(self, error):
-        self.operation_details = _technical_error_detail(error)
-        self.record_details = self.operation_details
-        self.record_details_button.configure(state="normal")
-
     def _current_settings(self):
         if not self.settings_loaded:
             raise ValueError(tr("Aguarde o carregamento das configurações antes de gravar ou salvar."))
@@ -3696,13 +4016,15 @@ class MeetingWindow:
 
     def _saved_settings(self, settings, error):
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível salvar as configurações. Veja os detalhes na aba Gravação."))
+            self._fail("settings", tr("Não foi possível salvar as configurações"),
+                       tr("As configurações anteriores continuam valendo. Tente salvar de novo."),
+                       error=error)
             return
         self.settings = settings
         self.raw_settings.update(settings.payload())
         self._sync_source_controls()
-        self.status.set(tr("Configurações salvas para a próxima gravação."))
+        self._sync_shortcut_hint()
+        self._say("settings", tr("Configurações salvas para a próxima gravação."))
         if self.on_settings_changed:
             self.on_settings_changed()
 
@@ -3710,7 +4032,8 @@ class MeetingWindow:
         try:
             settings = self._current_settings()
         except (ValueError, StopIteration) as exc:
-            self.status.set(str(exc))
+            self._fail("settings", tr("Não foi possível salvar as configurações"),
+                       str(exc) or tr("Revise as configurações e tente de novo."), tone="warning")
             return
         def save():
             result = self.persist_settings(settings.payload())
@@ -3743,8 +4066,10 @@ class MeetingWindow:
 
     def _previewed(self, result, error):
         if error:
-            self._remember_operation_error(error)
-            self.preview_status.set(tr("O teste de áudio falhou. Veja os detalhes e tente novamente."))
+            self.preview_status.set(tr(SOURCE_TEST_HINT))
+            self._fail("recording", tr("O teste de áudio falhou"),
+                       tr("Nenhum áudio foi gravado. Confira as fontes escolhidas e teste de novo."),
+                       error=error)
             return
         try:
             current = self._source_signature(self._current_settings())
@@ -3769,9 +4094,10 @@ class MeetingWindow:
     def _devices_loaded(self, devices, error):
         self.device_refresh_button.configure(text=tr("Atualizar dispositivos"), state="normal")
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível atualizar os dispositivos. Veja os detalhes na aba Gravação."))
-            self.preview_status.set(tr("Não foi possível atualizar os dispositivos. Tente novamente."))
+            self.preview_status.set(tr(SOURCE_TEST_HINT))
+            self._fail("recording", tr("Não foi possível atualizar os dispositivos"),
+                       tr("A lista anterior continua em uso. Conecte o dispositivo e atualize de novo."),
+                       error=error)
             return
         self.devices = list(islice(devices or [], 256))
         self.devices_loaded = True
@@ -3805,7 +4131,8 @@ class MeetingWindow:
                         and device.get("kind") == track for device in self.devices):
                     raise ValueError(tr("O dispositivo manual está indisponível. Atualize ou escolha outro dispositivo."))
         except (ValueError, StopIteration) as exc:
-            self.status.set(str(exc))
+            self._fail("recording", tr("Revise as configurações da gravação"),
+                       str(exc) or tr("Confira as fontes e tente de novo."), tone="warning")
             return None
         return settings, title
 
@@ -3866,10 +4193,23 @@ class MeetingWindow:
         else:
             self.interrupt_start_button.grid_remove()
 
+    def _library_blocker(self, snapshot):
+        """Why work on a recording cannot start now, in a sentence ("" when it can)."""
+        state = snapshot.get("state", "idle")
+        if state in CAPTURE_STATES:
+            return tr("Finalize a gravação em andamento primeiro.")
+        job = processing_job_label(snapshot)
+        if job or state == "postprocessing":
+            return tr("Aguarde {job} terminar.", job=job or tr("o processamento"))
+        if state != "idle":
+            return tr("Os recursos de áudio ainda estão em uso.")
+        return ""
+
     def _sync_processing_cancel(self, snapshot):
         """Offer Cancel only for a running job of this recording or of no recording.
 
-        The step it stops is named in the line above the buttons.
+        The line above the buttons names the step it stops; with no job of this
+        recording running, it says what keeps Transcrever novamente from acting.
         """
         button = getattr(self, "cancel_processing_button", None)
         if button is None:
@@ -3877,14 +4217,182 @@ class MeetingWindow:
         session_id = snapshot.get("processing_session")
         job = processing_job_label(snapshot) if snapshot.get("state", "idle") not in CAPTURE_STATES else ""
         mine = bool(job) and (session_id is None or session_id == self.selected)
-        button.configure(state="normal" if mine else "disabled")
-        step = tr("Em execução: {job}.", job=job) if mine else ""
+        self._show_cancel(button, mine)
+        if mine:
+            step = tr("Em execução: {job}.", job=job)
+        elif self.selected and self.detail_ready:
+            step = self._library_blocker(snapshot) or (
+                "" if getattr(self, "final_available", False)
+                else tr("Transcrever de novo requer o áudio final. Use Preparar áudio final, em Arquivos."))
+        else:
+            step = ""
         if step != self.processing_job_status.get():
             self.processing_job_status.set(step)
             if step:
                 self.processing_job_label.grid()
             else:
                 self.processing_job_label.grid_remove()
+
+    def _sync_library_controls(self, snapshot):
+        """Enable each recovery control only when it can act, and say what holds the rest."""
+        blocker = self._library_blocker(snapshot)
+        ready = bool(self.selected and self.detail_ready and not blocker)
+        final = getattr(self, "final_available", False)
+        playable = ready and bool(self.playback_choices)
+        self.play_button.configure(state="normal" if playable else "disabled")
+        self.transcribe_button.configure(state="normal" if ready and final else "disabled")
+        recover_needed = getattr(self, "recovery_needed", False)
+        self.recover_audio_button.configure(state="normal" if ready and recover_needed else "disabled")
+        note = ""
+        if self.selected and self.detail_ready and not (ready and recover_needed):
+            note = blocker or (tr("O áudio final está completo; não há nada a recuperar.")
+                               if final and not recover_needed else "")
+        if note != self.recover_audio_note.cget("text"):
+            self.recover_audio_note.configure(text=note)
+        reason = ""
+        if self.selected and self.detail_ready and not playable:
+            reason = blocker or tr("Esta gravação ainda não tem áudio final para ouvir.")
+        if reason != self._play_reason:
+            self._play_reason = reason
+            self.playback_status.set(reason or tr("Pronto para ouvir."))
+
+    # -- The recorder: state, transport, trouble -----------------------------------------------
+
+    def _sync_recording_status(self, snapshot, start_ready):
+        """Write the recorder's one state beside its tone dot."""
+        state = snapshot.get("state", "idle")
+        text = format_recording_status(snapshot, start_held=state == "idle" and not start_ready)
+        self.record_status.set(text)
+        self.record_chip.set(text, recording_tone(snapshot, start_ready))
+
+    def _sync_transport(self, state, start_ready):
+        """Show only the controls that can act: Start while idle; Stop (primary) and Pause while capturing."""
+        active = state in CAPTURE_STATES
+        live = state in ("recording", "paused")
+        key = (active, live)
+        if key != self._transport_key:
+            self._transport_key = key
+            for button in (self.start_button, self.stop_button, self.pause_button):
+                button.pack_forget()
+            if active:
+                self.stop_button.pack(side="left", before=self.shortcut_hint)
+                if live:
+                    self.pause_button.pack(side="left", padx=(self.ui.space_sm, 0),
+                                           before=self.shortcut_hint)
+            else:
+                self.start_button.pack(side="left", before=self.shortcut_hint)
+        self.start_button.configure(state="normal" if start_ready else "disabled")
+        self.stop_button.configure(state="normal" if active else "disabled")
+        self.pause_button.configure(text=tr("Retomar") if state == "paused" else tr("Pausar"),
+                                    state="normal" if live else "disabled")
+
+    def _sync_shortcut_hint(self):
+        """Name the shortcut beside the transport, when the user set one."""
+        hotkey = hotkey_display(self.settings.hotkey)
+        self.shortcut_hint.configure(text=tr("Atalho: {hotkey}", hotkey=hotkey) if hotkey else "")
+
+    def _sync_recording_hint(self, active):
+        """The line under the recorder: test guidance while idle, what a change means while capturing."""
+        if active != self._recording_hint:
+            self._recording_hint = active
+            self.preview_status.set(tr(RECORDING_HINT) if active else tr(SOURCE_TEST_HINT))
+
+    def _recording_details(self, snapshot, lost):
+        """The cause behind Detalhes for the recorder's trouble, bounded and path-redacted."""
+        details = []
+        _append_detail_once(details, _technical_error_detail(snapshot["error"]) if snapshot.get("error") else "")
+        health = snapshot.get("capture_health") or {}
+        for track, state in lost.items():
+            reason = _safe_retention_text(health[track].get("reason", ""), 512)
+            details.append(f"{tr(SOURCE_LABELS[track])}: {state}" + (f" ({reason})" if reason else ""))
+        if snapshot.get("final_audio"):
+            details.append(tr("Arquivo final: {path}", path=str(snapshot["final_audio"])[:2048]))
+        if snapshot.get("postprocess"):
+            details.append(tr("Processamento: {details}", details=str(snapshot["postprocess"])[:2048]))
+        return "\n".join(details)
+
+    def _sync_recording_trouble(self, snapshot, now=None):
+        """Keep the source captions and the Recording warning true to the capture.
+
+        A source silent past the grace period raises a warning that names it and
+        counts the silence. With nothing lost, an error the recorder reports stays
+        on the page until it is dismissed.
+        """
+        now = time.monotonic() if now is None else now
+        lost = dict(lost_sources(snapshot))
+        health = snapshot.get("capture_health") or {}
+        self._lost_since = {track: since for track, since in self._lost_since.items() if track in lost}
+        for track in lost:
+            # last_packet_age is the silence that already preceded the event that reported the loss.
+            age = health[track].get("last_packet_age")
+            age = float(age) if isinstance(age, (int, float)) and math.isfinite(age) and age > 0 else 0.0
+            self._lost_since.setdefault(track, now - age)
+        self._silent_for = {track: now - since for track, since in self._lost_since.items()}
+        sources = self._recording_sources or self.settings.sources
+        for track, caption in self.source_captions.items():
+            text, role = source_health(track, snapshot, sources, self._silent_for.get(track, 0))
+            if text != caption.cget("text") or getattr(self.ui, role) != str(caption.cget("fg")):
+                caption.configure(text=text, fg=getattr(self.ui, role))
+
+        shown = {track: lost[track] for track in ("microphone", "system")
+                 if self._silent_for.get(track, 0) >= LOST_SOURCE_GRACE}
+        error = str(snapshot.get("error") or "")
+        capturing = snapshot.get("state") in CAPTURE_STATES
+        if shown:
+            key = ("lost", tuple(shown.items()))
+            silent = max(self._silent_for[track] for track in shown)
+            names = [tr(SOURCE_PROSE[track]) for track in shown]
+            sources_text = names[0] if len(names) == 1 else tr("{first} e {second}", first=names[0], second=names[1])
+            title = tr("Sem áudio {sources} há {duration}", sources=sources_text, duration=format_silence(silent))
+            if "disconnected" in shown.values():
+                body = tr("A gravação continua e retoma quando o dispositivo voltar. "
+                          "Reconecte-o; outro dispositivo só vale na próxima gravação.")
+            else:
+                body = tr("O aplicativo tenta reabrir o dispositivo e a gravação retoma sozinha. "
+                          "Outro dispositivo só vale na próxima gravação.")
+            tone = "warning"
+            action = (tr("Trocar dispositivo"), lambda track=next(iter(shown)): self._choose_device(track))
+        elif error and not lost:
+            # A source inside its grace period already put its cause in the error;
+            # the lost-source warning will say it better, or the source will mend.
+            key = ("error", error, capturing)
+            title = tr("A gravação encontrou um problema") if capturing \
+                else tr("A última operação terminou com um problema")
+            body = tr("A gravação continua. Os detalhes explicam o que aconteceu.") if capturing \
+                else tr("O que foi capturado ou salvo foi preservado. Veja a gravação na Biblioteca.")
+            tone = "danger" if not capturing and snapshot.get("last_status") == "failed" else "warning"
+            action = None if capturing else (tr("Abrir Biblioteca"), self._open_library)
+        else:
+            key = None
+        if key == self._trouble_key:
+            if key is not None and key[0] == "lost":
+                self.recording_trouble.retitle(title)
+            return
+        self._trouble_key = key
+        if key is None:
+            self._trouble_dismissed = None
+        if key is None or key == self._trouble_dismissed:
+            self.recording_trouble.clear()
+            return
+        self.recording_trouble.problem(
+            tone, title, body, action=action, details=self._recording_details(snapshot, shown) or None,
+            when=datetime.now(),
+            dismiss=None if key[0] == "lost" else lambda key=key: self._dismiss_trouble(key))
+
+    def _dismiss_trouble(self, key):
+        self._trouble_dismissed = key
+        self.recording_trouble.clear()
+
+    def _open_library(self):
+        self.notebook.select(self.library_tab)
+
+    def _choose_device(self, track):
+        """Take the user to the selector of a lost source. The capture helper cannot switch
+        endpoints live, so a new choice applies to the next recording and the page says so."""
+        self.endpoint_boxes[track].focus_set()
+        self.preview_status.set(
+            tr("Trocar o dispositivo vale a partir da próxima gravação. "
+               "Para continuar agora, reconecte o dispositivo."))
 
     def interrupt_and_record(self):
         """Stop the job holding Start, after naming what stops, then record."""
@@ -3911,14 +4419,13 @@ class MeetingWindow:
                                       parent=self.window):
             return
         self.start_after_interrupt = "window"
-        self.status.set(tr("Interrompendo {job}; a gravação começa em seguida.", job=job))
+        self._say("recording", tr("Interrompendo {job}; a gravação começa em seguida.", job=job))
 
         def cancelled(_issued, error):
             if error:
                 self.start_after_interrupt = None
-                self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível interromper o processamento, e a gravação não começou. "
-                                   "Tente novamente."))
+                self._fail("recording", tr("Não foi possível interromper o processamento"),
+                           tr("A gravação não começou. Tente de novo."), error=error)
 
         if not self._submit("control", self.controller.cancel_processing, cancelled, urgent=True):
             self.start_after_interrupt = None
@@ -3928,21 +4435,25 @@ class MeetingWindow:
         if self.closed:
             return False
         if getattr(self, "privacy_save_inflight", False):
-            self.status.set(tr("Aguarde a atualização de privacidade antes de iniciar a gravação."))
+            self._fail("recording", tr("Gravação não iniciada"),
+                       tr("Aguarde a atualização de privacidade antes de iniciar a gravação."),
+                       tone="warning")
             return False
         if not getattr(self, "retention_ready", True):
-            self.status.set(tr("A gravação aguarda a recuperação do workspace."))
+            self._fail("recording", tr("Gravação não iniciada"),
+                       tr("A gravação aguarda a recuperação do workspace."), tone="warning")
             return False
         if not getattr(self, "privacy_ready", True):
             self.pending_start_origin = origin
             refresher = getattr(self.controller, "refresh_privacy_defaults", None)
             if callable(refresher):
-                self.status.set(tr("Carregando privacidade local antes de gravar…"))
+                self._say("recording", tr("Carregando privacidade local antes de gravar…"))
                 if not self._submit("privacy_start", refresher, self._privacy_ready_for_start):
                     self.pending_start_origin = None
                     return False
                 return True
-            self.status.set(tr("Privacidade local indisponível; gravação bloqueada."))
+            self._fail("recording", tr("Gravação não iniciada"),
+                       tr("Privacidade local indisponível; gravação bloqueada."), tone="warning")
             return False
         request = self._validated_recording_request()
         if request is None:
@@ -4026,7 +4537,7 @@ class MeetingWindow:
             except tk.TclError:
                 pass
             self.recording_notice_dialog = None
-            self.status.set(tr("Gravação cancelada no aviso de consentimento."))
+            self._say("recording", tr("Gravação cancelada no aviso de consentimento."))
 
         def confirm():
             grant = getattr(self.controller, "grant_recording_consent", None)
@@ -4034,8 +4545,8 @@ class MeetingWindow:
                 if callable(grant):
                     grant()
             except Exception as exc:
-                self._remember_operation_error(exc)
-                self.status.set(tr("Não foi possível registrar a confirmação; gravação bloqueada."))
+                self._fail("recording", tr("Não foi possível registrar a confirmação"),
+                           tr("A gravação não começou. Confirme o aviso de novo."), error=exc)
                 return
             try:
                 dialog.grab_release()
@@ -4057,7 +4568,9 @@ class MeetingWindow:
         return dialog
 
     def _submit_start(self, settings, title, origin="window"):
-        self.status.set(tr("Iniciando gravação ({origin})…", origin=origin))
+        # The recorder's own state says the rest; a message from before is stale.
+        self.messages.clear("recording")
+        self._recording_sources = settings.sources
         submitted = self._submit(
             "control", lambda: self.controller.start(settings, title=title),
             lambda accepted, error: self._started(accepted, error, origin), urgent=True,
@@ -4076,11 +4589,10 @@ class MeetingWindow:
             revoke = getattr(self.controller, "revoke_recording_consent", None)
             if callable(revoke):
                 revoke()
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível iniciar a gravação. Veja os detalhes na aba Gravação."))
+            self._fail("recording", tr("Não foi possível iniciar a gravação"),
+                       tr("Nada foi gravado. Verifique as fontes e tente de novo."), error=error)
         else:
             if accepted:
-                self.status.set(tr("Gravação solicitada."))
                 return
             revoke = getattr(self.controller, "revoke_recording_consent", None)
             if callable(revoke):
@@ -4089,12 +4601,15 @@ class MeetingWindow:
             snapshot = self.controller.snapshot()
             job = start_blocker(snapshot)
             if not job:
-                self.status.set(tr("Não foi possível iniciar. Verifique o estado da gravação."))
+                self._fail("recording", tr("Gravação não iniciada"),
+                           tr("Verifique o estado da gravação e tente de novo."), tone="warning")
             elif processing_job_label(snapshot):
-                self.status.set(tr("Gravação não iniciada: aguardando {job}. Para gravar agora, "
-                                   "use Interromper e gravar.", job=job))
+                self._fail("recording", tr("Gravação não iniciada"),
+                           tr("Aguardando {job}. Para gravar agora, use Interromper e gravar.", job=job),
+                           tone="warning")
             else:
-                self.status.set(tr("Gravação não iniciada: aguardando {job}.", job=job))
+                self._fail("recording", tr("Gravação não iniciada"),
+                           tr("Aguardando {job}.", job=job), tone="warning")
 
     def stop(self):
         self._action("stop", urgent=True)
@@ -4102,11 +4617,10 @@ class MeetingWindow:
     def pause_resume(self):
         self._action("resume" if self.snapshot.get("state") == "paused" else "pause", urgent=True)
 
-    def _action(self, method, *args, urgent=False, callback=None, **kwargs):
-        self.operation_details = ""
-        self.status.set(tr("Processando solicitação…"))
+    def _action(self, method, *args, urgent=False, callback=None, receipt=None, **kwargs):
+        """Run a controller command off Tk; ``receipt`` is the quiet line a success earns."""
         self._submit("control" if urgent else method, lambda: getattr(self.controller, method)(*args, **kwargs),
-                     callback, urgent)
+                     callback or (lambda value, error: self._done(value, error, receipt)), urgent)
 
     def search(self):
         self.offset = 0
@@ -4177,8 +4691,10 @@ class MeetingWindow:
 
     def _library_loaded(self, sessions, error):
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível carregar a biblioteca. Tente novamente."))
+            self._fail("library", tr("Não foi possível carregar a biblioteca"),
+                       tr("A lista abaixo pode estar desatualizada. Tente novamente."),
+                       error=error, action=(tr("Tentar novamente"), self.refresh_library),
+                       key="library_load")
             if not self.sessions.get_children():
                 self._set_library_detail_visible(False)
                 self.library_empty.set(tr("Não foi possível carregar a biblioteca."))
@@ -4189,6 +4705,7 @@ class MeetingWindow:
                 self.library_empty_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
                 self.library_empty_panel.lift()
             return
+        self.messages.clear("library", key="library_load")
         search_results = []
         generation = self.library_filter_generation
         if isinstance(sessions, tuple) and len(sessions) == 3 and isinstance(sessions[0], dict):
@@ -4271,8 +4788,8 @@ class MeetingWindow:
             if self.closed or request != self.search_request:
                 return
             if error or not isinstance(value, dict):
-                self._remember_operation_error(error)
-                self.status.set(tr("A fonte da busca não está mais disponível."))
+                self._fail("library", tr("A fonte da busca não está mais disponível"),
+                           tr("A gravação ou o relatório pode ter mudado. Busque de novo."), error=error)
                 return
             if value.get("session_id") != self.selected:
                 self.pending_search_resolution = value
@@ -4297,9 +4814,9 @@ class MeetingWindow:
             report_id = value.get("report_id")
             if report_id:
                 self._load_report(report_id)
-                self.status.set(tr("Fonte do relatório carregada."))
+                self._say("library", tr("Fonte do relatório carregada."))
         else:
-            self.status.set(tr("Reunião encontrada na biblioteca."))
+            self._say("library", tr("Reunião encontrada na biblioteca."))
 
     def _jump_to_transcript_evidence(self, session_id, revision, segment_id, *, request=None):
         if not session_id or not revision or not segment_id:
@@ -4322,7 +4839,8 @@ class MeetingWindow:
                     or self.selected != session_id or (request is not None and request != self.search_request)):
                 return
             if error or not page:
-                self.status.set(tr("O trecho citado não está disponível nesta revisão."))
+                self._fail("library", tr("O trecho citado não está disponível nesta revisão."),
+                           tone="warning", session=session_id)
                 return
             self.transcript_offset = page.get("offset", 0)
             self.transcript_revision = revision
@@ -4343,7 +4861,7 @@ class MeetingWindow:
                     except (tk.TclError, AttributeError):
                         pass
                     break
-            self.status.set(tr("Fonte carregada · {time}", time=format_time(next((item.get('start', 0) for item in page.get('segments', []) if item.get('id') == segment_id), 0))))
+            self._say("library", tr("Fonte carregada · {time}", time=format_time(next((item.get('start', 0) for item in page.get('segments', []) if item.get('id') == segment_id), 0))))
         self._submit("search_citation", read, loaded)
 
     def refresh_workspace(self):
@@ -4355,9 +4873,8 @@ class MeetingWindow:
         if self.closed:
             return
         if error or not isinstance(workspace, dict):
-            if error:
-                self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível carregar as preferências da biblioteca."))
+            self._fail("library", tr("Não foi possível carregar as preferências da biblioteca"),
+                       tr("Os padrões atuais continuam em uso."), tone="warning", error=error)
             return
         self._apply_workspace_settings(workspace)
 
@@ -4370,7 +4887,7 @@ class MeetingWindow:
         self.cross_request += 1
         request = self.cross_request
         self.cross_pending = request
-        self.cross_cancel_button.configure(state="normal")
+        self._sync_job_cancels()
         self.cross_status.set(tr("Processando evidência local; a resposta não será salva automaticamente."))
         filters = {}
         submitted = self._submit(
@@ -4382,7 +4899,7 @@ class MeetingWindow:
         )
         if not submitted:
             self.cross_pending = None
-            self.cross_cancel_button.configure(state="disabled")
+            self._sync_job_cancels()
 
     def cancel_cross_question(self):
         self.controller.cancel_processing(kinds=frozenset({"cross_question"}))
@@ -4392,10 +4909,11 @@ class MeetingWindow:
         if self.closed or request != self.cross_request:
             return
         self.cross_pending = None
-        self.cross_cancel_button.configure(state="disabled")
+        self._sync_job_cancels()
         if error:
-            self._remember_operation_error(error)
-            self.cross_status.set(tr("A pergunta cruzada não foi concluída; nada foi salvo."))
+            self.cross_status.set(tr("Resposta cruzada fica somente na memória."))
+            self._fail("library", tr("A pergunta entre gravações não foi concluída"),
+                       tr("Nada foi salvo. Tente perguntar de novo."), error=error)
             return
         if not isinstance(value, dict):
             self.cross_status.set(tr("A resposta cruzada não tinha um formato utilizável."))
@@ -4440,7 +4958,8 @@ class MeetingWindow:
         if self.closed or request != self.cross_citation_request:
             return
         if error or not isinstance(value, dict):
-            self.status.set(tr("A citação cruzada deixou de resolver para a transcrição canônica."))
+            self._fail("library", tr("A citação cruzada deixou de resolver para a transcrição canônica."),
+                       tone="warning")
             return
         if value.get("session_id") != self.selected:
             self.pending_search_resolution = value
@@ -4451,7 +4970,7 @@ class MeetingWindow:
     def show_trash(self):
         """Open the trash: restore or permanently delete; every mutation runs on the IO lane."""
         if not getattr(self, "retention_ready", True):
-            self.status.set(tr("A lixeira aguarda a recuperação do workspace."))
+            self._say("library", tr("A lixeira aguarda a recuperação do workspace."))
             return None
         if self.closed:
             return None
@@ -4604,8 +5123,9 @@ class MeetingWindow:
         if self.closed or request != self.trash_request or self.trash_tree is None:
             return
         if error:
-            self._remember_operation_error(error)
             self.trash_status.set(tr("Não foi possível carregar a lixeira. Tente Atualizar."))
+            self._fail("library", tr("Não foi possível carregar a lixeira"),
+                       tr("Atualize a lixeira para tentar de novo."), error=error)
             return
         previous = self._selected_trash_entry(quiet=True)
         projected = []
@@ -4807,7 +5327,8 @@ class MeetingWindow:
             return
         if error or value is False:
             if error:
-                self._remember_operation_error(error)
+                self._fail("library", tr("A lixeira não confirmou a ação"),
+                           tr("Atualize a lista para ver o estado atual."), error=error)
             self.trash_status.set(tr("A lixeira não confirmou a ação. Atualize a lista para ver o estado atual."))
             return
         self.trash_receipt = message
@@ -4836,9 +5357,11 @@ class MeetingWindow:
         self.semantic_cancel = threading.Event()
         event = self.semantic_cancel
         self.semantic_status.set(tr("Baixando modelo com verificação SHA-256…"))
+        self._sync_job_cancels()
         if not self._submit("semantic_model", lambda: download_embedding_model(cancel_event=event),
                             self._semantic_operation_finished):
             self.semantic_cancel = None
+            self._sync_job_cancels()
             self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
 
     def rebuild_semantic_index(self):
@@ -4850,9 +5373,11 @@ class MeetingWindow:
         self.semantic_cancel = threading.Event()
         event = self.semantic_cancel
         self.semantic_status.set(tr("Indexando transcrições localmente…"))
+        self._sync_job_cancels()
         if not self._submit("semantic_rebuild", lambda: self.controller.rebuild_semantic_index(cancel_event=event),
                             self._semantic_operation_finished):
             self.semantic_cancel = None
+            self._sync_job_cancels()
             self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
 
     def cancel_semantic_operation(self):
@@ -4865,6 +5390,7 @@ class MeetingWindow:
 
     def _semantic_operation_finished(self, value, error):
         self.semantic_cancel = None
+        self._sync_job_cancels()
         if error:
             self.semantic_status.set(tr("Operação semântica cancelada ou indisponível. Busca por palavras disponível."))
         elif isinstance(value, dict) and value.get("state") == "rebuilding":
@@ -4879,7 +5405,7 @@ class MeetingWindow:
         self.rebuild_cancel = threading.Event()
         self.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
         self.rebuild_button.configure(state="disabled")
-        self.rebuild_cancel_button.configure(state="normal")
+        self._sync_job_cancels()
         self.index_status.set(tr("Índice de busca: reconstruindo…"))
         self._submit(
             "rebuild_index",
@@ -4901,10 +5427,11 @@ class MeetingWindow:
     def _rebuild_finished(self, value, error):
         self.rebuild_cancel = None
         self.rebuild_button.configure(state="normal")
-        self.rebuild_cancel_button.configure(state="disabled")
+        self._sync_job_cancels()
         if error:
-            self._remember_operation_error(error)
             self.index_status.set(tr("Índice de busca: reconstrução cancelada ou indisponível."))
+            self._fail("library", tr("Não foi possível reconstruir o índice de busca"),
+                       tr("A busca por palavras continua disponível."), tone="warning", error=error)
             return
         state = value.get("state", "ready") if isinstance(value, dict) else "ready"
         count = value.get("sessions", 0) if isinstance(value, dict) else 0
@@ -4933,6 +5460,8 @@ class MeetingWindow:
     def load_session(self, session_id):
         self._action("stop_playback", urgent=True)
         self.selected = session_id
+        # What the page said about another recording does not describe this one.
+        self.messages.drop_other_sessions(session_id)
         self._reset_transcript_document()
         self._show_summary("")
         self._show_library_detail(True)
@@ -4946,6 +5475,7 @@ class MeetingWindow:
             self.summary_focus.delete("1.0", "end")
         if hasattr(self, "meeting_chat"):
             self.meeting_chat.set_question("")
+            self.meeting_chat.clear_notice()
             self._render_chat()
         if hasattr(self, "ask_status"):
             self.ask_status.set(tr("Conversa temporária. Salve as respostas que quiser guardar."))
@@ -4969,6 +5499,7 @@ class MeetingWindow:
         self.replay_stop_button.configure(state="disabled")
         self.audio_overview.set(tr("Carregando áudio…"))
         self.playback_status.set(tr("Pronto para ouvir."))
+        self._play_reason = None
         self.playback_position.set(0.0)
         self.loading = True
         self.title.set("")
@@ -5033,20 +5564,18 @@ class MeetingWindow:
                              speaker_labels=speaker_labels,
                             highlights=highlights[:2000])
             return metadata, page["segments"]
-        self.status.set(tr("Carregando gravação…"))
         self._submit("detail", read, lambda data, error: self._detail_loaded(session_id, data, error))
 
     def _detail_loaded(self, session_id, data, error):
         if session_id != self.selected:
             return
         if error:
-            self._remember_operation_error(error)
-            self.status.set(tr("Não foi possível carregar a gravação. Veja os detalhes na aba Gravação."))
+            self._fail("library", tr("Não foi possível carregar a gravação"),
+                       tr("Selecione-a de novo na lista para tentar outra vez."),
+                       error=error, session=session_id)
             return
         metadata, segments = data
-        self.operation_details = ""
-        if metadata.get("processing_details") or metadata.get("error"):
-            self._remember_operation_error(metadata.get("processing_details") or metadata["error"])
+        self._explain_capture(session_id, metadata)
         self.loading = True
         self.title.set(metadata.get("title") or "")
         self.transcript_revision = metadata.get("transcript_revision")
@@ -5091,9 +5620,24 @@ class MeetingWindow:
         if isinstance(pending_search, dict) and pending_search.get("session_id") == session_id:
             self.pending_search_resolution = None
             self._apply_search_resolution(pending_search, self.search_request)
-        self.status.set(tr("Gravação carregada · página de transcrição com {count} trechos.", count=len(segments))
-                         + (" · " + tr("Uma etapa anterior não foi concluída.")
-                            if metadata.get("processing_details") else ""))
+
+    def _explain_capture(self, session_id, metadata):
+        """Say why a capture ended as it did, with the recorded cause behind Detalhes."""
+        error = metadata.get("error")
+        if not error:
+            return
+        status = metadata.get("status")
+        if status == "failed":
+            title = tr("A captura falhou")
+            body = tr("O que foi capturado antes da falha foi preservado.")
+        elif status == "interrupted":
+            title = tr("A captura foi interrompida")
+            body = tr("O que foi capturado até ali foi preservado.")
+        else:
+            title = tr("A captura teve problemas")
+            body = tr("Parte do áudio de uma fonte pode estar faltando. O restante foi preservado.")
+        self._fail("library", title, body, tone="danger" if status == "failed" else "warning",
+                   error=error, session=session_id)
 
     def _set_audio_capabilities(self, tracks, final_available=False):
         # Keep these projections for legacy metadata and controller doubles;
@@ -5186,13 +5730,14 @@ class MeetingWindow:
             return
         if error:
             self.delete_button.configure(state="normal")
-            self._remember_operation_error(error)
-            self.status.set(tr("A prévia de retenção falhou; nenhuma exclusão foi tentada."))
+            self._fail("library", tr("A prévia de retenção falhou"), tr("Nenhuma exclusão foi tentada."),
+                       error=error, session=session_id)
             return
         projection = retention_plan_projection(plan)
         if not projection.get("eligible"):
             self.delete_button.configure(state="normal")
-            self.status.set(tr("A retenção foi bloqueada: {reasons}", reasons="; ".join(projection.get("reasons", [])[:3])))
+            self._fail("library", tr("A retenção foi bloqueada"),
+                       "; ".join(projection.get("reasons", [])[:3]), tone="warning", session=session_id)
             messagebox.showwarning(tr("Retenção bloqueada"), self._retention_preview_text(projection, title), parent=self.window)
             return
         if not messagebox.askyesno(
@@ -5201,9 +5746,9 @@ class MeetingWindow:
                 + tr("\n\nMover para a lixeira do app agora? A confirmação usa exatamente esta prévia."),
                 parent=self.window):
             self.delete_button.configure(state="normal")
-            self.status.set(tr("Nenhuma exclusão foi aplicada."))
+            self._say("library", tr("Nenhuma exclusão foi aplicada."))
             return
-        self.status.set(tr("Aplicando a prévia de retenção…"))
+        self._say("library", tr("Aplicando a prévia de retenção…"))
         if not self._submit(
                 "retention_apply",
                 lambda: self.controller.apply_retention(plan, confirm=True),
@@ -5216,13 +5761,13 @@ class MeetingWindow:
             return
         if error or value is False:
             self.delete_button.configure(state="normal")
-            if error:
-                self._remember_operation_error(error)
-            self.status.set(tr("A prévia ficou inválida ou a retenção falhou; revise e gere uma nova prévia."))
+            self._fail("library", tr("A retenção não foi aplicada"),
+                       tr("A prévia ficou inválida ou a retenção falhou. Revise e gere uma nova prévia."),
+                       error=error, session=session_id)
             return
         self._clear_library_detail()
         self.refresh_library()
-        self.status.set(tr("Reunião movida para a lixeira do app; cópias externas não foram alteradas."))
+        self._say("library", tr("Reunião movida para a lixeira do app; cópias externas não foram alteradas."))
 
     def _legacy_delete_selected(self):
         """Compatibility path for old embedded doubles only."""
@@ -5237,30 +5782,30 @@ class MeetingWindow:
         if not messagebox.askyesno(tr("Excluir gravação"), message, parent=self.window):
             return
         self.delete_button.configure(state="disabled")
-        self.status.set(tr("Movendo gravação para a lixeira…"))
+        self._say("library", tr("Movendo gravação para a lixeira…"))
 
         def deleted(value, error):
             if error or value is False:
                 if self.selected == session_id:
                     self.delete_button.configure(state="normal")
-                if error:
-                    self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível mover a gravação para a lixeira."))
+                self._fail("library", tr("Não foi possível mover a gravação para a lixeira"),
+                           tr("A gravação continua na biblioteca. Tente de novo."),
+                           error=error, session=session_id)
                 return
             if self.selected == session_id:
                 self._clear_library_detail()
             self.refresh_library()
-            self.status.set(tr("Gravação movida para a lixeira do app."))
+            self._say("library", tr("Gravação movida para a lixeira do app."))
 
         if not self._submit("delete_session", lambda: self.controller.delete_session(session_id), deleted):
             self.delete_button.configure(state="normal")
 
     def delete_selected(self):
         if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         if not getattr(self, "retention_ready", True):
-            self.status.set(tr("A retenção aguarda a recuperação do workspace."))
+            self._say("library", tr("A retenção aguarda a recuperação do workspace."))
             return
         if not self._retention_workflow_available(self.controller):
             return self._legacy_delete_selected()
@@ -5269,7 +5814,7 @@ class MeetingWindow:
         self.retention_request += 1
         request = self.retention_request
         self.delete_button.configure(state="disabled")
-        self.status.set(tr("Calculando prévia de retenção…"))
+        self._say("library", tr("Calculando prévia de retenção…"))
         if not self._submit(
                 "retention_plan",
                 lambda: self.controller.retention_plan(
@@ -5333,7 +5878,9 @@ class MeetingWindow:
                 return
             if error or not isinstance(value, dict) or not isinstance(value.get("text"), str):
                 if error:
-                    self._remember_operation_error(error)
+                    self._fail("library", tr("Não foi possível carregar a transcrição"),
+                               tr("Abra a gravação de novo para tentar outra vez."),
+                               error=error, session=session_id)
                 self.transcript_document_status.set(tr("Não foi possível carregar a transcrição. Tente novamente."))
                 return
             text = value["text"]
@@ -5379,25 +5926,24 @@ class MeetingWindow:
 
     def copy_transcript(self):
         if not self.transcript_document_ready:
-            self.status.set(tr("Aguarde o carregamento da transcrição."))
+            self._say("library", tr("Aguarde o carregamento da transcrição."))
             return
         if self.transcript_document_truncated:
-            self.status.set(tr("Use Exportar para obter esta transcrição completa."))
+            self._say("library", tr("Use Exportar para obter esta transcrição completa."))
             return
         text = self.transcript_document.get("1.0", "end-1c")
         if not text:
-            self.status.set(tr("Esta gravação ainda não tem uma transcrição."))
+            self._say("library", tr("Esta gravação ainda não tem uma transcrição."))
             return
         self._submit(
             "copy_transcript", lambda: Clipboard.set_content(text),
-            lambda copied, error: self.status.set(
-                tr("Transcrição copiada.") if copied and not error else tr("Não foi possível copiar a transcrição."),
-            ),
+            lambda copied, error: self._copied(
+                tr("Transcrição copiada."), tr("Não foi possível copiar a transcrição"), copied, error),
         )
 
     def export_transcript(self):
         if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação antes de exportar."))
+            self._say("library", tr("Selecione uma gravação antes de exportar."))
             return
         path = filedialog.asksaveasfilename(
             parent=self.window, title=tr("Exportar transcrição"), defaultextension=".txt",
@@ -5406,7 +5952,7 @@ class MeetingWindow:
         if path:
             self._action("export_transcript", self.selected, path,
                          style=displayed_value(TRANSCRIPT_STYLES, self.transcript_style.get()),
-                         revision=self.transcript_revision)
+                         revision=self.transcript_revision, receipt=tr("Exportação da transcrição iniciada."))
 
     def _render_transcript(self, segments):
         self.transcript.delete(*self.transcript.get_children())
@@ -5461,7 +6007,6 @@ class MeetingWindow:
         self.transcript_request += 1
         request = self.transcript_request
         self.bridge.invalidate("transcript_page")
-        self.status.set(tr("Carregando trechos da transcrição…"))
 
         def read():
             return self._read_transcript_page(session_id, revision, offset)
@@ -5470,8 +6015,9 @@ class MeetingWindow:
             if self.closed or request != self.transcript_request or self.selected != session_id:
                 return
             if error:
-                self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível carregar a página da transcrição. Veja os detalhes na aba Gravação."))
+                self._fail("library", tr("Não foi possível carregar a página da transcrição"),
+                           tr("A página anterior continua na tela. Tente de novo."),
+                           error=error, session=session_id)
                 return
             page = page or {}
             self.transcript_offset = int(page.get("offset", offset))
@@ -5479,10 +6025,6 @@ class MeetingWindow:
             self.transcript_has_more = bool(page.get("has_more"))
             self._render_transcript(page.get("segments", []))
             self._update_transcript_paging_controls()
-            self.status.set(
-                tr("Página de transcrição carregada · {count} trechos", count=len(self.segments))
-                + (" · " + tr("horários por trecho de áudio.") if self.transcript_has_more else ".")
-            )
 
         self._submit("transcript_page", read, loaded)
 
@@ -5536,27 +6078,26 @@ class MeetingWindow:
 
     def save_title(self, after=None):
         if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         session_id, title = self.selected, self.title.get()
         if len(title) > 400:
-            self.status.set(tr("Use um título de até 400 caracteres."))
+            self._say("library", tr("Use um título de até 400 caracteres."))
             return
         def saved(_value, error):
             if error or _value is False:
-                if error:
-                    self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível salvar o título. Veja os detalhes na aba Gravação.")
-                                if error else tr("Não foi possível salvar o título. Tente novamente."))
+                self._fail("library", tr("Não foi possível salvar o título"),
+                           tr("O título anterior continua salvo. Tente salvar de novo."),
+                           error=error, session=session_id)
                 return
             if self.selected == session_id and self.title.get() == title:
                 self.dirty = False
-            self.status.set(tr("Título salvo."))
+            self._say("library", tr("Título salvo."), session=session_id)
             self.refresh_library()
             if after and not self.dirty:
                 after()
             elif after:
-                self.status.set(tr("O título foi alterado novamente. Salve antes de sair."))
+                self._say("library", tr("O título foi alterado novamente. Salve antes de sair."))
         self._submit("save_title", lambda: self.controller.rename_session(session_id, title), saved)
 
     def _clear_library_detail(self):
@@ -5566,6 +6107,7 @@ class MeetingWindow:
         self.bridge.invalidate("transcript_page")
         self.transcript_request += 1
         self.selected = None
+        self.messages.drop_other_sessions()
         self.detail_state_item = None
         self._render_detail_state()
         self.transcription_status = ""
@@ -5678,8 +6220,9 @@ class MeetingWindow:
 
     def _replay_started(self, accepted, error):
         if error:
-            self._remember_operation_error(error)
-            self.playback_status.set(tr("Não foi possível reproduzir o áudio. Veja os detalhes da operação."))
+            self.playback_status.set(tr("Não foi possível reproduzir o áudio."))
+            self._fail("library", tr("Não foi possível reproduzir o áudio"),
+                       tr("Tente de novo. O áudio final continua salvo."), error=error)
         elif not accepted:
             self.playback_status.set(tr("A reprodução não está disponível durante outra operação."))
         else:
@@ -5690,29 +6233,29 @@ class MeetingWindow:
 
     def play(self):
         if not self.selected:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         if self.snapshot.get("state") in ("starting", "recording", "paused", "stopping"):
-            self.status.set(tr("Finalize a captura antes de ouvir uma gravação."))
+            self._say("library", tr("Finalize a captura antes de ouvir uma gravação."))
             return
         try:
             position = self._position()
         except ValueError as exc:
-            self.status.set(str(exc))
+            self._say("library", str(exc))
             return
         self._action("seek_playback", self.selected, "final", start=position, urgent=True)
 
     def transcribe(self):
         if not self.selected:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         if not getattr(self, "final_available", False):
-            self.status.set(tr("A retranscrição exige um áudio final MP3 salvo."))
+            self._say("library", tr("A retranscrição exige um áudio final MP3 salvo."))
             return
         try:
             settings = self._current_settings()
         except ValueError as exc:
-            self.status.set(str(exc))
+            self._say("library", str(exc))
             return
         session_id = self.selected
         self._action("transcribe", session_id, settings.profile, settings.language,
@@ -5730,7 +6273,7 @@ class MeetingWindow:
         try:
             settings = self._current_settings()
         except ValueError as exc:
-            self.status.set(str(exc))
+            self._say("library", str(exc))
             return
         path = filedialog.askopenfilename(
             parent=self.window,
@@ -5743,37 +6286,37 @@ class MeetingWindow:
         if path:
             def imported(session_id, error):
                 if error:
-                    self._remember_operation_error(error)
                     self.refresh_library()
-                    self.status.set(
-                        tr("Não foi possível importar o áudio. Veja os detalhes na aba Gravação.")
-                    )
+                    self._fail("library", tr("Não foi possível importar o áudio"),
+                               tr("Nenhuma gravação foi criada. Verifique o arquivo e tente de novo."),
+                               error=error)
                     return
                 self.refresh_library()
                 if not self.dirty:
                     self.notebook.select(self.library_tab)
                     self.load_session(session_id)
                 else:
-                    self.status.set(tr("Áudio importado. O título em edição foi preservado."))
+                    self._say("library", tr("Áudio importado. O título em edição foi preservado."))
             self._action("import_audio", path, settings, callback=imported)
 
     def export(self, format):
         if not self.selected:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         suffix = ".md" if format == "markdown" else ".txt"
         path = filedialog.asksaveasfilename(parent=self.window, title=tr("Exportar transcrição"),
             defaultextension=suffix, filetypes=(("Markdown" if suffix == ".md" else tr("Texto"), "*" + suffix),))
         if path:
-            self._action("export", self.selected, path, format=format)
+            self._action("export", self.selected, path, format=format,
+                         receipt=tr("Exportação iniciada."))
 
     def export_audio(self):
         """Save a copy of the final audio, the file playback uses."""
         if not self.selected:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         if not getattr(self, "final_available", False):
-            self.status.set(tr("Esta gravação ainda não tem áudio final salvo."))
+            self._say("library", tr("Esta gravação ainda não tem áudio final salvo."))
             return
         sizes = getattr(self, "audio_sizes", None) or {}
         extension = "." + (sizes.get("final_format") or "MP3").lower()
@@ -5782,18 +6325,19 @@ class MeetingWindow:
                    "filetypes": ((tr("Áudio {format}", format=extension[1:].upper()), "*" + extension),)}
         path = filedialog.asksaveasfilename(**options)
         if path:
-            self._action("export_final_audio", self.selected, path)
+            self._action("export_final_audio", self.selected, path,
+                         receipt=tr("Exportação do áudio final iniciada."))
 
     def prepare_final_audio(self):
         """Recover and verify the final MP3 from a retained capture."""
         if not self.selected or not self.detail_ready:
-            self.status.set(tr("Selecione uma gravação na biblioteca."))
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
         if getattr(self, "final_available", False) and not getattr(self, "recovery_needed", False):
-            self.status.set(tr("Esta gravação já tem áudio final salvo."))
+            self._say("library", tr("Esta gravação já tem áudio final salvo."))
             return
         if not callable(getattr(self.controller, "recover_audio", None)):
-            self.status.set(tr("A recuperação do áudio final não está disponível nesta versão."))
+            self._say("library", tr("A recuperação do áudio final não está disponível nesta versão."))
             return
         session_id = self.selected
         self._action("recover_audio", session_id,
@@ -5808,29 +6352,33 @@ class MeetingWindow:
         snapshot = getattr(self, "snapshot", {})
         pending = getattr(self, "summary_pending", None)
         busy = bool(pending or snapshot.get("processing") or snapshot.get("state", "idle") != "idle")
+        enabled = bool(not busy and self.detail_ready and self.transcript_revision)
         self.regenerate_summary_button.configure(
             text=tr("Gerando…") if pending and pending[0] == self.selected else tr("Gerar resumo"),
-            state="normal" if not busy and self.detail_ready and self.transcript_revision else "disabled",
+            state="normal" if enabled else "disabled",
         )
-        if hasattr(self, "cancel_summary_button"):
-            self.cancel_summary_button.configure(state="normal" if pending else "disabled")
+        reason = ""
+        if self.selected and self.detail_ready and not enabled and not pending:
+            reason = self._library_blocker(snapshot) or (
+                "" if self.transcript_revision else tr("Transcreva esta gravação antes de gerar o resumo."))
+        if reason != self._summary_reason:
+            self._summary_reason = reason
+            self.summary_status.set(reason or self._summary_hint(getattr(self, "summary_text", "")))
+        self._sync_job_cancels()
 
     def _processing_launched(self, session_id, accepted, error):
         if error or not accepted:
             if error:
-                self._remember_operation_error(error)
-                self.status.set(
-                    tr("Não foi possível iniciar o processamento local. "
-                       "Veja os detalhes na aba Gravação.")
-                )
+                self._fail("library", tr("Não foi possível iniciar o processamento local"),
+                           tr("Nada foi alterado. Tente de novo."), error=error,
+                           session=session_id or None)
             else:
-                self.status.set(
-                    tr("Há uma captura ou outro processamento em andamento. Tente novamente depois.")
-                )
+                self._fail("library", tr("O processamento não começou"),
+                           tr("Há uma captura ou outro processamento em andamento. Tente de novo depois."),
+                           tone="warning")
             return
-        self.operation_details = ""
         self.processing_target = session_id
-        self.status.set(tr("Processamento local iniciado. O resultado aparecerá quando terminar."))
+        self._say("library", tr("Processamento local iniciado. O resultado aparecerá quando terminar."))
 
     def refresh_outputs(self, session_id):
         if self.selected != session_id:
@@ -5852,13 +6400,10 @@ class MeetingWindow:
             if self.selected != session_id or not self.detail_ready:
                 return
             if error:
-                self._remember_operation_error(error)
-                self.status.set(tr("Não foi possível atualizar os resultados. Veja os detalhes na aba Gravação."))
+                self._results_not_refreshed(error, session_id)
                 return
-            (summary, page, annotations, tracks, final_available, processing_details,
+            (summary, page, annotations, tracks, final_available, _processing_details,
              processing_issue, transcription_status) = data
-            if processing_details:
-                self._remember_operation_error(processing_details)
             self._set_audio_capabilities(tracks, final_available)
             self.transcription_status = transcription_status
             self._show_processing_issue(processing_issue)
@@ -5885,23 +6430,19 @@ class MeetingWindow:
             self._update_transcript_paging_controls()
             self._load_transcript_document()
             self.refresh_reports(session_id)
-            self.status.set(
-                tr("Resultados disponíveis atualizados; uma etapa não foi concluída. Veja os detalhes na aba Gravação.")
-                if processing_details else
-                tr("Resultado local atualizado. Revise a transcrição e o resumo.")
-            )
+            self._say("library", tr("Resultado local atualizado. Revise a transcrição e o resumo."),
+                      session=session_id)
         self._submit("outputs", read, loaded)
 
     def copy_summary(self):
         text = getattr(self, "summary_text", "")
         if not text:
-            self.status.set(tr("Esta gravação ainda não tem um resumo."))
+            self._say("library", tr("Esta gravação ainda não tem um resumo."))
             return
         self._submit(
             "copy_summary", lambda: Clipboard.set_content(text),
-            lambda copied, error: self.status.set(
-                tr("Resumo copiado.") if copied and not error else tr("Não foi possível copiar o resumo."),
-            ),
+            lambda copied, error: self._copied(
+                tr("Resumo copiado."), tr("Não foi possível copiar o resumo"), copied, error),
         )
 
     def _show_summary(self, value):
@@ -5911,15 +6452,20 @@ class MeetingWindow:
         self.summary.insert("1.0", text[:65536] or tr("O resumo aparecerá aqui após o processamento local."))
         self.summary.configure(state="disabled")
         self.summary_text = text
+        self._summary_reason = None
         if hasattr(self, "copy_summary_button"):
             self.copy_summary_button.configure(state="normal" if text else "disabled")
         if hasattr(self, "summary_status"):
-            installed = any(self.summary_model_installed.values())
-            self.summary_status.set(
-                tr("Resumo salvo. Escolha um formato para gerar outra versão.") if text
-                else tr("O resumo será gerado automaticamente com os modelos instalados.") if installed
-                else tr("Instale um modelo de resumo em Configurações → Modelos para gerar automaticamente.")
-            )
+            self.summary_status.set(self._summary_hint(text))
+
+    def _summary_hint(self, text):
+        """What the line under Gerar resumo says while nothing is running."""
+        installed = any(self.summary_model_installed.values())
+        return (
+            tr("Resumo salvo. Escolha um formato para gerar outra versão.") if text
+            else tr("O resumo será gerado automaticamente com os modelos instalados.") if installed
+            else tr("Instale um modelo de resumo em Configurações → Modelos para gerar automaticamente.")
+        )
 
     def _apply_playback_snapshot(self, snapshot):
         """Apply controller-owned progress on Tk, ignoring stale generations."""
@@ -5963,7 +6509,12 @@ class MeetingWindow:
         else:
             error = str(playback.get("error") or "")
             if error:
-                self.playback_status.set(tr("A reprodução falhou; veja os detalhes da operação."))
+                self.playback_status.set(tr("A reprodução falhou."))
+                if generation != self._playback_failure:
+                    self._playback_failure = generation
+                    self._fail("library", tr("A reprodução falhou"),
+                               tr("O áudio final continua salvo. Tente de novo."),
+                               error=error, session=self.selected)
             else:
                 self.playback_status.set(tr("Reprodução parada."))
 
@@ -6099,36 +6650,20 @@ class MeetingWindow:
                 self.request_start(origin)
             elif self.start_after_interrupt and state == "unavailable":
                 self.start_after_interrupt = None
-                self.status.set(tr("A gravação não foi iniciada: os recursos de áudio ainda estão em uso."))
+                self._fail("recording", tr("A gravação não foi iniciada"),
+                           tr("Os recursos de áudio ainda estão em uso."), tone="warning")
             elif self.start_after_interrupt and active:
                 # Another path (hotkey, tray) already started the recording.
                 self.start_after_interrupt = None
-            self.start_button.configure(state="normal" if start_ready else "disabled")
+            self._sync_transport(state, start_ready)
             self.preview_button.configure(state="normal" if start_ready else "disabled")
-            self.stop_button.configure(state="normal" if active else "disabled")
-            self.pause_button.configure(text=tr("Retomar") if state == "paused" else tr("Pausar"),
-                state="normal" if state in ("recording", "paused") else "disabled")
-            self.play_button.configure(
-                state="normal" if state == "idle" and not processing
-                and self.detail_ready and self.playback_choices else "disabled"
-            )
-            self._sync_summary_controls()
             error = self.snapshot.get("error")
-            self.record_status.set(format_recording_status(
-                self.snapshot, start_held=state == "idle" and not start_ready,
-            ))
+            self._sync_summary_controls()
+            self._sync_recording_status(self.snapshot, start_ready)
+            self._sync_recording_hint(active)
+            self._sync_recording_trouble(self.snapshot)
             self._sync_audio_export_progress()
-            details = [self.operation_details] if self.operation_details else []
-            if self.snapshot.get("final_audio"):
-                details.append(tr("Arquivo final: {path}", path=str(self.snapshot["final_audio"])[:2048]))
-            if self.snapshot.get("postprocess"):
-                details.append(tr("Processamento: {details}", details=str(self.snapshot["postprocess"])[:2048]))
-            if error:
-                _append_detail_once(details, _technical_error_detail(error))
-            self.record_details = "\n".join(details)
-            self.record_details_button.configure(
-                state="normal" if self.record_details else "disabled",
-            )
+            self._sync_library_controls(self.snapshot)
             self.waveform.clear()
             for track, values in self.snapshot.get("waveforms", {}).items():
                 if track in ("microphone", "system"):
@@ -6156,16 +6691,16 @@ class MeetingWindow:
                 target, self.processing_target = self.processing_target, None
                 if error:
                     self._adjusted_audio_target = None
-                    if target == self.selected:
-                        self._remember_operation_error(error)
-                elif target == self.selected:
-                    self.operation_details = ""
-                if target == self.selected:
-                    self.status.set(tr("Atualizando…"))
                 if target:
                     self.refresh_outputs(target)
-        except Exception:
-            self.status.set(tr("Não foi possível atualizar o estado da gravação."))
+        except Exception as exc:
+            current = self.messages.current("recording")
+            if current is None or current.key != "poll":
+                self._fail("recording", tr("Não foi possível atualizar o estado da gravação"),
+                           tr("O que aparece pode estar desatualizado. Uma gravação em andamento continua."),
+                           error=exc, key="poll")
+        else:
+            self.messages.clear("recording", key="poll")
         self.after_id = self.root.after(200, self._poll)
 
     def _destroyed(self, event):

@@ -35,7 +35,7 @@ import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
 
-from i18n import tr
+from i18n import N_, tr
 from platform_support import current_os
 
 
@@ -1089,16 +1089,28 @@ INFO_BAR_TONES = ("danger", "warning", "info", "success")
 # A shape per severity, so the bar never depends on its color alone. Tk falls
 # back to a symbol face for glyphs the text face lacks.
 _INFO_BAR_GLYPHS = {"danger": "⊗", "warning": "⚠", "info": "ⓘ", "success": "✓"}
+# The severity written beside the time, for people who do not read tone or shape.
+INFO_BAR_WORDS = {"danger": N_("Erro"), "warning": N_("Aviso"), "info": N_("Informação"),
+                  "success": N_("Concluído")}
 
 
-def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None):
+def local_time_text(moment):
+    """``moment`` as the 24-hour local clock ("14:02")."""
+    return moment.strftime("%H:%M")
+
+
+def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None,
+             when=None, dismiss=None):
     """A Windows-family InfoBar: tone pair, glyph, title, body, one action, Detalhes.
 
-    ``title`` says what happened, ``body`` what it affects and what to do.
+    ``title`` says what happened, ``body`` (optional) what it affects and what to do.
     ``action`` is one ``(label, command)`` pair. ``details`` is technical text
     kept behind a "Detalhes" disclosure and selectable. ``copy(text, done)``
     adds a Copiar button; it owns the clipboard write and calls ``done(ok)`` on
     the GUI thread, so the bar reports a copy that failed instead of assuming it.
+    ``when`` (a local datetime) writes the severity and the time at the right of
+    the title ("Erro às 14:02"); the title wraps to make room. ``dismiss`` adds a
+    quiet "Fechar".
     """
     if tone not in INFO_BAR_TONES:
         raise ValueError(f"unknown info bar tone: {tone!r}")
@@ -1110,17 +1122,27 @@ def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None
     bar.columnconfigure(1, weight=1)
     tk.Label(bar, text=_INFO_BAR_GLYPHS[tone], font=ui.body_strong(), bg=bg, fg=fg).grid(
         row=0, column=0, sticky="nw", padx=(0, ui.space_sm))
-    tk.Label(bar, text=title, font=ui.body_strong(), bg=bg, fg=ui.text, anchor="w",
-             justify="left").grid(row=0, column=1, sticky="ew")
-    # width=1 keeps the wrapped body from requesting width back from the page.
-    message = tk.Label(bar, text=body, font=ui.body(), bg=bg, fg=ui.text, anchor="w",
-                       justify="left", width=1, wraplength=360)
-    message.bind("<Configure>", lambda event: message.configure(wraplength=max(event.width, 120)))
-    message.grid(row=1, column=1, sticky="ew")
-    if not (action or details):
+    # width=1 keeps a wrapped title from requesting width back from the page.
+    bar.title_label = tk.Label(bar, text=title, font=ui.body_strong(), bg=bg, fg=ui.text,
+                               anchor="w", justify="left", width=1, wraplength=360)
+    bar.title_label.bind("<Configure>", lambda event: bar.title_label.configure(
+        wraplength=max(event.width, 120)))
+    bar.title_label.grid(row=0, column=1, sticky="ew")
+    if when is not None:
+        tk.Label(bar, text=tr("{severity} às {time}", severity=tr(INFO_BAR_WORDS[tone]),
+                              time=local_time_text(when)),
+                 font=ui.caption(), bg=bg, fg=ui.text, anchor="e").grid(
+            row=0, column=2, sticky="ne", padx=(ui.space_sm, 0))
+    if body:
+        message = tk.Label(bar, text=body, font=ui.body(), bg=bg, fg=ui.text, anchor="w",
+                           justify="left", width=1, wraplength=360)
+        message.bind("<Configure>",
+                     lambda event: message.configure(wraplength=max(event.width, 120)))
+        message.grid(row=1, column=1, columnspan=2, sticky="ew")
+    if not (action or details or dismiss):
         return bar
     actions = tk.Frame(bar, bg=bg)
-    actions.grid(row=2, column=1, sticky="w", pady=(ui.space_sm, 0))
+    actions.grid(row=2, column=1, columnspan=2, sticky="w", pady=(ui.space_sm, 0))
     if action:
         label, command = action
         button(actions, label, command, resolved=ui).pack(side="left", padx=(0, ui.space_sm))
@@ -1153,12 +1175,100 @@ def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None
                 panel.grid_remove()
                 toggle_button.configure(text=f"{tr('Detalhes')} ▾")
             else:
-                panel.grid(row=3, column=1, sticky="ew", pady=(ui.space_sm, 0))
+                panel.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(ui.space_sm, 0))
                 toggle_button.configure(text=f"{tr('Detalhes')} ▴")
 
         toggle_button = button(actions, f"{tr('Detalhes')} ▾", toggle, "quiet", resolved=ui)
-        toggle_button.pack(side="left")
+        toggle_button.pack(side="left", padx=(0, ui.space_sm))
+    if dismiss:
+        button(actions, tr("Fechar"), dismiss, "quiet", resolved=ui).pack(side="left")
     return bar
+
+
+class MessageBar(tk.Frame):
+    """One page's feedback slot: trouble as an InfoBar, everything else as one quiet line.
+
+    The slot has no height until the page has something to say, and the next
+    message replaces the last, so a page never stacks a history. ``attach``
+    records where the slot sits (pack or grid options); :meth:`clear` takes it
+    out again.
+    """
+
+    def __init__(self, parent, ui, *, copy=None):
+        super().__init__(parent, bg=_surface_of(parent), bd=0, highlightthickness=0)
+        self._ui, self._copy = ui, copy
+        self._placer, self._slot = None, None
+        self._title = None
+        self.kind = None
+
+    def attach(self, *, grid=False, **options):
+        """Remember how the slot is placed whenever it shows (``grid=True`` for a grid cell)."""
+        self._placer, self._slot = ("grid" if grid else "pack"), options
+
+    def _show(self, kind, widget):
+        if self._slot is None:
+            raise ValueError("attach() the message bar before showing a message")
+        for child in self.winfo_children():
+            if child is not widget:
+                child.destroy()
+        self.kind = kind
+        widget.pack(fill="x")
+        if not self.winfo_manager():
+            getattr(self, self._placer)(**self._slot)
+
+    def problem(self, tone, title, body, *, action=None, details=None, when=None, dismiss=None):
+        """Show trouble: tone, what happened, what it affects, one action, Detalhes."""
+        bar = info_bar(self, self._ui, tone, title, body, action=action, details=details,
+                       copy=self._copy, when=when, dismiss=dismiss)
+        self._title = bar.title_label
+        self._show("problem", bar)
+
+    def retitle(self, title):
+        """Rewrite the title of the trouble on show without rebuilding the bar."""
+        if self.kind == "problem" and self._title is not None:
+            self._title.configure(text=title)
+
+    def receipt(self, text, when=None):
+        """Show one quiet line for a routine outcome, with the local time."""
+        line = text.rstrip(".") + (" · " + local_time_text(when) if when is not None else "")
+        label = tk.Label(self, text=line, font=self._ui.caption(), bg=self.cget("bg"),
+                         fg=self._ui.text_muted, anchor="w", justify="left", width=1,
+                         wraplength=360)
+        label.bind("<Configure>", lambda event: label.configure(wraplength=max(event.width, 120)))
+        self._show("receipt", label)
+
+    def clear(self):
+        for child in self.winfo_children():
+            child.destroy()
+        self.kind, self._title = None, None
+        if self.winfo_manager():
+            (self.grid_remove if self._placer == "grid" else self.pack_forget)()
+
+
+class StatusChip(tk.Frame):
+    """A tone dot beside one written state ("● Gravando · 00:45:54").
+
+    The dot is drawn, not typed, so it scales with the text and never depends on
+    a glyph face; the written state carries the meaning, the dot only the tone.
+    """
+
+    def __init__(self, parent, ui, *, bg, font, wraplength=360):
+        super().__init__(parent, bg=bg)
+        self._ui = ui
+        size = max(8, int(tkfont.Font(root=parent, font=font).metrics("linespace") * 0.5))
+        self._dot = tk.Canvas(self, width=size, height=size, bg=bg, bd=0, highlightthickness=0)
+        self._shape = self._dot.create_oval(1, 1, size - 1, size - 1, width=0)
+        self._dot.pack(side="left", padx=(0, ui.space_sm))
+        self.label = tk.Label(self, text="", font=font, bg=bg, fg=ui.text_strong, anchor="w",
+                              justify="left", width=1, wraplength=wraplength)
+        self.label.bind("<Configure>",
+                        lambda event: self.label.configure(wraplength=max(event.width, 120)))
+        self.label.pack(side="left", fill="x", expand=True)
+
+    def set(self, text, tone):
+        """Write ``text`` and color the dot with the ``Theme`` color named ``tone``."""
+        self.label.configure(text=text)
+        self._dot.itemconfigure(self._shape, fill=getattr(self._ui, tone))
 
 
 # ---------------------------------------------------------------------------

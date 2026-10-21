@@ -1,14 +1,19 @@
 """Device chooser identity, feedback, native popup, and keyboard regressions."""
 
 import gc
+import os
+import sys
 import time
 import tkinter as tk
 from tkinter import font as tkfont
 import unittest
 from unittest import mock
 
-from meeting_gui import MeetingWindow, endpoint_hint, endpoint_options
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from meeting_gui import MeetingWindow, SOURCE_TEST_HINT, endpoint_hint, endpoint_options
 from meeting_settings import EndpointSelection
+from message_support import new_view, said
 import ui_theme
 
 
@@ -65,14 +70,12 @@ class DeviceChoiceTests(unittest.TestCase):
         self.assertTrue(endpoint_hint(DEVICES[:2], "system", EndpointSelection())[1])
 
     def test_refresh_only_reports_success_after_worker_completion(self):
-        view = MeetingWindow.__new__(MeetingWindow)
+        view = new_view("recording")
         view.preview_status = mock.Mock()
-        view.status = mock.Mock()
         view.device_refresh_button = mock.Mock()
         view.controller = mock.Mock()
         view._submit = mock.Mock(return_value=True)
         view._render_devices = mock.Mock()
-        view._remember_operation_error = mock.Mock()
         view.refresh_devices()
         view.preview_status.set.assert_called_once_with("Buscando dispositivos…")
         view.device_refresh_button.configure.assert_called_with(text="Atualizando…", state="disabled")
@@ -81,9 +84,16 @@ class DeviceChoiceTests(unittest.TestCase):
         self.assertEqual(view.devices, DEVICES)
         view._render_devices.assert_called_once()
         view.device_refresh_button.configure.assert_called_with(text="Atualizar dispositivos", state="normal")
+        self.assertIsNone(said(view, "recording"))
         view._devices_loaded(None, "synthetic failure")
         self.assertEqual(view.devices, DEVICES)
-        self.assertIn("Não foi possível", view.preview_status.set.call_args.args[0])
+        # The failure is written on the Recording page; the line under the
+        # recorder goes back to its guidance.
+        kind, title, body, details = said(view, "recording")
+        self.assertEqual((kind, title), ("problem", "Não foi possível atualizar os dispositivos"))
+        self.assertIn("synthetic failure", details)
+        self.assertNotIn("aba", body)
+        self.assertEqual(view.preview_status.set.call_args.args[0], SOURCE_TEST_HINT)
 
 
 class DeviceMenuNativeTests(unittest.TestCase):
