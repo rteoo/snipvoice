@@ -224,7 +224,7 @@ class DeviceMenuNativeTests(unittest.TestCase):
         listbox = popup + ".f.l"
         width = int(combo.tk.call("winfo", "width", listbox))
         padding = 2 * int(combo.tk.call(listbox, "cget", "-borderwidth"))
-        font = tkfont.Font(root=combo, font=view.ui.font(10))
+        font = tkfont.Font(root=combo, font=combo.tk.call(listbox, "cget", "-font"))
         self.assertLessEqual(max(font.measure(value) for value in combo.cget("values")), width - padding)
         left = int(combo.tk.call("winfo", "rootx", popup))
         right = left + int(combo.tk.call("winfo", "width", popup))

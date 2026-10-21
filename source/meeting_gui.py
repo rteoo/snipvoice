@@ -1770,16 +1770,20 @@ class MeetingWindow:
         self._build_library(library)
         self._build_summary_models(summary)
 
-    @staticmethod
-    def _park_cancel(button, manager, **options):
-        """Place a Cancel where it will appear, then take it out: it exists only while its job runs.
-
-        Parking it at the end of its row (or in a cell the row already
-        reserves) means it appears without moving a sibling.
-        """
-        button._cancel_manager, button._cancel_options = manager, options
-        getattr(button, manager)(**options)
-        (button.pack_forget if manager == "pack" else button.grid_remove)()
+    def _park_cancel(self, button, manager, **options):
+        """Reserve the Cancel's footprint; only the running job exposes its control."""
+        parent = button.master
+        try:
+            background = parent.cget("background")
+        except tk.TclError:
+            style = parent.cget("style") or parent.winfo_class()
+            background = ttk.Style(parent).lookup(style, "background") or self.ui.surface
+        slot = tk.Frame(parent, width=button.winfo_reqwidth(),
+                        height=button.winfo_reqheight(), bg=background)
+        getattr(slot, manager)(**options)
+        button._cancel_slot = slot
+        button._cancel_manager = "place"
+        button._cancel_options = {"in_": slot, "relwidth": 1, "relheight": 1}
 
     @staticmethod
     def _show_cancel(button, running):
@@ -1788,7 +1792,7 @@ class MeetingWindow:
         if running:
             getattr(button, button._cancel_manager)(**button._cancel_options)
         else:
-            (button.pack_forget if button._cancel_manager == "pack" else button.grid_remove)()
+            button.place_forget()
 
     def _sync_job_cancels(self):
         """Show each Cancel while, and only while, the job it stops runs."""
@@ -3016,24 +3020,31 @@ class MeetingWindow:
             self.on_settings_changed()
 
     def _submit(self, key, operation, callback=None, urgent=False):
-        if not self.bridge.submit(key, operation, callback or self._done, urgent):
+        if callback is None:
+            destination = self._here()
+            session = getattr(self, "selected", None) if destination == "library" else None
+            callback = lambda value, error: self._done(
+                value, error, destination=destination, session=session)
+        if not self.bridge.submit(key, operation, callback, urgent):
             if not self.closed:
                 self._fail(self._here(), tr("Há operações pendentes"),
                            tr("Aguarde a operação atual terminar e tente de novo."), tone="warning")
             return False
         return True
 
-    def _done(self, value, error, receipt=None):
+    def _done(self, value, error, receipt=None, *, destination=None, session=None):
         """Settle an action that has no outcome of its own: trouble is written, success is quiet."""
-        destination = self._here()
+        destination = destination or self._here()
+        if session is not None and session != getattr(self, "selected", None):
+            return
         if error:
             self._fail(destination, tr("Não foi possível concluir a operação"),
-                       tr("Nada foi alterado. Tente de novo."), error=error)
+                       tr("Nada foi alterado. Tente de novo."), error=error, session=session)
         elif value is False:
             self._fail(destination, tr("A operação não foi aceita"),
-                       tr("Verifique o estado atual e tente de novo."), tone="warning")
+                       tr("Verifique o estado atual e tente de novo."), tone="warning", session=session)
         elif receipt:
-            self._say(destination, receipt)
+            self._say(destination, receipt, session=session)
 
     # -- Local report profiles, history, and Q&A ----------------------
 
@@ -4619,8 +4630,13 @@ class MeetingWindow:
 
     def _action(self, method, *args, urgent=False, callback=None, receipt=None, **kwargs):
         """Run a controller command off Tk; ``receipt`` is the quiet line a success earns."""
+        if callback is None:
+            destination = self._here()
+            session = getattr(self, "selected", None) if destination == "library" else None
+            callback = lambda value, error: self._done(
+                value, error, receipt, destination=destination, session=session)
         self._submit("control" if urgent else method, lambda: getattr(self.controller, method)(*args, **kwargs),
-                     callback or (lambda value, error: self._done(value, error, receipt)), urgent)
+                     callback, urgent)
 
     def search(self):
         self.offset = 0

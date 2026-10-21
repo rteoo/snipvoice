@@ -25,7 +25,7 @@ class MeetingChatTests(unittest.TestCase):
             cls.root.withdraw()
         except tk.TclError as exc:
             raise unittest.SkipTest(f"Tk initialization unavailable: {exc}") from exc
-        cls.theme = ui_theme.build_theme("light", system="windows")
+        cls.theme = ui_theme.build_theme("light", system=ui_theme.current_os())
 
     @classmethod
     def tearDownClass(cls):

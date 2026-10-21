@@ -258,8 +258,8 @@ On navigation / page / content / selection:
   recorder may move below the fold.
 - **Cancel exists only while there is something to cancel.** The semantic-index,
   index-repair, cross-recording, summary and model-download Cancel controls, and
-  the processing one, are drawn only while their job runs, parked at the end of
-  their row or in a cell the row already reserves, so the controls beside them
+  the processing one, are drawn only while their job runs, inside a reserved
+  fixed-size slot in their row, so the controls beside them
   and the page below do not move. A control that cannot act says what it waits
   for in the line beside it ("Aguarde o resumo terminar.", "Transcrever de novo
   requer o áudio final. Use Preparar áudio final, em Arquivos.", "O áudio final

@@ -1869,6 +1869,45 @@ class PageMessageTests(unittest.TestCase):
                 self.assertEqual((message.tone, message.title, message.session), (tone, title, "s1"))
                 self.assertIn("native_discontinuity", message.details)
 
+    def test_async_action_feedback_stays_on_its_submitting_page(self):
+        for value, error, kind in ((True, None, "receipt"),
+                                   (False, None, "problem"),
+                                   (None, "synthetic stop failure", "problem")):
+            with self.subTest(value=value, error=error):
+                view = new_view("recording")
+                view.controller = types.SimpleNamespace(stop=lambda: value)
+                view.bridge = mock.Mock()
+                view.bridge.submit.return_value = True
+                view._action("stop", receipt="Parada solicitada.")
+                callback = view.bridge.submit.call_args.args[2]
+                view._destination = "settings"
+                callback(value, error)
+                self.assertEqual(view.messages.current("recording").kind, kind)
+                self.assertIsNone(view.messages.current("settings"))
+
+    def test_default_submit_feedback_captures_page_before_navigation(self):
+        view = new_view("settings")
+        view.bridge = mock.Mock()
+        view.bridge.submit.return_value = True
+        view._submit("operation", lambda: None)
+        callback = view.bridge.submit.call_args.args[2]
+        view._destination = "library"
+        callback(None, "synthetic settings failure")
+        self.assertIn("synthetic settings failure", said(view, "settings")[3])
+        self.assertIsNone(view.messages.current("library"))
+
+    def test_async_library_feedback_cannot_describe_a_different_recording(self):
+        view = new_view("library")
+        view.selected = "recording-a"
+        view.controller = types.SimpleNamespace(export=lambda: True)
+        view.bridge = mock.Mock()
+        view.bridge.submit.return_value = True
+        view._action("export", receipt="Exportação iniciada.")
+        callback = view.bridge.submit.call_args.args[2]
+        view.selected = "recording-b"
+        callback(True, None)
+        self.assertIsNone(view.messages.current("library"))
+
 
 class RecordingFeedbackLogicTests(unittest.TestCase):
     """Source health, silence and the recorder's tone, as pure projections of its snapshot."""
@@ -2297,15 +2336,15 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.final_available = True
         # Cancel exists only while a job of this recording (or of none) runs. The
         # Library page is hidden behind the recorder tab, so read the manager
-        # (pack/grid membership) rather than whether a widget is on screen.
+        # geometry-manager membership rather than whether a widget is on screen.
         self._poll_once(view, {**base, "processing": False})
         self.assertFalse(button.winfo_manager())
         self.assertEqual(view.processing_job_status.get(), "")
         self.assertFalse(step.grid_info())
         self._poll_once(view, {**base, "state": "postprocessing", "processing": True,
                                "processing_kind": "transcription", "processing_session": "s1"})
-        self.assertEqual((button.winfo_manager(), str(button.cget("state")), button.cget("text")),
-                         ("pack", "normal", "Cancelar"))
+        self.assertEqual((bool(button.winfo_manager()), str(button.cget("state")), button.cget("text")),
+                         (True, "normal", "Cancelar"))
         self.assertEqual(view.processing_job_status.get(), "Em execução: a transcrição.")
         self.assertTrue(step.grid_info())
         # Another recording's job: no Cancel here, and the line says what holds the recovery controls.
@@ -2316,7 +2355,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertEqual(str(view.transcribe_button.cget("state")), "disabled")
         self._poll_once(view, {**base, "processing": True, "processing_kind": "import",
                                "processing_session": None})
-        self.assertEqual((button.winfo_manager(), button.cget("text")), ("pack", "Cancelar"))
+        self.assertEqual((bool(button.winfo_manager()), button.cget("text")), (True, "Cancelar"))
         self.assertEqual(view.processing_job_status.get(), "Em execução: a importação de áudio.")
         for state in ("starting", "recording", "paused", "stopping"):
             self._poll_once(view, {**base, "state": state, "processing": True,
@@ -3498,6 +3537,27 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.root.update()
         self.assertFalse(button.winfo_ismapped())
         self.assertEqual(row.winfo_height(), height)
+
+    def test_every_job_cancel_reserves_its_width_and_height_while_hidden(self):
+        view, _notebook = self._ready_recorder()
+        for name in ("semantic_cancel_button", "rebuild_cancel_button", "cross_cancel_button",
+                     "cancel_summary_button", "summary_download_cancel_button",
+                     "cancel_processing_button"):
+            with self.subTest(button=name):
+                button = getattr(view, name)
+                row = button.master
+                self.root.update_idletasks()
+                before = (row.winfo_reqwidth(), row.winfo_reqheight())
+                siblings = [(sibling, sibling.winfo_x(), sibling.winfo_width())
+                            for sibling in row.winfo_children() if sibling is not button]
+                view._show_cancel(button, True)
+                self.root.update_idletasks()
+                self.assertEqual((row.winfo_reqwidth(), row.winfo_reqheight()), before)
+                self.assertEqual([(sibling, sibling.winfo_x(), sibling.winfo_width())
+                                  for sibling, _x, _width in siblings], siblings)
+                view._show_cancel(button, False)
+                self.root.update_idletasks()
+                self.assertEqual((row.winfo_reqwidth(), row.winfo_reqheight()), before)
 
     def test_disabled_recovery_controls_name_what_they_wait_for(self):
         view, _notebook = self._ready_recorder()
