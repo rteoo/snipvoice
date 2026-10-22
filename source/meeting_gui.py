@@ -183,6 +183,8 @@ def retention_plan_projection(plan):
     reasons = [_safe_retention_text(item) for item in list(get("reasons", ()) or ())[:32]]
     lost = [_safe_retention_text(item) for item in list(get("lost_capabilities", ()) or ())[:32]]
     excluded = [_safe_retention_text(item) for item in list(get("excluded_external_exports", ()) or ())[:32]]
+    policy = get("policy", {})
+    purge_days = policy.get("purge_after_days", 30) if isinstance(policy, dict) else policy.purge_after_days
     return {
         "session_id": _safe_retention_text(get("session_id", ""), 128),
         "operation": _safe_retention_text(get("operation", ""), 80),
@@ -195,6 +197,7 @@ def retention_plan_projection(plan):
         "excluded_external_exports": excluded,
         "canonical_changes": [_safe_retention_text(item) for item in list(get("canonical_changes", ()) or ())[:32]],
         "recovery_mode": _safe_retention_text(get("recovery_mode", "none"), 160),
+        "purge_after_days": purge_days,
         "raw_tracks": [_safe_retention_text(item, 80) for item in list(get("raw_tracks", ()) or ())[:4]],
     }
 
@@ -848,6 +851,7 @@ class MeetingWindow:
         self.processing_issue = None
         self.transcription_status = ""
         self.retention_request = 0
+        self._retention_pending = None
         self.playback_generation = -1
         self.preview_signature = None
         # Report/Q&A requests carry their own generation so a late worker
@@ -908,6 +912,10 @@ class MeetingWindow:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Destroy>", self._destroyed, add="+")
         self.window.bind("<Control-Shift-C>", self._copy_summary_shortcut, add="+")
+        self.window.bind("<Control-f>", self._focus_library_search, add="+")
+        self.window.bind("<F2>", self._begin_title_edit, add="+")
+        self.window.bind("<Control-Tab>", lambda event: self._cycle_detail_section(1), add="+")
+        self.window.bind("<Control-Shift-Tab>", lambda event: self._cycle_detail_section(-1), add="+")
         self._submit("settings", self.settings_getter, self._settings_loaded)
         self._submit(
             "privacy_defaults",
@@ -1028,6 +1036,10 @@ class MeetingWindow:
         if width <= 100 or len(panes.panes()) < 2:
             return False
         sash = max(self.library_toolbar.winfo_reqwidth(), int(width * 0.47))
+        columns = getattr(self, "_session_column_widths", {})
+        # Prefer a readable date when the detail's own controls still fit.
+        date_width = SESSION_TITLE_MIN + columns.get("status", 0) + columns.get("date", 0) + 24
+        sash = max(sash, date_width)
         panes.sashpos(0, min(sash, width - self.library_detail_pane.winfo_reqwidth()))
         return True
 
@@ -1053,6 +1065,145 @@ class MeetingWindow:
     def _clear_library_search(self):
         self.query.set("")
         self.search()
+        return "break"
+
+    def _queue_library_search(self, *_args):
+        self._cancel_library_search()
+        # Reject an older read immediately, including during the debounce.
+        self.library_filter_generation += 1
+        self.bridge.invalidate("library")
+        self._library_search_after = self.window.after(250, self.search)
+
+    def _cancel_library_search(self):
+        pending = getattr(self, "_library_search_after", None)
+        if pending is not None:
+            self.window.after_cancel(pending)
+            self._library_search_after = None
+
+    def _focus_library_search(self, _event=None):
+        self.notebook.select(self.library_tab)
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def _cycle_detail_section(self, step):
+        if self._visible_destination() != "library" or not self.selected:
+            return None
+        keys = ("transcript", "summary", "ask", "files")
+        current = self.detail_sections.current
+        self.detail_sections.user_select(keys[(keys.index(current) + step) % len(keys)])
+        return "break"
+
+    def _menu(self):
+        return tk.Menu(self.window, tearoff=False, font=self.ui.body(),
+                       bg=self.ui.card, fg=self.ui.text, activebackground=self.ui.select_bg,
+                       activeforeground=self.ui.select_fg)
+
+    def _show_library_menu(self):
+        def counted(entries, error):
+            if not error and not self.closed:
+                self.library_menu.entryconfigure(1, label=tr("Lixeira ({count})", count=len(entries or ())))
+        self._submit("library_trash_count", self.controller.list_trash, counted)
+        self.library_menu.tk_popup(self.tools_toggle.winfo_rootx(),
+                                   self.tools_toggle.winfo_rooty() + self.tools_toggle.winfo_height())
+        self.library_menu.grab_release()
+
+    def _open_search_repair(self):
+        self.notebook.select(self.settings_tab)
+        self.settings_sections.select("models")
+        self.model_sections.select("search")
+        self.rebuild_index()
+
+    def _delete_shortcut(self):
+        self.delete_selected()
+        return "break"
+
+    def _show_session_menu(self, event):
+        if getattr(event, "num", None) == 3:
+            row = self.sessions.identify_row(event.y)
+            # Never let a context click delete the previous selection while
+            # this row's detail is still loading or a rename guard is open.
+            if not row:
+                return "break"
+            self.sessions.selection_set(row)
+            self.sessions.focus(row)
+            self._selection_changed()
+            if self.selected != row or self.sessions.selection() != (row,):
+                return "break"
+        ready = self._trash_target_ready() and not getattr(self, "_retention_pending", None)
+        self.session_menu.entryconfigure(0, state="normal" if ready else "disabled")
+        self.session_menu.tk_popup(self.sessions.winfo_rootx() + 16,
+                                   self.sessions.winfo_rooty() + 32)
+        self.session_menu.grab_release()
+        return "break"
+
+    def _begin_title_edit(self, _event=None):
+        if self._visible_destination() != "library" or not self.detail_ready:
+            return None
+        self.title_heading.grid_remove()
+        self.title_entry.grid(row=0, column=0, sticky="ew")
+        self.title_entry.focus_set()
+        self.title_entry.selection_range(0, "end")
+        return "break"
+
+    def _end_title_edit(self, _event=None, *, cancel=False):
+        if cancel and getattr(self, "_title_save_pending", None):
+            return "break"
+        if cancel:
+            self.loading = True
+            self.title.set(self._saved_title)
+            self.loading = False
+            self.dirty = False
+        elif self.dirty:
+            self.save_title(after=self._hide_title_editor)
+            return "break"
+        self._hide_title_editor()
+        return "break"
+
+    def _hide_title_editor(self, *, focus=True):
+        self.title_entry.grid_remove()
+        self.title_heading.grid(row=0, column=0, sticky="ew")
+        if focus:
+            self.rename_button.focus_set()
+
+    def _reflow_title_header(self, event):
+        # Reserve a readable heading width before placing Rename beside it.
+        stacked = event.width < 320 + self.rename_button.winfo_reqwidth() + self.ui.space_sm
+        if stacked == getattr(self, "_title_header_stacked", None):
+            return
+        self._title_header_stacked = stacked
+        self.rename_button.grid(
+            row=1 if stacked else 0, column=0 if stacked else 1,
+            sticky="w" if stacked else "e",
+            padx=0 if stacked else (self.ui.space_sm, 0),
+            pady=(self.ui.space_xs, 0) if stacked else 0,
+        )
+
+    def _build_search_models(self, parent):
+        self._label(parent, tr("Busca"), font=self.ui.heading()).pack(anchor="w")
+        self.semantic_enabled = tk.BooleanVar(self.window, False)
+        self.semantic_cancel = None
+        tk.Checkbutton(parent, text=tr("Busca semântica local"), variable=self.semantic_enabled,
+                       command=self.toggle_semantic_search, font=self.ui.body(),
+                       **self.ui.checkbutton_colors(self.ui.surface)).pack(anchor="w")
+        controls = tk.Frame(parent, bg=self.ui.surface)
+        controls.pack(fill="x", pady=self.ui.space_sm)
+        self._button(controls, tr("Instalar modelo…"), self.install_embedding_model).pack(side="left")
+        self._button(controls, tr("Reindexar"), self.rebuild_semantic_index).pack(side="left", padx=(4, 0))
+        self.semantic_cancel_button = self._button(controls, tr("Cancelar"), self.cancel_semantic_operation)
+        self._park_cancel(self.semantic_cancel_button, "pack", side="left", padx=(4, 0))
+        self.semantic_status = tk.StringVar(self.window, tr("Busca por palavras ativa."))
+        self._wrap_label(parent, "", textvariable=self.semantic_status,
+                         fg=self.ui.text_muted).pack(fill="x")
+        repair = tk.Frame(parent, bg=self.ui.surface)
+        repair.pack(fill="x", pady=self.ui.space_md)
+        self.rebuild_button = self._button(repair, tr("Reparar busca"), self.rebuild_index)
+        self.rebuild_button.pack(side="left")
+        self.rebuild_cancel_button = self._button(repair, tr("Cancelar"), self.cancel_rebuild_index)
+        self._park_cancel(self.rebuild_cancel_button, "pack", side="right")
+        self.index_status = tk.StringVar(self.window, tr("Índice de busca: estado desconhecido"))
+        self._wrap_label(parent, "", textvariable=self.index_status,
+                         fg=self.ui.text_muted).pack(fill="x")
 
     def _tone_fg(self, tone):
         """Text color for a state tone; the quiet default reads as secondary text."""
@@ -1443,6 +1594,8 @@ class MeetingWindow:
         bar = self.message_bars.get(destination)
         if bar is None or self.closed:
             return
+        if message is not None and destination == "library" and hasattr(self, "undo_receipt"):
+            self.undo_receipt.pack_forget()
         if message is None:
             bar.clear()
         elif message.kind == "receipt":
@@ -1490,6 +1643,8 @@ class MeetingWindow:
         if left != current:
             self._navigation_generation = getattr(self, "_navigation_generation", 0) + 1
             self.messages.leave(left)
+            if left == "library" and hasattr(self, "undo_receipt"):
+                self.undo_receipt.pack_forget()
 
     def _results_not_refreshed(self, error, session_id):
         self._fail("library", tr("Não foi possível atualizar os resultados"),
@@ -1670,6 +1825,8 @@ class MeetingWindow:
         )
         transcription = self.model_sections.add("transcription", tr("Transcrição"))
         summary_section = self.model_sections.add("summary", tr("Resumos"))
+        self.search_models_page = self.model_sections.add("search", tr("Busca"))
+        self._build_search_models(self.search_models_page)
         self._build_language_card(general)
         self._build_appearance_card(general)
         self.location_cards = {}
@@ -2161,7 +2318,7 @@ class MeetingWindow:
                     font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
         self.cross_question = tk.StringVar(self.window)
         self._entry(question_row, self.cross_question, 12).pack(side="left", fill="x", expand=True)
-        self._button(question_row, tr("Perguntar"), self.ask_across_meetings, accent=True).pack(side="left", padx=(6, 0))
+        self._button(question_row, tr("Perguntar"), self.ask_across_meetings).pack(side="left", padx=(6, 0))
         self.cross_cancel_button = self._button(question_row, tr("Cancelar"), self.cancel_cross_question)
         self._park_cancel(self.cross_cancel_button, "pack", side="left", padx=(6, 0))
         self.cross_status = tk.StringVar(self.window, tr("Resposta cruzada fica somente na memória."))
@@ -2184,21 +2341,17 @@ class MeetingWindow:
         self.cross_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_cross_citation())
         self._button(cross_citation_row, tr("Ir à fonte"), self.jump_to_cross_citation).pack(side="left", padx=(6, 0))
 
-        tools_panel = self._card(parent, pady=self.ui.space_sm)
-        self._button(tools_panel, tr("Lixeira…"), self.show_trash).pack(side="left")
-        self.rebuild_button = self._button(tools_panel, tr("Reparar busca"), self.rebuild_index)
-        self.rebuild_button.pack(side="left", padx=(6, 0))
-        self.rebuild_cancel_button = self._button(tools_panel, tr("Cancelar"), self.cancel_rebuild_index)
-        # At the far end of the row: the index status keeps its place either way.
-        self._park_cancel(self.rebuild_cancel_button, "pack", side="right")
-        self.index_status = tk.StringVar(self.window, tr("Índice de busca: estado desconhecido"))
-        self._label(tools_panel, "", textvariable=self.index_status, bg=self.ui.card,
-                    fg=self.ui.text_muted).pack(side="left", padx=(8, 0))
-
         panes = ttk.Panedwindow(parent, orient="horizontal")
         panes.pack(fill="both", expand=True)
         self.library_panes = panes
-        self.library_panels = {"cross": cross_frame, "tools": tools_panel}
+        self.undo_receipt = tk.Frame(parent, bg=self.ui.surface)
+        self._label(self.undo_receipt, tr("Movida para a lixeira"),
+                    fg=self.ui.text_muted).pack(side="left")
+        self.undo_button = ui_theme.button(self.undo_receipt, tr("Desfazer"), self._undo_trash,
+                                           "quiet", resolved=self.ui)
+        self.undo_button.pack(side="left", padx=(self.ui.space_sm, 0))
+        self._undo_session = None
+        self.library_panels = {"cross": cross_frame}
         left = ttk.Frame(panes, style="Meeting.TFrame")
         right_outer = ttk.Frame(panes, style="Meeting.TFrame")
         panes.add(left, weight=1)
@@ -2220,39 +2373,27 @@ class MeetingWindow:
         search_row = tk.Frame(toolbar, bg=self.ui.card)
         search_row.pack(fill="x")
         self.query = tk.StringVar(self.window)
+        self._library_search_after = None
+        self._label(toolbar, tr("Buscar na biblioteca (Ctrl+F)"), bg=self.ui.card,
+                    anchor="w").pack(fill="x", before=search_row)
         search = self._entry(search_row, self.query, 12)
+        self.search_entry = search
         search.pack(side="left", fill="x", expand=True)
         search.bind("<Return>", lambda _event: self.search())
+        search.bind("<Escape>", lambda _event: self._clear_library_search())
         self._placeholder(search, self.query, tr("Buscar gravações e transcrições"))
-        self._button(search_row, tr("Buscar"), self.search, accent=True).pack(side="left", padx=(6, 0))
-        semantic_row = tk.Frame(toolbar, bg=self.ui.card)
-        semantic_row.pack(fill="x", pady=(4, 0))
-        self.semantic_enabled = tk.BooleanVar(self.window, False)
-        self.semantic_cancel = None
-        tk.Checkbutton(semantic_row, text=tr("Busca semântica local"), variable=self.semantic_enabled,
-                       command=self.toggle_semantic_search, font=self.ui.font(),
-                       **self.ui.checkbutton_colors(self.ui.card)).pack(side="left")
-        semantic_controls = tk.Frame(toolbar, bg=self.ui.card)
-        semantic_controls.pack(fill="x")
-        self._button(semantic_controls, tr("Instalar modelo…"), self.install_embedding_model).pack(side="left")
-        self._button(semantic_controls, tr("Reindexar"), self.rebuild_semantic_index).pack(side="left", padx=(4, 0))
-        self.semantic_cancel_button = self._button(
-            semantic_controls, tr("Cancelar"), self.cancel_semantic_operation)
-        self._park_cancel(self.semantic_cancel_button, "pack", side="left", padx=(4, 0))
-        self.semantic_status = tk.StringVar(self.window, tr("Busca por palavras ativa."))
-        self._wrap_label(toolbar, "", textvariable=self.semantic_status, bg=self.ui.card,
-                         fg=self.ui.text_muted).pack(fill="x")
+        self.query.trace_add("write", self._queue_library_search)
         action_row = tk.Frame(toolbar, bg=self.ui.card)
         action_row.pack(fill="x", pady=(self.ui.space_sm, 0))
-        self.cross_toggle = self._button(
-            action_row, tr("Perguntar à biblioteca"), lambda: self._toggle_library_panel("cross"),
-        )
-        self.cross_toggle.pack(side="left")
-        self.tools_toggle = self._button(action_row, tr("Mais"), lambda: self._toggle_library_panel("tools"))
+        self.tools_toggle = self._button(action_row, tr("Mais"), self._show_library_menu)
         self.tools_toggle.pack(side="right", padx=(6, 0))
         self._button(action_row, tr("Importar áudio…"), self.import_audio).pack(side="right", padx=(6, 0))
-        self.library_panel_toggles = {"cross": self.cross_toggle, "tools": self.tools_toggle}
-        self._refresh_library_toggles()
+        self.library_panel_toggles = {}
+        self.library_menu = self._menu()
+        self.library_menu.add_command(label=tr("Perguntar à biblioteca"),
+                                      command=lambda: self._toggle_library_panel("cross"))
+        self.library_menu.add_command(label=tr("Lixeira…"), command=self.show_trash)
+        self.library_menu.add_command(label=tr("Reparar busca"), command=self._open_search_repair)
 
         # Recording list with an empty state drawn over the tree.
         list_frame = tk.Frame(left, bg=self.ui.surface)
@@ -2269,6 +2410,11 @@ class MeetingWindow:
         self.sessions.pack(fill="both", expand=True)
         self.sessions.bind("<<TreeviewSelect>>", self._selection_changed)
         self.sessions.bind("<Configure>", self._schedule_session_title_fit, add="+")
+        self.sessions.bind("<Delete>", lambda _event: self._delete_shortcut())
+        self.sessions.bind("<Button-3>", self._show_session_menu)
+        self.sessions.bind("<Shift-F10>", self._show_session_menu)
+        self.session_menu = self._menu()
+        self.session_menu.add_command(label=tr("Excluir gravação…"), command=self.delete_selected)
         self.library_empty = tk.StringVar(self.window)
         self.library_empty_panel = tk.Frame(list_frame, bg=self.ui.card)
         empty_content = tk.Frame(self.library_empty_panel, bg=self.ui.card)
@@ -2306,7 +2452,7 @@ class MeetingWindow:
         self._label(pages, "", textvariable=self.page_label, fg=self.ui.text_muted).pack(
             side="left", padx=(8, 0))
         # Full-text hits appear only after a search that found something.
-        self.search_results_frame = ttk.Frame(left, style="Meeting.TFrame")
+        self.search_results_frame = ttk.Frame(self.library_detail_pane, style="Meeting.TFrame")
         self._label(self.search_results_frame, tr("Encontrado em transcrições e relatórios"),
                     anchor="w", fg=self.ui.text_muted).pack(fill="x", pady=(8, 2))
         self.search_results = ttk.Treeview(
@@ -2327,28 +2473,33 @@ class MeetingWindow:
         # Selected recording: a placeholder until one is chosen, then a fixed
         # header over one section at a time.
         right_outer.columnconfigure(0, weight=1)
-        right_outer.rowconfigure(0, weight=1)
+        right_outer.rowconfigure(1, weight=1)
         self.detail_placeholder = tk.Frame(right_outer, bg=self.ui.surface)
-        self.detail_placeholder.grid(row=0, column=0, sticky="nsew", padx=(12, 0))
+        self.detail_placeholder.grid(row=1, column=0, sticky="nsew", padx=(12, 0))
         self._label(
             self.detail_placeholder,
             tr("Selecione uma gravação na lista para ouvir o áudio e ver a transcrição e o resumo."),
             fg=self.ui.text_muted, justify="center", wraplength=320,
         ).place(relx=0.5, rely=0.4, anchor="center")
         self.detail_frame = tk.Frame(right_outer, bg=self.ui.surface)
-        self.detail_frame.grid(row=0, column=0, sticky="nsew")
+        self.detail_frame.grid(row=1, column=0, sticky="nsew")
         self.detail_frame.grid_remove()
         title_row = ttk.Frame(self.detail_frame, style="Meeting.TFrame")
         title_row.pack(fill="x", padx=(12, 0))
+        title_row.columnconfigure(0, weight=1)
+        title_row.bind("<Configure>", self._reflow_title_header)
         self.title = tk.StringVar(self.window)
         self.title.trace_add("write", self._mark_dirty)
-        # Small minimum width: the entry expands, and a wide request clipped
-        # the delete button off the pane at the minimum window size.
-        title_entry = self._entry(title_row, self.title, 12)
-        title_entry.configure(font=self.ui.font(12, "bold"))
-        title_entry.pack(side="left", fill="x", expand=True)
-        self._placeholder(title_entry, self.title, tr("Título da gravação"))
-        self._button(title_row, tr("Salvar título"), self.save_title).pack(side="left", padx=(8, 0))
+        self._saved_title = ""
+        self.title_entry = self._entry(title_row, self.title, 12)
+        self.title_heading = self._wrap_label(title_row, "", textvariable=self.title,
+                                               font=self.ui.title(), anchor="w", justify="left")
+        self.title_heading.grid(row=0, column=0, sticky="ew")
+        self.rename_button = self._button(title_row, tr("Renomear (F2)"), self._begin_title_edit)
+        self.rename_button.grid(row=0, column=1, sticky="e", padx=(self.ui.space_sm, 0))
+        self.title_entry.bind("<Return>", self._end_title_edit)
+        self.title_entry.bind("<Control-s>", self._end_title_edit)
+        self.title_entry.bind("<Escape>", lambda event: self._end_title_edit(event, cancel=True))
         # The recording's state, in the list's word, then its date and length.
         state_row = tk.Frame(self.detail_frame, bg=self.ui.surface)
         state_row.pack(fill="x", padx=(12, 0), pady=(self.ui.space_xs, 0))
@@ -2403,8 +2554,7 @@ class MeetingWindow:
         player.pack(fill="x", padx=(12, 0), pady=(0, self.ui.space_sm))
         player_actions = tk.Frame(player, bg=self.ui.card)
         player_actions.pack(fill="x")
-        self.play_button = self._button(player_actions, tr("Reproduzir"), self.play_selected_recording,
-                                        accent=True)
+        self.play_button = self._button(player_actions, tr("Reproduzir"), self.play_selected_recording)
         self.play_button.configure(state="disabled")
         self.play_button.pack(side="left")
         self.replay_stop_button = self._button(player_actions, tr("Parar"), self.stop_selected_recording)
@@ -2447,7 +2597,7 @@ class MeetingWindow:
         )
         self.transcript_style_box.pack(side="left")
         self.transcript_style_box.bind("<<ComboboxSelected>>", self._transcript_style_changed)
-        self.copy_transcript_button = self._button(format_row, tr("Copiar"), self.copy_transcript)
+        self.copy_transcript_button = self._button(format_row, tr("Copiar"), self.copy_transcript, accent=True)
         self.copy_transcript_button.pack(side="right", padx=(6, 0))
         self._button(format_row, tr("Exportar…"), self.export_transcript).pack(side="right")
         self.transcript_document_status = tk.StringVar(
@@ -2609,7 +2759,7 @@ class MeetingWindow:
         self.summary.configure(yscrollcommand=summary_scroll.set)
         self.summary.insert("1.0", tr("O resumo aparecerá aqui após o processamento local."))
         self.summary.configure(state="disabled")
-        self.copy_summary_button = self._button(summary_header, tr("Copiar resumo"), self.copy_summary)
+        self.copy_summary_button = self._button(summary_header, tr("Copiar resumo"), self.copy_summary, accent=True)
         self.copy_summary_button.pack(side="right")
 
         # Structured local reports.  The generated envelope remains immutable;
@@ -2672,7 +2822,7 @@ class MeetingWindow:
         self.report_editor.pack(fill="x", pady=(4, 2))
         report_actions = tk.Frame(report_frame, bg=self.ui.card)
         report_actions.pack(fill="x", pady=2)
-        self._button(report_actions, tr("Salvar revisão"), self.save_report_review, accent=True).pack(side="left")
+        self._button(report_actions, tr("Salvar revisão"), self.save_report_review).pack(side="left")
         self._label(report_actions, tr("Citações"), bg=self.ui.card, fg=self.ui.text_muted).pack(side="left", padx=(12, 4))
         self.report_citations = tk.Listbox(report_actions, height=2, width=10,
                                            font=self.ui.font(), **self.ui.listbox_colors(),
@@ -2727,10 +2877,13 @@ class MeetingWindow:
         tk.Frame(audio, bg=self.ui.divider, height=1).grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=self.ui.space_md)
 
-        self.delete_button = self._button(files_page, tr("Excluir gravação…"), self.delete_selected,
-                                          danger=True)
+        risk = tk.Frame(files_page, bg=self.ui.surface)
+        risk.pack(fill="x", padx=12, pady=(self.ui.space_lg, 4))
+        self._label(risk, tr("Zona de risco"), fg=self.ui.danger).pack(side="left")
+        self.delete_button = ui_theme.button(risk, tr("Excluir gravação…"), self.delete_selected,
+                                             "quiet", resolved=self.ui)
         self.delete_button.configure(state="disabled")
-        self.delete_button.pack(anchor="w", padx=12, pady=(self.ui.space_lg, 4))
+        self.delete_button.pack(side="right")
 
     def _build_privacy_card(self, parent):
         """Build privacy/retention controls inside the existing scrollable page."""
@@ -3527,6 +3680,17 @@ class MeetingWindow:
     def _sync_summary_setup_label(self):
         label = tr("Gerar outra versão") if self.summary_text else tr("Gerar resumo")
         self.summary_setup_toggle.configure(text=label + (" ▴" if self.summary_setup.winfo_manager() else " ▾"))
+        setup_open = bool(self.summary_setup.winfo_manager())
+        for widget, primary in (
+            (self.copy_summary_button, bool(self.summary_text)),
+            (self.regenerate_summary_button, not self.summary_text and setup_open),
+            (self.summary_setup_toggle, not self.summary_text and not setup_open),
+        ):
+            # Aqua uses native buttons. The themed Tk button owns repainting
+            # its role and disabled state; keep both in sync when the next action changes.
+            if hasattr(widget, "_variant"):
+                widget._variant = "primary" if primary else "neutral"
+                widget._paint()
 
     def _report_generated(self, session_id, value, error, request=None):
         if self.closed:
@@ -4145,10 +4309,7 @@ class MeetingWindow:
         self.startup_status = _safe_retention_text(message, 320)
         if hasattr(self, "start_button") and not ready:
             self.start_button.configure(state="disabled")
-        for name in ("delete_button",):
-            widget = getattr(self, name, None)
-            if widget is not None and not ready:
-                widget.configure(state="disabled")
+        self._sync_trash_controls()
         if hasattr(self, "privacy_status") and not ready:
             self.privacy_status.set(self.startup_status or tr("Recuperação local pendente."))
         if not ready:
@@ -4900,6 +5061,7 @@ class MeetingWindow:
                      callback, urgent)
 
     def search(self):
+        self._cancel_library_search()
         self.offset = 0
         self.library_cursor = None
         self.library_next_cursor = None
@@ -5021,8 +5183,12 @@ class MeetingWindow:
         self.previous_button.configure(state="normal" if self.library_page_index else "disabled")
         self.next_button.configure(state="normal" if self.library_next_cursor else "disabled")
         self.page_label.set(self._library_count_text(len(items)))
-        self._render_library_empty_state(items)
         self._render_search_results(search_results)
+        self._render_library_empty_state(items or self.search_result_items)
+        if self.search_result_items:
+            self.library_empty_panel.place_forget()
+            self.page_label.set(tr("1 resultado") if len(search_results) == 1 else
+                                tr("{count} resultados", count=len(search_results)))
         if self.selected in self.sessions.get_children():
             self.sessions.selection_set(self.selected)
 
@@ -5043,9 +5209,9 @@ class MeetingWindow:
         frame = getattr(self, "search_results_frame", None)
         if frame is not None:
             if self.search_result_items:
-                frame.pack(fill="x")
+                frame.grid(row=0, column=0, sticky="ew", padx=(12, 0))
             else:
-                frame.pack_forget()
+                frame.grid_remove()
 
     def open_search_result(self):
         selected = self.search_results.selection()
@@ -5718,6 +5884,7 @@ class MeetingWindow:
         self.search()
 
     def _selection_changed(self, _event=None):
+        self._sync_trash_controls()
         selected = self.sessions.selection()
         if not selected or selected[0] == self.selected:
             return
@@ -5738,6 +5905,10 @@ class MeetingWindow:
         self._selection_generation = getattr(self, "_selection_generation", 0) + 1
         self._action("stop_playback", urgent=True)
         self.selected = session_id
+        if hasattr(self, "undo_receipt"):
+            self.undo_receipt.pack_forget()
+        if hasattr(self, "title_entry"):
+            self._hide_title_editor(focus=False)
         # What the page said about another recording does not describe this one.
         self.messages.drop_other_sessions(session_id)
         self._reset_transcript_document()
@@ -5857,6 +6028,9 @@ class MeetingWindow:
         self._explain_capture(session_id, metadata)
         self.loading = True
         self.title.set(metadata.get("title") or "")
+        self._saved_title = self.title.get()
+        if hasattr(self, "title_entry"):
+            self._hide_title_editor(focus=False)
         self.transcript_revision = metadata.get("transcript_revision")
         self.transcript_offset = metadata.get("transcript_offset", 0)
         self.transcript_has_previous = bool(metadata.get("transcript_has_previous"))
@@ -5883,10 +6057,7 @@ class MeetingWindow:
         self._show_processing_issue(metadata.get("processing_issue"))
         self.detail_ready = True
         self._sync_qa_controls()
-        self.delete_button.configure(
-            state="normal" if self.retention_ready and metadata.get("status") != "recording"
-            else "disabled"
-        )
+        self._sync_trash_controls()
         self.dirty = False
         self.loading = False
         self._render_transcript(segments)
@@ -6001,34 +6172,39 @@ class MeetingWindow:
         for label, key in (
             (tr("Motivos"), "reasons"), (tr("Capacidades perdidas"), "lost_capabilities"),
             (tr("Exportações externas preservadas"), "excluded_external_exports"),
+            (tr("Alterações na biblioteca"), "canonical_changes"),
         ):
             values = projection.get(key) or []
             if values:
                 lines.append(label + ":\n- " + "\n- ".join(values[:8]))
+        for target in projection.get("targets", []):
+            lines.append(tr("{kind}: {size}", kind=target["kind"], size=format_storage_size(target["bytes"])))
         return "\n".join(lines)[:6000]
 
     def _retention_preview_loaded(self, session_id, title, plan, error, request):
-        if self.closed or request != self.retention_request or self.selected != session_id:
+        if getattr(self, "_retention_pending", None) != (request, session_id):
+            return
+        if self.closed or not self._trash_target_ready(session_id):
+            self._finish_retention(request, session_id)
             return
         if error:
-            self.delete_button.configure(state="normal")
+            self._finish_retention(request, session_id)
             self._fail("library", tr("A prévia de retenção falhou"), tr("Nenhuma exclusão foi tentada."),
                        error=error, session=session_id)
             return
         projection = retention_plan_projection(plan)
         if not projection.get("eligible"):
-            self.delete_button.configure(state="normal")
+            self._finish_retention(request, session_id)
             self._fail("library", tr("A retenção foi bloqueada"),
                        "; ".join(projection.get("reasons", [])[:3]), tone="warning", session=session_id)
             messagebox.showwarning(tr("Retenção bloqueada"), self._retention_preview_text(projection, title), parent=self.window)
             return
-        if not messagebox.askyesno(
-                tr("Prévia de retenção"),
-                self._retention_preview_text(projection, title)
-                + tr("\n\nMover para a lixeira do app agora? A confirmação usa exatamente esta prévia."),
-                parent=self.window):
-            self.delete_button.configure(state="normal")
+        if not self._confirm_trash(projection, title):
+            self._finish_retention(request, session_id)
             self._say("library", tr("Nenhuma exclusão foi aplicada."))
+            return
+        if self.closed or not self._trash_target_ready(session_id):
+            self._finish_retention(request, session_id)
             return
         self._say("library", tr("Aplicando a prévia de retenção…"))
         if not self._submit(
@@ -6036,22 +6212,148 @@ class MeetingWindow:
                 lambda: self.controller.apply_retention(plan, confirm=True),
                 lambda value, apply_error: self._retention_applied(session_id, value, apply_error, request),
         ):
-            self.delete_button.configure(state="normal")
+            self._finish_retention(request, session_id)
 
     def _retention_applied(self, session_id, value, error, request):
-        if self.closed or request != self.retention_request or self.selected != session_id:
+        if getattr(self, "_retention_pending", None) != (request, session_id):
+            return
+        self._finish_retention(request, session_id)
+        if self.closed:
             return
         if error or value is False:
-            self.delete_button.configure(state="normal")
             self._fail("library", tr("A retenção não foi aplicada"),
                        tr("A prévia ficou inválida ou a retenção falhou. Revise e gere uma nova prévia."),
                        error=error, session=session_id)
             return
-        self._clear_library_detail()
+        if self.selected == session_id:
+            self._clear_library_detail()
         self.refresh_library()
-        self._say("library", tr("Reunião movida para a lixeira do app; cópias externas não foram alteradas."))
+        self._show_trash_receipt(session_id)
 
-    def _legacy_delete_selected(self):
+    def _trash_confirmation_text(self, projection, title):
+        session_id = projection["session_id"]
+        item = getattr(self, "session_items", {}).get(session_id, {})
+        duration = self._trash_duration_seconds(item)
+        if duration is None:
+            detail = getattr(self, "detail_state_item", None) or {}
+            if isinstance(detail, dict) and detail.get("id") == session_id:
+                duration = self._trash_duration_seconds(detail)
+        duration_text = (format_time(duration) if duration is not None
+                         else tr("Duração desconhecida"))
+        days = f"{float(projection['purge_after_days']):g}"
+        return tr(
+            "Mover “{title}” para a lixeira?\n\nDuração: {duration} · Tamanho: {size}\n"
+            "Você poderá restaurar esta gravação por {days} dias. Cópias exportadas ficam preservadas.",
+            title=_safe_retention_text(title, 400), duration=duration_text,
+            size=format_storage_size(projection["byte_estimate"]), days=days,
+        )
+
+    @staticmethod
+    def _trash_duration_seconds(item):
+        if not isinstance(item, dict):
+            return None
+        seconds = item.get("duration")
+        if isinstance(seconds, bool):
+            return None
+        try:
+            seconds = float(seconds)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+
+    def _confirm_trash(self, projection, title):
+        dialog = tk.Toplevel(self.window)
+        dialog.withdraw()
+        dialog.title(tr("Mover para a lixeira"))
+        dialog.configure(bg=self.ui.surface)
+        dialog.transient(self.window)
+        self._dialog_icon(dialog)
+        confirmed = False
+        def finish(accepted=False):
+            nonlocal confirmed
+            confirmed = accepted
+            dialog.destroy()
+        self._wrap_label(dialog, self._trash_confirmation_text(projection, title),
+                         anchor="w", justify="left").pack(fill="x", padx=16, pady=16)
+        details = tk.Text(dialog, height=8, width=50, wrap="word", font=self.ui.mono(),
+                          **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True))
+        details.insert("1.0", self._retention_preview_text(projection, title))
+        details.configure(state="disabled")
+        actions = tk.Frame(dialog, bg=self.ui.surface)
+        actions.pack(fill="x", padx=16, pady=(0, 16))
+        def toggle_details():
+            if details.winfo_manager():
+                details.pack_forget()
+                dialog.geometry("560x240")
+            else:
+                details.pack(fill="both", expand=True, padx=16, pady=(0, 16), before=actions)
+                dialog.geometry("560x480")
+        self._button(actions, tr("Detalhes"), toggle_details).pack(side="left")
+        cancel = self._button(actions, tr("Cancelar"), finish)
+        cancel.pack(side="right")
+        self._button(actions, tr("Mover para a lixeira"), lambda: finish(True)).pack(side="right", padx=8)
+        dialog.protocol("WM_DELETE_WINDOW", finish)
+        dialog.bind("<Escape>", lambda _event: finish())
+        dialog.geometry("560x240")
+        dialog.minsize(480, 240)
+        dialog.deiconify()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        cancel.focus_set()
+        dialog.wait_window()
+        return confirmed
+
+    def _show_trash_receipt(self, session_id):
+        self._undo_session = session_id
+        self.messages.clear("library")
+        self.undo_button.configure(state="normal")
+        self.undo_receipt.pack(fill="x", pady=(0, self.ui.space_sm), before=self.library_panes)
+
+    def _undo_trash(self):
+        session_id = self._undo_session
+        if not session_id:
+            return
+        self.undo_button.configure(state="disabled")
+        def restored(value, error):
+            if error or value is False:
+                self.undo_button.configure(state="normal")
+                self._fail("library", tr("Não foi possível restaurar a gravação"),
+                           tr("Abra a lixeira para tentar novamente."), error=error)
+                return
+            if self._undo_session == session_id:
+                self._undo_session = None
+                self.undo_receipt.pack_forget()
+            self.refresh_library()
+            self._say("library", tr("Gravação restaurada na biblioteca."))
+        if not self._submit("library_undo", lambda: self.controller.restore_session(session_id), restored):
+            self.undo_button.configure(state="normal")
+
+    def _trash_target_ready(self, session_id=None):
+        """Require loaded detail and reject any conflicting list selection."""
+        selected = getattr(self, "selected", None)
+        detail = getattr(self, "detail_state_item", None) or {}
+        return bool(
+            selected and (session_id is None or selected == session_id)
+            and self.detail_ready and detail.get("id", selected) == selected
+            and (self.sessions.selection() == (selected,)
+                 or (not self.sessions.selection() and detail.get("id") == selected))
+            and not getattr(self, "_title_save_pending", None)
+            and getattr(self, "retention_ready", True)
+            and detail.get("status") != "recording"
+        )
+
+    def _sync_trash_controls(self):
+        button = getattr(self, "delete_button", None)
+        if button is not None and not self.closed:
+            ready = self._trash_target_ready() and not getattr(self, "_retention_pending", None)
+            button.configure(state="normal" if ready else "disabled")
+
+    def _finish_retention(self, request, session_id):
+        if getattr(self, "_retention_pending", None) == (request, session_id):
+            self._retention_pending = None
+            self._sync_trash_controls()
+
+    def _legacy_delete_selected(self, request):
         """Compatibility path for old embedded doubles only."""
         session_id = self.selected
         title = self.title.get().strip() or session_id
@@ -6062,14 +6364,21 @@ class MeetingWindow:
             title=title,
         )
         if not messagebox.askyesno(tr("Excluir gravação"), message, parent=self.window):
+            self._finish_retention(request, session_id)
+            return
+        if self.closed or not self._trash_target_ready(session_id):
+            self._finish_retention(request, session_id)
             return
         self.delete_button.configure(state="disabled")
         self._say("library", tr("Movendo gravação para a lixeira…"))
 
         def deleted(value, error):
+            if getattr(self, "_retention_pending", None) != (request, session_id):
+                return
+            self._finish_retention(request, session_id)
+            if self.closed:
+                return
             if error or value is False:
-                if self.selected == session_id:
-                    self.delete_button.configure(state="normal")
                 self._fail("library", tr("Não foi possível mover a gravação para a lixeira"),
                            tr("A gravação continua na biblioteca. Tente de novo."),
                            error=error, session=session_id)
@@ -6077,25 +6386,28 @@ class MeetingWindow:
             if self.selected == session_id:
                 self._clear_library_detail()
             self.refresh_library()
-            self._say("library", tr("Gravação movida para a lixeira do app."))
+            self._show_trash_receipt(session_id)
 
         if not self._submit("delete_session", lambda: self.controller.delete_session(session_id), deleted):
-            self.delete_button.configure(state="normal")
+            self._finish_retention(request, session_id)
 
     def delete_selected(self):
-        if not self.selected or not self.detail_ready:
-            self._say("library", tr("Selecione uma gravação na biblioteca."))
+        if getattr(self, "_retention_pending", None):
             return
         if not getattr(self, "retention_ready", True):
             self._say("library", tr("A retenção aguarda a recuperação do workspace."))
             return
-        if not self._retention_workflow_available(self.controller):
-            return self._legacy_delete_selected()
+        if not self._trash_target_ready():
+            self._say("library", tr("Selecione uma gravação na biblioteca."))
+            return
         session_id = self.selected
         title = self.title.get().strip() or session_id
-        self.retention_request += 1
+        self.retention_request = getattr(self, "retention_request", 0) + 1
         request = self.retention_request
+        self._retention_pending = (request, session_id)
         self.delete_button.configure(state="disabled")
+        if not self._retention_workflow_available(self.controller):
+            return self._legacy_delete_selected(request)
         self._say("library", tr("Calculando prévia de retenção…"))
         if not self._submit(
                 "retention_plan",
@@ -6106,7 +6418,7 @@ class MeetingWindow:
                     session_id, title, plan, error, request,
                 ),
         ):
-            self.delete_button.configure(state="normal")
+            self._finish_retention(request, session_id)
 
     def _select_transcript_text(self, _event=None):
         self.transcript_document.tag_add("sel", "1.0", "end-1c")
@@ -6361,16 +6673,25 @@ class MeetingWindow:
         if not self.selected or not self.detail_ready:
             self._say("library", tr("Selecione uma gravação na biblioteca."))
             return
+        if getattr(self, "_title_save_pending", None):
+            return
         session_id, title = self.selected, self.title.get()
         if len(title) > 400:
             self._say("library", tr("Use um título de até 400 caracteres."))
             return
+        self._title_save_pending = (session_id, title)
+        self._sync_trash_controls()
         def saved(_value, error):
+            self._title_save_pending = None
+            self._sync_trash_controls()
             if error or _value is False:
                 self._fail("library", tr("Não foi possível salvar o título"),
                            tr("O título anterior continua salvo. Tente salvar de novo."),
                            error=error, session=session_id)
                 return
+            if self.selected != session_id:
+                return
+            self._saved_title = title
             if self.selected == session_id and self.title.get() == title:
                 self.dirty = False
             self._say("library", tr("Título salvo."), session=session_id)
@@ -6379,7 +6700,9 @@ class MeetingWindow:
                 after()
             elif after:
                 self._say("library", tr("O título foi alterado novamente. Salve antes de sair."))
-        self._submit("save_title", lambda: self.controller.rename_session(session_id, title), saved)
+        if not self._submit("save_title", lambda: self.controller.rename_session(session_id, title), saved):
+            self._title_save_pending = None
+            self._sync_trash_controls()
 
     def _clear_library_detail(self):
         self._action("stop_playback", urgent=True)
@@ -7018,6 +7341,7 @@ class MeetingWindow:
     def close_without_prompt(self, destroy=True, after_close=None):
         if self.closed:
             return
+        self._cancel_library_search()
         self.closed = True
         # Closing never cancels a recording's work (its capture, final audio,
         # transcript or summary); it stops only answers this view would show.
@@ -7034,6 +7358,7 @@ class MeetingWindow:
         self.cross_citation_request = getattr(self, "cross_citation_request", 0) + 1
         self.trash_request = getattr(self, "trash_request", 0) + 1
         self.retention_request = getattr(self, "retention_request", 0) + 1
+        self._retention_pending = None
         self.pending_start_origin = None
         self.start_after_interrupt = None
         if hasattr(self, "ask_conversations"):

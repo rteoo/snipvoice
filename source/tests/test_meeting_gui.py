@@ -90,6 +90,139 @@ class Text:
 
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_live_search_cancels_previous_timer_and_invalidates_old_reads(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.window = mock.Mock()
+        view.bridge = mock.Mock()
+        view._library_search_after = None
+        view.library_filter_generation = 0
+        view.refresh_library = mock.Mock()
+        view._queue_library_search()
+        first = view._library_search_after
+        view._queue_library_search()
+        view.window.after_cancel.assert_called_once_with(first)
+        self.assertEqual(view.library_filter_generation, 2)
+        self.assertEqual(view.bridge.invalidate.call_args_list, [mock.call("library"), mock.call("library")])
+        delay, callback = view.window.after.call_args.args
+        self.assertEqual(delay, 250)
+        callback()
+        view.refresh_library.assert_called_once_with()
+        self.assertIsNone(view._library_search_after)
+
+    def test_escape_clears_query_and_runs_one_immediate_search(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.query = Variable("query")
+        view.search = mock.Mock()
+        self.assertEqual(view._clear_library_search(), "break")
+        self.assertEqual(view.query.get(), "")
+        view.search.assert_called_once_with()
+
+    def test_search_shortcut_selects_library_and_focuses_the_labelled_field(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.notebook, view.search_entry = mock.Mock(), mock.Mock()
+        view.library_tab = object()
+        self.assertEqual(view._focus_library_search(), "break")
+        view.notebook.select.assert_called_once_with(view.library_tab)
+        view.search_entry.focus_set.assert_called_once_with()
+        view.search_entry.selection_range.assert_called_once_with(0, "end")
+
+    def test_detail_cycling_is_user_navigation_and_wraps_in_both_directions(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.selected = "one"
+        view._visible_destination = lambda: "library"
+        view.detail_sections = mock.Mock(current="files")
+        self.assertEqual(view._cycle_detail_section(1), "break")
+        view.detail_sections.user_select.assert_called_with("transcript")
+        view.detail_sections.current = "transcript"
+        view._cycle_detail_section(-1)
+        view.detail_sections.user_select.assert_called_with("files")
+
+    def test_cancel_rename_restores_saved_title_without_dispatching(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.title = Variable("Unsaved")
+        view._saved_title, view.dirty = "Saved", True
+        view.save_title = mock.Mock()
+        view._hide_title_editor = mock.Mock()
+        self.assertEqual(view._end_title_edit(cancel=True), "break")
+        self.assertEqual(view.title.get(), "Saved")
+        self.assertFalse(view.dirty)
+        view.save_title.assert_not_called()
+
+    def test_title_header_reflows_only_at_its_readable_width_boundary(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.ui = types.SimpleNamespace(space_sm=8, space_xs=4)
+        view.rename_button = mock.Mock()
+        view.rename_button.winfo_reqwidth.return_value = 112
+        view._reflow_title_header(types.SimpleNamespace(width=308))
+        view.rename_button.grid.assert_called_once_with(
+            row=1, column=0, sticky="w", padx=0, pady=(4, 0))
+        view._reflow_title_header(types.SimpleNamespace(width=400))
+        self.assertEqual(view.rename_button.grid.call_count, 1)
+        view._reflow_title_header(types.SimpleNamespace(width=520))
+        view.rename_button.grid.assert_called_with(
+            row=0, column=1, sticky="e", padx=(8, 0), pady=0)
+        view.rename_button.focus_set.assert_not_called()
+
+    def test_plain_delete_confirmation_uses_the_plan_actual_restore_period(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.session_items = {"one": {"duration": 65}}
+        projection = retention_plan_projection({"session_id": "one", "byte_estimate": 1500000,
+                                                "policy": {"purge_after_days": 7}})
+        text = view._trash_confirmation_text(projection, "Planning")
+        for expected in ("Planning", "00:01:05", "1,5 MB", "7 dias"):
+            self.assertIn(expected, text)
+        self.assertNotIn("30 dias", text)
+
+    def test_trash_confirmation_uses_only_a_known_duration_for_the_exact_recording(self):
+        projection = retention_plan_projection({"session_id": "one", "byte_estimate": 1500000,
+                                                "policy": {"purge_after_days": 7}})
+
+        def confirmation(items=None, detail=None):
+            view = MeetingWindow.__new__(MeetingWindow)
+            view.session_items = items or {}
+            view.detail_state_item = detail
+            return view._trash_confirmation_text(projection, "Planning")
+
+        self.assertIn("00:02:03", confirmation(detail={"id": "one", "duration": 123}))
+        self.assertIn("Duração desconhecida", confirmation(detail={"id": "two", "duration": 123}))
+        self.assertIn("Duração desconhecida", confirmation())
+        for duration in (None, "invalid", -1, float("nan"), float("inf"), True):
+            with self.subTest(duration=duration):
+                self.assertIn("Duração desconhecida", confirmation({"one": {"duration": duration}}))
+        self.assertIn("00:00:00", confirmation({"one": {"duration": 0}}))
+        known_list = confirmation({"one": {"duration": 65}}, {"id": "one", "duration": 123})
+        self.assertIn("00:01:05", known_list)
+        self.assertNotIn("00:02:03", known_list)
+
+    def test_undo_restores_the_deleted_session_even_after_selection_changes(self):
+        view = new_view()
+        view._undo_session, view.selected = "deleted", "another"
+        view.undo_button, view.undo_receipt = mock.Mock(), mock.Mock()
+        view._submit, view.refresh_library = mock.Mock(return_value=True), mock.Mock()
+        view.controller = mock.Mock()
+        view._undo_trash()
+        key, operation, finished = view._submit.call_args.args
+        self.assertEqual(key, "library_undo")
+        operation()
+        view.controller.restore_session.assert_called_once_with("deleted")
+        finished(True, None)
+        self.assertIsNone(view._undo_session)
+        view.undo_receipt.pack_forget.assert_called_once_with()
+        self.assertEqual(view.selected, "another")
+
+    def test_undo_failure_keeps_a_retry_and_does_not_claim_restored(self):
+        view = new_view()
+        view._undo_session = "deleted"
+        view.undo_button, view.undo_receipt = mock.Mock(), mock.Mock()
+        view._submit, view.refresh_library = mock.Mock(return_value=True), mock.Mock()
+        view.controller = mock.Mock()
+        view._undo_trash()
+        view._submit.call_args.args[2](False, None)
+        self.assertEqual(view._undo_session, "deleted")
+        view.undo_receipt.pack_forget.assert_not_called()
+        view.refresh_library.assert_not_called()
+        self.assertEqual(said(view)[0], "problem")
+
     def test_library_empty_state_offers_a_relevant_next_action(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.ui = ui_theme.build_theme("windows", system="windows")
@@ -493,6 +626,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def test_retention_delete_previews_and_applies_the_exact_plan(self):
         view = new_view()
         view.selected = "meeting-1"
+        view.sessions = mock.Mock()
+        view.sessions.selection.return_value = ("meeting-1",)
         view.detail_ready = True
         view.retention_ready = True
         view.retention_request = 0
@@ -520,15 +655,211 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.controller.retention_plan.assert_called_once_with(
             "meeting-1", policy={"mode": "whole_meeting", "after_days": 0},
         )
-        with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm:
+        with mock.patch.object(view, "_confirm_trash", return_value=True) as confirm:
             preview_call.args[2](plan, None)
-        prompt = confirm.call_args.args[1]
+        projection, title = confirm.call_args.args
+        prompt = view._trash_confirmation_text(projection, title)
         self.assertNotIn("C:\\Users", prompt)
         self.assertNotIn("D:\\exports", prompt)
+        self.assertIn("30 dias", prompt)
         apply_call = view._submit.call_args_list[-1]
         self.assertEqual(apply_call.args[0], "retention_apply")
         apply_call.args[1]()
         view.controller.apply_retention.assert_called_once_with(plan, confirm=True)
+
+    def _retention_view(self):
+        view = self.make_edit_view()
+        view.retention_ready, view.retention_request = True, 0
+        view.window = mock.Mock()
+        view._clear_library_detail = mock.Mock()
+        view._show_trash_receipt = mock.Mock()
+        plan = {"session_id": "one", "eligible": True,
+                "policy": {"purge_after_days": 7}}
+        view.controller.retention_plan.return_value = plan
+        return view, plan
+
+    def test_every_delete_route_rejects_a_different_or_unready_loaded_target(self):
+        for state in ("different", "empty", "multiple", "wrong_detail", "loading", "saving", "recording", "recovery"):
+            for route in ("delete_selected", "_delete_shortcut"):
+                with self.subTest(state=state, route=route):
+                    view, _plan = self._retention_view()
+                    if state == "different":
+                        view.sessions.selection.return_value = ("two",)
+                    elif state == "empty":
+                        view.sessions.selection.return_value = ()
+                    elif state == "multiple":
+                        view.sessions.selection.return_value = ("one", "two")
+                    elif state == "wrong_detail":
+                        view.detail_state_item = {"id": "two", "status": "completed"}
+                    elif state == "loading":
+                        view.detail_ready = False
+                    elif state == "saving":
+                        view._title_save_pending = ("one", "Title")
+                    elif state == "recording":
+                        view.detail_state_item = {"status": "recording"}
+                    else:
+                        view.retention_ready = False
+                    getattr(view, route)()
+                    view._submit.assert_not_called()
+                    self.assertEqual(view.retention_request, 0)
+
+    def test_loaded_search_detail_with_no_list_row_can_use_the_exact_trash_plan(self):
+        view, plan = self._retention_view()
+        view.sessions.selection.return_value = ()
+        view.detail_state_item = {"id": "one", "status": "completed"}
+        view.delete_selected()
+        with mock.patch.object(view, "_confirm_trash", return_value=True):
+            view._submit.call_args.args[2](plan, None)
+        self.assertEqual(view._submit.call_args.args[0], "retention_apply")
+        view._submit.call_args.args[1]()
+        self.assertIs(view.controller.apply_retention.call_args.args[0], plan)
+        self.assertEqual(view.controller.apply_retention.call_args.kwargs, {"confirm": True})
+
+    def test_title_save_resyncs_current_trash_readiness_without_changing_context(self):
+        for outcome in ("success", "false", "error", "refused"):
+            for pending in (False, True):
+                with self.subTest(outcome=outcome, retention_pending=pending):
+                    view = self.make_edit_view()
+                    after = mock.Mock()
+                    view.save_title(after)
+                    view.delete_button.configure.assert_called_with(state="disabled")
+                    callback = view._submit.call_args.args[2]
+                    # The user has already opened B before A's save finishes.
+                    view.selected, view.dirty = "two", False
+                    view.title.set("Other title")
+                    view._saved_title = "Other title"
+                    view.detail_state_item = {"id": "two", "status": "completed"}
+                    view.sessions.selection.return_value = ("two",)
+                    view._retention_pending = (1, "two") if pending else None
+                    if outcome == "refused":
+                        # A refused admission must release the same visible gate.
+                        view._title_save_pending = None
+                        view._submit.return_value = False
+                        view.save_title(after)
+                    else:
+                        callback(outcome != "false", RuntimeError("synthetic save failure")
+                                 if outcome == "error" else None)
+                    view.delete_button.configure.assert_called_with(
+                        state="disabled" if pending else "normal")
+                    self.assertIsNone(view._title_save_pending)
+                    self.assertEqual((view.selected, view.title.get(), view._saved_title),
+                                     ("two", "Other title", "Other title"))
+                    view.refresh_library.assert_not_called()
+                    after.assert_not_called()
+
+    def test_context_click_aborts_when_dirty_guard_cancels_or_waits_for_save(self):
+        for answer in (None, True):
+            with self.subTest(answer=answer):
+                view, _plan = self._retention_view()
+                view.sessions.identify_row.return_value = "two"
+                view.sessions.get_children.return_value = ("one", "two")
+                current = ["one"]
+                view.sessions.selection.side_effect = lambda: tuple(current)
+                view.sessions.selection_set.side_effect = lambda row: current.__setitem__(0, row)
+                view.session_menu = mock.Mock()
+                with mock.patch("meeting_gui.messagebox.askyesnocancel", return_value=answer):
+                    view._show_session_menu(types.SimpleNamespace(num=3, y=50))
+                view.session_menu.tk_popup.assert_not_called()
+                self.assertEqual(view.selected, "one")
+                if answer:
+                    self.assertEqual(view._title_save_pending, ("one", "Title"))
+                    view._delete_shortcut()
+                self.assertFalse(any(call.args[0] == "retention_plan"
+                                     for call in view._submit.call_args_list))
+
+    def test_repeated_delete_during_preview_and_apply_keeps_the_admitted_callback(self):
+        view, plan = self._retention_view()
+        view.delete_selected()
+        preview = view._submit.call_args.args[2]
+        view._delete_shortcut()
+        view.delete_selected()
+        self.assertEqual(view._submit.call_count, 1)
+        self.assertEqual(view.retention_request, 1)
+        with mock.patch.object(view, "_confirm_trash", return_value=True):
+            preview(plan, None)
+        apply = view._submit.call_args.args[2]
+        view._delete_shortcut()
+        view.delete_selected()
+        self.assertEqual(view._submit.call_count, 2)
+        self.assertEqual(view.retention_request, 1)
+        apply(True, None)
+        self.assertIsNone(view._retention_pending)
+        view._clear_library_detail.assert_called_once_with()
+        view.refresh_library.assert_called_once_with()
+        view._show_trash_receipt.assert_called_once_with("one")
+
+    def test_preview_terminal_paths_release_admission_and_allow_retry(self):
+        for outcome in ("error", "blocked", "refused", "cancel", "selection", "saving", "apply_refused"):
+            with self.subTest(outcome=outcome):
+                view, plan = self._retention_view()
+                view.delete_selected()
+                preview = view._submit.call_args.args[2]
+                error = RuntimeError("synthetic preview failure") if outcome == "error" else None
+                if outcome == "blocked":
+                    plan = {**plan, "eligible": False}
+                elif outcome == "refused":
+                    plan = False
+                elif outcome == "selection":
+                    view.sessions.selection.return_value = ("two",)
+                elif outcome == "saving":
+                    view._title_save_pending = ("one", "Title")
+                elif outcome == "apply_refused":
+                    view._submit.return_value = False
+                with mock.patch.object(view, "_confirm_trash", return_value=outcome != "cancel"), \
+                        mock.patch("meeting_gui.messagebox.showwarning"):
+                    preview(plan, error)
+                self.assertIsNone(view._retention_pending)
+                view._show_trash_receipt.assert_not_called()
+                view.sessions.selection.return_value = ("one",)
+                view._title_save_pending = None
+                view._submit.return_value = True
+                view.delete_selected()
+                self.assertEqual(view._retention_pending, (2, "one"))
+
+    def test_preview_admission_refusal_releases_gate_without_losing_next_request(self):
+        view, _plan = self._retention_view()
+        view._submit.return_value = False
+        view.delete_selected()
+        self.assertIsNone(view._retention_pending)
+        view._submit.return_value = True
+        view.delete_selected()
+        self.assertEqual(view._retention_pending, (2, "one"))
+
+    def test_apply_terminal_paths_release_gate_and_navigation_keeps_captured_undo(self):
+        for outcome in ("error", "refused", "success", "navigated", "closed"):
+            with self.subTest(outcome=outcome):
+                view, plan = self._retention_view()
+                view.delete_selected()
+                with mock.patch.object(view, "_confirm_trash", return_value=True):
+                    view._submit.call_args.args[2](plan, None)
+                applied = view._submit.call_args.args[2]
+                if outcome == "navigated":
+                    view.selected = "two"
+                    view.sessions.selection.return_value = ("two",)
+                elif outcome == "closed":
+                    view.closed = True
+                applied(outcome != "refused", RuntimeError("synthetic apply failure")
+                        if outcome == "error" else None)
+                self.assertIsNone(view._retention_pending)
+                if outcome in {"success", "navigated"}:
+                    view.refresh_library.assert_called_once_with()
+                    view._show_trash_receipt.assert_called_once_with("one")
+                else:
+                    view._show_trash_receipt.assert_not_called()
+                if outcome == "navigated":
+                    view._clear_library_detail.assert_not_called()
+                    self.assertEqual(view.selected, "two")
+
+    def test_selection_changed_inside_confirmation_does_not_apply_the_preview(self):
+        view, plan = self._retention_view()
+        view.delete_selected()
+        def accept_after_selection_changes(*_args):
+            view.sessions.selection.return_value = ("two",)
+            return True
+        with mock.patch.object(view, "_confirm_trash", side_effect=accept_after_selection_changes):
+            view._submit.call_args.args[2](plan, None)
+        self.assertIsNone(view._retention_pending)
+        self.assertEqual(view._submit.call_count, 1)
 
     def test_trash_restore_purge_and_expired_empty_use_worker_confirmations(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1245,6 +1576,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def make_edit_view(self):
         view = new_view()
         view.selected, view.detail_ready = "one", True
+        view.sessions = mock.Mock()
+        view.sessions.selection.return_value = ("one",)
         view.dirty = True
         view.title = Variable("Title")
         view.controller = mock.Mock()
@@ -1274,6 +1607,22 @@ class MeetingGuiLogicTests(unittest.TestCase):
         callback(True, None)
         self.assertTrue(view.dirty)
         after.assert_not_called()
+        self.assertEqual(view._saved_title, "Title")
+
+    def test_cancel_after_an_inflight_save_restores_the_last_committed_title(self):
+        view = self.make_edit_view()
+        view._saved_title = "Original"
+        view._hide_title_editor = mock.Mock()
+        view.save_title()
+        callback = view._submit.call_args.args[2]
+        view.title.set("Later edit")
+        view._end_title_edit(cancel=True)
+        self.assertEqual(view.title.get(), "Later edit")
+        view._hide_title_editor.assert_not_called()
+        callback(True, None)
+        view._end_title_edit(cancel=True)
+        self.assertEqual(view.title.get(), "Title")
+        self.assertFalse(view.dirty)
 
     def test_loading_detail_prevents_saving_old_title_to_new_session(self):
         view = self.make_edit_view()
@@ -1299,6 +1648,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.window = mock.Mock()
         view.delete_button = mock.Mock()
         view._clear_library_detail = mock.Mock()
+        view._show_trash_receipt = mock.Mock()
 
         with mock.patch("meeting_gui.messagebox.askyesno", return_value=True) as confirm:
             view.delete_selected()
@@ -1311,7 +1661,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         callback(True, None)
         view._clear_library_detail.assert_called_once_with()
         view.refresh_library.assert_called_once_with()
-        self.assertEqual(said(view)[:2], ("receipt", "Gravação movida para a lixeira do app."))
+        view._show_trash_receipt.assert_called_once_with("one")
 
     def test_delete_selected_cancel_preserves_the_recording(self):
         view = self.make_edit_view()
@@ -2565,9 +2915,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         sections.select("models")
         self.root.update()
         models = view.model_sections
-        self.assertEqual(list(models.frames), ["transcription", "summary"])
+        self.assertEqual(list(models.frames), ["transcription", "summary", "search"])
         self.assertEqual([models.buttons[key].cget("text") for key in models.frames],
-                         ["Transcrição", "Resumos"])
+                         ["Transcrição", "Resumos", "Busca"])
         self.assertTrue(view.transcription_models_parent.winfo_ismapped())
         self.assertFalse(models.frames["summary"].winfo_ismapped())
         models.select("summary")
@@ -2580,13 +2930,338 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         notebook.select(view.library_tab)
         self.root.update()
         self.assertFalse(view.library_panels["cross"].winfo_ismapped())
-        self.assertFalse(view.library_panels["tools"].winfo_ismapped())
-        view.library_panel_toggles["cross"].invoke()
+        self.assertNotIn("tools", view.library_panels)
+        view.library_menu.invoke(0)
         self.root.update()
         self.assertTrue(view.library_panels["cross"].winfo_ismapped())
-        view.library_panel_toggles["cross"].invoke()
+        view.library_menu.invoke(0)
         self.root.update()
         self.assertFalse(view.library_panels["cross"].winfo_ismapped())
+
+    def test_library_live_search_runs_once_and_escape_clears_immediately(self):
+        view, _notebook = self._library_view()
+        view.search = mock.Mock(wraps=view.search)
+        view.refresh_library = mock.Mock()
+        for value in ("m", "me", "meeting"):
+            view.query.set(value)
+        wait_for(lambda: (self.root.update(), view.refresh_library.call_count)[1] == 1)
+        self.assertEqual(view.search.call_count, 1)
+        view.window.focus_force()
+        view.search_entry.focus_set()
+        self.root.update()
+        view.search_entry.event_generate("<Escape>")
+        self.root.update()
+        self.assertEqual(view.query.get(), "")
+        self.assertIsNone(view._library_search_after)
+        self.assertEqual(view.refresh_library.call_count, 2)
+
+    def test_semantic_controls_live_only_in_settings_and_toolbar_is_small(self):
+        view, notebook = self._library_view()
+        library_widgets = descendants(view.library_tab)
+        self.assertNotIn(view.semantic_cancel_button, library_widgets)
+        self.assertNotIn(view.rebuild_button, library_widgets)
+        self.assertIn(view.semantic_cancel_button, descendants(view.search_models_page))
+        buttons = [w for w in descendants(view.library_toolbar) if isinstance(w, tk.Button)]
+        self.assertEqual({w.cget("text") for w in buttons}, {"Mais", "Importar áudio…"})
+        self.assertTrue(view.search_entry.winfo_ismapped())
+        notebook.select(view.settings_tab)
+        view.settings_sections.select("models")
+        view.model_sections.select("search")
+        self.root.update()
+        self.assertTrue(view.rebuild_button.winfo_ismapped())
+
+    def test_full_text_hits_replace_the_no_results_state_and_are_in_detail(self):
+        view, _notebook = self._library_view()
+        view.query.set("decision")
+        view._cancel_library_search()
+        view._library_loaded(({"items": []}, [{"session_id": "one", "title": "Planning",
+                                                "source_kind": "transcript", "snippet": "decision"}],
+                              view.library_filter_generation), None)
+        self.root.update()
+        self.assertFalse(view.library_empty_panel.winfo_ismapped())
+        self.assertTrue(view.search_results_frame.winfo_ismapped())
+        self.assertEqual(view.search_results_frame.master, view.library_detail_pane)
+        self.assertEqual(view.page_label.get(), "1 resultado")
+
+    def test_library_columns_fit_at_minimum_and_date_is_required_when_wide(self):
+        created = "2026-10-20T12:10:00Z"
+        for geometry in ("1040x700", "1120x820", "1440x900"):
+            with self.subTest(geometry=geometry):
+                view, _notebook = self._library_view(geometry)
+                item = {"id": "one", "title": "Planning", "status": "completed",
+                        "created_at": created, "duration": 65}
+                view._library_loaded([item], None)
+                view.selected, view.detail_state_item = "one", item
+                view._show_library_detail(True)
+                view._render_detail_state()
+                self.root.update()
+                shown = tuple(view.sessions["displaycolumns"])
+                self.assertEqual(shown[:2], ("status", "title"))
+                self.assertGreaterEqual(int(view.sessions.column("title", "width")), 190)
+                self.assertLessEqual(sum(int(view.sessions.column(key, "width")) for key in shown),
+                                     view.sessions.winfo_width())
+                self.assertIn(format_local_timestamp(created), view.detail_meta.get())
+                self.assertTrue(view.detail_state_label.master.winfo_ismapped())
+                if geometry == "1440x900":
+                    self.assertIn("date", shown)
+                    self.assertGreaterEqual(int(view.sessions.column("date", "width")),
+                                            view._session_font.measure(format_local_timestamp(created)))
+
+    def test_each_detail_section_keeps_one_primary_action(self):
+        view, _notebook = self._library_view()
+        view._show_library_detail(True)
+        for text in ("", "Saved summary"):
+            view._show_summary(text)
+            for section in ("transcript", "summary", "ask", "files"):
+                view.detail_sections.select(section)
+                for setup in (False, True):
+                    if section == "summary" and bool(view.summary_setup.winfo_manager()) != setup:
+                        view._toggle_summary_setup()
+                    self.root.update()
+                    primary = [w for w in descendants(view.detail_frame)
+                               if isinstance(w, tk.Button) and w.winfo_ismapped()
+                               and getattr(w, "_variant", None) == "primary"]
+                    self.assertLessEqual(len(primary), 1, (text, section, setup))
+
+    def test_delete_confirmation_hides_details_and_requires_an_explicit_choice(self):
+        view, _notebook = self._library_view()
+        projection = retention_plan_projection({"session_id": "one", "eligible": True,
+                                                "byte_estimate": 2000,
+                                                "policy": {"purge_after_days": 7}})
+        view.window.focus_force()
+        self.root.update()
+        observed = []
+        def inspect_and_choose(accept):
+            dialog = next(w for w in view.window.winfo_children() if isinstance(w, tk.Toplevel))
+            buttons = {w.cget("text"): w for w in descendants(dialog) if isinstance(w, tk.Button)}
+            details = next(w for w in descendants(dialog) if isinstance(w, tk.Text))
+            observed.append((bool(details.winfo_manager()), view.window.focus_get() == buttons["Cancelar"]))
+            buttons["Detalhes"].invoke()
+            observed.append(bool(details.winfo_manager()))
+            buttons["Mover para a lixeira" if accept else "Cancelar"].invoke()
+        for accept in (False, True):
+            self.root.after(50, lambda accept=accept: inspect_and_choose(accept))
+            self.assertEqual(view._confirm_trash(projection, "Planning"), accept)
+        self.assertEqual(observed, [(False, True), True, (False, True), True])
+
+    def test_keyboard_rename_cancel_and_delete_use_the_loaded_selection(self):
+        view, _notebook = self._library_view()
+        view.selected, view.detail_ready = "one", True
+        view.loading = True
+        view.title.set("Saved title")
+        view._saved_title = "Saved title"
+        view.loading = False
+        view._show_library_detail(True)
+        view.window.focus_force()
+        view.sessions.focus_set()
+        self.root.update()
+        view.window.event_generate("<F2>")
+        self.root.update()
+        self.assertTrue(view.title_entry.winfo_ismapped())
+        self.assertFalse(view.title_heading.winfo_ismapped())
+        view.title.set("Unsaved title")
+        view.title_entry.event_generate("<Escape>")
+        self.root.update()
+        self.assertEqual(view.title.get(), "Saved title")
+        self.assertFalse(view.dirty)
+        self.assertTrue(view.title_heading.winfo_ismapped())
+        view.delete_selected = mock.Mock()
+        view.sessions.focus_set()
+        self.root.update()
+        view.sessions.event_generate("<Delete>")
+        view.delete_selected.assert_called_once_with()
+
+    def test_narrow_title_uses_full_width_and_rename_survives_resize_cancel_and_save(self):
+        view, _notebook = self._library_view("1040x700")
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        title = "Quarterly product planning and delivery review with decisions, owners, and next steps"
+        view.selected, view.detail_ready = "one", True
+        view.loading = True
+        view.title.set(title)
+        view._saved_title = title
+        view.loading = False
+        view._show_library_detail(True)
+        for geometry in ("1040x700", "1440x900", "1040x700"):
+            view.window.geometry(geometry)
+            self.root.update()
+            header_width = view.title_heading.master.winfo_width()
+            stacked = header_width < 320 + view.rename_button.winfo_reqwidth() + view.ui.space_sm
+            row = 1 if stacked else 0
+            self.assertEqual(int(view.rename_button.grid_info()["row"]), row)
+            self.assertTrue(view.rename_button.winfo_ismapped())
+            self.assertGreaterEqual(view.rename_button.winfo_height(), 32)
+            if row == 1:
+                self.assertGreaterEqual(view.title_heading.winfo_width(),
+                                        view.title_heading.master.winfo_width() - 2)
+                line_height = ui_theme.tkfont.Font(font=view.title_heading.cget("font")).metrics("linespace")
+                self.assertLessEqual(view.title_heading.winfo_height(), line_height * 5 + 4)
+            view._begin_title_edit()
+            self.root.update()
+            self.assertTrue(view.title_entry.winfo_ismapped())
+            self.assertFalse(view.title_heading.winfo_ismapped())
+            self.assertTrue(view.rename_button.winfo_ismapped())
+            view.title.set("Unsaved change")
+            view._end_title_edit(cancel=True)
+            self.root.update()
+            self.assertEqual(view.title.get(), title)
+            self.assertTrue(view.title_heading.winfo_ismapped())
+        view._begin_title_edit()
+        view.title.set("Saved replacement")
+        with mock.patch.object(view, "_submit", return_value=True) as submit, \
+                mock.patch.object(view, "refresh_library"):
+            view._end_title_edit()
+            submit.call_args.args[2](True, None)
+        self.root.update()
+        self.assertEqual(view._saved_title, "Saved replacement")
+        self.assertFalse(view.title_entry.winfo_ismapped())
+        self.assertTrue(view.title_heading.winfo_ismapped())
+        self.assertTrue(view.rename_button.winfo_ismapped())
+
+    def test_full_text_return_loads_a_trashable_detail_without_a_main_list_row(self):
+        view, _notebook = self._library_view()
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        view.controller.retention_plan.return_value = {
+            "session_id": "two", "eligible": True, "byte_estimate": 2000,
+            "policy": {"purge_after_days": 7},
+        }
+        result = {"session_id": "two", "title": "Search-only recording", "source_kind": "session"}
+        view._library_loaded(({"items": []}, [result], view.library_filter_generation), None)
+        view.search_results.selection_set("0")
+        view.window.focus_force()
+        view.search_results.focus_set()
+        self.root.update()
+        with mock.patch.object(view, "_submit", return_value=True) as submit:
+            view.search_results.event_generate("<Return>")
+            self.root.update()
+            self.assertEqual(submit.call_args.args[0], "search_result")
+            submit.call_args.args[2](result, None)
+            self.assertEqual(submit.call_args.args[0], "detail")
+            submit.call_args.args[2](({"id": "two", "title": result["title"],
+                                      "status": "completed", "duration": 60}, []), None)
+            self.root.update()
+            self.assertEqual(view.sessions.selection(), ())
+            self.assertEqual(view.selected, "two")
+            view.detail_sections.select("files")
+            self.root.update()
+            self.assertEqual(str(view.delete_button.cget("state")), "normal")
+            view.delete_button.invoke()
+            self.assertEqual(submit.call_args.args[0], "retention_plan")
+            self.assertEqual(view._retention_pending[1], "two")
+
+    def _trash_event_view(self):
+        view, _notebook = self._library_view()
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        view.selected = "one"
+        view._library_loaded([
+            {"id": name, "title": name, "status": "completed", "duration": 60}
+            for name in ("one", "two")
+        ], None)
+        view._show_library_detail(True)
+        view.detail_ready = True
+        view.detail_state_item = {"id": "one", "status": "completed"}
+        view.loading = True
+        view.title.set("Saved title")
+        view._saved_title = "Saved title"
+        view.loading, view.dirty = False, False
+        view.delete_button.configure(state="normal")
+        view.window.focus_force()
+        view.sessions.focus_set()
+        self.root.update()
+        return view
+
+    def test_context_mouse_event_cancel_and_pending_save_never_target_the_old_row(self):
+        view = self._trash_event_view()
+        for answer in (None, True):
+            with self.subTest(answer=answer), \
+                    mock.patch("meeting_gui.messagebox.askyesnocancel", return_value=answer), \
+                    mock.patch.object(view, "_submit", return_value=True) as submit, \
+                    mock.patch.object(view.session_menu, "tk_popup") as popup:
+                view.sessions.selection_set("one")
+                self.root.update()
+                view.title.set("Unsaved title")
+                _x, y, _width, height = view.sessions.bbox("two")
+                view.sessions.event_generate("<Button-3>", x=20, y=y + height // 2)
+                self.root.update()
+                popup.assert_not_called()
+                self.assertEqual(view.selected, "one")
+                if answer:
+                    self.assertIsNotNone(view._title_save_pending)
+                    view.sessions.event_generate("<Delete>")
+                    self.root.update()
+                    self.assertEqual([call.args[0] for call in submit.call_args_list], ["save_title"])
+                else:
+                    self.assertEqual(view.sessions.selection(), ("one",))
+                    submit.assert_not_called()
+
+    def test_delete_events_release_each_unsuccessful_retention_lifecycle(self):
+        view = self._trash_event_view()
+        plan = {"session_id": "one", "eligible": True, "policy": {"purge_after_days": 7}}
+        view.controller.retention_plan.return_value = plan
+        for outcome in ("preview_refused", "preview_error", "blocked", "no_plan", "cancel",
+                        "apply_refused", "apply_error", "apply_false"):
+            with self.subTest(outcome=outcome), \
+                    mock.patch.object(view, "_submit", return_value=outcome != "preview_refused") as submit, \
+                    mock.patch.object(view, "_confirm_trash", return_value=outcome != "cancel"), \
+                    mock.patch("meeting_gui.messagebox.showwarning"):
+                view.sessions.event_generate("<Delete>")
+                self.root.update()
+                self.assertEqual(submit.call_args.args[0], "retention_plan")
+                if outcome != "preview_refused":
+                    if outcome == "apply_refused":
+                        submit.return_value = False
+                    preview_plan = False if outcome == "no_plan" else {
+                        **plan, "eligible": outcome != "blocked"}
+                    submit.call_args.args[2](preview_plan, RuntimeError("synthetic preview failure")
+                                            if outcome == "preview_error" else None)
+                    if outcome in {"apply_error", "apply_false"}:
+                        self.assertEqual(submit.call_args.args[0], "retention_apply")
+                        submit.call_args.args[2](outcome != "apply_false",
+                                                RuntimeError("synthetic apply failure")
+                                                if outcome == "apply_error" else None)
+                self.assertIsNone(view._retention_pending)
+                self.assertEqual(str(view.delete_button.cget("state")), "normal")
+                self.assertFalse(view.undo_receipt.winfo_ismapped())
+
+    def test_delete_key_context_and_risk_row_share_one_inflight_operation_and_undo(self):
+        view = self._trash_event_view()
+        plan = {"session_id": "one", "eligible": True, "policy": {"purge_after_days": 7}}
+        view.controller.retention_plan.return_value = plan
+        with mock.patch.object(view, "_submit", return_value=True) as submit, \
+                mock.patch.object(view, "refresh_library") as refresh, \
+                mock.patch.object(view, "_confirm_trash", return_value=True), \
+                mock.patch.object(view.session_menu, "tk_popup"):
+            view.sessions.event_generate("<Delete>")
+            self.root.update()
+            preview = submit.call_args.args[2]
+            request = view.retention_request
+            for phase in ("preview", "apply"):
+                view.sessions.event_generate("<Delete>")
+                view.sessions.event_generate("<Shift-F10>")
+                self.root.update()
+                self.assertEqual(str(view.session_menu.entrycget(0, "state")), "disabled")
+                # Even a command from a menu opened before admission uses the gate.
+                view.session_menu.entryconfigure(0, state="normal")
+                view.session_menu.invoke(0)
+                view.delete_button.invoke()
+                self.assertEqual(view.retention_request, request)
+                self.assertEqual(submit.call_count, 1 if phase == "preview" else 2)
+                if phase == "preview":
+                    preview(plan, None)
+            applied = submit.call_args.args[2]
+            applied(True, None)
+            self.root.update()
+            self.assertIsNone(view._retention_pending)
+            refresh.assert_called_once_with()
+            self.assertTrue(view.undo_receipt.winfo_ismapped())
+            self.assertEqual(view._undo_session, "one")
+            view.selected = "two"
+            view.undo_button.invoke()
+            self.assertEqual(submit.call_args.args[0], "library_undo")
+            submit.call_args.args[1]()
+            view.controller.restore_session.assert_called_once_with("one")
 
     def test_library_explains_empty_list_and_unselected_detail(self):
         view, notebook = self._embedded_view()
@@ -2927,9 +3602,12 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         tree = view.sessions
         self.assertEqual(tuple(tree["columns"]), ("status", "title", "date", "duration"))
         self.assertEqual(str(tree.column("duration", "anchor")), "e")
-        # The default size shows the date; every shown column fits the list.
+        # Native metrics determine which columns fit. A date disappears only
+        # to preserve the readable title and remains in the selected header.
         shown = tuple(tree["displaycolumns"])
-        self.assertEqual(shown[:3], ("status", "title", "date"))
+        required = 190 + view._session_column_widths["status"] + view._session_column_widths["date"] + 4
+        self.assertEqual("date" in shown, tree.winfo_width() >= required)
+        self.assertEqual(shown[:2], ("status", "title"))
         self.assertLessEqual(sum(int(tree.column(column, "width")) for column in shown),
                              tree.winfo_width())
 
@@ -2937,6 +3615,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             return tuple(tree.item(iid, "values")), tuple(tree.item(iid, "tags"))
 
         date = format_local_timestamp(created)
+        view.selected = "s1"
+        view.detail_state_item = view.session_items["s1"]
+        view._render_detail_state()
+        self.assertIn(date, view.detail_meta.get())
         self.assertEqual(row("s1"), (("Falhou", "Falha na captura", date, "00:41:05"), ("danger",)))
         self.assertEqual(row("s2"), (("Interrompida", "Queda de energia", date, "00:01:00"), ("warning",)))
         self.assertEqual(row("s3")[0][0], "Parcial")
@@ -3596,9 +4278,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view.window.attributes("-topmost", True)
             view.window.lift()
             for name, panel, section in (
-                    ("semantic_cancel_button", None, None),
+                    ("semantic_cancel_button", None, "search"),
                     ("cross_cancel_button", "cross", None),
-                    ("rebuild_cancel_button", "tools", None),
+                    ("rebuild_cancel_button", None, "search"),
                     ("cancel_processing_button", None, "transcript"),
                     ("cancel_summary_button", None, "summary"),
                     ("summary_download_cancel_button", None, "models")):
@@ -3606,12 +4288,12 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                     for key, widget in view.library_panels.items():
                         if widget.winfo_manager():
                             view._toggle_library_panel(key)
-                    notebook.select(view.settings_tab if section == "models" else view.library_tab)
+                    notebook.select(view.settings_tab if section in {"models", "search"} else view.library_tab)
                     if panel:
                         view._toggle_library_panel(panel)
-                    if section == "models":
+                    if section in {"models", "search"}:
                         view.settings_sections.select("models")
-                        view.model_sections.select("summary")
+                        view.model_sections.select("search" if section == "search" else "summary")
                     elif section:
                         view._show_library_detail(True)
                         view.detail_sections.select(section)
@@ -3620,8 +4302,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                     button = getattr(view, name)
                     view._show_cancel(button, True)
                     self.root.update()
-                    if section in {"models", "summary"}:
-                        canvas = view.settings_canvas if section == "models" else view.detail_canvas
+                    if section in {"models", "search", "summary"}:
+                        canvas = view.settings_canvas if section in {"models", "search"} else view.detail_canvas
                         canvas.yview_moveto(1)
                         self.root.update()
                     self.assertTrue(button.winfo_ismapped())

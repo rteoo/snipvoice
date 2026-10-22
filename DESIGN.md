@@ -208,6 +208,27 @@ On navigation / page / content / selection:
   while idle and return for preview or capture. A combined lost-source warning
   labels the longest interruption; captions retain each source's own duration.
 - **Biblioteca:** search and select a recording, then read the full transcript.
+  Search is labelled and runs after 250 ms without typing; Enter runs it now,
+  Esc clears it, and Ctrl+F opens Biblioteca and focuses the field. Typing
+  invalidates an earlier read immediately. The toolbar keeps only Importar
+  and Mais, whose menu holds the cross-recording question, the trash count
+  and search repair. Semantic settings, model installation, reindexing and
+  cancellation live in Configurações › Modelos › Busca. Transcript/report
+  search hits occupy the detail pane, and suppress the empty-results state.
+  Each detail section has one primary: Copy transcript, Copy summary (Generate
+  when empty), or Send chat. Playback and report editing stay secondary.
+  The title is a wrapping Title role; F2 or Renomear opens its editor, Enter
+  or Ctrl+S saves, and Esc restores the latest saved title. Ctrl+Tab and
+  Ctrl+Shift+Tab cycle detail sections as explicit user navigation.
+  Delete and the row context menu (right click or Shift+F10) open the same
+  explicit retention preview as the quiet risk row in Arquivos. The plain
+  confirmation names the title, duration, size and the exact plan's restore
+  period (30 days by default, configurable); technical inventory stays behind
+  Details. Applying uses the original plan object. The inline trash receipt
+  offers Undo for that recording through `restore_session`; later selection,
+  navigation or feedback clears the receipt. Search prefers room for a date
+  column while protecting the detail controls; the selected header always
+  keeps the date when the list must hide it.
   Full text with paragraphs is the default; users can switch to timestamps
   afterward without running transcription again. Copy and export use that
   presentation. Audio, summary, questions, and files remain accessible.
