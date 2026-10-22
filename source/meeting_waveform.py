@@ -196,6 +196,7 @@ class MeetingWaveform(tk.Canvas):
         self.bind("<Configure>", self._on_configure, add="+")
         self.bind("<Destroy>", self._on_destroy, add="+")
         self._poll_id = self.after(self.poll_ms, self._drain_pending)
+        self._visible = True
         self._request_redraw()
 
     @property
@@ -253,7 +254,7 @@ class MeetingWaveform(tk.Canvas):
         self._request_redraw()
 
     def _request_redraw(self):
-        if self._destroyed or self._redraw_pending:
+        if self._destroyed or self._redraw_pending or not self._visible:
             return
         self._redraw_pending = True
         try:
@@ -262,6 +263,7 @@ class MeetingWaveform(tk.Canvas):
             self._redraw_pending = False
 
     def _drain_pending(self):
+        self._poll_id = None
         if self._destroyed:
             return
         changed = False
@@ -277,6 +279,23 @@ class MeetingWaveform(tk.Canvas):
             self._poll_id = self.after(self.poll_ms, self._drain_pending)
         except tk.TclError:
             self._destroyed = True
+
+    def set_visible(self, visible):
+        """Suspend both the queue timer and painting while this page is hidden."""
+        visible = bool(visible)
+        if visible == self._visible:
+            return
+        self._visible = visible
+        if not visible:
+            for name in ("_poll_id", "_redraw_id"):
+                pending = getattr(self, name, None)
+                if pending is not None:
+                    self.after_cancel(pending)
+                    setattr(self, name, None)
+            self._redraw_pending = False
+        else:
+            self._drain_pending()
+            self._request_redraw()
 
     def _wave_color(self, track):
         # Chart roles: the microphone is the primary series, the system the

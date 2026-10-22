@@ -29,6 +29,25 @@ from meeting_titles import initial_recording_title, refine_recording_title, safe
 _UNSET = object()
 
 
+class _RequestCancellation:
+    """Read-only cancellation shared by the controller and one UI request.
+
+    The request Event must survive the controller clearing its reusable active
+    Event at admission. Intelligence and runtime consumers only call is_set().
+    """
+
+    def __init__(self, active, request):
+        self.active, self.request = active, request
+
+    def is_set(self):
+        return self.active.is_set() or self.request.is_set()
+
+
+def _check_request_cancelled(event):
+    if event is not None and event.is_set():
+        raise RuntimeError(tr("A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."))
+
+
 WAVEFORM_POINTS = 360
 WAVEFORM_BLOCK_POINTS = 24
 TRANSCRIPT_PAGE_SIZE = 100
@@ -1885,13 +1904,16 @@ class MeetingController:
                 return False
             return self._launch_processing(work, session_id=session_id, kind="final_audio")
 
-    def _file_work(self, operation, session_id=None, *, kind):
-        # Caller is an IO worker; reserve admission without another nested thread.
+    def _file_work(self, operation, session_id=None, *, kind, cancel_event=None):
+        # Caller is a worker; reserve admission without another nested thread.
+        # A request's cancellation intent must survive clearing the reusable
+        # active-job Event below, including bridge-to-controller handoff races.
         with self._lock:
             if (self._closed or self._retention_active or self._processing
                     or self._final_copy_active or self._state != "idle"
                     or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
                 raise RuntimeError(tr("Aguarde a gravação, reprodução ou processamento terminar."))
+            _check_request_cancelled(cancel_event)
             self._processing = True
             self._processing_session = session_id
             self._processing_kind = kind
@@ -1899,6 +1921,7 @@ class MeetingController:
             self._cancel.clear()
             self._file_done.clear()
         try:
+            _check_request_cancelled(cancel_event)
             return operation()
         finally:
             with self._lock:
@@ -2001,30 +2024,40 @@ class MeetingController:
         )
 
     def generate_report(self, session_id, model, *, profile=None, revision=None,
-                        language=None, focus=None):
+                        language=None, focus=None, cancel_event=None):
         """Generate one immutable structured report off the GUI thread."""
+        event = self._cancel if cancel_event is None else _RequestCancellation(self._cancel, cancel_event)
         def work():
+            _check_request_cancelled(event)
             token = self.voice.reserve_for_meeting()
             try:
-                return self._intelligence().generate_report(
+                _check_request_cancelled(event)
+                result = self._intelligence().generate_report(
                     session_id, model, profile=profile, revision=revision,
-                    language=language, focus=focus, cancel_event=self._cancel,
+                    language=language, focus=focus, cancel_event=event,
                 )
+                # Intelligence owns the final cancel check before its immutable
+                # write. Once it returns, a committed report remains a success.
+                return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work, session_id=session_id, kind="report")
+        return self._file_work(work, session_id=session_id, kind="report", cancel_event=cancel_event)
 
     def ask_this_meeting(self, session_id, question, model, *, revision=None,
-                         revision_id=None, language=None, history=None):
+                         revision_id=None, language=None, history=None, cancel_event=None):
         """Run a memory-only answer; nothing is saved until save_answer()."""
+        event = self._cancel if cancel_event is None else _RequestCancellation(self._cancel, cancel_event)
         def work():
+            _check_request_cancelled(event)
             token = self.voice.reserve_for_meeting()
             try:
+                _check_request_cancelled(event)
                 result = self._intelligence().ask_this_meeting(
                     session_id, question, model, revision=revision,
                     revision_id=revision_id, language=language,
-                    cancel_event=self._cancel, include_provenance=True, history=history,
+                    cancel_event=event, include_provenance=True, history=history,
                 )
+                _check_request_cancelled(event)
                 if isinstance(result, dict):
                     result = dict(result)
                     provenance = result.get("_provenance")
@@ -2039,22 +2072,28 @@ class MeetingController:
                             else None
                         )
                     result["revision"] = selected_revision
+                _check_request_cancelled(event)
                 return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work, session_id=session_id, kind="ask")
+        return self._file_work(work, session_id=session_id, kind="ask", cancel_event=cancel_event)
 
-    def ask_across_meetings(self, question, model, *, filters=None, **kwargs):
+    def ask_across_meetings(self, question, model, *, filters=None, cancel_event=None, **kwargs):
         """Run bounded memory-only Q&A over the filtered meeting library."""
+        event = self._cancel if cancel_event is None else _RequestCancellation(self._cancel, cancel_event)
         def work():
+            _check_request_cancelled(event)
             token = self.voice.reserve_for_meeting()
             try:
-                return self._intelligence().ask_across_meetings(
-                    question, model, filters=filters, cancel_event=self._cancel, **kwargs,
+                _check_request_cancelled(event)
+                result = self._intelligence().ask_across_meetings(
+                    question, model, filters=filters, cancel_event=event, **kwargs,
                 )
+                _check_request_cancelled(event)
+                return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work, kind="cross_question")
+        return self._file_work(work, kind="cross_question", cancel_event=cancel_event)
 
     ask_cross_meeting = ask_across_meetings
     ask_cross_meetings = ask_across_meetings

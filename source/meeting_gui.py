@@ -1,6 +1,7 @@
 """Shared-root meeting workspace with bounded workers and Tk-only updates."""
 
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
 from itertools import islice
 import copy
 import json
@@ -64,6 +65,8 @@ TRANSCRIPT_STYLES = {N_("Texto completo"): "full_text", N_("Com horários"): "ti
 MAX_ANSWER_CHARS = 4_000
 MAX_CHAT_TURNS = 24
 MAX_CHAT_SESSIONS = 8
+LONG_JOB_KEYS = frozenset({"generate_report", "ask_this_meeting", "cross_question", "summary_model",
+                           "semantic_model", "semantic_rebuild", "rebuild_index"})
 REPORT_HISTORY_LIMIT = 500
 MAX_RETENTION_PREVIEW_ITEMS = 64
 MAX_TRASH_ITEMS = 256
@@ -590,22 +593,47 @@ def validated_settings(raw, dictation=DEFAULT_DICTATION_HOTKEY, command=DEFAULT_
     return settings
 
 
+@dataclass
+class ManagerViewState:
+    """Python-only context; no Tcl objects may outlive a manager rebuild."""
+
+    destination: str = "recording"
+    query: str = ""
+    selection: str | None = None
+    detail_section: str = "transcript"
+    transcript_style: str = "full_text"
+    list_scroll: float = 0.0
+    cursor: object = None
+    back_stack: list = field(default_factory=lambda: [None])
+    chats: dict = field(default_factory=dict)
+
+
+def manager_poll_interval(snapshot):
+    if (snapshot.get("state") in CAPTURE_STATES or snapshot.get("previewing")
+            or (snapshot.get("playback") or {}).get("active")):
+        return 200
+    return 1000 if snapshot.get("processing") else 2000
+
+
 class BackgroundBridge:
-    """Two bounded lanes keep capture controls independent of slow disk work."""
+    """Bounded control, read and long-job lanes with GUI-owned callbacks."""
 
     def __init__(self):
         # ceiling: eight pending jobs per lane and sixteen returned results.
         # Increase only after measured UI request/IO requirements justify it.
-        self.jobs = {False: queue.Queue(8), True: queue.Queue(8)}
+        self.jobs = {False: queue.Queue(8), True: queue.Queue(8), "long": queue.Queue(8)}
         self.results = queue.Queue(16)
         self.closed = threading.Event()
         self.tokens = {}
+        self.admitted = {}
         self.callbacks = {}
         self.serial = 0
         self.workers = []
-        for urgent in (False, True):
+        self.admission_lock = threading.Lock()
+        for urgent in (False, True, "long"):
             worker = threading.Thread(target=self._work, args=(urgent,), daemon=True,
-                                      name="MeetingGuiControl" if urgent else "MeetingGuiIO")
+                                      name=("MeetingGuiLong" if urgent == "long" else
+                                            "MeetingGuiControl" if urgent else "MeetingGuiIO"))
             worker.start()
             self.workers.append(worker)
 
@@ -614,18 +642,36 @@ class BackgroundBridge:
             return False
         self.serial += 1
         token = self.serial
-        try:
-            self.jobs[urgent].put_nowait((key, token, operation))
-        except queue.Full:
-            self.invalidate(key)
-            return False
-        self.tokens[key] = token
-        self.callbacks[key] = callback
+        with self.admission_lock:
+            self.tokens[key] = token
+            self.callbacks[key] = callback
+            try:
+                self.jobs[urgent].put_nowait((key, token, operation))
+            except queue.Full:
+                self.tokens.pop(key, None)
+                self.callbacks.pop(key, None)
+                return False
         return True
 
     def invalidate(self, key):
-        self.tokens.pop(key, None)
-        self.callbacks.pop(key, None)
+        with self.admission_lock:
+            self.tokens.pop(key, None)
+            self.callbacks.pop(key, None)
+
+    def cancel_queued(self, key):
+        """Remove only a job that has not crossed worker admission yet.
+
+        Admitted jobs keep their callback until completion, including while
+        their result is waiting to drain, so cancellation cannot report that
+        finished work never ran or accidentally cancel a replacement job.
+        """
+        with self.admission_lock:
+            token = self.tokens.get(key)
+            if token is None or self.admitted.get(key) == token:
+                return False
+            self.tokens.pop(key, None)
+            self.callbacks.pop(key, None)
+            return True
 
     def _work(self, urgent):
         while not self.closed.is_set():
@@ -635,6 +681,10 @@ class BackgroundBridge:
                 continue
             if self.closed.is_set():
                 break
+            with self.admission_lock:
+                if self.tokens.get(key) != token:
+                    continue
+                self.admitted[key] = token
             try:
                 value, error = operation(), None
             except Exception as exc:
@@ -653,6 +703,9 @@ class BackgroundBridge:
                 key, token, value, error = self.results.get_nowait()
             except queue.Empty:
                 break
+            with self.admission_lock:
+                if self.admitted.get(key) == token:
+                    self.admitted.pop(key, None)
             if not self.closed.is_set() and self.tokens.get(key) == token:
                 callback = self.callbacks.pop(key, None)
                 self.tokens.pop(key, None)
@@ -663,6 +716,7 @@ class BackgroundBridge:
         self.closed.set()
         self.callbacks.clear()
         self.tokens.clear()
+        self.admitted.clear()
 
 
 class SectionSwitcher:
@@ -763,6 +817,7 @@ class MeetingWindow:
         self.window.configure(bg=self.ui.surface)
         self.bridge = BackgroundBridge()
         self.closed = False
+        self.visible = True
         self.after_id = None
         self.raw_settings = {}
         self.settings = resolve_meeting_settings({})
@@ -873,9 +928,12 @@ class MeetingWindow:
         self.selected_report = None
         self.report_sections = {}
         self.summary_pending = None
+        self.summary_request_cancel = None
         self.summary_generation = 0
         self.ask_conversations = {}
         self.ask_pending = None
+        self.ask_request_cancel = None
+        self.cross_request_cancel = None
         self._mousewheel_bindings = []
         # Each page writes what happened on it into its own message slot.
         self.message_bars = {}
@@ -907,6 +965,8 @@ class MeetingWindow:
         self._processing_started = None
         self._completion_context = None
         self._summary_cancel_requested = None
+        self._waveform_key = None
+        self._waveform_visible = None
         self._build()
         if not self.embedded:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
@@ -916,6 +976,14 @@ class MeetingWindow:
         self.window.bind("<F2>", self._begin_title_edit, add="+")
         self.window.bind("<Control-Tab>", lambda event: self._cycle_detail_section(1), add="+")
         self.window.bind("<Control-Shift-Tab>", lambda event: self._cycle_detail_section(-1), add="+")
+        self.window.bind("<F5>", self._refresh_shortcut, add="+")
+        self.window.bind("<Control-s>", self._save_title_shortcut, add="+")
+        self.window.bind("<Control-Shift-R>", lambda event: self._record_shortcut(False), add="+")
+        self.window.bind("<Control-Shift-P>", lambda event: self._record_shortcut(True), add="+")
+        self.window.bind("<F1>", self._shortcut_sheet, add="+")
+        self.sessions.bind("<space>", self._play_shortcut, add="+")
+        self.transcript.bind("<space>", self._play_shortcut, add="+")
+        self.transcript_document.bind("<space>", self._play_shortcut, add="+")
         self._submit("settings", self.settings_getter, self._settings_loaded)
         self._submit(
             "privacy_defaults",
@@ -926,6 +994,101 @@ class MeetingWindow:
         self.refresh_library()
         self.refresh_workspace()
         self._poll()
+
+    def capture_view_state(self):
+        chats = copy.deepcopy(dict(list(self.ask_conversations.items())[-MAX_CHAT_SESSIONS:]))
+        for turns in chats.values():
+            for turn in turns:
+                if turn.get("status") == "pending":
+                    turn.update(status="error", error=tr("Resposta cancelada."))
+                turn.pop("saving", None)
+        return ManagerViewState(
+            destination=self._visible_destination() or "voice", query=self.query.get(), selection=self.selected,
+            detail_section=self.detail_sections.current,
+            transcript_style=tuple(TRANSCRIPT_STYLES.values())[max(0, self.transcript_style_box.current())],
+            list_scroll=self.sessions.yview()[0], cursor=self.library_cursor,
+            back_stack=list(self.library_back_stack), chats=chats,
+        )
+
+    def restore_view_state(self, state):
+        self._restoring_view_state = state
+        self.query.set(state.query)
+        self._cancel_library_search()
+        self.library_cursor = state.cursor
+        self.library_back_stack = list(state.back_stack)
+        self.library_page_index = len(self.library_back_stack) - 1
+        self.ask_conversations = copy.deepcopy(state.chats)
+        self.ask_request = max((turn.get("id", 0) for turns in self.ask_conversations.values()
+                                for turn in turns if isinstance(turn.get("id"), int)), default=0)
+        for label, value in TRANSCRIPT_STYLES.items():
+            if value == state.transcript_style:
+                self.transcript_style.set(tr(label))
+        self._sync_transcript_style()
+        self.detail_sections.select(state.detail_section)
+        self._detail_section_chosen = True
+        targets = {"recording": self.recording_tab, "library": self.library_tab,
+                   "settings": self.settings_tab, "voice": self.voice_tab}
+        target = targets.get(state.destination)
+        if target is not None:
+            self.notebook.select(target)
+        if state.selection:
+            self.load_session(state.selection)
+        self.refresh_library()
+
+    def set_visible(self, visible):
+        self.visible = bool(visible)
+        self.waveform.set_visible(self.visible and self._visible_destination() == "recording")
+        if not self.visible and self.after_id is not None:
+            self.root.after_cancel(self.after_id)
+            self.after_id = None
+        elif self.visible and self.after_id is None and not self.closed:
+            self._poll()
+
+    def _refresh_shortcut(self, _event=None):
+        self.refresh_library()
+        return "break"
+
+    def _save_title_shortcut(self, _event=None):
+        if self._visible_destination() == "library" and self.dirty:
+            self._end_title_edit()
+            return "break"
+        return None
+
+    def _record_shortcut(self, pause):
+        settings = dict(self.raw_settings)
+        settings["meeting_hotkey"] = "ctrl+shift+p" if pause else "ctrl+shift+r"
+        try:
+            validate_hotkey_conflicts(settings)
+        except ValueError as exc:
+            self._fail(self._here(), tr("Atalho indisponível"), str(exc), tone="warning")
+            return "break"
+        state = self.controller.snapshot().get("state", "idle")
+        if pause:
+            if state in {"recording", "paused"}:
+                self.pause_resume()
+        elif state in {"recording", "paused"}:
+            self._action("stop", urgent=True)
+        elif state == "idle":
+            self.request_start("window")
+        return "break"
+
+    def _play_shortcut(self, _event=None):
+        if (self.snapshot.get("playback") or {}).get("active"):
+            self._action("stop_playback", urgent=True)
+        else:
+            self.play_selected_recording()
+        return "break"
+
+    def _shortcut_sheet(self, _event=None):
+        messagebox.showinfo(tr("Atalhos de teclado"), tr(
+            "Ctrl+1…4 · destinos\nCtrl+F · buscar\nF5 · atualizar biblioteca\n"
+            "F2 · editar título\nCtrl+S · salvar título\nDelete · mover para a lixeira\n"
+            "Espaço · reproduzir/parar na lista ou transcrição\nCtrl+Tab · próxima seção\n"
+            "Ctrl+Shift+C · copiar resumo\nCtrl+Shift+R · iniciar/parar gravação\n"
+            "Ctrl+Shift+P · pausar/retomar\nF1 · atalhos\n\n"
+            "Atalhos de gravação funcionam nesta janela e são verificados contra os atalhos de ditado."
+        ), parent=self.window)
+        return "break"
 
     def _label(self, parent, text, **kwargs):
         kwargs.setdefault("font", self.ui.font())
@@ -1637,6 +1800,8 @@ class MeetingWindow:
     def _destination_changed(self, _event=None):
         """Leaving a page empties its message slot; what it said stays true only there."""
         current = self._visible_destination()
+        if hasattr(self, "waveform"):
+            self.waveform.set_visible(getattr(self, "visible", True) and current == "recording")
         left = self._destination
         if current:
             self._destination = current
@@ -2268,6 +2433,7 @@ class MeetingWindow:
                    terms=terms), parent=self.window):
             return
         self.summary_download_cancel = threading.Event()
+        event = self.summary_download_cancel
         with self.summary_progress_lock:
             self.summary_progress = (entry["name"], 0, entry["size_bytes"])
         for button in self.summary_model_buttons.values():
@@ -2276,7 +2442,7 @@ class MeetingWindow:
         self._sync_job_cancels()
         submitted = self._submit(
             "summary_model",
-            lambda: download_summary_model(model_id, cancel_event=self.summary_download_cancel,
+            lambda: download_summary_model(model_id, cancel_event=event,
                                            progress=lambda done, total: self._summary_progress(entry, done, total)),
             lambda _value, error: self._summary_model_finished(entry, error),
         )
@@ -2290,6 +2456,10 @@ class MeetingWindow:
             self.summary_model_status.set(tr("Nenhum download de modelo está em andamento."))
             return
         self.summary_download_cancel.set()
+        if self.bridge.cancel_queued("summary_model"):
+            self._summary_model_finished(
+                {}, tr("Download cancelado; os bytes parciais poderão ser retomados."))
+            return
         self.summary_model_status.set(tr("Cancelando download; os bytes parciais poderão ser retomados."))
 
     def _summary_progress(self, entry, done, total):
@@ -3409,11 +3579,18 @@ class MeetingWindow:
             session = getattr(self, "selected", None) if destination == "library" else None
             callback = lambda value, error: self._done(
                 value, error, destination=destination, session=session)
-        if not self.bridge.submit(key, operation, callback, urgent):
+        lane = "long" if not urgent and key in LONG_JOB_KEYS else urgent
+        if not self.bridge.submit(key, operation, callback, lane):
             if not self.closed:
                 self._fail(self._here(), tr("Há operações pendentes"),
                            tr("Aguarde a operação atual terminar e tente de novo."), tone="warning")
             return False
+        # A user-requested read must not wait for the next two-second idle tick.
+        # This runs on Tk; workers only publish results into the bounded queue.
+        if (getattr(self, "after_id", None) is not None and getattr(self, "visible", True)
+                and not self.closed):
+            self.root.after_cancel(self.after_id)
+            self.after_id = self.root.after(200, self._poll)
         return True
 
     def _done(self, value, error, receipt=None, *, destination=None, session=None):
@@ -3649,6 +3826,8 @@ class MeetingWindow:
         self.summary_generation = getattr(self, "summary_generation", 0) + 1
         request = self.summary_generation
         self.summary_pending = (session_id, request)
+        self.summary_request_cancel = threading.Event()
+        event = self.summary_request_cancel
         self._summary_cancel_requested = None
         self._summary_completion_context = self._current_completion_context()
         self.summary_status.set(tr("Gerando {name} localmente… O resumo atual será preservado.", name=profile["name"]))
@@ -3656,7 +3835,7 @@ class MeetingWindow:
         submitted = self._submit(
             "generate_report",
             lambda: self.controller.generate_report(
-                session_id, model, profile=profile, revision=revision, focus=focus or None,
+                session_id, model, profile=profile, revision=revision, focus=focus or None, cancel_event=event,
             ),
             lambda value, error: self._report_generated(session_id, value, error, request=request),
         )
@@ -3667,7 +3846,13 @@ class MeetingWindow:
         if not getattr(self, "summary_pending", None):
             return
         self._summary_cancel_requested = self.summary_pending
-        self._action("cancel_processing", kinds=frozenset({"report"}), urgent=True)
+        event = getattr(self, "summary_request_cancel", None)
+        if event is not None:
+            event.set()
+        if self.bridge.cancel_queued("generate_report"):
+            session_id, request = self.summary_pending
+            self._report_generated(session_id, None, "cancelled", request=request)
+            return
 
     def _toggle_summary_setup(self):
         if self.summary_setup.winfo_manager():
@@ -3698,6 +3883,7 @@ class MeetingWindow:
         if request is not None and getattr(self, "summary_pending", None) != (session_id, request):
             return
         self.summary_pending = None
+        self.summary_request_cancel = None
         self._sync_summary_controls()
         if self.selected != session_id:
             return
@@ -4067,13 +4253,15 @@ class MeetingWindow:
         turns.append({"id": request, "question": question, "answer": "", "status": "pending",
                       "model": model, "revision": revision, "citations": [], "saved": False})
         self.ask_pending = (session_id, request)
+        self.ask_request_cancel = threading.Event()
+        event = self.ask_request_cancel
         self.meeting_chat.set_question("")
         self.ask_status.set(tr("Consultando a transcrição localmente…"))
         self._render_chat()
         submitted = self._submit(
             "ask_this_meeting",
             lambda: self.controller.ask_this_meeting(
-                session_id, question, model, revision=revision, history=history,
+                session_id, question, model, revision=revision, history=history, cancel_event=event,
             ),
             lambda value, error: self._answer_loaded(session_id, request, question, value, error),
         )
@@ -4102,8 +4290,12 @@ class MeetingWindow:
         if not self.ask_pending:
             return
         session_id, request = self.ask_pending
+        event = getattr(self, "ask_request_cancel", None)
+        if event is not None:
+            event.set()
+        self.ask_request_cancel = None
         self.ask_pending = None
-        self.controller.cancel_processing(kinds=frozenset({"ask"}))
+        self.bridge.invalidate("ask_this_meeting")
         turn = self._chat_turn(session_id, request)
         if turn is not None:
             self.ask_conversations[session_id].remove(turn)
@@ -4122,6 +4314,7 @@ class MeetingWindow:
         if self.closed or self.ask_pending != (session_id, request):
             return
         self.ask_pending = None
+        self.ask_request_cancel = None
         turn = self._chat_turn(session_id, request)
         if turn is None:
             self._sync_qa_controls()
@@ -5191,6 +5384,10 @@ class MeetingWindow:
                                 tr("{count} resultados", count=len(search_results)))
         if self.selected in self.sessions.get_children():
             self.sessions.selection_set(self.selected)
+        restored = getattr(self, "_restoring_view_state", None)
+        if restored is not None:
+            self.sessions.yview_moveto(restored.list_scroll)
+            self._restoring_view_state = None
 
     def _render_search_results(self, results):
         self.search_result_items = [item for item in (results or ()) if isinstance(item, dict)][:MAX_SEARCH_RESULTS]
@@ -5323,6 +5520,8 @@ class MeetingWindow:
 
 
     def ask_across_meetings(self):
+        if getattr(self, "cross_pending", None):
+            return
         question = self.cross_question.get().strip()
         if not question:
             self.cross_status.set(tr("Digite uma pergunta."))
@@ -5330,28 +5529,40 @@ class MeetingWindow:
         self.cross_request += 1
         request = self.cross_request
         self.cross_pending = request
+        self.cross_request_cancel = threading.Event()
+        event = self.cross_request_cancel
+        model = self.summary_model.get().strip()
         self._sync_job_cancels()
         self.cross_status.set(tr("Processando evidência local; a resposta não será salva automaticamente."))
         filters = {}
         submitted = self._submit(
             "cross_question",
             lambda: self.controller.ask_across_meetings(
-                question, self.summary_model.get(), filters=filters,
+                question, model, filters=filters, cancel_event=event,
             ),
             lambda value, error: self._cross_answer_loaded(request, value, error),
         )
         if not submitted:
             self.cross_pending = None
+            self.cross_request_cancel = None
             self._sync_job_cancels()
 
     def cancel_cross_question(self):
-        self.controller.cancel_processing(kinds=frozenset({"cross_question"}))
+        event = getattr(self, "cross_request_cancel", None)
+        if event is not None:
+            event.set()
+        self.cross_request_cancel = None
+        self.bridge.invalidate("cross_question")
+        self.cross_request += 1
+        self.cross_pending = None
+        self._sync_job_cancels()
         self.cross_status.set(tr("Cancelamento solicitado; a resposta anterior foi preservada."))
 
     def _cross_answer_loaded(self, request, value, error):
         if self.closed or request != self.cross_request:
             return
         self.cross_pending = None
+        self.cross_request_cancel = None
         self._sync_job_cancels()
         if error:
             self.cross_status.set(tr("Resposta cruzada fica somente na memória."))
@@ -5824,8 +6035,14 @@ class MeetingWindow:
             self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
 
     def cancel_semantic_operation(self):
-        if self.semantic_cancel is not None:
-            self.semantic_cancel.set()
+        if self.semantic_cancel is None:
+            return
+        self.semantic_cancel.set()
+        queued_model = self.bridge.cancel_queued("semantic_model")
+        queued_rebuild = self.bridge.cancel_queued("semantic_rebuild")
+        if queued_model or queued_rebuild:
+            self._semantic_operation_finished(None, "cancelled")
+            return
         cancel = getattr(self.controller, "cancel_semantic_index", None)
         if callable(cancel):
             cancel()
@@ -5846,18 +6063,20 @@ class MeetingWindow:
         if self.rebuild_cancel is not None:
             return
         self.rebuild_cancel = threading.Event()
+        event = self.rebuild_cancel
         self.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
         self.rebuild_button.configure(state="disabled")
         self._sync_job_cancels()
         self.index_status.set(tr("Índice de busca: reconstruindo…"))
-        self._submit(
+        if not self._submit(
             "rebuild_index",
             lambda: self.controller.rebuild_index(
-                cancel_event=self.rebuild_cancel,
+                cancel_event=event,
                 progress=self._rebuild_progress_from_worker,
             ),
             self._rebuild_finished,
-        )
+        ):
+            self._rebuild_finished(None, tr("Fila de operações ocupada."))
 
     def _rebuild_progress_from_worker(self, done, total):
         self.rebuild_progress = {"done": done, "total": total, "state": "rebuilding"}
@@ -5865,13 +6084,18 @@ class MeetingWindow:
     def cancel_rebuild_index(self):
         if self.rebuild_cancel is not None:
             self.rebuild_cancel.set()
+            if self.bridge.cancel_queued("rebuild_index"):
+                self._rebuild_finished({"state": "cancelled", "sessions": 0}, None)
+                return
             self.index_status.set(tr("Índice de busca: cancelamento solicitado…"))
 
     def _rebuild_finished(self, value, error):
+        cancelled = self.rebuild_cancel is not None and self.rebuild_cancel.is_set()
         self.rebuild_cancel = None
         self.rebuild_button.configure(state="normal")
         self._sync_job_cancels()
         if error:
+            self.rebuild_progress = dict(self.rebuild_progress, state="cancelled" if cancelled else "failed")
             self.index_status.set(tr("Índice de busca: reconstrução cancelada ou indisponível."))
             self._fail("library", tr("Não foi possível reconstruir o índice de busca"),
                        tr("A busca por palavras continua disponível."), tone="warning", error=error)
@@ -7206,9 +7430,11 @@ class MeetingWindow:
             self._audio_export_refreshed = None
 
     def _poll(self):
-        if self.closed:
+        self.after_id = None
+        if self.closed or not getattr(self, "visible", True):
             return
         try:
+            had_results = not self.bridge.results.empty()
             self.bridge.drain()
             semantic_state = getattr(self.controller, "semantic_state", None)
             if (callable(semantic_state) and hasattr(self, "semantic_enabled")
@@ -7240,7 +7466,19 @@ class MeetingWindow:
                     tr("Índice de busca: {state} · {count} reuniões",
                        state=rebuild.get('state'), count=rebuild.get('done', 0))
                 )
-            self.snapshot = self.controller.snapshot()
+            snapshot = self.controller.snapshot()
+            self.snapshot = snapshot
+            self._sync_readiness()
+            projection = (snapshot, self.settings_loaded, self.retention_ready,
+                          self.privacy_ready, self.dirty, self._visible_destination())
+            if (not had_results and not self.bridge.callbacks and not snapshot.get("processing")
+                    and self.processing_target is None and not self.previous_processing
+                    and manager_poll_interval(snapshot) == 2000
+                    and projection == getattr(self, "_last_idle_projection", None)):
+                self.messages.clear("recording", key="poll")
+                self.after_id = self.root.after(2000, self._poll)
+                return
+            self._last_idle_projection = projection
             self._sync_qa_controls()
             self._apply_playback_snapshot(self.snapshot)
             state = self.snapshot.get("state", "idle")
@@ -7254,7 +7492,6 @@ class MeetingWindow:
             self._sync_processing_cancel(self.snapshot)
             self._sync_library_processing(self.snapshot)
             self._sync_processing_banner(self.snapshot)
-            self._sync_readiness()
             if self.start_after_interrupt and start_ready:
                 origin, self.start_after_interrupt = self.start_after_interrupt, None
                 self.request_start(origin)
@@ -7274,15 +7511,22 @@ class MeetingWindow:
             self._sync_recording_trouble(self.snapshot)
             self._sync_audio_export_progress()
             self._sync_library_controls(self.snapshot)
-            self.waveform.clear()
-            if active or self.snapshot.get("previewing"):
-                self.waveform.grid()
-                self.recording_monitor.rowconfigure(0, weight=1)
-            else:
-                self.waveform.grid_remove()
-                self.recording_monitor.rowconfigure(0, weight=0)
-            for track, values in self.snapshot.get("waveforms", {}).items():
-                if track in ("microphone", "system"):
+            show_waveform = bool(active or self.snapshot.get("previewing"))
+            waveform_visible = self._visible_destination() == "recording" and show_waveform
+            self.waveform.set_visible(waveform_visible)
+            if show_waveform != self._waveform_visible:
+                self._waveform_visible = show_waveform
+                if show_waveform:
+                    self.waveform.grid()
+                else:
+                    self.waveform.grid_remove()
+                self.recording_monitor.rowconfigure(0, weight=int(show_waveform))
+            points = tuple((track, tuple(values)) for track, values in
+                           self.snapshot.get("waveforms", {}).items() if track in ("microphone", "system"))
+            if waveform_visible and points != self._waveform_key:
+                self._waveform_key = points
+                self.waveform.clear()
+                for track, values in points:
                     self.waveform.append_block(track, values)
             # The caption follows the status lead: a held Start reads the job
             # (Processando), a source test (Testando) or, with neither, Aguardando.
@@ -7294,7 +7538,9 @@ class MeetingWindow:
             self.waveform.set_state(waveform_state)
             for track, meter in self.meters.items():
                 value = float(self.snapshot.get("levels", {}).get(track, 0) or 0)
-                meter.configure(value=meter_value(value))
+                shown = meter_value(value)
+                if float(meter.cget("value")) != shown:
+                    meter.configure(value=shown)
             if self.previous_state in ("starting", "recording", "paused", "stopping") and not active:
                 self._recording_finished(self.snapshot)
             if state != self.previous_state and self.on_recording_state_changed:
@@ -7320,7 +7566,12 @@ class MeetingWindow:
                            error=exc, key="poll")
         else:
             self.messages.clear("recording", key="poll")
-        self.after_id = self.root.after(200, self._poll)
+        interval = manager_poll_interval(self.snapshot)
+        if any(key not in LONG_JOB_KEYS for key in self.bridge.callbacks):
+            interval = 200
+        elif self.bridge.callbacks:
+            interval = min(interval, 1000)
+        self.after_id = self.root.after(interval, self._poll)
 
     def _destroyed(self, event):
         if event.widget is self.window:
@@ -7345,11 +7596,11 @@ class MeetingWindow:
         self.closed = True
         # Closing never cancels a recording's work (its capture, final audio,
         # transcript or summary); it stops only answers this view would show.
-        interactive = {kind for kind, pending in (
-            ("ask", getattr(self, "ask_pending", None)),
-            ("cross_question", getattr(self, "cross_pending", None)),
-            ("report", getattr(self, "summary_pending", None)),
-        ) if pending}
+        for name in ("ask_request_cancel", "cross_request_cancel", "summary_request_cancel"):
+            event = getattr(self, name, None)
+            if event is not None:
+                event.set()
+                setattr(self, name, None)
         self.report_request = getattr(self, "report_request", 0) + 1
         self.ask_request = getattr(self, "ask_request", 0) + 1
         self.citation_request = getattr(self, "citation_request", 0) + 1
@@ -7373,14 +7624,6 @@ class MeetingWindow:
             event = getattr(self, name, None)
             if event is not None:
                 event.set()
-        if interactive:
-            try:
-                # Those jobs run only while the recorder is idle; the kinds keep
-                # the cancel off post-processing even if the state moves on.
-                if self.controller.snapshot().get("state") == "idle":
-                    self.controller.cancel_processing(kinds=frozenset(interactive))
-            except (AttributeError, RuntimeError):
-                pass
         try:
             self.controller.stop_playback()
         except (AttributeError, RuntimeError):

@@ -122,6 +122,47 @@ class MacVoiceIndicatorRoutingTests(unittest.TestCase):
         panel.destroy.assert_called_once_with()
         self.assertIsNone(indicator.window)
 
+    def test_click_opens_the_affected_recording_without_changing_native_flags(self):
+        from voice_indicator import VoiceStatusIndicator
+
+        opened = mock.Mock()
+        indicator = VoiceStatusIndicator(mock.Mock(), on_open=opened)
+        indicator._session_id = "synthetic-recording"
+        indicator.window = mock.Mock()
+        with mock.patch("voice_indicator._windows_user32") as native:
+            self.assertEqual(indicator.open(), "break")
+        opened.assert_called_once_with("synthetic-recording")
+        native.assert_not_called()
+        indicator.window.deiconify.assert_not_called()
+
+    def test_dismiss_stays_dismissed_through_timer_ticks_and_resets_after_state_change(self):
+        from voice_indicator import VoiceStatusIndicator
+
+        panel = mock.Mock()
+        with mock.patch("voice_indicator.current_os", return_value="darwin"), \
+                mock.patch("voice_indicator.MacVoiceStatusPanel", return_value=panel):
+            indicator = VoiceStatusIndicator(mock.Mock())
+            snapshot = {"state": "recording", "session_id": "synthetic", "elapsed": 1}
+            indicator.update_meeting(snapshot)
+            indicator.dismiss()
+            indicator.update_meeting({**snapshot, "elapsed": 2})
+            self.assertEqual(panel.update.call_count, 1)
+            panel.hide.assert_called_once_with()
+            indicator.update_meeting({**snapshot, "state": "paused"})
+            self.assertEqual(panel.update.call_count, 2)
+            indicator.update_meeting(snapshot)
+            self.assertEqual(panel.update.call_count, 3)
+
+    def test_cocoa_panel_receives_callbacks_and_no_tk_window(self):
+        from voice_indicator import VoiceStatusIndicator
+
+        with mock.patch("voice_indicator.current_os", return_value="darwin"), \
+                mock.patch("voice_indicator.MacVoiceStatusPanel") as native:
+            indicator = VoiceStatusIndicator(mock.Mock())
+            indicator.update("recording")
+            native.assert_called_once_with(on_open=indicator.open, on_dismiss=indicator.dismiss)
+            self.assertIsNone(indicator.window)
+
     def test_an_unknown_tone_fails_loudly(self):
         from voice_indicator import VoiceStatusIndicator
 

@@ -339,15 +339,42 @@ On navigation / page / content / selection:
   gravação na lixeira · 1 expirada"). The trash and the typed-confirmation
   dialog take the app icon from the host window (`set_window_icon`); Tk's
   default icon never reaches a transient dialog.
-- Closing or rebuilding the manager (theme or language change) never
+- Closing the manager hides it, pauses its poll and retains its widgets and
+  conversations. The first close explains once that SnipVoice stays in the
+  tray. Tray Open restores the destination, except during capture when it
+  opens Gravação. Theme and language rebuilds retain destination, query,
+  selection, detail section, transcript presentation, list position and up to
+  eight temporary chats as Python-only state; no Tk variables cross teardown.
+  A rebuild stops interactive answers and retains completed chat turns.
+  Quitting destroys the manager on the GUI thread.
+- Rebuilding the manager (theme or language change) never
   cancels a recording's work: its capture, final audio, transcript and summary
-  keep running. A close stops only the chat, cross-recording and summary
+  keep running. A rebuild stops only the chat, cross-recording and summary
   answers that window asked for. The processing, summary, cross-recording and
   chat Cancel controls exist only while their job runs (see the Cancel rule
   below). The processing one is a plain "Cancelar" under a line that names the
   running step ("Em execução: a transcrição.") and wraps at any width, so no job
   name can clip the button at the 1040x700 minimum; the chat one returns the
   question to the composer.
+- F1 lists the window shortcuts: Ctrl+1…4, Ctrl+F, F5, F2, Ctrl+S for the title,
+  Delete, Space in the list or transcript, Ctrl+Tab, Ctrl+Shift+C and local
+  Ctrl+Shift+R/P for recording and pause. Recording chords are checked against
+  dictation and command hotkeys; this sets no global default.
+- Visible managers poll at 200ms during capture, source preview or playback,
+  1s during processing and 2s idle. Hidden managers stop polling. Waveforms
+  paint only changed points on the recording page and suspend their own queue
+  timer while hidden. Unchanged idle projections do not reconfigure widgets.
+  Capture controls, library reads and long jobs use separate bounded lanes;
+  cancelled queued chat requests never enter the controller.
+  Report and Q&A request Events survive controller admission and stay combined
+  with the active-job cancel signal during inference. A committed report stays
+  a success when a later Cancel arrives; publication owns that final boundary.
+- The HUD opens the affected recording on a deliberate click, preserving its
+  nonactivation style. Dismiss holds through elapsed/progress ticks until the
+  semantic state changes. Cocoa open callbacks enqueue through GuiThread;
+  showing the panel never activates the manager. The tray tooltip mirrors the
+  current recording or dictation state. Native Cocoa runtime proof remains a
+  platform gate.
 - A held Start names its holder under the button: "Aguardando o resumo de
   “Reunião 14/10”." The recorder status never reads "Pronto" while Start is
   disabled; it leads with Processando, Testando or Aguardando, and the waveform

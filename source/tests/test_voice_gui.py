@@ -72,6 +72,53 @@ def _ancestors(widget):
         parent = parent.master
 
 
+class ManagerLifecycleTests(unittest.TestCase):
+    def test_close_hides_and_notifies_once_without_closing_the_view(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.manager_window, app._manager_meeting_view, app.icon = mock.Mock(), mock.Mock(), mock.Mock()
+        app._destroy_manager_window = mock.Mock()
+        app._close_settings_window()
+        app._close_settings_window()
+        self.assertEqual(app.manager_window.withdraw.call_count, 2)
+        self.assertEqual(app._manager_meeting_view.set_visible.call_args_list,
+                         [mock.call(False), mock.call(False)])
+        app.icon.notify.assert_called_once()
+        app._manager_meeting_view.close.assert_not_called()
+        app._manager_meeting_view.close_without_prompt.assert_not_called()
+        app._destroy_manager_window.assert_not_called()
+
+    def test_tray_open_keeps_idle_destination_but_selects_recording_while_capturing(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._show_manager_window, app._manager_notebook = mock.Mock(), mock.Mock()
+        app._manager_recording_tab, app.meetings = "recording", mock.Mock()
+        app.meetings.snapshot.return_value = {"state": "idle"}
+        app._show_meetings("root")
+        app._manager_notebook.select.assert_not_called()
+        app.meetings.snapshot.return_value = {"state": "recording"}
+        app._show_meetings("root")
+        app._manager_notebook.select.assert_called_once_with("recording")
+
+    def test_rebuild_captures_python_context_before_closing_and_destroys_on_callback(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._manager_meeting_view, app._destroy_manager_window = mock.Mock(), mock.Mock()
+        app._manager_meeting_view.closed = False
+        root = mock.Mock()
+        app._reopen_manager(root)
+        self.assertIs(app._manager_view_state, app._manager_meeting_view.capture_view_state.return_value)
+        app._destroy_manager_window.assert_not_called()
+        app._manager_meeting_view.close.call_args.kwargs["after_close"]()
+        app._destroy_manager_window.assert_called_once_with()
+        root.after_idle.assert_called_once()
+
+    def test_overlay_open_queues_through_gui_instead_of_touching_tk_in_cocoa_callback(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.gui, app._open_indicator_target = mock.Mock(), mock.Mock()
+        app._queue_indicator_target("synthetic")
+        app._open_indicator_target.assert_not_called()
+        app.gui.submit.call_args.args[0]("root")
+        app._open_indicator_target.assert_called_once_with("synthetic")
+
+
 @unittest.skipUnless(TK_AVAILABLE, TK_SKIP_REASON)
 class ManagerGuiSmokeTests(unittest.TestCase):
     def setUp(self):
@@ -918,7 +965,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(selected, "balanced")
         self.assertEqual(language, "pt-BR")
 
-    def test_meeting_shortcut_reuses_manager_and_selects_recording_tab(self):
+    def test_tray_open_reuses_manager_and_keeps_the_last_destination_while_idle(self):
         _ensure_voice(self.app)
 
         def select_recording(shared_root):
@@ -937,7 +984,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         reused, title, top_levels = self._on_gui(select_recording)
         self.assertTrue(reused)
-        self.assertEqual(title, "Gravação")
+        self.assertEqual(title, "Ditado")
         self.assertEqual(top_levels, 1)
 
     def test_recording_level_meters_fit_inside_the_manager_viewport(self):
@@ -1103,13 +1150,17 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(selected, "Gravação")
         self.assertIsNone(self.app._manager_voice_refresher)
 
-    def test_manager_reopen_rebinds_voice_refresher(self):
+    def test_manager_hide_keeps_voice_refresher_query_and_selection(self):
         _ensure_voice(self.app)
 
         def cycle(shared_root):
             self.app._show_manager_window(shared_root)
             first = self.app._manager_voice_refresher
             window = self.app.manager_window
+            view = self.app._manager_meeting_view
+            view.query.set("synthetic query")
+            view.selected = "synthetic-recording"
+            self.app._manager_notebook.select(view.library_tab)
             handler = window.protocol("WM_DELETE_WINDOW")
             window.tk.call(handler)
             closed_refresher = self.app._manager_voice_refresher
@@ -1118,17 +1169,23 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             titles = _notebook_titles(self.app.manager_window)
             return (
                 first is not None,
-                closed_refresher is None,
+                closed_refresher is first,
                 second is not None,
                 first is second,
                 titles,
+                self.app.manager_window is window,
+                view.query.get(), view.selected,
+                self.app._manager_notebook.select() == str(view.library_tab),
             )
 
-        bound, cleared, rebound, same, titles = self._on_gui(cycle)
+        bound, retained, rebound, same, titles, same_window, query, selected, library = self._on_gui(cycle)
         self.assertTrue(bound)
-        self.assertTrue(cleared)
+        self.assertTrue(retained)
         self.assertTrue(rebound)
-        self.assertFalse(same, "reopen must register a new refresher")
+        self.assertTrue(same, "hiding keeps the existing refresher and Tk variables alive")
+        self.assertTrue(same_window)
+        self.assertEqual((query, selected), ("synthetic query", "synthetic-recording"))
+        self.assertTrue(library)
         self.assertIn("Ditado", titles)
 
 

@@ -119,8 +119,13 @@ def meeting_indicator_content(snapshot):
 class VoiceStatusIndicator:
     """Small bottom-center overlay owned by the shared Tk root."""
 
-    def __init__(self, root):
+    def __init__(self, root, on_open=None):
         self.root = root
+        self.on_open = on_open
+        self._identity = None
+        self._dismissed_identity = None
+        self._session_id = None
+        self._content = None
         self.window = None
         self.title_label = None
         self.subtitle_label = None
@@ -133,6 +138,8 @@ class VoiceStatusIndicator:
         self._state = "idle"
 
     def update(self, state, mode=None):
+        self._set_identity(("voice", state, mode))
+        self._session_id = None
         content = indicator_content(state, mode)
         if content is None:
             self.hide()
@@ -141,33 +148,60 @@ class VoiceStatusIndicator:
         self._present(state, title, tone, indicator_subtitle(state, mode))
 
     def update_meeting(self, snapshot):
+        self._session_id = snapshot.get("processing_session") or snapshot.get("session_id")
+        self._set_identity(("meeting", snapshot.get("state"), self._session_id,
+                          snapshot.get("last_status"), bool(snapshot.get("partial")),
+                          snapshot.get("processing_kind"), bool(snapshot.get("error")),
+                          (snapshot.get("audio_export") or {}).get("stage")))
         content = meeting_indicator_content(snapshot)
         if content is None:
             self.hide()
             return
         self._present(*content)
 
+    def _set_identity(self, identity):
+        if identity != self._identity:
+            self._dismissed_identity = None
+        self._identity = identity
+
     def _present(self, state, title, tone, subtitle):
         if tone not in OVERLAY_TONES:
             raise ValueError(f"unknown overlay tone: {tone!r}")
+        if self._identity is not None and self._identity == self._dismissed_identity:
+            return
         if current_os() == "darwin":
             if self._mac_panel is None:
-                self._mac_panel = MacVoiceStatusPanel()
+                self._mac_panel = MacVoiceStatusPanel(on_open=self.open, on_dismiss=self.dismiss)
             self._mac_panel.update(title, tone)
             return
         if self.window is None or not self._window_exists():
             self._build()
         color = getattr(ui_theme.theme(), f"overlay_{tone}")
-        self.title_label.configure(text=title)
-        self.subtitle_label.configure(text=subtitle)
-        for item in self.waveform_bars:
-            self.waveform.itemconfigure(item, fill=color)
+        content = (title, subtitle, tone)
+        if content != self._content:
+            self.title_label.configure(text=title)
+            self.subtitle_label.configure(text=subtitle)
+            for item in self.waveform_bars:
+                self.waveform.itemconfigure(item, fill=color)
+            self._content = content
         self._state = state
         if state in VISIBLE_STATES:
             self._start_animation()
         else:
             self._stop_animation()
-        self._show_without_activation()
+        if self.window.state() == "withdrawn":
+            self._show_without_activation()
+
+    def open(self, _event=None):
+        """Keep native no-activate flags; the explicit callback opens the manager."""
+        if self.on_open is not None:
+            self.on_open(self._session_id)
+        return "break"
+
+    def dismiss(self, _event=None):
+        self._dismissed_identity = self._identity
+        self.hide()
+        return "break"
 
     def hide(self):
         if self._mac_panel is not None:
@@ -175,7 +209,8 @@ class VoiceStatusIndicator:
             return
         self._stop_animation()
         self._state = "idle"
-        if self.window is not None and self._window_exists():
+        if (self.window is not None and self._window_exists()
+                and self.window.state() != "withdrawn"):
             self.window.withdraw()
 
     def destroy(self):
@@ -187,6 +222,7 @@ class VoiceStatusIndicator:
             self.window.destroy()
         self.window = None
         self._native_hwnd = None
+        self._content = None
 
     def _window_exists(self):
         try:
@@ -223,6 +259,14 @@ class VoiceStatusIndicator:
             bd=0,
         )
         container.pack(fill=tk.BOTH, expand=True)
+        window.bind("<Button-1>", self.open)
+        close = tk.Label(container, text="×", bg=ui.overlay_bg, fg=ui.overlay_muted,
+                         font=ui.body(), cursor="hand2", padx=4)
+        close.pack(side=tk.RIGHT)
+        close.bind("<Button-1>", self.dismiss)
+        close.bind("<Enter>", lambda _event: self.subtitle_label.configure(text=tr("Fechar")))
+        close.bind("<Leave>", lambda _event: self.subtitle_label.configure(
+            text=self._content[1] if self._content else ""))
 
         self.waveform = tk.Canvas(
             container,

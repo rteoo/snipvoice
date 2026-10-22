@@ -38,6 +38,8 @@ class SummaryFlowTests(unittest.TestCase):
                         "sections": ["summary", "key_points", "decisions", "action_items"]}
         view._selected_report_profile = Mock(return_value=self.profile)
         view.controller = Mock()
+        view.bridge = Mock()
+        view.bridge.cancel_queued.return_value = False
         view._submit = Mock(return_value=True)
         view._sync_summary_controls = Mock()
         view._show_summary = Mock()
@@ -60,9 +62,14 @@ class SummaryFlowTests(unittest.TestCase):
     def test_requested_cancellation_preserves_summary_and_uses_warning(self):
         view = self.view
         view.generate_report()
+        cancel_event = view.summary_request_cancel
         view._action = Mock()
         view.cancel_summary_generation()
-        view._action.assert_called_once_with("cancel_processing", kinds=frozenset({"report"}), urgent=True)
+        self.assertTrue(cancel_event.is_set())
+        view.bridge.cancel_queued.assert_called_once_with("generate_report")
+        view._action.assert_not_called()
+        view._submit.call_args.args[1]()
+        self.assertIs(view.controller.generate_report.call_args.kwargs["cancel_event"], cancel_event)
         view._report_generated("session-1", None, "synthetic cancelled work", request=1)
         self.assertEqual(said(view)[:2], ("problem", "O resumo foi cancelado"))
         self.assertEqual(view.messages.current("library").tone, "warning")

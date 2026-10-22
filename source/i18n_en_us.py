@@ -1898,4 +1898,10 @@ EN_US = {
     'A reprodução falhou.': 'Playback failed.',
     'A reprodução falhou': 'Playback failed',
     'O áudio final continua salvo. Tente de novo.': 'The final audio is still saved. Try again.',
+    'Atalho indisponível': 'Shortcut unavailable',
+    'Download cancelado; os bytes parciais poderão ser retomados.': 'Download cancelled; partial bytes can be resumed.',
+    'Abrir': 'Open',
+    'Atalhos de teclado': 'Keyboard shortcuts',
+    'Ctrl+1…4 · destinos\nCtrl+F · buscar\nF5 · atualizar biblioteca\nF2 · editar título\nCtrl+S · salvar título\nDelete · mover para a lixeira\nEspaço · reproduzir/parar na lista ou transcrição\nCtrl+Tab · próxima seção\nCtrl+Shift+C · copiar resumo\nCtrl+Shift+R · iniciar/parar gravação\nCtrl+Shift+P · pausar/retomar\nF1 · atalhos\n\nAtalhos de gravação funcionam nesta janela e são verificados contra os atalhos de ditado.': 'Ctrl+1…4 · destinations\nCtrl+F · search\nF5 · refresh library\nF2 · edit title\nCtrl+S · save title\nDelete · move to trash\nSpace · play/stop in the list or transcript\nCtrl+Tab · next section\nCtrl+Shift+C · copy summary\nCtrl+Shift+R · start/stop recording\nCtrl+Shift+P · pause/resume\nF1 · shortcuts\n\nRecording shortcuts work in this window and are checked against dictation shortcuts.',
+    'SnipVoice continua na bandeja; gravação e processamento continuam': 'SnipVoice stays in the tray; recording and processing continue',
 }

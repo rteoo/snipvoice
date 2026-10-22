@@ -182,6 +182,8 @@ class Snipvoice:
         self.voice_status_indicator = None
         self._recording_indicator_after = None
         self._meeting_menu_key = None
+        self._manager_view_state = None
+        self._tray_close_notified = False
         self._quitting = threading.Event()
         self._autostart_state = platform_support.AUTOSTART_ABSENT
         self._notification_lock = threading.Lock()
@@ -222,6 +224,8 @@ class Snipvoice:
 
     def _show_meetings(self, root):
         self._show_manager_window(root)
+        if self.meetings.snapshot().get("state") not in CAPTURE_STATES:
+            return
         notebook = self._manager_notebook
         tab = self._manager_recording_tab
         if notebook is None or tab is None:
@@ -373,6 +377,9 @@ class Snipvoice:
         if self.manager_window is not None and self.manager_window.winfo_exists():
             self.manager_window.deiconify()
             self.manager_window.lift()
+            view = self._manager_meeting_view
+            if view is not None:
+                view.set_visible(True)
             return
         appearance = ui_theme.normalize_preference(self.settings.get("appearance"))
         ui = ui_theme.bind(root, preference=appearance)
@@ -507,6 +514,10 @@ class Snipvoice:
         )
         self._build_manager_nav(ui, nav, notebook)
         notebook.select(meeting_view.recording_tab)
+        saved_state = getattr(self, "_manager_view_state", None)
+        if saved_state is not None:
+            meeting_view.restore_view_state(saved_state)
+            self._manager_view_state = None
         # Keep the four destinations available from the keyboard while focus
         # remains inside a recording, search, or settings control.
         def select_destination(index):
@@ -585,12 +596,6 @@ class Snipvoice:
             if before_reopen is not None:
                 before_reopen()
             self._show_manager_window(root)
-            view = self._manager_meeting_view
-            if view is not None and self._manager_notebook is not None:
-                try:
-                    self._manager_notebook.select(view.settings_tab)
-                except tk.TclError:
-                    pass
 
         def finish():
             self._destroy_manager_window()
@@ -598,12 +603,28 @@ class Snipvoice:
 
         view = self._manager_meeting_view
         if view is not None and not view.closed:
+            self._manager_view_state = view.capture_view_state()
             view.close(destroy=False, after_close=finish)
         else:
             finish()
 
     def _close_settings_window(self, force=False):
         meeting_view = self._manager_meeting_view
+        if not force:
+            window = self.manager_window
+            if window is not None:
+                window.withdraw()
+                if meeting_view is not None:
+                    meeting_view.set_visible(False)
+                if not getattr(self, "_tray_close_notified", False) and self.icon is not None:
+                    try:
+                        self.icon.notify(tr("SnipVoice continua na bandeja; gravação e processamento continuam"),
+                                         "SnipVoice")
+                    except Exception:
+                        self.logger.warning("Could not show the close-to-tray notice")
+                    else:
+                        self._tray_close_notified = True
+            return
         if meeting_view is not None and not meeting_view.closed:
             if force:
                 meeting_view.close_without_prompt(destroy=False)
@@ -944,7 +965,7 @@ class Snipvoice:
 
     def _render_voice_status(self, root, snapshot):
         if self.voice_status_indicator is None:
-            self.voice_status_indicator = VoiceStatusIndicator(root)
+            self.voice_status_indicator = VoiceStatusIndicator(root, on_open=self._queue_indicator_target)
         meeting = self.meetings.snapshot()
         if (meeting.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
                 or meeting.get("processing") and (meeting.get("audio_export") or {}).get("stage")
@@ -957,13 +978,27 @@ class Snipvoice:
 
     def _render_recording_indicator(self, root, snapshot):
         if self.voice_status_indicator is None:
-            self.voice_status_indicator = VoiceStatusIndicator(root)
+            self.voice_status_indicator = VoiceStatusIndicator(root, on_open=self._queue_indicator_target)
         window = self.manager_window
         hidden = window is None or window.state() in {"withdrawn", "iconic"}
         if hidden:
             self.voice_status_indicator.update_meeting(snapshot)
         else:
             self.voice_status_indicator.hide()
+
+    def _queue_indicator_target(self, session_id=None):
+        # A Cocoa target/action frame must never call Tcl, even on the main thread.
+        self.gui.submit(lambda _root: self._open_indicator_target(session_id))
+
+    def _open_indicator_target(self, session_id=None):
+        # Called only by a deliberate pointer click on the GUI-owned HUD.
+        self._show_manager_window(self.gui.root)
+        view = self._manager_meeting_view
+        if session_id and view is not None:
+            self._manager_notebook.select(view.library_tab)
+            view.load_session(session_id)
+        elif view is not None:
+            self._manager_notebook.select(view.recording_tab)
 
     def _poll_recording_indicator(self, root):
         """Observe capture independently of manager lifetime, using only the Tk pump."""
@@ -979,12 +1014,23 @@ class Snipvoice:
         if menu_key != self._meeting_menu_key:
             self._meeting_menu_key = menu_key
             self.refresh_tray_menu()
+        from voice_indicator import indicator_content, meeting_indicator_content
+        content = meeting_indicator_content(snapshot)
+        voice_content = indicator_content(voice.get("state"), voice.get("mode"))
+        tooltip = APP_DISPLAY_NAME + (" · " + content[1] if content else
+                                      " · " + voice_content[0] if voice_content else "")
+        if self.icon is not None and getattr(self, "_tray_status_title", None) != tooltip:
+            self._tray_status_title = tooltip
+            self.icon.title = tooltip
         if (snapshot.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
                 or snapshot.get("processing") and (snapshot.get("audio_export") or {}).get("stage")
                 in {"preparing", "encoding", "finalizing"}
                 or voice.get("state") not in {"recording", "transcribing", "routing"}):
             self._render_recording_indicator(root, snapshot)
-        self._recording_indicator_after = root.after(200, lambda: self._poll_recording_indicator(root))
+        busy = (snapshot.get("state") in CAPTURE_STATES or snapshot.get("processing")
+                or voice.get("state") in {"recording", "transcribing", "routing"})
+        self._recording_indicator_after = root.after(200 if busy else 1000,
+                                                    lambda: self._poll_recording_indicator(root))
 
 
     def _refresh_manager_voice_tab(self):

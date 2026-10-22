@@ -71,6 +71,160 @@ class FakeClock:
         return self.value
 
 
+class RequestCancellationTests(unittest.TestCase):
+    """No capture, files, runtime or Tk: exercise real controller admission."""
+
+    def setUp(self):
+        self.controller = MeetingController.__new__(MeetingController)
+        self.controller._lock = threading.Lock()
+        self.controller._closed = self.controller._retention_active = self.controller._processing = False
+        self.controller._final_copy_active = self.controller._playback_active = False
+        self.controller._state, self.controller._play_thread = "idle", None
+        self.controller._processing_kind = self.controller._processing_session = None
+        self.controller._cancel, self.controller._file_done = threading.Event(), threading.Event()
+        self.controller.voice = Mock()
+        self.intelligence = Mock()
+        self.controller._intelligence = Mock(return_value=self.intelligence)
+        for name in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+            getattr(self.intelligence, name).return_value = {"answer": "synthetic", "report_id": "synthetic"}
+
+    def _call(self, method, event=None):
+        if method == "generate_report":
+            return self.controller.generate_report("one", "model", cancel_event=event)
+        if method == "ask_this_meeting":
+            return self.controller.ask_this_meeting("one", "question", "model", revision="rev", cancel_event=event)
+        return self.controller.ask_across_meetings("question", "model", cancel_event=event)
+
+    def _thread(self, operation):
+        values, errors = [], []
+        def run():
+            try:
+                values.append(operation())
+            except Exception as exc:
+                errors.append(exc)
+        thread = threading.Thread(target=run)
+        thread.start()
+        return thread, values, errors
+
+    def test_precancelled_requests_do_not_reserve_voice_or_call_intelligence(self):
+        event = threading.Event()
+        event.set()
+        for method in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+            with self.subTest(method=method), self.assertRaises(RuntimeError):
+                self._call(method, event)
+        self.controller.voice.reserve_for_meeting.assert_not_called()
+        self.controller._intelligence.assert_not_called()
+        self.assertFalse(self.controller._processing)
+
+    def test_cancel_after_bridge_admission_before_controller_admission_survives_the_clear(self):
+        original = self.controller._file_work
+        for method in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+            event, entered, release = threading.Event(), threading.Event(), threading.Event()
+            def admitted(*args, **kwargs):
+                entered.set()
+                if not release.wait(1):
+                    raise AssertionError("Controller admission barrier timed out")
+                return original(*args, **kwargs)
+            with self.subTest(method=method), patch.object(self.controller, "_file_work", side_effect=admitted):
+                thread, values, errors = self._thread(lambda: self._call(method, event))
+                try:
+                    self.assertTrue(entered.wait(1))
+                    self.assertFalse(self.controller.cancel_processing())
+                    event.set()
+                finally:
+                    release.set()
+                    thread.join(2)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(values, [])
+                self.assertEqual(len(errors), 1)
+                self.assertIsInstance(errors[0], RuntimeError)
+        self.controller.voice.reserve_for_meeting.assert_not_called()
+        self.controller._intelligence.assert_not_called()
+
+    def test_cancel_during_voice_reservation_stops_before_intelligence_and_releases_the_lease(self):
+        for method in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+            event = threading.Event()
+            self.controller.voice.reserve_for_meeting.side_effect = lambda: event.set() or "lease"
+            with self.subTest(method=method), self.assertRaises(RuntimeError):
+                self._call(method, event)
+        self.assertEqual(self.controller.voice.release_meeting.call_count, 3)
+        self.controller._intelligence.assert_not_called()
+
+    def test_request_and_legacy_cancellation_reach_inference_and_do_not_poison_replacements(self):
+        for method in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+            for cancel_active in (False, True):
+                event, entered, release = threading.Event(), threading.Event(), threading.Event()
+                observed = []
+                def infer(*args, cancel_event, **kwargs):
+                    entered.set()
+                    if not release.wait(1):
+                        raise AssertionError("Inference barrier timed out")
+                    observed.append(cancel_event.is_set())
+                    if cancel_event.is_set():
+                        raise RuntimeError("Synthetic inference cancelled before publication")
+                    return {"answer": "synthetic", "report_id": "synthetic"}
+                target = getattr(self.intelligence, method)
+                target.side_effect = infer
+                with self.subTest(method=method, cancel_active=cancel_active):
+                    thread, values, errors = self._thread(lambda: self._call(method, event))
+                    try:
+                        self.assertTrue(entered.wait(1))
+                        if cancel_active:
+                            self.assertTrue(self.controller.cancel_processing())
+                        else:
+                            event.set()
+                    finally:
+                        release.set()
+                        thread.join(2)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(observed, [True])
+                    self.assertEqual(values, [])
+                    self.assertEqual(len(errors), 1)
+                    self.assertIsInstance(errors[0], RuntimeError)
+                    target.side_effect = None
+                    fresh = threading.Event()
+                    self.assertIsInstance(self._call(method, fresh), dict)
+                    supplied = target.call_args.kwargs["cancel_event"]
+                    event.set()  # A late old request cannot cancel its replacement.
+                    self.assertFalse(supplied.is_set())
+                    self.assertFalse(fresh.is_set())
+
+    def test_existing_busy_and_closed_guards_are_preserved(self):
+        for name, value in (("_closed", True), ("_retention_active", True), ("_processing", True),
+                            ("_final_copy_active", True), ("_state", "recording"),
+                            ("_playback_active", True), ("_play_thread", Mock(is_alive=Mock(return_value=True)))):
+            original = getattr(self.controller, name)
+            setattr(self.controller, name, value)
+            self.controller._cancel.set()
+            try:
+                for method in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+                    with self.subTest(guard=name, method=method), self.assertRaises(RuntimeError):
+                        self._call(method, threading.Event())
+                    self.assertTrue(self.controller._cancel.is_set())
+            finally:
+                setattr(self.controller, name, original)
+                self.controller._cancel.clear()
+        self.controller.voice.reserve_for_meeting.assert_not_called()
+        self.controller._intelligence.assert_not_called()
+
+    def test_legacy_callers_still_receive_the_original_active_event(self):
+        for method in ("generate_report", "ask_this_meeting", "ask_across_meetings"):
+            self._call(method)
+            self.assertIs(getattr(self.intelligence, method).call_args.kwargs["cancel_event"],
+                          self.controller._cancel)
+
+    def test_cancel_after_report_commit_does_not_turn_saved_truth_into_a_failure(self):
+        event = threading.Event()
+        saved = {"report_id": "committed", "summary": "synthetic"}
+        def committed(*args, **kwargs):
+            # The intelligence layer has crossed its checked publication boundary.
+            event.set()
+            return saved
+        self.intelligence.generate_report.side_effect = committed
+        self.assertIs(self._call("generate_report", event), saved)
+        self.controller.voice.release_meeting.assert_called_once()
+
+
 class MeetingControllerTests(unittest.TestCase):
     def setUp(self):
         root = Path(__file__).parent / "tmp"

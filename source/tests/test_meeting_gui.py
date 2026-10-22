@@ -22,6 +22,7 @@ from meeting_gui import (
     add_meeting_tabs, destination_display, endpoint_options, format_recording_status,
     format_silence, format_time, hotkey_display, lost_sources, meter_value,
     open_meeting_window, playback_sources, recording_tone, retention_plan_projection,
+    ManagerViewState, manager_poll_interval,
     source_health, validated_settings, _append_detail_once,
     _processing_issue, _stage_status,
 )
@@ -1122,11 +1123,14 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
         view.ask_across_meetings()
         operation = view._submit.call_args.args[1]
+        # A long worker must use the model captured on Tk, never read its StringVar.
+        view.summary_model = mock.Mock()
+        view.summary_model.get.side_effect = AssertionError("Worker touched a Tk variable")
         operation()
 
         view.controller.ask_across_meetings.assert_called_once_with(
             "What was decided?", "local-model",
-            filters={},
+            filters={}, cancel_event=view.cross_request_cancel,
         )
 
     def test_search_resolution_callback_ignores_stale_generation(self):
@@ -1292,8 +1296,12 @@ class MeetingGuiLogicTests(unittest.TestCase):
     def test_close_cancels_only_this_views_interactive_jobs_while_idle(self):
         view = self._closing_view("idle")
         view.ask_pending, view.summary_pending = ("s1", 4), ("s2", 5)
+        ask, summary = threading.Event(), threading.Event()
+        view.ask_request_cancel, view.summary_request_cancel = ask, summary
         view.close_without_prompt(destroy=False)
-        view.controller.cancel_processing.assert_called_once_with(kinds=frozenset({"ask", "report"}))
+        self.assertTrue(ask.is_set())
+        self.assertTrue(summary.is_set())
+        view.controller.cancel_processing.assert_not_called()
         self.assertIsNone(view.ask_pending)
         self.assertIsNone(view.cross_pending)
 
@@ -2427,6 +2435,353 @@ class BackgroundBridgeTests(unittest.TestCase):
         self.bridge.drain()
         callback.assert_called_once_with(None, "Actionable error")
 
+    def test_library_reads_complete_while_a_long_job_is_blocked(self):
+        entered = threading.Event()
+        read = mock.Mock()
+        def long_job():
+            entered.set()
+            self.release.wait(2)
+        self.assertTrue(self.bridge.submit("report", long_job, mock.Mock(), urgent="long"))
+        self.assertTrue(entered.wait(1))
+        self.assertTrue(self.bridge.submit("library", lambda: ["synthetic"], read))
+        wait_for(lambda: self.bridge.results.qsize() == 1)
+        self.bridge.drain()
+        read.assert_called_once_with(["synthetic"], None)
+        self.assertFalse(self.release.is_set())
+
+    def test_cancelled_queued_chat_is_never_admitted(self):
+        entered = threading.Event()
+        answer, callback = mock.Mock(), mock.Mock()
+        def blocking_job():
+            entered.set()
+            self.release.wait(2)
+        self.bridge.submit("report", blocking_job, mock.Mock(), urgent="long")
+        self.assertTrue(entered.wait(1))
+        self.bridge.submit("ask_this_meeting", answer, callback, urgent="long")
+        self.bridge.invalidate("ask_this_meeting")
+        self.release.set()
+        wait_for(lambda: self.bridge.jobs["long"].empty())
+        self.bridge.drain()
+        answer.assert_not_called()
+        callback.assert_not_called()
+
+
+class LongJobCancellationTests(unittest.TestCase):
+    setUp = BackgroundBridgeTests.setUp
+    tearDown = BackgroundBridgeTests.tearDown
+
+    def _block_long_lane(self):
+        entered = threading.Event()
+        def block():
+            entered.set()
+            self.release.wait(2)
+        self.assertTrue(self.bridge.submit("blocker", block, mock.Mock(), "long"))
+        self.assertTrue(entered.wait(1))
+
+    def _report_view(self):
+        from meeting_support import MeetingController
+
+        controller = MeetingController.__new__(MeetingController)
+        controller._lock = threading.Lock()
+        controller._closed = controller._retention_active = controller._processing = False
+        controller._final_copy_active = controller._playback_active = False
+        controller._state, controller._play_thread = "idle", None
+        controller._processing_kind = controller._processing_session = None
+        controller._cancel, controller._file_done = threading.Event(), threading.Event()
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.bridge, view.controller, view.closed = self.bridge, controller, False
+        view.selected, view.summary_pending, view.summary_text = "one", ("one", 1), "old summary"
+        view.summary_request_cancel = threading.Event()
+        view.summary_status = Variable()
+        view._sync_summary_controls, view._fail = mock.Mock(), mock.Mock()
+        view._summary_hint = lambda _text: "synthetic hint"
+        view._show_summary, view.refresh_reports, view._summary_completed = mock.Mock(), mock.Mock(), mock.Mock()
+        view._action = mock.Mock(side_effect=lambda method, *, kinds, urgent:
+                                 getattr(controller, method)(kinds=kinds))
+        return view
+
+    def test_cancel_queued_report_prevents_controller_admission_and_allows_a_new_report(self):
+        self._block_long_lane()
+        view = self._report_view()
+        generated = mock.Mock(return_value={"report_id": "old"})
+        def old():
+            return view.controller._file_work(generated, "one", kind="report",
+                                              cancel_event=view.summary_request_cancel)
+        self.bridge.submit("generate_report", old,
+                           lambda value, error: view._report_generated("one", value, error, request=1), "long")
+        view.cancel_summary_generation()
+        self.assertNotIn("generate_report", self.bridge.tokens)
+        self.assertIsNone(view.summary_pending)
+        view._sync_summary_controls.assert_called_once_with()
+        view._action.assert_not_called()
+        view.summary_pending = ("one", 2)
+        view.summary_request_cancel = threading.Event()
+        view._summary_cancel_requested = None
+        view._report_generated("one", {"report_id": "stale"}, None, request=1)
+        self.assertEqual(view.summary_pending, ("one", 2))
+        view._show_summary.assert_not_called()
+        fresh = mock.Mock(return_value={"report_id": "new"})
+        self.bridge.submit("generate_report", lambda: view.controller._file_work(fresh, "one", kind="report"),
+                           lambda value, error: view._report_generated("one", value, error, request=2), "long")
+        self.release.set()
+        wait_for(lambda: self.bridge.results.qsize() == 2)
+        self.bridge.drain()
+        generated.assert_not_called()
+        fresh.assert_called_once_with()
+        view._show_summary.assert_called_once_with({"report_id": "new"})
+        self.assertIsNone(view.summary_pending)
+
+    def test_running_report_receives_request_cancellation_and_settles_on_completion(self):
+        view = self._report_view()
+        entered, received = threading.Event(), threading.Event()
+        event = view.summary_request_cancel
+        def report():
+            def generate():
+                entered.set()
+                if event.wait(1):
+                    received.set()
+                return None
+            return view.controller._file_work(generate, "one", kind="report", cancel_event=event)
+        self.bridge.submit("generate_report", report,
+                           lambda value, error: view._report_generated("one", value, error, request=1), "long")
+        self.assertTrue(entered.wait(1))
+        view.cancel_summary_generation()
+        self.assertTrue(received.wait(1))
+        view._action.assert_not_called()
+        self.assertEqual(view.summary_pending, ("one", 1))
+        wait_for(lambda: self.bridge.results.qsize() == 1)
+        self.bridge.drain()
+        self.assertIsNone(view.summary_pending)
+        view._show_summary.assert_not_called()
+
+    def test_each_gui_cancel_survives_bridge_admission_before_controller_admission(self):
+        for method, handler in (("generate_report", "cancel_summary_generation"),
+                                ("ask_this_meeting", "cancel_chat_answer"),
+                                ("cross_question", "cancel_cross_question")):
+            with self.subTest(method=method):
+                view = self._report_view()
+                view.controller.voice = mock.Mock()
+                view.controller._intelligence = mock.Mock()
+                view.controller.cancel_processing = mock.Mock(wraps=view.controller.cancel_processing)
+                entered, release, event = threading.Event(), threading.Event(), threading.Event()
+                view.summary_request_cancel = event
+                view.ask_request_cancel, view.ask_pending = event, ("one", 1)
+                view.cross_request_cancel, view.cross_pending, view.cross_request = event, 1, 1
+                view.selected = "other"
+                view._chat_turn, view._sync_qa_controls = lambda *_: None, mock.Mock()
+                view._sync_job_cancels, view.cross_status = mock.Mock(), Variable()
+                original = view.controller._file_work
+                def before_controller(*args, **kwargs):
+                    entered.set()
+                    if not release.wait(1):
+                        raise AssertionError("Admission boundary timed out")
+                    return original(*args, **kwargs)
+                view.controller._file_work = before_controller
+                def operation():
+                    if method == "generate_report":
+                        return view.controller.generate_report("one", "model", cancel_event=event)
+                    if method == "ask_this_meeting":
+                        return view.controller.ask_this_meeting("one", "question", "model", cancel_event=event)
+                    return view.controller.ask_across_meetings("question", "model", cancel_event=event)
+                callback = mock.Mock()
+                self.assertTrue(self.bridge.submit(method, operation, callback, "long"))
+                try:
+                    self.assertTrue(entered.wait(1))
+                    self.assertIn(method, self.bridge.admitted)
+                    getattr(view, handler)()
+                    self.assertTrue(event.is_set())
+                    view.controller.cancel_processing.assert_not_called()
+                    view._action.assert_not_called()
+                finally:
+                    release.set()
+                wait_for(lambda: self.bridge.results.qsize() == 1)
+                self.bridge.drain()
+                view.controller.voice.reserve_for_meeting.assert_not_called()
+                view.controller._intelligence.assert_not_called()
+                if method == "generate_report":
+                    self.assertIsNotNone(callback.call_args.args[1])
+                else:
+                    callback.assert_not_called()
+
+    def _check_event_job(self, key, cancel_method, event_name, *, running=False):
+        if not running:
+            self._block_long_lane()
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.bridge, view.controller = self.bridge, mock.Mock()
+        view._sync_job_cancels, view._refresh_summary_models, view.search = mock.Mock(), mock.Mock(), mock.Mock()
+        view._fail = mock.Mock()
+        view.summary_progress_lock = threading.Lock()
+        view.summary_progress = ("synthetic", 1, 10)
+        view.summary_model_status, view.semantic_status, view.index_status = Variable(), Variable(), Variable()
+        view.rebuild_button = mock.Mock()
+        view.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
+        event, entered, received = threading.Event(), threading.Event(), threading.Event()
+        setattr(view, event_name, event)
+        operation = mock.Mock(return_value={"state": "ready"})
+        def work():
+            entered.set()
+            if running:
+                if event.wait(1):
+                    received.set()
+            return operation()
+        if key == "summary_model":
+            callback = lambda value, error: view._summary_model_finished({"name": "synthetic"}, error)
+        elif key in {"semantic_model", "semantic_rebuild"}:
+            callback = view._semantic_operation_finished
+        else:
+            callback = view._rebuild_finished
+        completed = mock.Mock(wraps=callback)
+        self.bridge.submit(key, work, completed, "long")
+        if running:
+            self.assertTrue(entered.wait(1))
+        getattr(view, cancel_method)()
+        self.assertTrue(event.is_set())
+        if running:
+            self.assertTrue(received.wait(1))
+            self.assertIs(getattr(view, event_name), event)
+            wait_for(lambda: self.bridge.results.qsize() == 1)
+            self.bridge.drain()
+            completed.assert_called_once()
+        else:
+            self.assertNotIn(key, self.bridge.tokens)
+            self.assertIsNone(getattr(view, event_name))
+            view._sync_job_cancels.assert_called_once_with()
+            replacement = mock.Mock()
+            self.bridge.submit(key, lambda: "fresh", replacement, "long")
+            self.release.set()
+            wait_for(lambda: self.bridge.results.qsize() == 2)
+            self.bridge.drain()
+            operation.assert_not_called()
+            completed.assert_not_called()
+            replacement.assert_called_once_with("fresh", None)
+            if key == "summary_model":
+                view._refresh_summary_models.assert_called_once_with()
+            elif key == "rebuild_index":
+                view.rebuild_button.configure.assert_called_once_with(state="normal")
+                self.assertEqual(view.rebuild_progress["state"], "cancelled")
+
+    def test_cancel_queued_summary_download_prevents_file_or_network_work(self):
+        self._check_event_job("summary_model", "cancel_summary_download", "summary_download_cancel")
+
+    def test_cancel_queued_semantic_download_prevents_file_or_network_work(self):
+        self._check_event_job("semantic_model", "cancel_semantic_operation", "semantic_cancel")
+
+    def test_cancel_queued_semantic_rebuild_settles_without_admission(self):
+        self._check_event_job("semantic_rebuild", "cancel_semantic_operation", "semantic_cancel")
+
+    def test_cancel_queued_index_rebuild_restores_controls(self):
+        self._check_event_job("rebuild_index", "cancel_rebuild_index", "rebuild_cancel")
+
+    def test_running_summary_download_receives_its_event_and_keeps_completion(self):
+        self._check_event_job("summary_model", "cancel_summary_download", "summary_download_cancel", running=True)
+
+    def test_running_semantic_download_receives_its_event_and_keeps_completion(self):
+        self._check_event_job("semantic_model", "cancel_semantic_operation", "semantic_cancel", running=True)
+
+    def test_running_semantic_rebuild_receives_its_event_and_keeps_completion(self):
+        self._check_event_job("semantic_rebuild", "cancel_semantic_operation", "semantic_cancel", running=True)
+
+    def test_running_index_rebuild_receives_its_event_and_keeps_completion(self):
+        self._check_event_job("rebuild_index", "cancel_rebuild_index", "rebuild_cancel", running=True)
+
+    def test_completed_result_waiting_for_gui_is_not_mistaken_for_queued_work(self):
+        completed = mock.Mock()
+        self.bridge.submit("generate_report", lambda: "finished", completed, "long")
+        wait_for(lambda: self.bridge.results.qsize() == 1)
+        self.assertFalse(self.bridge.cancel_queued("generate_report"))
+        self.bridge.drain()
+        completed.assert_called_once_with("finished", None)
+
+
+class ManagerLifecycleLogicTests(unittest.TestCase):
+    def test_poll_cadence_uses_controller_playback_contract(self):
+        for snapshot, expected in (
+            ({"state": "idle"}, 2000), ({"state": "idle", "processing": True}, 1000),
+            ({"state": "postprocessing", "processing": True}, 1000),
+            ({"state": "recording"}, 200), ({"state": "paused"}, 200),
+            ({"state": "idle", "previewing": True}, 200),
+            ({"state": "idle", "playback": {"active": True}}, 200),
+        ):
+            with self.subTest(snapshot=snapshot):
+                self.assertEqual(manager_poll_interval(snapshot), expected)
+
+    def test_hide_stops_poll_without_closing_or_cancelling_controller(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed, view.visible, view.after_id = False, True, "pending"
+        view.root, view.waveform, view.controller = mock.Mock(), mock.Mock(), mock.Mock()
+        view._visible_destination = lambda: "library"
+        view._poll = mock.Mock()
+        view.set_visible(False)
+        view.root.after_cancel.assert_called_once_with("pending")
+        self.assertIsNone(view.after_id)
+        self.assertFalse(view.closed)
+        view.controller.cancel_processing.assert_not_called()
+        view.set_visible(True)
+        view._poll.assert_called_once_with()
+
+    def test_capture_keeps_bounded_python_context_and_settles_pending_chats(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.ask_conversations = {str(index): [{"status": "pending", "saving": True}]
+                                  for index in range(10)}
+        view._visible_destination = lambda: None
+        view.query, view.transcript_style = Variable("synthetic query"), Variable("Com horários")
+        view.transcript_style_box = mock.Mock()
+        view.transcript_style_box.current.return_value = 1
+        view.selected, view.library_cursor, view.library_back_stack = "synthetic", "cursor", [None, "cursor"]
+        view.detail_sections, view.sessions = mock.Mock(), mock.Mock()
+        view.detail_sections.current = "ask"
+        view.sessions.yview.return_value = (0.4, 0.8)
+        state = view.capture_view_state()
+        self.assertIsInstance(state, ManagerViewState)
+        self.assertEqual((state.destination, state.query, state.selection, state.detail_section,
+                          state.transcript_style, state.list_scroll),
+                         ("voice", "synthetic query", "synthetic", "ask", "timestamped", 0.4))
+        self.assertEqual(len(state.chats), 8)
+        self.assertTrue(all(turns[0]["status"] == "error" and "saving" not in turns[0]
+                            for turns in state.chats.values()))
+        self.assertEqual(view.ask_conversations["9"][0]["status"], "pending")
+
+    def test_recording_shortcuts_validate_conflicts_and_dispatch_only_valid_states(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.raw_settings = {}
+        view.controller, view._action, view.pause_resume = mock.Mock(), mock.Mock(), mock.Mock()
+        view.request_start, view._fail, view._here = mock.Mock(), mock.Mock(), lambda: "recording"
+        with mock.patch("meeting_gui.validate_hotkey_conflicts") as validate:
+            view.controller.snapshot.return_value = {"state": "idle"}
+            self.assertEqual(view._record_shortcut(False), "break")
+            view.request_start.assert_called_once_with("window")
+            self.assertEqual(validate.call_args.args[0]["meeting_hotkey"], "ctrl+shift+r")
+            view.controller.snapshot.return_value = {"state": "paused"}
+            view._record_shortcut(False)
+            view._action.assert_called_once_with("stop", urgent=True)
+            view._record_shortcut(True)
+            view.pause_resume.assert_called_once_with()
+        with mock.patch("meeting_gui.validate_hotkey_conflicts", side_effect=ValueError("conflict")):
+            view.request_start.reset_mock()
+            view._record_shortcut(False)
+            view.request_start.assert_not_called()
+            view._fail.assert_called_once()
+
+    def test_rebuild_restores_context_and_continues_unique_chat_identifiers(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.query, view.transcript_style = Variable(), Variable()
+        view._cancel_library_search, view._sync_transcript_style = mock.Mock(), mock.Mock()
+        view.detail_sections, view.notebook = mock.Mock(), mock.Mock()
+        view.recording_tab, view.library_tab, view.settings_tab, view.voice_tab = "record", "library", "settings", "voice"
+        view.load_session, view.refresh_library = mock.Mock(), mock.Mock()
+        state = ManagerViewState(destination="library", query="synthetic", selection="one",
+                                 detail_section="ask", transcript_style="timestamped", list_scroll=0.4,
+                                 chats={"one": [{"id": 41, "status": "complete"}]})
+        view.restore_view_state(state)
+        self.assertEqual(view.query.get(), "synthetic")
+        self.assertEqual(view.transcript_style.get(), "Com horários")
+        self.assertEqual(view.ask_request, 41)
+        view.detail_sections.select.assert_called_once_with("ask")
+        view.notebook.select.assert_called_once_with("library")
+        view.load_session.assert_called_once_with("one")
+        self.assertIsNot(view.ask_conversations, state.chats)
+        self.assertIs(view._restoring_view_state, state)
+
 
 class MeetingWindowSmokeTests(unittest.TestCase):
     @classmethod
@@ -2824,8 +3179,10 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         chat = view.meeting_chat
         self.assertEqual(chat.cancel_button.winfo_manager(), "pack")
         self.assertEqual(str(chat.cancel_button.cget("state")), "normal")
+        cancel_event = view.ask_request_cancel
         chat.cancel_button.invoke()
-        view.controller.cancel_processing.assert_called_once_with(kinds=frozenset({"ask"}))
+        self.assertTrue(cancel_event.is_set())
+        view.controller.cancel_processing.assert_not_called()
         self.assertIsNone(view.ask_pending)
         self.assertEqual(view.ask_conversations["synthetic-session"], [])
         self.assertEqual(chat.get_question(), "Quem decide o prazo?")
@@ -3372,13 +3729,16 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.root.update()
         view.meeting_chat.set_question("Qual foi a decisão?")
         view.meeting_chat.send_button.invoke()
+        cancel_event = view.ask_request_cancel
+        self.assertIsInstance(cancel_event, threading.Event)
+        self.assertFalse(cancel_event.is_set())
         wait_for(lambda: (self.root.update(), view.ask_pending is None)[1])
         turns = view.ask_conversations[view.selected]
         self.assertEqual(turns[0]["status"], "complete")
         self.assertEqual(turns[0]["answer"], "A revisão será na sexta-feira.")
         view.controller.ask_this_meeting.assert_called_once_with(
             "synthetic-session", "Qual foi a decisão?", "synthetic-model",
-            revision="revision-1", history=[],
+            revision="revision-1", history=[], cancel_event=cancel_event,
         )
         self.assertEqual(view.detail_sections.buttons["ask"].cget("text"), "Chat")
         composer = view.meeting_chat.composer
