@@ -72,6 +72,145 @@ def _ancestors(widget):
         parent = parent.master
 
 
+class DictationPresentationTests(unittest.TestCase):
+    def test_download_bytes_belong_only_to_the_explicit_or_current_runtime_profile(self):
+        snapshot = {"state": "loading", "download_active": True,
+                    "download_profile": "compact", "download_done": 25, "download_total": 200}
+        self.assertTrue(tx.voice_profile_downloading(snapshot, "compact", "accuracy"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+        snapshot.update(download_active=False, download_profile=None, download_done=0, download_total=0)
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+        snapshot.update(download_done=50, download_total=100)
+        self.assertTrue(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "compact", "accuracy"))
+        snapshot["state"] = "idle"
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+
+    def test_header_uses_controller_health_instead_of_enabled_setting(self):
+        voice = mock.Mock()
+        voice.settings.profile, voice.settings.language = "balanced", "pt-BR"
+        voice.settings.hotkey, voice.settings.activation_mode = "ctrl+alt+space", "hold"
+        voice.is_enabled.return_value = True
+        for state, flags, expected, tone in (
+            ("loading", {}, "Carregando ditado", "info"),
+            ("loading", {"load_failed": True}, "Carregando ditado", "info"),
+            ("unavailable", {}, "Ditado indisponível", "warning"),
+            ("unavailable", {"load_failed": True}, "Falha ao carregar", "danger"),
+            ("idle", {}, "Ditado pronto", "success"),
+            ("idle", {"load_failed": True}, "Ditado pronto", "success"),
+            ("idle", {"meeting_busy": True}, "Aguardando a gravação", "warning"),
+        ):
+            voice.status_snapshot.return_value = dict(state=state, **flags)
+            label, actual_tone = tx.voice_status_presentation(voice)
+            self.assertIn(expected, label)
+            self.assertEqual(actual_tone, tone)
+        voice.is_enabled.return_value = False
+        voice.status_snapshot.return_value = {"state": "unavailable"}
+        self.assertIn("Ditado desligado", tx.voice_status_presentation(voice)[0])
+
+    def test_history_states_are_translated_and_have_written_tones(self):
+        import i18n
+        self.addCleanup(i18n.set_language, "pt-BR")
+        i18n.set_language("en-US")
+        self.assertEqual(tx.voice_history_status("failed"), ("Failed", "danger"))
+        self.assertEqual(tx.voice_history_status("interrupted"), ("Interrupted", "warning"))
+        self.assertEqual(tx.voice_history_status("completed"), ("Completed", "text"))
+        self.assertEqual(tx.voice_history_status("other"), ("Unknown", "text_muted"))
+
+    def test_attention_caption_gives_neutral_actions_in_both_languages(self):
+        import i18n
+        self.addCleanup(i18n.set_language, "pt-BR")
+        for language, single, plural, action in (
+            ("pt-BR", "1 ditado precisa", "2 ditados precisam", "Selecione um item"),
+            ("en-US", "1 dictation needs", "2 dictations need", "Select an item"),
+        ):
+            i18n.set_language(language)
+            self.assertIn(single, tx.voice_history_attention(1))
+            self.assertIn(plural, tx.voice_history_attention(2))
+            for count in (1, 2):
+                text = tx.voice_history_attention(count)
+                self.assertIn(action, text)
+                self.assertNotIn("Ative", text)
+                self.assertNotIn("Enable", text)
+
+    def test_download_ticks_do_not_rebuild_the_tray(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.voice, app.gui, app.logger = mock.Mock(), mock.Mock(), mock.Mock()
+        app.refresh_tray_menu = mock.Mock()
+        state = {"state": "unavailable", "download_active": True, "enabled": False}
+        app.voice.status_snapshot.return_value = state
+        app._voice_status_changed()
+        state["download_done"] = 50
+        app._voice_status_changed()
+        app.refresh_tray_menu.assert_called_once_with()
+        state["download_active"] = False
+        app._voice_status_changed()
+        self.assertEqual(app.refresh_tray_menu.call_count, 2)
+
+    def test_recording_observer_request_cannot_cross_a_shortcut_edit_epoch(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.voice, app.gui = mock.Mock(), mock.Mock()
+        app._quitting = threading.Event()
+        app._meeting_startup_ready = True
+        app._manager_meeting_view = mock.Mock(closed=False)
+        app.meetings = mock.Mock()
+        app.voice.hotkey_edit_state.return_value = (0, False)
+        self.assertTrue(app._meeting_hotkey_request())
+        queued = app.gui.submit.call_args.args[0]
+        app.voice.hotkey_edit_state.return_value = (2, False)
+        queued("root")
+        app.meetings.snapshot.assert_not_called()
+        app.voice.hotkey_edit_state.return_value = (3, True)
+        self.assertFalse(app._meeting_hotkey_request())
+        app._manager_meeting_view.request_start.assert_not_called()
+
+    def test_enable_keeps_persistence_waits_off_the_gui_caller(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.voice, app.gui, app.task_runner = mock.Mock(), mock.Mock(), mock.Mock()
+        app.voice.settings.profile = "balanced"
+        app.voice.model_installed.return_value = True
+        app._quitting = threading.Event()
+        app.refresh_tray_menu, app._refresh_manager_voice_tab = mock.Mock(), mock.Mock()
+        entered, release = threading.Event(), threading.Event()
+        observed = []
+
+        def blocked_enable():
+            observed.append(threading.get_ident())
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic persistence wait timed out")
+        app.voice.enable.side_effect = blocked_enable
+        with mock.patch.object(tx.macos_permissions, "check_microphone", return_value="granted"):
+            app._confirm_and_enable_voice()
+            app.voice.enable.assert_not_called()
+            work = app.task_runner.start.call_args.args[0]
+            worker = threading.Thread(target=work)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                app._confirm_and_enable_voice()
+                app.task_runner.start.assert_called_once()
+            finally:
+                release.set()
+                worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertNotEqual(observed, [threading.get_ident()])
+        app.gui.submit.call_args.args[0]("root")
+        self.assertFalse(app._voice_enable_pending)
+
+    def test_recording_monitor_uses_the_shared_passthrough_state(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._settings_lock, app._quitting = threading.RLock(), threading.Event()
+        app._meeting_monitor, app._meeting_startup_ready = None, True
+        app.settings = {"meeting_hotkey": "ctrl+alt+f9"}
+        app.voice = mock.Mock()
+        app.notify_error = mock.Mock()
+        with mock.patch("voice_hotkey.VoiceHotkeyMonitor") as monitor:
+            app._rebuild_meeting_monitor()
+        self.assertIs(monitor.call_args.kwargs["passthrough_state"], app.voice.hotkey_edit_state)
+        app.notify_error.assert_not_called()
+
+
 class ManagerLifecycleTests(unittest.TestCase):
     def test_close_hides_and_notifies_once_without_closing_the_view(self):
         app = tx.Snipvoice.__new__(tx.Snipvoice)
@@ -272,8 +411,8 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         checked, labels, buttons, menu_items, selector_count = self._on_gui(build)
         self.assertTrue(checked)
-        self.assertIn("Entrada por voz (pronta)", labels)
-        self.assertIn("Salvar e usar", buttons)
+        self.assertTrue(any("Ditado" in text for text in labels), labels)
+        self.assertIn("Salvar", buttons)
         self.assertIn("Histórico de voz…", buttons)
         self.assertEqual(menu_items, [
             "Correções…", "Recarregar comandos",
@@ -349,7 +488,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             primary_visible = all(
                 button.winfo_manager()
                 for button in buttons
-                if button.cget("text") in ("Salvar e usar", "Histórico de voz…")
+                if button.cget("text") in ("Salvar", "Histórico de voz…")
             )
             has_secondary_buttons = any(
                 button.cget("text") in labels for button in buttons
@@ -385,7 +524,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 if isinstance(widget, (tk.Button, tk.Menubutton))
             }
             expected = {
-                "Salvar e usar",
+                "Salvar",
                 "Histórico de voz…",
                 "Mais opções ▾",
             }
@@ -451,6 +590,294 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(after_state, ("accuracy", "auto"))
         self.assertIn("Muito preciso · Qwen 1.7B", after_display)
         self.assertTrue(any("Automático" in text for text in after_display), after_display)
+
+    def test_voice_status_ticks_preserve_dirty_fields_and_discard_reloads_settings(self):
+        voice = _ensure_voice(self.app)
+        queued = []
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            frame = tk.Frame(owner)
+            frame.pack(fill=tk.BOTH, expand=True)
+            self.app._create_voice_tab(frame, owner)
+            selected, language, hotkey, command, mode = self.app._manager_voice_tk_vars
+            selected.set("accuracy")
+            language.set("auto")
+            hotkey.set("ctrl+shift+f8")
+            command.set("ctrl+shift+f9")
+            mode.set("toggle")
+            edited = tuple(var.get() for var in self.app._manager_voice_tk_vars)
+            for _ in range(10):
+                self.app._manager_voice_refresher()
+            self.assertEqual(tuple(var.get() for var in self.app._manager_voice_tk_vars), edited)
+            buttons = {str(widget.cget("text")): widget for widget in _descendants(frame)
+                       if isinstance(widget, tk.Button)}
+            self.assertEqual(str(buttons["Salvar"].cget("state")), tk.NORMAL)
+            buttons["Descartar"].invoke()
+            self.assertEqual(selected.get(), voice.settings.profile)
+            self.assertEqual(hotkey.get(), voice.settings.hotkey)
+            self.assertEqual(str(buttons["Salvar"].cget("state")), tk.DISABLED)
+        with mock.patch.object(self.app.task_runner, "start", side_effect=lambda fn, **kw: queued.append(fn)):
+            self._on_gui(build)
+
+    def test_shortcut_edit_status_callback_updates_the_real_header_without_manual_refresh(self):
+        voice = self.app.voice
+        self.app.voice_status_indicator = mock.Mock()
+        with voice._lock:
+            voice.settings.enabled = True
+            voice._state = "idle"
+        built = {}
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            owner.withdraw()
+            frame = tk.Frame(owner)
+            frame.pack(fill=tk.BOTH, expand=True)
+            self.app._create_voice_tab(frame, owner)
+            built["header"] = next(widget for widget in _descendants(frame)
+                                   if isinstance(widget, tk.Label)
+                                   and str(widget.cget("text")).startswith("Ditado pronto"))
+        self._on_gui(build)
+        self.assertIn("Ditado pronto", self._on_gui(lambda _root: built["header"].cget("text")))
+        token = threading.Event()
+        token.set()
+        self.assertTrue(self._on_gui(lambda _root: voice.begin_hotkey_edit(token)))
+        paused = self._on_gui(lambda _root: (str(built["header"].cget("text")),
+                                           str(built["header"].cget("fg"))))
+        self.assertIn("Atalhos pausados para configurar", paused[0])
+        self.assertEqual(paused[1], ui_theme.theme().info)
+        self._on_gui(lambda _root: voice.end_hotkey_edit(token))
+        ready = self._on_gui(lambda _root: (str(built["header"].cget("text")),
+                                          str(built["header"].cget("fg"))))
+        self.assertIn("Ditado pronto", ready[0])
+        self.assertEqual(ready[1], ui_theme.theme().success)
+
+    def test_model_download_percentages_fit_in_both_languages_and_window_sizes(self):
+        import i18n
+        self.addCleanup(i18n.set_language, "pt-BR")
+        voice = mock.Mock()
+        voice.settings.profile, voice.settings.language = "balanced", "auto"
+        voice.settings.hotkey, voice.settings.command_hotkey = "ctrl+alt+space", "ctrl+alt+shift+space"
+        voice.settings.activation_mode = "hold"
+        voice.is_enabled.return_value = False
+        voice.history_rows.return_value = []
+        voice.model_download_in_progress.side_effect = lambda profile=None: profile == "balanced"
+        voice.status_snapshot.return_value = {
+            "state": "unavailable", "download_active": True, "download_profile": "balanced",
+            "download_done": 100, "download_total": 100,
+        }
+        voice.cache_dir = self.app.voice.cache_dir
+        self.app.voice = voice
+
+        built = {}
+
+        def build(root, language, width):
+            i18n.set_language(language)
+            owner = tk.Toplevel(root)
+            owner.geometry(f"{width}x700")
+            built["owner"] = owner
+            frame, models = tk.Frame(owner), tk.Frame(owner)
+            models.pack(fill=tk.X)
+            self.app._build_voice_settings_controls(frame, owner, models_parent=models)
+            button = next(widget for widget in _descendants(models)
+                          if isinstance(widget, tk.Button)
+                          and str(widget.cget("text")) == i18n.tr("Baixando {percent}%", percent=100))
+            built.update(models=models, button=button)
+
+        def measure(_root):
+            owner, models, button = (built[name] for name in ("owner", "models", "button"))
+            # Map notifications are normal events; idle layout alone leaves
+            # the new child hierarchy unmapped on Windows.
+            owner.update()
+            self.assertTrue(owner.winfo_viewable())
+            self.assertTrue(button.winfo_viewable())
+            # Copying a pixel font through Font rounds it to a point size.
+            # Measure the exact configured font that Tk uses for this button.
+            text_width = int(button.tk.call(
+                "font", "measure", button.cget("font"), button.cget("text")))
+            inset = 2 * sum(int(button.cget(option)) for option in ("padx", "bd", "highlightthickness"))
+            return (text_width, button.winfo_width() - inset,
+                    button.winfo_rootx() + button.winfo_width(),
+                    models.winfo_rootx() + models.winfo_width())
+
+        def close(_root):
+            owner = built.pop("owner", None)
+            if owner is not None and owner.winfo_exists():
+                owner.destroy()
+
+        with mock.patch("voice_models.model_is_installed", return_value=False):
+            for language in ("pt-BR", "en-US"):
+                for width in (1040, 1440):
+                    with self.subTest(language=language, width=width):
+                        try:
+                            self._on_gui(lambda root: build(root, language, width))
+                            text_width, available, right, parent_right = self._on_gui(measure)
+                            self.assertGreaterEqual(available, text_width)
+                            self.assertLessEqual(right, parent_right)
+                        finally:
+                            self._on_gui(close)
+
+    def test_shortcut_capture_hint_distinguishes_pause_busy_and_invalid_input(self):
+        voice = self.app.voice
+        self.app.voice_status_indicator = mock.Mock()
+        with voice._lock:
+            voice.settings.enabled = True
+            voice._state = "idle"
+
+        built = {}
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            owner.geometry("1040x700")
+            built["owner"] = owner
+            frame = tk.Frame(owner)
+            frame.pack(fill=tk.BOTH, expand=True)
+            self.app._create_voice_tab(frame, owner)
+            entry = next(widget for widget in _descendants(frame)
+                         if isinstance(widget, tk.Entry) and widget.get() == "Ctrl + Alt + Space")
+            hint = next(widget for widget in entry.master.winfo_children()
+                        if isinstance(widget, tk.Label) and int(widget.grid_info().get("row", -1)) == 6)
+            built.update(entry=entry, hint=hint)
+
+        def inspect(_root):
+            owner, entry, hint = (built[name] for name in ("owner", "entry", "hint"))
+            owner.update()
+            self.assertTrue(owner.winfo_viewable())
+            self.assertTrue(entry.winfo_viewable())
+            entry.event_generate("<FocusIn>")
+            self.assertIn("Atalhos globais pausados", str(hint.cget("text")))
+            self.assertEqual(str(hint.cget("fg")), ui_theme.theme().info)
+            self.app._manager_voice_tk_vars[3].set(voice.settings.hotkey)
+            entry.event_generate("<FocusOut>")
+            self.assertIn("Use atalhos diferentes", str(hint.cget("text")))
+            self.assertEqual(str(hint.cget("fg")), ui_theme.theme().danger)
+            self.app._manager_voice_tk_vars[3].set(voice.settings.command_hotkey)
+            entry.event_generate("<FocusOut>")
+            self.assertEqual(str(hint.cget("text")), "")
+            with voice._lock:
+                voice._state = "transcribing"
+            try:
+                entry.event_generate("<FocusIn>")
+                self.assertIn("Aguarde o ditado terminar", str(hint.cget("text")))
+                self.assertEqual(str(hint.cget("fg")), ui_theme.theme().warning)
+                entry.event_generate("<FocusOut>")
+            finally:
+                with voice._lock:
+                    voice._state = "idle"
+        try:
+            self._on_gui(build)
+            self._on_gui(inspect)
+        finally:
+            def close(_root):
+                owner = built.get("owner")
+                if owner is not None and owner.winfo_exists():
+                    owner.destroy()
+            self._on_gui(close)
+
+    def test_recent_history_reads_off_tk_once_and_disables_nonretryable_selection(self):
+        voice = mock.Mock()
+        voice.status_snapshot.return_value = {"state": "idle", "retry_available": True, "enabled": True}
+        voice.history_rows.return_value = [
+            {"id": "completed", "created_at": "2026-01-01T12:00:00Z", "status": "completed",
+             "transcript": "synthetic receipt", "retryable": False},
+            {"id": "failed", "created_at": "2026-01-01T12:01:00Z", "status": "failed",
+             "transcript": "", "error": "synthetic failure", "retryable": True},
+        ]
+        self.app.voice = voice
+        queued, built = [], {}
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            frame = tk.Frame(owner)
+            frame.pack(fill=tk.BOTH, expand=True)
+            tree, refresh = self.app._build_voice_history_rows(frame, owner, limit=5, height=3)
+            built.update(frame=frame, owner=owner, tree=tree, refresh=refresh)
+            for n in range(10):
+                voice.status_snapshot.return_value["download_done"] = n
+                refresh()
+            voice.history_rows.assert_not_called()
+
+        with mock.patch.object(self.app.task_runner, "start", side_effect=lambda fn, **kw: queued.append(fn)):
+            self._on_gui(build)
+            self.assertEqual(len(queued), 1)
+            queued.pop()()  # Test thread, never the Tk owner.
+
+            def inspect(_root):
+                tree = built["tree"]
+                self.assertEqual(str(tree.cget("style")), "Manager.Treeview")
+                self.assertEqual(tuple(tree.get_children()), ("completed", "failed"))
+                self.assertNotIn("T12:", tree.item("completed", "values")[0])
+                self.assertEqual(tree.item("failed", "values")[1], "Falhou")
+                retry = next(widget for widget in _descendants(built["frame"])
+                             if isinstance(widget, tk.Button) and str(widget.cget("text")) == "Tentar novamente")
+                tree.selection_set("completed")
+                tree.event_generate("<<TreeviewSelect>>")
+                self.assertEqual(str(retry.cget("state")), tk.DISABLED)
+                tree.selection_set("failed")
+                tree.event_generate("<<TreeviewSelect>>")
+                self.assertEqual(str(retry.cget("state")), tk.NORMAL)
+                built["owner"].destroy()
+                self.assertFalse(getattr(self.app, "_voice_history_refreshers", []))
+            self._on_gui(inspect)
+
+    def test_history_error_is_not_an_empty_row_and_destroy_fences_delivery(self):
+        voice = mock.Mock()
+        voice.status_snapshot.return_value = {"state": "idle", "retry_available": True}
+        voice.history_rows.side_effect = OSError("synthetic read failure")
+        self.app.voice = voice
+        queued, built = [], {}
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            frame = tk.Frame(owner)
+            frame.pack(fill=tk.BOTH, expand=True)
+            tree, refresh = self.app._build_voice_history_rows(frame, owner, limit=200, height=4)
+            built.update(owner=owner, frame=frame, tree=tree, refresh=refresh)
+
+        with mock.patch.object(self.app.task_runner, "start", side_effect=lambda fn, **kw: queued.append(fn)):
+            self._on_gui(build)
+            queued.pop()()
+
+            def inspect(_root):
+                self.assertFalse(built["tree"].get_children())
+                labels = [str(widget.cget("text")) for widget in _descendants(built["frame"])
+                          if isinstance(widget, tk.Label)]
+                self.assertTrue(any("Não foi possível ler" in text for text in labels))
+                self.assertNotIn("Nenhuma gravação.", labels)
+                built["refresh"](force=True)
+                built["owner"].destroy()
+            self._on_gui(inspect)
+            queued.pop()()
+            self._on_gui(lambda _root: self.assertFalse(getattr(self.app, "_voice_history_refreshers", [])))
+
+    def test_rejected_dictation_save_keeps_the_form_dirty(self):
+        voice = _ensure_voice(self.app)
+        queued, built = [], {}
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            frame = tk.Frame(owner)
+            frame.pack(fill=tk.BOTH, expand=True)
+            self.app._create_voice_tab(frame, owner)
+            self.app._manager_voice_tk_vars[2].set("ctrl+shift+f8")
+            save = next(widget for widget in _descendants(frame) if isinstance(widget, tk.Button)
+                        and str(widget.cget("text")) == "Salvar")
+            built.update(frame=frame, save=save)
+            save.invoke()
+
+        with mock.patch.object(self.app.task_runner, "start", side_effect=lambda fn, **kw: queued.append((kw.get("name"), fn))), \
+                mock.patch.object(voice, "apply_options", return_value=False), \
+                mock.patch("voice_models.model_is_installed", return_value=True):
+            self._on_gui(build)
+            next(fn for name, fn in queued if name == "voice-settings")()
+
+            def inspect(_root):
+                self.assertEqual(str(built["save"].cget("state")), tk.NORMAL)
+                self.assertEqual(self.app._manager_voice_tk_vars[2].get(), "ctrl+shift+f8")
+                labels = [str(widget.cget("text")) for widget in _descendants(built["frame"])
+                          if isinstance(widget, tk.Label)]
+                self.assertIn("Não foi possível salvar. Tente novamente.", labels)
+            self._on_gui(inspect)
 
     def test_voice_tab_download_button_downloads_its_model_without_enabling(self):
         voice = mock.Mock()
@@ -573,7 +1000,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                           and widget.cget("value") == "toggle")
             choice.invoke()
             next(widget for widget in widgets if isinstance(widget, tk.Button)
-                 and widget.cget("text") == "Salvar e usar").invoke()
+                 and widget.cget("text") == "Salvar").invoke()
             return threading.current_thread()
 
         with mock.patch("voice_models.model_is_installed", return_value=True), \

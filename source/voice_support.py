@@ -166,6 +166,7 @@ class VoiceController:
         self._on_status_change = on_status_change
         self._download_done = 0
         self._download_total = 0
+        self._last_progress_emit = float("-inf")
         self._model_download_active = False
         self._model_download_profile = None
         self._model_download_cancel = threading.Event()
@@ -187,6 +188,7 @@ class VoiceController:
             )
         self._history = history_store
         self._lock = threading.Lock()
+        self._options_lock = threading.RLock()
         self._state = STATE_UNAVAILABLE
         self._session_generation = 0
         self._cancel = threading.Event()
@@ -208,6 +210,10 @@ class VoiceController:
         self._form_guard_token = None
         self._partial = ""
         self._monitor = None
+        self._hotkey_edit_token = None
+        self._hotkey_edit_epoch = 0
+        self._hotkey_edit_snapshot = (0, False)
+        self._hotkey_cancel_pending = False
         self._load_error = None
         self._workers = []
         self._workers_lock = threading.Lock()
@@ -215,6 +221,7 @@ class VoiceController:
         self._hotkey_events = deque()
         self._hotkey_worker_active = False
         self._hotkey_overflow = False
+        self._hotkey_overflow_epoch = 0
         self._unload_lock = threading.Lock()
         self._unload_pending = False
         self._unload_in_progress = False
@@ -423,7 +430,15 @@ class VoiceController:
                 return tr("Entrada por voz (baixando {percent}%)", percent=percent)
             return tr(_STATE_LABELS.get(self._state, N_("Entrada por voz")))
 
-    def _emit_status(self):
+    def _emit_status(self, *, progress=False):
+        # Only byte callbacks are throttled. Capture, cancellation and terminal
+        # transitions always reach the HUD even during an active download.
+        with self._lock:
+            now = time.monotonic()
+            if progress and now - self._last_progress_emit < 0.25:
+                return
+            if progress:
+                self._last_progress_emit = now
         callback = self._on_status_change
         if callback is None:
             return
@@ -457,6 +472,13 @@ class VoiceController:
             if not self._model_download_active:
                 return False
             return profile is None or profile == self._model_download_profile
+
+    def _clear_runtime_progress_locked(self):
+        # An explicit catalog download owns the shared byte counters until its
+        # worker finishes, even when a runtime switch is admitted meanwhile.
+        if not self._model_download_active:
+            self._download_done = 0
+            self._download_total = 0
 
     def download_profile(self, profile):
         """Download and verify one profile without enabling or loading voice."""
@@ -507,6 +529,17 @@ class VoiceController:
     def history_entry(self, record_id):
         return self._history.get(record_id)
 
+    def history_rows(self, limit=5):
+        """Read history and retry eligibility on a background worker only."""
+        # ceiling: render at most 200 history rows (five inline). The retained
+        # store is scanned off Tk; add an indexed store if retention outgrows it.
+        limit = max(1, min(200, int(limit)))
+        entries = self._history.list_entries(strict=True)[:limit]
+        snapshot = self.status_snapshot()
+        ready = snapshot["retry_available"]
+        return [dict(entry, retryable=ready and self._history.is_retryable(entry["id"]))
+                for entry in entries]
+
     def retry_history(self, record_id):
         """Retry saved audio without pasting into a potentially stale target."""
         with self._lock:
@@ -514,6 +547,8 @@ class VoiceController:
                 self._meeting_token is not None
                 or self._state != STATE_IDLE
                 or self._capture_starting
+                or self._hotkey_edit_token is not None
+                or self._hotkey_cancel_pending
                 or not self.settings.enabled
             ):
                 self._notify(
@@ -557,26 +592,25 @@ class VoiceController:
         command_hotkey=None,
         activation_mode=None,
     ):
-        """Persist voice options and apply only the runtime changes required."""
+        """Return whether options were accepted and persisted before runtime work."""
+        with self._options_lock:
+            return self._apply_options(profile, language, hotkey, command_hotkey, activation_mode)
+
+    def _apply_options(self, profile, language, hotkey, command_hotkey, activation_mode):
         warnings = []
-        payload = voice_settings_payload(self.settings)
-        if profile is not None:
-            payload["voice_profile"] = profile
-        if language is not None:
-            payload["voice_language"] = language
-        if hotkey is not None:
-            payload["voice_hotkey"] = hotkey
-        if command_hotkey is not None:
-            payload["voice_command_hotkey"] = command_hotkey
-        if activation_mode is not None:
-            payload["voice_activation_mode"] = activation_mode
-        candidate = resolve_voice_settings(payload, warnings)
-        for warning in warnings:
-            self._log(warning)
         with self._lock:
-            if self._disable_requested or self._meeting_token is not None:
-                return
+            if self._disable_requested or self._meeting_token is not None or self._shutdown.is_set():
+                return False
             previous = self.settings
+            payload = voice_settings_payload(previous)
+            for key, value in (("voice_profile", profile), ("voice_language", language),
+                               ("voice_hotkey", hotkey), ("voice_command_hotkey", command_hotkey),
+                               ("voice_activation_mode", activation_mode)):
+                if value is not None:
+                    payload[key] = value
+            candidate = resolve_voice_settings(payload, warnings)
+            admission = (self._session_generation, self._state, self._capture_starting,
+                         previous.enabled, self._hotkey_edit_epoch)
             runtime_same = (
                 candidate.profile == previous.profile
                 and candidate.language == previous.language
@@ -586,17 +620,38 @@ class VoiceController:
                 and candidate.command_hotkey == previous.command_hotkey
                 and candidate.activation_mode == previous.activation_mode
             )
-            self.settings = candidate
+        for warning in warnings:
+            self._log(warning)
+        # Publish only after persistence, so a failed save cannot leak candidate
+        # options into a capture admitted while the disk callback is blocked.
+        if not self._persist_payload(voice_settings_payload(candidate)):
+            return False
+        with self._lock:
+            current = (self._session_generation, self._state, self._capture_starting,
+                       self.settings.enabled, self._hotkey_edit_epoch)
+            accepted = (self.settings is previous and current == admission
+                        and not self._disable_requested and self._meeting_token is None
+                        and not self._shutdown.is_set())
+            if accepted:
+                self.settings = candidate
+        if not accepted:
+            # A disable, capture or reservation won during the write. Reconcile
+            # disk to the current runtime before rejecting this editable draft.
+            if not self._persist():
+                self._notify(tr("As opções não foram aplicadas e o arquivo salvo precisa de revisão. Tente salvar novamente."), key="voice-settings")
+            return False
         if not hotkeys_same:
             self._stop_monitor()
-        self._persist()
         if runtime_same and hotkeys_same:
             if candidate.enabled and self.state == STATE_UNAVAILABLE:
                 self.enable()
-            return
+            return True
         if not candidate.enabled:
-            return
+            return True
         with self._lock:
+            if not runtime_same:
+                self._load_error = None
+                self._clear_runtime_progress_locked()
             active = self._state in (
                 STATE_RECORDING,
                 STATE_TRANSCRIBING,
@@ -622,7 +677,7 @@ class VoiceController:
                 self.enable()
             # A load already in progress starts the monitor with the latest
             # settings when it reaches idle.
-            return
+            return True
         if active:
             # Stop the microphone before the switch worker unloads the backend.
             # The abort also bumps the session generation and keeps LOADING so
@@ -631,7 +686,7 @@ class VoiceController:
         else:
             with self._lock:
                 if not candidate.enabled:
-                    return
+                    return True
                 self._session_generation += 1
                 self._form_guard_token = None
                 self._state = STATE_LOADING
@@ -647,6 +702,7 @@ class VoiceController:
             switch_generation,
             name="voice-switch",
         )
+        return True
 
     def partial_text(self):
         with self._lock:
@@ -659,6 +715,19 @@ class VoiceController:
                 "state": self._state,
                 "mode": self._active_mode,
                 "partial": self._partial,
+                "enabled": bool(self.settings.enabled),
+                "retry_available": bool(self.settings.enabled and self._state == STATE_IDLE
+                                        and not self._capture_starting
+                                        and self._meeting_token is None
+                                        and self._hotkey_edit_token is None
+                                        and not self._hotkey_cancel_pending),
+                "shortcut_editing": self._hotkey_edit_token is not None,
+                "meeting_busy": self._meeting_token is not None,
+                "load_failed": bool(self._load_error),
+                "download_active": self._model_download_active,
+                "download_profile": self._model_download_profile,
+                "download_done": self._download_done,
+                "download_total": self._download_total,
             }
 
     def register_form_target(self, apply_fn, guarded_apply_fn=None):
@@ -706,10 +775,13 @@ class VoiceController:
                     return
                 # disable()/cancel() leave this set; a later enable must start clean.
                 self._cancel.clear()
+                # A queued worker must retain this admission even if a profile
+                # switch replaces it before the runner starts executing it.
+                self._session_generation += 1
+                generation = self._session_generation
                 self._state = STATE_LOADING
                 self._load_error = None
-                self._download_done = 0
-                self._download_total = 0
+                self._clear_runtime_progress_locked()
         if blocked_by_download:
             self._notify(
                 tr("Aguarde o download do modelo terminar antes de ativar a voz."),
@@ -718,7 +790,7 @@ class VoiceController:
             return
         self._persist()
         self._emit_status()
-        self._start_worker(self._load_worker, name="voice-load")
+        self._start_worker(self._load_worker, generation, name="voice-load")
 
     def disable(self):
         # Close new-session admission before cancellation can wait on a worker.
@@ -770,7 +842,7 @@ class VoiceController:
     def set_profile(self, profile):
         self.apply_options(profile=profile)
 
-    def handle_hotkey_press(self, mode):
+    def handle_hotkey_press(self, mode, *, _hotkey_epoch=None):
         if self._shutdown.is_set():
             return False
         if mode not in (MODE_DICTATION, MODE_COMMAND):
@@ -779,6 +851,9 @@ class VoiceController:
         with self._lock:
             if (
                 self._meeting_token is not None
+                or self._hotkey_edit_token is not None
+                or self._hotkey_cancel_pending
+                or _hotkey_epoch is not None and _hotkey_epoch != self._hotkey_edit_epoch
                 or self._disable_requested
                 or not self.settings.enabled
             ):
@@ -803,7 +878,7 @@ class VoiceController:
                 self._active_mode = mode
                 self._last_model_use = time.monotonic()
         if stop_generation is not None:
-            return self._stop_hotkey_capture(mode, stop_generation)
+            return self._stop_hotkey_capture(mode, stop_generation, _hotkey_epoch=_hotkey_epoch)
         if self._microphone_status is not None:
             try:
                 status = self._microphone_status()
@@ -958,19 +1033,21 @@ class VoiceController:
             )
         return True
 
-    def handle_hotkey_release(self, mode):
+    def handle_hotkey_release(self, mode, *, _hotkey_epoch=None):
         with self._lock:
             if self.settings.activation_mode == ACTIVATION_TOGGLE:
                 return False
-        return self._stop_hotkey_capture(mode)
+        return self._stop_hotkey_capture(mode, _hotkey_epoch=_hotkey_epoch)
 
-    def _stop_hotkey_capture(self, mode, expected_generation=None):
+    def _stop_hotkey_capture(self, mode, expected_generation=None, *, _hotkey_epoch=None):
         """Finish the matching session without letting a stale stop affect its successor."""
         if self._shutdown.is_set():
             return False
         with self._lock:
             if (
                 self._disable_requested
+                or _hotkey_epoch is not None and (_hotkey_epoch != self._hotkey_edit_epoch
+                                                 or self._hotkey_edit_token is not None)
                 or not self.settings.enabled
                 or mode != self._active_mode
                 or (expected_generation is not None
@@ -989,7 +1066,7 @@ class VoiceController:
                 recording = self._history_recording
                 self._state = STATE_TRANSCRIBING
         if starting:
-            self._cancel_session_locked(reason="cancel")
+            self.cancel(_hotkey_epoch=_hotkey_epoch)
             return True
         self._emit_status()
         self._start_worker(
@@ -1001,11 +1078,25 @@ class VoiceController:
         )
         return True
 
-    def cancel(self):
+    def cancel(self, *, _hotkey_epoch=None):
         with self._lock:
             if self._disable_requested or self._shutdown.is_set():
-                return
-        self._cancel_session_locked(reason="cancel")
+                return False if _hotkey_epoch is not None else None
+            if _hotkey_epoch is not None:
+                if (_hotkey_epoch != self._hotkey_edit_epoch
+                        or self._hotkey_edit_token is not None or self._hotkey_cancel_pending):
+                    return False
+                # Reserve this cancellation's target before native work. No
+                # new edit or session may enter while a queued Escape unwinds.
+                self._hotkey_cancel_pending = True
+        try:
+            self._cancel_session_locked(reason="cancel")
+        finally:
+            if _hotkey_epoch is not None:
+                with self._lock:
+                    self._hotkey_cancel_pending = False
+        if _hotkey_epoch is not None:
+            return True
 
     def _cancel_session_locked(self, reason):
         self._cancel.set()
@@ -1092,19 +1183,24 @@ class VoiceController:
                 self._warn(f"Não foi possível encerrar o histórico de voz: {exc}")
         self._emit_status()
 
-    def _load_worker(self):
-        if self._shutdown.is_set():
-            return
+    def _load_worker(self, generation=None):
+        with self._lock:
+            if generation is None:
+                generation = self._session_generation
+            if (not self._session_valid_locked(generation, STATE_LOADING)
+                    or not self.settings.enabled or self._disable_requested):
+                return
         try:
             if not self.capture_available():
                 raise VoiceRuntimeError(
                     tr("A captura de áudio não está disponível neste aplicativo.")
                 )
-            self._prepare_provider()
-            if self._cancel.is_set() or self._shutdown.is_set():
+            if not self._prepare_provider(generation):
                 return
         except (VoiceModelError, VoiceRuntimeError) as exc:
             with self._lock:
+                if not self._session_valid_locked(generation, STATE_LOADING):
+                    return
                 self._state = STATE_UNAVAILABLE
                 self._load_error = str(exc)
             self._notify(str(exc), key="voice-load")
@@ -1112,6 +1208,8 @@ class VoiceController:
             return
         except Exception as exc:
             with self._lock:
+                if not self._session_valid_locked(generation, STATE_LOADING):
+                    return
                 self._state = STATE_UNAVAILABLE
                 self._load_error = str(exc)
             self._warn(f"Falha ao ativar a entrada por voz: {exc}")
@@ -1119,17 +1217,13 @@ class VoiceController:
             self._emit_status()
             return
         with self._lock:
-            if not self.settings.enabled or self._shutdown.is_set():
-                self._state = STATE_UNAVAILABLE
-                start_monitor = False
-            else:
-                self._state = STATE_IDLE
-                self._load_error = None
-                self._download_done = 0
-                self._download_total = 0
-                start_monitor = True
-        if start_monitor:
-            self._start_monitor()
+            if (not self._session_valid_locked(generation, STATE_LOADING)
+                    or not self.settings.enabled or self._disable_requested):
+                return
+            self._state = STATE_IDLE
+            self._load_error = None
+            self._clear_runtime_progress_locked()
+        self._start_monitor()
         self._emit_status()
 
     def _switch_profile_worker(
@@ -1174,7 +1268,8 @@ class VoiceController:
                 switch_valid = self._switch_valid_locked(generation)
             if not switch_valid:
                 return
-            self._prepare_provider()
+            if not self._prepare_provider(generation):
+                return
             with self._lock:
                 switch_valid = self._switch_valid_locked(generation)
             if not switch_valid or self._cancel.is_set():
@@ -1212,6 +1307,8 @@ class VoiceController:
                     else:
                         emit_status = False
                         self._state = STATE_IDLE
+                        self._load_error = None
+                        self._clear_runtime_progress_locked()
                 if emit_status:
                     self._emit_status()
                     return
@@ -1228,6 +1325,8 @@ class VoiceController:
                         emit_status = False
                 else:
                     self._state = STATE_UNAVAILABLE
+                    self._load_error = str(exc)
+                    self._clear_runtime_progress_locked()
                     emit_status = True
             if not emit_status:
                 return
@@ -1238,30 +1337,48 @@ class VoiceController:
             if not self._switch_valid_locked(generation):
                 return
             self._state = STATE_IDLE
+            self._load_error = None
+            self._clear_runtime_progress_locked()
         self._start_monitor()
         self._emit_status()
 
-    def _prepare_provider(self):
+    def _prepare_provider(self, generation=None):
+        with self._lock:
+            if generation is None:
+                generation = self._session_generation
+            if (not self._session_valid_locked(generation, STATE_LOADING)
+                    or not self.settings.enabled or self._disable_requested):
+                return False
+            profile, language = self.settings.profile, self.settings.language
+
         def progress(done, total):
             with self._lock:
+                if (not self._session_valid_locked(generation, STATE_LOADING)
+                        or self.settings.profile != profile or self._model_download_active):
+                    return
                 self._download_done = done
                 self._download_total = total or 0
-            self._emit_status()
+            self._emit_status(progress=True)
 
         self._provider.prepare(
-            self.settings.profile,
-            self.settings.language,
+            profile,
+            language,
             progress=progress,
             cancel_event=self._cancel,
         )
+        with self._lock:
+            if (not self._session_valid_locked(generation, STATE_LOADING)
+                    or self.settings.profile != profile):
+                return False
         self._model_loaded()
+        return True
 
     def _download_profile_worker(self, profile):
         def progress(done, total):
             with self._lock:
                 self._download_done = done
                 self._download_total = total or self._download_total
-            self._emit_status()
+            self._emit_status(progress=True)
 
         try:
             self._provider.download_profile(
@@ -1825,15 +1942,20 @@ class VoiceController:
             self._notify(message, key="voice-error")
 
     def _persist(self):
-        self._persist_payload(voice_settings_payload(self.settings))
+        with self._options_lock:
+            with self._lock:
+                payload = voice_settings_payload(self.settings)
+            return self._persist_payload(payload)
 
     def _persist_payload(self, payload):
-        if self._persist_settings is None:
-            return
-        try:
-            self._persist_settings(payload)
-        except Exception as exc:
-            self._warn(f"Não foi possível gravar as configurações de voz: {exc}")
+        with self._options_lock:
+            if self._persist_settings is None:
+                return True
+            try:
+                return self._persist_settings(payload) is not False
+            except Exception as exc:
+                self._warn(f"Não foi possível gravar as configurações de voz: {exc}")
+                return False
 
     def _model_loaded(self):
         if self._provider.is_ready():
@@ -1900,6 +2022,34 @@ class VoiceController:
             except Exception as exc:
                 self._warn(f"Não foi possível liberar o modelo de ditado ocioso: {exc}")
 
+    def begin_hotkey_edit(self, token):
+        """Admit editing, then publish its state outside the state lock."""
+        with self._lock:
+            if (not token.is_set() or self._state not in {STATE_IDLE, STATE_UNAVAILABLE}
+                    or self._capture_starting or self._meeting_token is not None
+                    or self._disable_requested or self._hotkey_cancel_pending or self._shutdown.is_set()):
+                return False
+            self._hotkey_edit_token = token
+            self._hotkey_edit_epoch += 1
+            self._hotkey_edit_snapshot = (self._hotkey_edit_epoch, True)
+        self._emit_status()
+        return True
+
+    def end_hotkey_edit(self, token):
+        with self._lock:
+            if self._hotkey_edit_token is not token:
+                return
+            self._hotkey_edit_token = None
+            self._hotkey_edit_epoch += 1
+            self._hotkey_edit_snapshot = (self._hotkey_edit_epoch, False)
+        self._emit_status()
+
+    def hotkey_edit_state(self):
+        # OS filters run for every key. Publish one immutable value at each
+        # edit edge so they never wait for disk work holding controller state.
+        # Worker admission still validates the epoch under the state lock.
+        return self._hotkey_edit_snapshot
+
     def _start_monitor(self):
         if self._idle_unloader is None:
             self._idle_unloader = threading.Thread(
@@ -1919,6 +2069,7 @@ class VoiceController:
             on_press=self._hotkey_press_from_os,
             on_release=self._hotkey_release_from_os,
             on_escape=self._hotkey_escape_from_os,
+            passthrough_state=self.hotkey_edit_state,
         )
         try:
             monitor.start()
@@ -2071,14 +2222,18 @@ class VoiceController:
 
     def _enqueue_hotkey(self, handler, *args):
         # Keyboard callbacks enqueue only; one worker preserves event order.
+        epoch, editing = self.hotkey_edit_state()
+        if editing:
+            return
         with self._hotkey_lock:
             if self._shutdown.is_set() or self._hotkey_overflow:
                 return
             if len(self._hotkey_events) >= HOTKEY_QUEUE_LIMIT:
                 self._hotkey_events.clear()
                 self._hotkey_overflow = True
+                self._hotkey_overflow_epoch = epoch
             else:
-                self._hotkey_events.append((handler, args))
+                self._hotkey_events.append((handler, args, epoch))
             if self._hotkey_worker_active:
                 return
             self._hotkey_worker_active = True
@@ -2111,21 +2266,25 @@ class VoiceController:
                 self._hotkey_overflow = False
                 if overflow:
                     handler, args = self.cancel, ()
+                    epoch = self._hotkey_overflow_epoch
                 elif self._hotkey_events:
-                    handler, args = self._hotkey_events.popleft()
+                    handler, args, epoch = self._hotkey_events.popleft()
                 else:
                     self._hotkey_worker_active = False
                     return
+            current_epoch, editing = self.hotkey_edit_state()
+            if editing or epoch != current_epoch:
+                continue
             try:
-                handler(*args)
-                if overflow:
+                completed = handler(*args, _hotkey_epoch=epoch)
+                if overflow and completed is not False:
                     self._notify(
                         tr("Os atalhos de voz chegaram rápido demais. A gravação foi cancelada; tente novamente."),
                         key="voice-hotkey",
                     )
             except Exception as exc:
                 self._warn(f"Voice shortcut processing failed: {type(exc).__name__}")
-                self.cancel()
+                self.cancel(_hotkey_epoch=epoch)
                 self._notify(
                     tr("Não foi possível processar o atalho de voz. Tente novamente."),
                     key="voice-hotkey",
@@ -2156,6 +2315,8 @@ class VoiceController:
         token = object()
         with self._lock:
             if (self._shutdown.is_set() or self._meeting_token is not None
+                    or self._hotkey_edit_token is not None
+                    or self._hotkey_cancel_pending
                     or self._disable_requested or self._model_download_active
                     or self._state not in (STATE_IDLE, STATE_UNAVAILABLE)
                     or self._capture_starting):

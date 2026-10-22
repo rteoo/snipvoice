@@ -126,6 +126,64 @@ RELAUNCH_FLAG = "--relaunch"
 RELAUNCH_LOCK_WAIT_SECONDS = 60
 
 
+def voice_history_status(value):
+    """A saved dictation's written state and semantic tone."""
+    labels = {
+        "recording": (N_("Gravando"), "info"),
+        "pending": (N_("Pendente"), "warning"),
+        "transcribed": (N_("Transcrito"), "text"),
+        "completed": (N_("Concluído"), "text"),
+        "failed": (N_("Falhou"), "danger"),
+        "interrupted": (N_("Interrompido"), "warning"),
+        "cancelled": (N_("Cancelado"), "text_muted"),
+    }
+    label, tone = labels.get(value, (N_("Desconhecido"), "text_muted"))
+    return tr(label), tone
+
+
+def voice_history_attention(count):
+    if count == 1:
+        return tr("1 ditado precisa de atenção. Selecione um item para ver as ações disponíveis.")
+    return tr("{count} ditados precisam de atenção. Selecione um item para ver as ações disponíveis.", count=count)
+
+
+def voice_profile_downloading(snapshot, profile, selected_profile):
+    """Attribute shared byte counters to their current explicit/runtime owner."""
+    if snapshot.get("download_active"):
+        return snapshot.get("download_profile") == profile
+    return bool(snapshot.get("state") == "loading" and snapshot.get("download_total")
+                and profile == selected_profile)
+
+
+def voice_status_presentation(voice):
+    """Describe actual controller readiness without probing models or disk."""
+    from meeting_gui import PROFILE_LABELS, hotkey_display
+    snapshot = voice.status_snapshot()
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    state = snapshot.get("state")
+    if snapshot.get("meeting_busy"):
+        label, tone = tr("Aguardando a gravação"), "warning"
+    elif snapshot.get("shortcut_editing"):
+        label, tone = tr("Atalhos pausados para configurar"), "info"
+    elif state == "unavailable" and snapshot.get("load_failed"):
+        label, tone = tr("Falha ao carregar o ditado. Verifique o modelo em Configurações."), "danger"
+    elif state == "loading":
+        label, tone = tr("Carregando ditado…"), "info"
+    elif not voice.is_enabled():
+        label, tone = tr("Ditado desligado"), "text_muted"
+    elif state == "idle":
+        label, tone = tr("Ditado pronto"), "success"
+    elif state in {"recording", "transcribing", "routing"}:
+        label, tone = voice.status_label(), "info"
+    else:
+        label, tone = tr("Ditado indisponível. Verifique o modelo em Configurações."), "warning"
+    mode = tr("segurar") if getattr(voice.settings, "activation_mode", "hold") == "hold" else tr("iniciar/parar")
+    detail = " · ".join((tr(PROFILE_LABELS.get(voice.settings.profile, "")),
+                         voice.settings.language, hotkey_display(voice.settings.hotkey), mode))
+    return f"{label}\n{detail}", tone
+
+
 def acquire_single_instance_mutex():
     """Keep Snipvoice copies exclusive while allowing Sniptype to coexist."""
     kernel32 = ctypes.windll.kernel32
@@ -254,7 +312,8 @@ class Snipvoice:
                     # Keyboard callbacks only enqueue a GUI request.  They do
                     # not read settings, open capture devices, show Tk, or join.
                     on_press=lambda mode: self._meeting_hotkey_request(),
-                    on_release=lambda mode: None)
+                    on_release=lambda mode: None,
+                    passthrough_state=self.voice.hotkey_edit_state)
                 monitor.start()
                 self._meeting_monitor = monitor
             except Exception:
@@ -264,13 +323,22 @@ class Snipvoice:
         """Bounded keyboard callback: enqueue the shared GUI toggle path."""
         if self._quitting.is_set() or not self._meeting_startup_ready:
             return False
+        epoch, editing = self.voice.hotkey_edit_state()
+        if editing:
+            return False
         try:
-            return bool(self.gui.submit(self._meeting_hotkey_on_gui))
+            @functools.wraps(self._meeting_hotkey_on_gui)
+            def dispatch(root):
+                self._meeting_hotkey_on_gui(root, hotkey_epoch=epoch)
+            return bool(self.gui.submit(dispatch))
         except Exception:
             return False
 
-    def _meeting_hotkey_on_gui(self, root):
+    def _meeting_hotkey_on_gui(self, root, *, hotkey_epoch=None):
         if self._quitting.is_set() or not self._meeting_startup_ready:
+            return
+        epoch, editing = self.voice.hotkey_edit_state()
+        if editing or hotkey_epoch is not None and hotkey_epoch != epoch:
             return
         view = self._manager_meeting_view
         if view is None or getattr(view, "closed", False):
@@ -959,7 +1027,13 @@ class Snipvoice:
             )
         except Exception as exc:
             self.logger.warning(f"Não foi possível atualizar o indicador de voz: {exc}")
-        if snapshot["state"] not in {"recording", "transcribing", "routing"}:
+        tray_state = (snapshot.get("state"), snapshot.get("download_active"),
+                      snapshot.get("download_profile"), snapshot.get("enabled"),
+                      snapshot.get("meeting_busy"), voice.settings.profile,
+                      voice.settings.language)
+        changed = tray_state != getattr(self, "_voice_tray_state", None)
+        self._voice_tray_state = tray_state
+        if changed and snapshot["state"] not in {"recording", "transcribing", "routing"}:
             self.refresh_tray_menu()
 
 
@@ -974,6 +1048,8 @@ class Snipvoice:
         else:
             self.voice_status_indicator.update(snapshot["state"], snapshot["mode"])
         self._refresh_manager_voice_tab()
+        for refresh in tuple(getattr(self, "_voice_history_refreshers", ())):
+            refresh()
 
 
     def _render_recording_indicator(self, root, snapshot):
@@ -1087,9 +1163,29 @@ class Snipvoice:
             if not messagebox.askyesno(tr("Entrada por voz"), message):
                 self._refresh_manager_voice_tab()
                 return
-        self.voice.enable()
-        self.refresh_tray_menu()
-        self._refresh_manager_voice_tab()
+        if getattr(self, "_voice_enable_pending", False):
+            return
+        self._voice_enable_pending = True
+        voice = self.voice
+
+        def enable():
+            try:
+                if self.voice is voice and not self._quitting.is_set():
+                    voice.enable()
+                    self.refresh_tray_menu()
+            except Exception:
+                self.notify_error(tr("Não foi possível ativar o ditado. Tente novamente."), key="voice-enable")
+            finally:
+                def finished(_root):
+                    self._voice_enable_pending = False
+                    if self.voice is voice:
+                        self._refresh_manager_voice_tab()
+                self.gui.submit(finished)
+        try:
+            self.task_runner.start(enable, name="voice-enable")
+        except Exception:
+            self._voice_enable_pending = False
+            self.notify_error(tr("Não foi possível ativar o ditado. Tente novamente."), key="voice-enable")
 
 
     def open_voice_settings(self, icon=None, item=None):
@@ -1492,7 +1588,7 @@ class Snipvoice:
         return dialog
 
 
-    def _build_voice_settings_controls(self, parent, owner, models_parent=None):
+    def _build_voice_settings_controls(self, parent, owner, models_parent=None, actions_parent=None):
         """Build Ditado controls and, when supplied, the Configurações model inventory."""
         from voice_catalog import (
             available_languages,
@@ -1515,6 +1611,7 @@ class Snipvoice:
             master=owner, value=self.voice.settings.command_hotkey
         )
         activation_mode = tk.StringVar(master=owner, value=ACTIVATION_HOLD)
+        form = {"baseline": None, "syncing": False, "saving": False}
         self._manager_voice_tk_vars = [
             selected,
             language,
@@ -1524,6 +1621,8 @@ class Snipvoice:
         ]
         profile_labels = []
         download_buttons = []
+        inventory_state = [None]
+        installed_profiles = {}
 
         # The Configurações page owns the long download inventory. The fallback keeps direct
         # callers and older embedded views functional while the manager view is
@@ -1565,26 +1664,38 @@ class Snipvoice:
             )
 
         def refresh_profile_labels():
+            snapshot = self.voice.status_snapshot()
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            inventory_key = (snapshot.get("download_active"), snapshot.get("state"),
+                             snapshot.get("download_profile"))
+            inventory_changed = inventory_state[0] != inventory_key
+            inventory_state[0] = inventory_key
             for button, entry in profile_labels:
                 try:
                     if not button.winfo_exists():
                         continue
                 except tk.TclError:
                     continue
-                button.configure(text=profile_label(entry))
+                if inventory_changed:
+                    button.configure(text=profile_label(entry))
             for button, entry in download_buttons:
                 try:
                     if not button.winfo_exists():
                         continue
                 except tk.TclError:
                     continue
-                installed = voice_models.model_is_installed(
-                    entry, self.voice.cache_dir
-                )
-                downloading = self.voice.model_download_in_progress(
-                    entry["profile"]
-                )
-                if installed:
+                if inventory_changed or entry["profile"] not in installed_profiles:
+                    installed_profiles[entry["profile"]] = voice_models.model_is_installed(
+                        entry, self.voice.cache_dir)
+                installed = installed_profiles[entry["profile"]]
+                downloading = voice_profile_downloading(snapshot, entry["profile"],
+                                                        self.voice.settings.profile)
+                if downloading and snapshot.get("download_total"):
+                    percent = min(100, int(100 * snapshot.get("download_done", 0)
+                                           / snapshot["download_total"]))
+                    button.configure(text=tr("Baixando {percent}%", percent=percent), state=tk.DISABLED)
+                elif installed:
                     button.configure(text=tr("Baixado"), state=tk.DISABLED)
                 elif downloading:
                     button.configure(text=tr("Baixando…"), state=tk.DISABLED)
@@ -1598,7 +1709,7 @@ class Snipvoice:
             # requests no width and wraps at whatever the row leaves it.
             download_button = ui_theme.button(
                 row, tr("Baixar"), lambda item=entry: download_model(item),
-                width=ui.button_width(10), resolved=ui,
+                width=0, resolved=ui,
             )
             download_button.pack(side=tk.RIGHT, padx=(8, 0))
             download_buttons.append((download_button, entry))
@@ -1732,14 +1843,15 @@ class Snipvoice:
             fg=ui.text,
             font=ui.font(9),
         ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
-        ui_theme.focus_ring(tk.Entry(
+        dictation_entry = ui_theme.focus_ring(tk.Entry(
             shortcut_frame,
-            textvariable=hotkey,
+            textvariable=tk.StringVar(master=owner),
             font=ui.body(),
             width=28,
             **ui.entry_colors(),
             **ui.entry_chrome(),
-        ), ui, shrink=("bd",)).grid(row=1, column=1, sticky="ew", pady=4)
+        ), ui, shrink=("bd",))
+        dictation_entry.grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
             text=tr("Comando por voz:"),
@@ -1747,17 +1859,18 @@ class Snipvoice:
             fg=ui.text,
             font=ui.font(9),
         ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
-        ui_theme.focus_ring(tk.Entry(
+        command_entry = ui_theme.focus_ring(tk.Entry(
             shortcut_frame,
-            textvariable=command_hotkey,
+            textvariable=tk.StringVar(master=owner),
             font=ui.body(),
             width=28,
             **ui.entry_colors(),
             **ui.entry_chrome(),
-        ), ui, shrink=("bd",)).grid(row=2, column=1, sticky="ew", pady=4)
+        ), ui, shrink=("bd",))
+        command_entry.grid(row=2, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
-            text=tr("Formato: ctrl+alt+space, ctrl+shift+f8, etc."),
+            text=tr("Selecione o campo e pressione o atalho. Tab avança; Esc sai do campo."),
             bg=ui.card,
             fg=ui.text_muted,
             font=ui.font(8),
@@ -1775,6 +1888,82 @@ class Snipvoice:
             text=tr("Mãos livres: pressione o atalho para iniciar e novamente para parar. Vale para os dois atalhos. Esc cancela."),
             bg=ui.card, fg=ui.text_muted, font=ui.font(8), wraplength=wrap, justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        shortcut_error = tk.Label(shortcut_frame, bg=ui.card, fg=ui.danger,
+                                  font=ui.caption(), wraplength=wrap, justify="left")
+        shortcut_error.grid(row=6, column=0, columnspan=2, sticky="w")
+        editing_voice = self.voice
+
+        def validate_shortcuts(_event=None):
+            try:
+                dictation = parse_chord(hotkey.get())
+                command = parse_chord(command_hotkey.get())
+                candidate = dict(self.settings, voice_hotkey=dictation.spec,
+                                 voice_command_hotkey=command.spec)
+                if dictation == command:
+                    raise ValueError("duplicate hotkeys")
+                validate_hotkey_conflicts(candidate)
+            except ValueError:
+                shortcut_error.configure(text=tr("Use atalhos diferentes, com modificador e tecla, sem conflito com a gravação."), fg=ui.danger)
+                return False
+            shortcut_error.configure(text="", fg=ui.text_muted)
+            return True
+
+        def bind_capture(widget, variable):
+            editing = {"token": None, "ready": False}
+
+            def end_edit(_event=None):
+                token = editing["token"]
+                editing["token"], editing["ready"] = None, False
+                if token is not None:
+                    token.clear()
+                    editing_voice.end_hotkey_edit(token)
+                if shortcut_error.winfo_exists():
+                    validate_shortcuts()
+
+            def begin_edit(_event=None):
+                token = threading.Event()
+                token.set()
+                editing["token"] = token
+                editing["ready"] = editing_voice.begin_hotkey_edit(token) is True
+                shortcut_error.configure(text=tr("Atalhos globais pausados. Pressione o novo atalho.") if editing["ready"] else
+                                         tr("Aguarde o ditado terminar antes de capturar um atalho."),
+                                         fg=ui.info if editing["ready"] else ui.warning)
+
+            def display(*_args):
+                widget.setvar(widget.cget("textvariable"), " + ".join(
+                    part.capitalize() for part in variable.get().split("+") if part))
+
+            def capture(event):
+                key = event.keysym.lower()
+                if key in {"tab", "iso_left_tab"}:
+                    return None
+                if key == "escape":
+                    widget.tk_focusNext().focus_set()
+                    return "break"
+                if not editing["ready"]:
+                    return "break"
+                if key.startswith(("control", "alt", "shift", "meta", "super", "win")):
+                    return "break"
+                modifiers = [name for mask, name in ((0x4, "ctrl"), (0x8, "alt"),
+                                                      (0x20000, "alt"), (0x1, "shift"),
+                                                      (0x40, "cmd" if sys.platform == "darwin" else "win"))
+                             if event.state & mask]
+                key = {"return": "enter", "kp_enter": "enter"}.get(key, key)
+                try:
+                    variable.set(parse_chord("+".join(dict.fromkeys([*modifiers, key]))).spec)
+                except ValueError:
+                    shortcut_error.configure(text=tr("Pressione um modificador e uma tecla para definir o atalho."), fg=ui.danger)
+                return "break"
+
+            variable.trace_add("write", display)
+            widget.bind("<KeyPress>", capture)
+            widget.bind("<FocusIn>", begin_edit, add="+")
+            widget.bind("<FocusOut>", end_edit, add="+")
+            widget.bind("<Destroy>", end_edit, add="+")
+            display()
+
+        bind_capture(dictation_entry, hotkey)
+        bind_capture(command_entry, command_hotkey)
 
         commands_card = tk.Frame(parent, padx=ui.space_lg, pady=ui.space_md, **ui.card_options())
         commands_card.pack(fill=tk.X, pady=(0, ui.space_md))
@@ -1785,11 +1974,30 @@ class Snipvoice:
         ui_theme.button(commands_card, tr("Configurar comandos…"),
                         lambda: self._show_voice_commands(owner), resolved=ui).pack(side=tk.RIGHT)
 
-        def refresh_form():
+        def form_values():
+            return tuple(variable.get() for variable in self._manager_voice_tk_vars)
+
+        def update_dirty(*_args):
+            if form["syncing"]:
+                return
+            dirty = form_values() != form["baseline"]
+            save_button.configure(state=tk.DISABLED if form["saving"] or not dirty else tk.NORMAL)
+            discard_button.configure(state=tk.NORMAL if dirty and not form["saving"] else tk.DISABLED)
+            save_status.configure(text=tr("Salvando…") if form["saving"] else
+                                  tr("Alterações não salvas") if dirty else tr("Configuração salva"),
+                                  fg=ui.text_muted)
+
+        def refresh_form(force=False):
             refresh_profile_labels()
             voice = self.voice
             if voice is None:
                 return
+            commands_count.configure(text=tr("1 comando") if len(self.snippets) == 1
+                                     else tr("{count} comandos", count=len(self.snippets)))
+            if not force and (form["saving"] or form["baseline"] is not None
+                              and form_values() != form["baseline"]):
+                return
+            form["syncing"] = True
             selected.set(voice.settings.profile)
             language.set(voice.settings.language)
             hotkey.set(voice.settings.hotkey)
@@ -1797,8 +2005,6 @@ class Snipvoice:
             configured_mode = getattr(voice.settings, "activation_mode", ACTIVATION_HOLD)
             activation_mode.set(configured_mode if configured_mode in (ACTIVATION_HOLD, ACTIVATION_TOGGLE)
                                 else ACTIVATION_HOLD)
-            commands_count.configure(text=tr("1 comando") if len(self.snippets) == 1
-                                     else tr("{count} comandos", count=len(self.snippets)))
             update_language_options()
             model_display.set(
                 profile_display_labels.get(selected.get(), selected.get())
@@ -1806,8 +2012,14 @@ class Snipvoice:
             language_display.set(
                 language_display_labels.get(language.get(), language.get())
             )
+            form["baseline"] = form_values()
+            form["syncing"] = False
+            validate_shortcuts()
+            update_dirty()
 
         def apply_voice_settings():
+            if form["saving"] or not validate_shortcuts():
+                return
             profile = selected.get()
             try:
                 dictation_chord = parse_chord(hotkey.get())
@@ -1863,16 +2075,41 @@ class Snipvoice:
             options = dict(profile=profile, language=language.get(),
                            hotkey=dictation_chord.spec, command_hotkey=command_chord.spec,
                            activation_mode=activation_mode.get())
+            saved_values = form_values()
+            voice = self.voice
+            form["saving"] = True
+            update_dirty()
 
             def apply():
-                with self._settings_lock:
-                    self.voice.apply_options(**options)
-                if not self.voice.is_enabled():
-                    self.voice.enable()
-                self.refresh_tray_menu()
-                self.gui.submit(lambda _root: self._refresh_manager_voice_tab())
+                succeeded = False
+                try:
+                    if self.voice is not voice or self._quitting.is_set():
+                        return
+                    if voice.apply_options(**options) is not True:
+                        return
+                    self.refresh_tray_menu()
+                    succeeded = True
+                except Exception:
+                    self.logger.warning("Could not apply dictation settings")
+                finally:
+                    def finished(_root):
+                        if (self.voice is not voice or self._quitting.is_set()
+                                or not buttons.winfo_exists()):
+                            return
+                        form["saving"] = False
+                        if succeeded:
+                            form["baseline"] = saved_values
+                        update_dirty()
+                        if not succeeded:
+                            save_status.configure(text=tr("Não foi possível salvar. Tente novamente."), fg=ui.danger)
+                    self.gui.submit(finished)
 
-            self.task_runner.start(apply, name="voice-settings")
+            try:
+                self.task_runner.start(apply, name="voice-settings")
+            except Exception:
+                form["saving"] = False
+                update_dirty()
+                save_status.configure(text=tr("Não foi possível salvar. Tente novamente."), fg=ui.danger)
 
         def download_model(entry):
             if voice_models.model_is_installed(entry, self.voice.cache_dir):
@@ -1903,17 +2140,31 @@ class Snipvoice:
                 parent=owner,
             ):
                 return
-            self.voice.delete_active_model()
-            self.refresh_tray_menu()
-            self._refresh_manager_voice_tab()
+            voice = self.voice
+
+            def remove():
+                voice.delete_active_model()
+                self.refresh_tray_menu()
+                self.gui.submit(lambda _root: self._refresh_manager_voice_tab()
+                                if self.voice is voice and buttons.winfo_exists() else None)
+            self.task_runner.start(remove, name="voice-model-remove")
 
         def action_button(text, command, accent=False):
+            # X11 lacks Win32's extra native button inset. Keep this new save
+            # bar at Compact height without changing shared controls in WP8.
+            options = {"pady": 6} if ui.system == "linux" else {}
             return ui_theme.button(buttons, text, command, "primary" if accent else "neutral",
-                                   resolved=ui)
+                                   resolved=ui, **options)
 
-        buttons = tk.Frame(parent, bg=ui.surface)
+        action_host = actions_parent if actions_parent is not None else parent
+        buttons = tk.Frame(action_host, bg=ui.surface)
         buttons.pack(fill=tk.X, pady=(ui.space_sm, 0))
-        action_button(tr("Salvar e usar"), apply_voice_settings, accent=True).pack(side=tk.LEFT)
+        save_button = action_button(tr("Salvar"), apply_voice_settings, accent=True)
+        save_button.pack(side=tk.LEFT)
+        discard_button = action_button(tr("Descartar"), lambda: refresh_form(force=True))
+        discard_button.pack(side=tk.LEFT, padx=(ui.space_sm, 0))
+        save_status = tk.Label(action_host, bg=ui.surface, fg=ui.text_muted, font=ui.caption())
+        save_status.pack(anchor="w", pady=(ui.space_xs, 0))
         more_button = tk.Menubutton(
             buttons, text=tr("Mais opções ▾"), direction="below", font=ui.body(),
             **ui.button_colors(), **ui.button_chrome(),
@@ -1942,6 +2193,8 @@ class Snipvoice:
             side=tk.RIGHT, padx=(0, ui.space_sm),
         )
 
+        for variable in self._manager_voice_tk_vars:
+            variable.trace_add("write", update_dirty)
         refresh_form()
         return refresh_form
 
@@ -1951,11 +2204,11 @@ class Snipvoice:
         ui = ui_theme.theme()
         main = tk.Frame(parent, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         main.pack(fill=tk.BOTH, expand=True)
+        footer = tk.Frame(main, bg=ui.surface)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
-        status_text = (
-            self.voice.status_label() if self.voice is not None else tr("Entrada por voz")
-        )
+        status_text, status_tone = voice_status_presentation(self.voice)
 
         def refresh():
             voice = self.voice
@@ -1970,7 +2223,8 @@ class Snipvoice:
                 checkbox.select()
             else:
                 checkbox.deselect()
-            status_label.configure(text=voice.status_label())
+            text, tone = voice_status_presentation(voice)
+            status_label.configure(text=text, fg=getattr(ui, tone))
             refresh_form()
 
         def on_toggle():
@@ -1995,7 +2249,7 @@ class Snipvoice:
             font=ui.font(10, "bold"),
             **ui.checkbutton_colors(ui.card),
         )
-        checkbox.pack(anchor="w")
+        checkbox.pack(side=tk.RIGHT, anchor="n")
         if enabled:
             checkbox.select()
         else:
@@ -2006,20 +2260,217 @@ class Snipvoice:
             text=status_text,
             font=ui.font(9),
             bg=ui.card,
-            fg=ui.text_muted,
+            fg=getattr(ui, status_tone),
             wraplength=640,
             justify="left",
         )
         status_label.pack(anchor="w", pady=(ui.space_xs, 0))
 
+        recent = tk.Frame(main, bg=ui.surface)
+        recent.pack(fill=tk.X, pady=(0, ui.space_md))
+        self._build_voice_history_rows(recent, root, limit=5, height=3)
+        tk.Label(main, text=tr("Configuração do ditado"), bg=ui.surface,
+                 fg=ui.text_strong, font=ui.heading()).pack(anchor="w", pady=(0, ui.space_sm))
+        config_host = tk.Frame(main, bg=ui.surface)
+        config_host.pack(fill=tk.BOTH, expand=True)
+        config_canvas = tk.Canvas(config_host, bg=ui.surface, bd=0, highlightthickness=0,
+                                  takefocus=False, height=180)
+        config_scroll = ttk.Scrollbar(config_host, orient=tk.VERTICAL, command=config_canvas.yview)
+        config_canvas.configure(yscrollcommand=config_scroll.set)
+        config_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        config_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        config = tk.Frame(config_canvas, bg=ui.surface)
+        config_item = config_canvas.create_window((0, 0), window=config, anchor="nw")
+        config.bind("<Configure>", lambda _event: config_canvas.configure(
+            scrollregion=config_canvas.bbox("all")))
+        config_canvas.bind("<Configure>", lambda event: config_canvas.itemconfigure(
+            config_item, width=event.width))
+
         refresh_form = self._build_voice_settings_controls(
-            main,
+            config,
             root,
             models_parent=models_parent,
+            actions_parent=footer,
         )
+        for widget in (config_canvas, config, *self._voice_descendants(config)):
+            self._bind_mousewheel(widget, config_canvas)
+            widget.bind("<FocusIn>", lambda event: self._reveal_voice_field(
+                event.widget, config, config_canvas), add="+")
         self._manager_voice_refresher = refresh
         refresh()
 
+
+    @staticmethod
+    def _voice_descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from Snipvoice._voice_descendants(child)
+
+    @staticmethod
+    def _reveal_voice_field(widget, content, canvas):
+        content.update_idletasks()
+        total = max(1, content.winfo_height())
+        top = widget.winfo_rooty() - content.winfo_rooty()
+        visible_top = canvas.canvasy(0)
+        if top < visible_top:
+            canvas.yview_moveto(max(0, top / total))
+        elif top + widget.winfo_height() > visible_top + canvas.winfo_height():
+            canvas.yview_moveto(max(0, (top + widget.winfo_height() - canvas.winfo_height()) / total))
+
+    def _build_voice_history_rows(self, parent, owner, *, limit, height):
+        """Bound history projection; all reads and retry checks run off Tk."""
+        from meeting_text import format_local_timestamp
+        ui = ui_theme.theme()
+        tk.Label(parent, text=tr("Últimos ditados") if limit == 5 else tr("Gravações recuperáveis"),
+                 font=ui.body_strong(), bg=ui.surface, fg=ui.text).pack(anchor="w")
+        state_line = tk.Label(parent, text=tr("Carregando histórico…"), bg=ui.surface,
+                              fg=ui.text_muted, font=ui.caption(), anchor="w", width=1,
+                              wraplength=640, justify="left")
+        state_line.pack(fill=tk.X, pady=(ui.space_xs, 0))
+        state_line.bind("<Configure>", lambda event: state_line.configure(wraplength=max(120, event.width)))
+        actions = tk.Frame(parent, bg=ui.surface)
+        actions.pack(side=tk.BOTTOM, fill=tk.X, pady=(ui.space_xs, 0))
+        frame = tk.Frame(parent, bg=ui.card)
+        frame.pack(fill=tk.BOTH, expand=True, pady=(ui.space_xs, 0))
+        columns = (("time", "status", "transcript") if limit == 5 else
+                   ("time", "status", "provider", "transcript"))
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=height,
+                            selectmode="browse", style="Manager.Treeview")
+        for column, label, width in (("time", tr("Data"), 145), ("status", tr("Estado"), 110),
+                                     ("transcript", tr("Transcrição / erro"), 340)):
+            tree.heading(column, text=label)
+            tree.column(column, width=width, minwidth=80, stretch=column == "transcript")
+        if limit != 5:
+            tree.heading("provider", text=tr("Provedor"))
+            tree.column("provider", width=85, minwidth=60, stretch=False)
+        for tone in ("text", "text_muted", "info", "warning", "danger"):
+            tree.tag_configure(tone, foreground=getattr(ui, tone))
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        state = {"pending": False, "again": False, "key": None, "rows": {}, "alive": True}
+        voice = self.voice
+
+        def selected():
+            selection = tree.selection()
+            return state["rows"].get(selection[0]) if selection else None
+
+        def update_actions(_event=None):
+            entry = selected()
+            snapshot = voice.status_snapshot()
+            ready = isinstance(snapshot, dict) and snapshot.get("retry_available") is True
+            can_retry = bool(entry and entry.get("retryable") and ready)
+            retry.configure(state=tk.NORMAL if can_retry else tk.DISABLED)
+            if limit == 5:
+                if can_retry:
+                    retry.pack(side=tk.LEFT, before=copy)
+                else:
+                    retry.pack_forget()
+            copy.configure(state=tk.NORMAL if entry and entry.get("transcript") else tk.DISABLED)
+
+        def run_action(kind):
+            entry = selected()
+            if entry is None:
+                return
+            record_id = entry["id"]
+
+            def work():
+                try:
+                    succeeded = (voice.retry_history(record_id) if kind == "retry"
+                                 else voice.copy_history_transcript(record_id))
+                except Exception:
+                    succeeded = False
+
+                def finished(_root):
+                    if not state["alive"]:
+                        return
+                    refresh(force=True)
+                    if not succeeded:
+                        state_line.configure(text=tr("A ação não foi concluída. Atualize o histórico e tente novamente."), fg=ui.danger)
+                self.gui.submit(finished)
+            self.task_runner.start(work, name="voice-history-action")
+
+        retry = ui_theme.button(actions, tr("Tentar novamente"), lambda: run_action("retry"), resolved=ui)
+        retry.pack(side=tk.LEFT)
+        copy = ui_theme.button(actions, tr("Copiar transcrição"), lambda: run_action("copy"), resolved=ui)
+        copy.pack(side=tk.LEFT, padx=(ui.space_sm, 0))
+        ui_theme.button(actions, tr("Atualizar"), lambda: refresh(force=True), resolved=ui).pack(side=tk.RIGHT)
+        tree.bind("<<TreeviewSelect>>", update_actions)
+
+        def refresh(*, force=False):
+            if not state["alive"] or self.voice is not voice:
+                return
+            snapshot = voice.status_snapshot()
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            key = (snapshot.get("state"), snapshot.get("retry_available"), snapshot.get("enabled"))
+            update_actions()
+            if not force and state["key"] == key:
+                return
+            if state["pending"]:
+                state["again"] = True
+                return
+            state["key"] = key
+            state["pending"] = True
+
+            def read():
+                rows, failed = [], False
+                try:
+                    rows = voice.history_rows(limit=limit)
+                    if not isinstance(rows, list):
+                        raise ValueError("history result must be a list")
+                except Exception:
+                    failed = True
+
+                def deliver(_root):
+                    if not state["alive"] or self.voice is not voice:
+                        return
+                    state["pending"] = False
+                    selection = tree.selection()
+                    tree.delete(*tree.get_children())
+                    state["rows"] = {entry["id"]: entry for entry in rows[:limit]}
+                    attention = 0
+                    for entry in state["rows"].values():
+                        label, tone = voice_history_status(entry.get("status"))
+                        attention += entry.get("status") in {"failed", "interrupted", "pending"}
+                        preview = " ".join(str(entry.get("transcript") or entry.get("error") or "").split())[:80]
+                        values = (format_local_timestamp(entry.get("created_at")), label)
+                        if limit != 5:
+                            values += (entry.get("provider", "—"),)
+                        tree.insert("", tk.END, iid=entry["id"], values=(*values, preview), tags=(tone,))
+                    if failed:
+                        state_line.configure(text=tr("Não foi possível ler o histórico. Use Atualizar para tentar novamente."), fg=ui.danger)
+                    elif not rows:
+                        state_line.configure(text=tr("Nenhuma gravação."), fg=ui.text_muted)
+                    elif attention:
+                        state_line.configure(text=voice_history_attention(attention), fg=ui.warning)
+                    else:
+                        state_line.configure(text=tr("Ditados recentes sem pendências."), fg=ui.text_muted)
+                    chosen = selection[0] if selection and selection[0] in state["rows"] else next(iter(state["rows"]), None)
+                    if chosen:
+                        tree.selection_set(chosen)
+                    update_actions()
+                    if state["again"]:
+                        state["again"] = False
+                        refresh(force=True)
+                self.gui.submit(deliver)
+            self.task_runner.start(read, name="voice-history-read")
+
+        callbacks = getattr(self, "_voice_history_refreshers", None)
+        if callbacks is None:
+            callbacks = self._voice_history_refreshers = []
+        callbacks.append(refresh)
+
+        def destroyed(event):
+            if event.widget is parent:
+                state["alive"] = False
+                if refresh in callbacks:
+                    callbacks.remove(refresh)
+        parent.bind("<Destroy>", destroyed, add="+")
+        self._bind_mousewheel(tree, tree)
+        refresh()
+        return tree, refresh
 
     def _open_voice_history(self, root):
         """Show recoverable recordings without replaying them into stale targets."""
@@ -2031,94 +2482,27 @@ class Snipvoice:
         history_window.configure(bg=ui.surface)
         history_window.transient(root)
         self._set_window_icon(history_window)
-
+        ui_theme.apply_window_chrome(history_window, ui)
         outer = tk.Frame(history_window, bg=ui.surface, padx=14, pady=14)
         outer.pack(fill=tk.BOTH, expand=True)
-        outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=1)
+        close_row = tk.Frame(outer, bg=ui.surface)
+        close_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(ui.space_sm, 0))
+        opener = root.focus_get()
 
-        tk.Label(
-            outer,
-            text=tr("Gravações recuperáveis"),
-            font=ui.font(11, "bold"),
-            bg=ui.surface,
-            fg=ui.text,
-        ).grid(row=0, column=0, sticky="w")
+        def close(_event=None):
+            history_window.destroy()
+            if opener is not None and opener.winfo_exists():
+                opener.focus_set()
+            return "break"
 
-        frame = tk.Frame(
-            outer,
-            bg=ui.card,
-            highlightbackground=ui.border,
-            highlightthickness=1,
-        )
-        frame.grid(row=1, column=0, sticky="nsew", pady=(10, 8))
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(0, weight=1)
-
-        columns = ("time", "status", "provider", "transcript")
-        tree = ttk.Treeview(frame, columns=columns, show="headings", height=12)
-        tree.heading("time", text=tr("Data"))
-        tree.heading("status", text=tr("Estado"))
-        tree.heading("provider", text=tr("Provedor"))
-        tree.heading("transcript", text=tr("Transcrição / erro"))
-        tree.column("time", width=145, anchor="center", stretch=False)
-        tree.column("status", width=95, anchor="center", stretch=False)
-        tree.column("provider", width=80, anchor="center", stretch=False)
-        tree.column("transcript", width=400, anchor="w")
-
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        def refresh_rows():
-            tree.delete(*tree.get_children())
-            voice = self.voice
-            entries = voice.history_entries() if voice is not None else []
-            if not entries:
-                tree.insert("", tk.END, values=("—", tr("vazio"), "—", tr("Nenhuma gravação.")))
-                return
-            for entry in entries:
-                summary = entry.get("transcript") or entry.get("error") or ""
-                tree.insert(
-                    "",
-                    tk.END,
-                    iid=entry["id"],
-                    values=(
-                        entry.get("created_at", "—"),
-                        entry.get("status", "—"),
-                        entry.get("provider", "—"),
-                        summary,
-                    ),
-                )
-
-        def selected_id():
-            selection = tree.selection()
-            return selection[0] if selection and self.voice is not None else None
-
-        def retry_selected():
-            record_id = selected_id()
-            if record_id and self.voice.retry_history(record_id):
-                history_window.after(500, refresh_rows)
-
-        def copy_selected():
-            record_id = selected_id()
-            if record_id and not self.voice.copy_history_transcript(record_id):
-                self.notify_error(
-                    tr("Esta gravação ainda não tem uma transcrição para copiar."),
-                    key="voice-history-copy",
-                )
-
-        actions = tk.Frame(outer, bg=ui.surface)
-        actions.grid(row=2, column=0, sticky="w")
-        ui_theme.button(actions, tr("Tentar novamente"), retry_selected, "primary",
-                        resolved=ui).pack(side=tk.LEFT)
-        ui_theme.button(actions, tr("Copiar transcrição"), copy_selected,
-                        resolved=ui).pack(side=tk.LEFT, padx=(8, 0))
-
-        refresh_rows()
-        self._bind_mousewheel(tree, tree)
+        ui_theme.button(close_row, tr("Fechar"), close, resolved=ui).pack(side=tk.RIGHT)
+        rows = tk.Frame(outer, bg=ui.surface)
+        rows.pack(fill=tk.BOTH, expand=True)
+        self._build_voice_history_rows(rows, history_window, limit=200, height=7)
+        history_window.bind("<Escape>", close)
+        history_window.protocol("WM_DELETE_WINDOW", close)
         center_dialog(history_window, root)
+        return history_window
 
 
     def _bind_mousewheel(self, widget, target=None):

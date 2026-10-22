@@ -257,7 +257,7 @@ class VoiceHistoryStore:
             return False
         return size > 0 and size % array.array("f").itemsize == 0
 
-    def get(self, record_id):
+    def get(self, record_id, *, strict=False):
         if not self._valid_record_id(record_id):
             return None
         path = self._metadata_path(record_id)
@@ -265,17 +265,25 @@ class VoiceHistoryStore:
             with open(path, "r", encoding="utf-8") as handle:
                 value = json.load(handle)
         except (OSError, ValueError, TypeError):
+            if strict:
+                raise
             return None
+        if strict and not isinstance(value, dict):
+            raise ValueError("voice history metadata must be an object")
         return value if isinstance(value, dict) else None
 
-    def list_entries(self):
+    def list_entries(self, *, strict=False):
         try:
             names = os.listdir(self.root_dir)
         except OSError:
+            if strict:
+                raise
             return []
         entries = []
         for name in names:
-            entry = self.get(name)
+            if not self._valid_record_id(name) or not os.path.isdir(self._item_dir(name)):
+                continue
+            entry = self.get(name, strict=strict)
             if entry is not None:
                 entry = dict(entry)
                 # Directory identity wins over editable metadata so recovery

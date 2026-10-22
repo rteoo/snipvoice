@@ -21,7 +21,7 @@ from voice_dispatch import (
     VoiceTarget,
 )
 from voice_runtime import FakeAsrBackend, VoiceRuntimeError
-from voice_settings import ACTIVATION_HOLD, ACTIVATION_TOGGLE
+from voice_settings import ACTIVATION_HOLD, ACTIVATION_TOGGLE, resolve_voice_settings
 from voice_support import (
     DICTATION_IDLE_UNLOAD_SECONDS,
     HOTKEY_QUEUE_LIMIT,
@@ -95,6 +95,301 @@ class ReorderedRunner:
         while self.pending:
             fn, args = self.pending.pop()
             fn(*args)
+
+
+class DictationProjectionTests(unittest.TestCase):
+    """Pure status/projection contracts; no capture, Tk, models or NumPy."""
+
+    def test_only_progress_callbacks_are_throttled(self):
+        controller = VoiceController.__new__(VoiceController)
+        controller._lock = threading.Lock()
+        controller._last_progress_emit = float("-inf")
+        controller._on_status_change = mock.Mock()
+        with mock.patch("voice_support.time.monotonic", side_effect=[0, .1, .24, .25, .5, .74, .75]):
+            for _ in range(7):
+                controller._emit_status(progress=True)
+        self.assertEqual(controller._on_status_change.call_count, 4)
+        with mock.patch("voice_support.time.monotonic", return_value=.76):
+            for _ in range(5):
+                controller._emit_status()
+        self.assertEqual(controller._on_status_change.call_count, 9)
+
+    def test_history_projection_bounds_rows_and_uses_audio_retry_rules(self):
+        controller = VoiceController.__new__(VoiceController)
+        controller._history = mock.Mock()
+        controller._history.list_entries.return_value = [{"id": str(n)} for n in range(10)]
+        controller._history.is_retryable.side_effect = lambda record_id: record_id == "1"
+        controller.status_snapshot = lambda: {"retry_available": True}
+        rows = controller.history_rows(limit=3)
+        self.assertEqual([row["id"] for row in rows], ["0", "1", "2"])
+        self.assertEqual([row["retryable"] for row in rows], [False, True, False])
+        controller._history.list_entries.assert_called_once_with(strict=True)
+        controller.status_snapshot = lambda: {"retry_available": False}
+        controller._history.is_retryable.reset_mock()
+        self.assertFalse(any(row["retryable"] for row in controller.history_rows()))
+        controller._history.is_retryable.assert_not_called()
+
+    def test_history_projection_propagates_read_errors(self):
+        controller = VoiceController.__new__(VoiceController)
+        controller._history = mock.Mock()
+        controller._history.list_entries.side_effect = OSError("synthetic read failure")
+        with self.assertRaises(OSError):
+            controller.history_rows()
+
+    def _edit_controller(self):
+        controller = VoiceController.__new__(VoiceController)
+        controller._lock = threading.Lock()
+        controller._options_lock = threading.RLock()
+        controller._hotkey_edit_token = None
+        controller._hotkey_edit_epoch = 0
+        controller._hotkey_edit_snapshot = (0, False)
+        controller._hotkey_cancel_pending = False
+        controller._session_generation = 0
+        controller._capture_starting = False
+        controller._meeting_token = None
+        controller._disable_requested = False
+        controller._shutdown = threading.Event()
+        controller._state = STATE_IDLE
+        controller.settings = mock.Mock(enabled=True)
+        controller._stop_monitor = mock.Mock()
+        controller._start_monitor = mock.Mock()
+        controller._emit_status = mock.Mock()
+        return controller
+
+    def _edit_token(self):
+        token = threading.Event()
+        token.set()
+        return token
+
+    def test_shortcut_edit_refuses_capture_startup_and_cancelled_admission(self):
+        controller = self._edit_controller()
+        token = self._edit_token()
+        for state in (STATE_RECORDING, STATE_TRANSCRIBING, STATE_ROUTING, STATE_LOADING):
+            controller._state = state
+            self.assertFalse(controller.begin_hotkey_edit(token))
+        controller._state = STATE_IDLE
+        controller._capture_starting = True
+        self.assertFalse(controller.begin_hotkey_edit(token))
+        controller._capture_starting = False
+        controller._meeting_token = object()
+        self.assertFalse(controller.begin_hotkey_edit(token))
+        controller._meeting_token = None
+        token.clear()  # Blur/destroy happened before this worker was admitted.
+        self.assertFalse(controller.begin_hotkey_edit(token))
+        controller._stop_monitor.assert_not_called()
+
+    def test_latest_shortcut_field_owns_observer_and_restarts_are_fenced(self):
+        controller = self._edit_controller()
+        first, second = self._edit_token(), self._edit_token()
+        self.assertTrue(controller.begin_hotkey_edit(first))
+        self.assertTrue(controller.begin_hotkey_edit(second))
+        # The observers remain installed and read the shared state gate.
+        self.assertEqual(controller.hotkey_edit_state(), (2, True))
+        first.clear()
+        stops = controller._stop_monitor.call_count
+        self.assertFalse(controller.begin_hotkey_edit(first))
+        controller.end_hotkey_edit(first)
+        self.assertEqual(controller._stop_monitor.call_count, stops)
+        controller._stop_monitor.assert_not_called()
+        self.assertIs(controller._hotkey_edit_token, second)
+        controller.end_hotkey_edit(second)
+        self.assertEqual(controller.hotkey_edit_state(), (3, False))
+        controller._stop_monitor.assert_not_called()
+        self.assertTrue(controller.settings.enabled)
+
+    def test_shortcut_edit_status_edges_publish_after_releasing_state_lock(self):
+        controller = self._edit_controller()
+        emit = VoiceController._emit_status.__get__(controller)
+        controller._last_progress_emit = float("-inf")
+        seen, callsite_unlocked = [], []
+
+        def checked_emit():
+            acquired = controller._lock.acquire(blocking=False)
+            callsite_unlocked.append(acquired)
+            if acquired:
+                controller._lock.release()
+                emit()
+        controller._emit_status = checked_emit
+
+        def changed():
+            acquired = controller._lock.acquire(blocking=False)
+            seen.append((acquired, controller.hotkey_edit_state()))
+            if acquired:
+                controller._lock.release()
+        controller._on_status_change = changed
+        first, second = self._edit_token(), self._edit_token()
+        self.assertTrue(controller.begin_hotkey_edit(first))
+        self.assertTrue(controller.begin_hotkey_edit(second))
+        controller.end_hotkey_edit(first)  # Stale release publishes nothing.
+        controller.end_hotkey_edit(second)
+        controller._state = STATE_TRANSCRIBING
+        self.assertFalse(controller.begin_hotkey_edit(self._edit_token()))
+        self.assertEqual(callsite_unlocked, [True, True, True])
+        self.assertEqual(seen, [(True, (1, True)), (True, (2, True)), (True, (3, False))])
+
+    def test_shortcut_release_cannot_reenable_disabled_or_shutdown_voice(self):
+        for shutdown in (False, True):
+            with self.subTest(shutdown=shutdown):
+                controller = self._edit_controller()
+                token = self._edit_token()
+                self.assertTrue(controller.begin_hotkey_edit(token))
+                if shutdown:
+                    controller._shutdown.set()
+                else:
+                    controller.settings.enabled = False
+                controller.end_hotkey_edit(token)
+                controller._start_monitor.assert_not_called()
+                self.assertEqual(controller.settings.enabled, shutdown)
+                self.assertIsNone(controller._hotkey_edit_token)
+
+    def test_edit_epoch_fences_enqueued_callbacks_after_rapid_begin_and_end(self):
+        controller = self._edit_controller()
+        from collections import deque
+        controller._hotkey_lock = threading.Lock()
+        controller._hotkey_events = deque()
+        controller._hotkey_worker_active = False
+        controller._hotkey_overflow = False
+        controller._start_worker = mock.Mock()
+        handler = mock.Mock()
+        controller._enqueue_hotkey(handler)
+        token = self._edit_token()
+        self.assertTrue(controller.begin_hotkey_edit(token))
+        controller._enqueue_hotkey(handler)
+        controller.end_hotkey_edit(token)
+        controller._process_hotkeys()
+        handler.assert_not_called()
+        controller._enqueue_hotkey(handler)
+        controller._process_hotkeys()
+        handler.assert_called_once_with(_hotkey_epoch=controller.hotkey_edit_state()[0])
+
+    def test_stale_epoch_is_rechecked_inside_real_handler_admission(self):
+        controller = self._edit_controller()
+        controller._cancel_session_locked = mock.Mock()
+        controller.settings.activation_mode = ACTIVATION_HOLD
+        token = self._edit_token()
+        self.assertTrue(controller.begin_hotkey_edit(token))
+        controller.end_hotkey_edit(token)
+        self.assertFalse(controller.handle_hotkey_press(MODE_DICTATION, _hotkey_epoch=0))
+        self.assertFalse(controller.handle_hotkey_release(MODE_DICTATION, _hotkey_epoch=0))
+        self.assertFalse(controller.cancel(_hotkey_epoch=0))
+        controller._cancel_session_locked.assert_not_called()
+
+    def test_queued_cancel_reserves_admission_without_holding_state_lock_over_native_work(self):
+        controller = self._edit_controller()
+        entered, release = threading.Event(), threading.Event()
+
+        def cancel(reason):
+            self.assertEqual(reason, "cancel")
+            self.assertTrue(controller._lock.acquire(blocking=False))
+            controller._lock.release()
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic cancellation timed out")
+        controller._cancel_session_locked = cancel
+        worker = threading.Thread(target=lambda: controller.cancel(_hotkey_epoch=0))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertFalse(controller.begin_hotkey_edit(self._edit_token()))
+            self.assertFalse(controller.handle_hotkey_press(MODE_DICTATION))
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(controller._hotkey_cancel_pending)
+        self.assertTrue(controller.begin_hotkey_edit(self._edit_token()))
+
+    def _settings_controller(self, enabled=False):
+        controller = self._edit_controller()
+        controller.settings = resolve_voice_settings({"voice_enabled": enabled})
+        controller._logger = mock.Mock()
+        controller._persist_settings = mock.Mock(return_value=True)
+        controller._notify = mock.Mock()
+        return controller
+
+    def test_rejected_settings_are_not_reported_saved(self):
+        controller = self._settings_controller()
+        for field, value in (("_meeting_token", object()), ("_disable_requested", True)):
+            with self.subTest(field=field):
+                setattr(controller, field, value)
+                self.assertFalse(controller.apply_options(hotkey="ctrl+shift+f8"))
+                setattr(controller, field, None if field == "_meeting_token" else False)
+        controller._persist_settings.assert_not_called()
+        controller._stop_monitor.assert_not_called()
+
+    def test_failed_persistence_keeps_options_and_observer_unchanged(self):
+        for raises in (False, True):
+            controller = self._settings_controller()
+            original = controller.settings
+            if raises:
+                controller._persist_settings.side_effect = OSError("synthetic failure")
+            else:
+                controller._persist_settings.return_value = False
+            self.assertFalse(controller.apply_options(hotkey="ctrl+shift+f8"))
+            self.assertIs(controller.settings, original)
+            controller._stop_monitor.assert_not_called()
+
+    def test_failed_save_does_not_undo_concurrent_disable(self):
+        controller = self._settings_controller(enabled=True)
+
+        def fail(_payload):
+            controller.settings.enabled = False
+            return False
+        controller._persist_settings.side_effect = fail
+        self.assertFalse(controller.apply_options(hotkey="ctrl+shift+f8"))
+        self.assertFalse(controller.settings.enabled)
+        self.assertNotEqual(controller.settings.hotkey, "ctrl+shift+f8")
+
+    def test_older_failed_save_cannot_replace_newer_accepted_options(self):
+        controller = self._settings_controller()
+        entered, release, second_entered = threading.Event(), threading.Event(), threading.Event()
+        result, second_result = [], []
+        original = controller.settings
+
+        def persist(payload):
+            if payload["voice_hotkey"] == "ctrl+shift+f8":
+                entered.set()
+                if not release.wait(2):
+                    raise AssertionError("synthetic persistence timed out")
+                return False
+            second_entered.set()
+            return True
+        controller._persist_settings.side_effect = persist
+        worker = threading.Thread(target=lambda: result.append(controller.apply_options(hotkey="ctrl+shift+f8")))
+        newer = threading.Thread(target=lambda: second_result.append(controller.apply_options(hotkey="ctrl+shift+f9")))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertIs(controller.settings, original)
+            newer.start()
+            self.assertFalse(second_entered.wait(.05))
+        finally:
+            release.set()
+            worker.join(2)
+            newer.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(newer.is_alive())
+        self.assertEqual(result, [False])
+        self.assertEqual(second_result, [True])
+        self.assertEqual(controller.settings.hotkey, "ctrl+shift+f9")
+
+    def test_post_write_admission_change_reconciles_disk_without_publishing_candidate(self):
+        controller = self._settings_controller()
+        original = controller.settings
+        payloads = []
+
+        def persist(payload):
+            payloads.append(payload)
+            self.assertIs(controller.settings, original)
+            if len(payloads) == 1:
+                controller._session_generation += 1
+            return True
+        controller._persist_settings.side_effect = persist
+        self.assertFalse(controller.apply_options(hotkey="ctrl+shift+f8"))
+        self.assertIs(controller.settings, original)
+        self.assertEqual(payloads[0]["voice_hotkey"], "ctrl+shift+f8")
+        self.assertEqual(payloads[-1]["voice_hotkey"], original.hotkey)
+        controller._stop_monitor.assert_not_called()
 
 
 class FakeCapture:
@@ -189,6 +484,113 @@ class ControllerTests(unittest.TestCase):
                 mock.patch.object(self.controller, "_start_monitor"):
             self.controller.enable()
         self.assertEqual(self.controller.state, STATE_IDLE)
+
+    def test_pending_failed_save_keeps_capture_on_the_previous_options(self):
+        self.controller.settings.language = "pt-BR"
+        self._ready()
+        entered, release = threading.Event(), threading.Event()
+        result = []
+
+        def persist(_payload):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic persistence wait timed out")
+            return False
+        self.controller._persist_settings = persist
+        worker = threading.Thread(target=lambda: result.append(
+            self.controller.apply_options(profile="accuracy", language="en-US")))
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+            entry = self.controller.history_entries()[0]
+            self.assertEqual((entry["profile"], entry["language"]), ("balanced", "pt-BR"))
+        finally:
+            release.set()
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, [False])
+        self.assertEqual((self.controller.settings.profile, self.controller.settings.language), ("balanced", "pt-BR"))
+
+    def test_shortcut_snapshot_and_filter_do_not_wait_for_retry_history_disk(self):
+        from voice_hotkey import VoiceHotkeyMonitor, parse_chord
+        self._ready()
+        entered, release, filtered = threading.Event(), threading.Event(), threading.Event()
+        snapshots, errors = [], []
+        monitor = VoiceHotkeyMonitor(
+            parse_chord("ctrl+alt+space"), parse_chord("ctrl+alt+shift+space"),
+            on_press=mock.Mock(), on_release=mock.Mock(),
+            passthrough_state=self.controller.hotkey_edit_state)
+        monitor._listener = mock.Mock()
+
+        def disk_check(_record_id):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic eligibility read timed out")
+            return False
+
+        def filter_key():
+            try:
+                snapshots.append(self.controller.hotkey_edit_state())
+                monitor._win32_filter(0x100, mock.Mock(vkCode=0x20))
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                filtered.set()
+
+        with mock.patch.object(self.controller._history, "is_retryable", side_effect=disk_check):
+            reader = threading.Thread(target=lambda: self.controller.retry_history("synthetic"))
+            keyboard = threading.Thread(target=filter_key)
+            reader.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertTrue(self.controller._lock.locked())
+                keyboard.start()
+                self.assertTrue(filtered.wait(.5), "the keyboard filter waited on history disk I/O")
+                self.assertTrue(self.controller._lock.locked())
+            finally:
+                release.set()
+                reader.join(2)
+                if keyboard.ident is not None:
+                    keyboard.join(2)
+        self.assertFalse(reader.is_alive())
+        self.assertFalse(keyboard.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(snapshots, [(0, False)])
+        monitor._listener.suppress_event.assert_not_called()
+
+    def test_popped_shortcut_actions_cannot_cross_a_full_edit_epoch(self):
+        self._ready()
+        for kind in ("press", "release", "cancel"):
+            with self.subTest(kind=kind):
+                entered, release = threading.Event(), threading.Event()
+                handler = {"press": self.controller.handle_hotkey_press,
+                           "release": self.controller.handle_hotkey_release,
+                           "cancel": self.controller.cancel}[kind]
+                self.controller.task_runner = ThreadRunner()
+
+                def delayed(*args, **kwargs):
+                    entered.set()
+                    if not release.wait(2):
+                        raise AssertionError("synthetic popped callback timed out")
+                    return handler(*args, **kwargs)
+                self.controller._enqueue_hotkey(delayed, *(() if kind == "cancel" else (MODE_DICTATION,)))
+                try:
+                    self.assertTrue(entered.wait(2))
+                    token = threading.Event()
+                    token.set()
+                    self.assertTrue(self.controller.begin_hotkey_edit(token))
+                    self.controller.end_hotkey_edit(token)
+                    if kind != "press":
+                        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+                finally:
+                    release.set()
+                    self.assertTrue(self.controller._join_workers(2))
+                    self.controller.task_runner = InlineRunner()
+                self.assertEqual(self.controller.state, STATE_IDLE if kind == "press" else STATE_RECORDING)
+                if kind != "press":
+                    self.assertTrue(self.capture.started)
+                    self.controller.cancel()
 
     def test_dictation_model_is_released_after_idle_and_reloaded_on_use(self):
         self._ready()
@@ -1274,7 +1676,7 @@ class ControllerTests(unittest.TestCase):
     def test_failed_error_notification_does_not_strand_the_hotkey_worker(self):
         self._ready()
         handler = mock.Mock(side_effect=RuntimeError("fixture handler failed"))
-        self.controller._hotkey_events.append((handler, ()))
+        self.controller._hotkey_events.append((handler, (), self.controller.hotkey_edit_state()[0]))
         self.controller._hotkey_worker_active = True
         with mock.patch.object(self.controller, "_notify", side_effect=RuntimeError("fixture notification failed")):
             with self.assertRaisesRegex(RuntimeError, "notification failed"):
@@ -1622,6 +2024,273 @@ class ControllerTests(unittest.TestCase):
         self.controller._model_download_profile = "compact"
 
         self.assertFalse(self.controller.download_profile("compact"))
+
+    def test_runtime_switch_progress_is_fresh_before_idle_and_active_cached_switches(self):
+        self._ready()
+        runner = ReorderedRunner()
+        self.controller.task_runner = runner
+
+        def prepare(profile, language, progress=None, **kwargs):
+            if profile == "accuracy" and progress:
+                progress(100, 100)
+
+        with mock.patch.object(self.controller, "_unload_provider", return_value=True), \
+                mock.patch.object(self.controller, "_start_monitor"), \
+                mock.patch.object(self.controller, "_model_loaded"), \
+                mock.patch.object(self.controller._provider, "prepare", side_effect=prepare):
+            for active in (False, True):
+                with self.subTest(active=active):
+                    self.assertTrue(self.controller.apply_options(profile="accuracy"))
+                    runner.drain()
+                    self.assertEqual(self.controller.state, STATE_IDLE)
+                    if active:
+                        self.assertTrue(self.controller.handle_hotkey_press(MODE_DICTATION))
+                        runner.drain()
+                    self.assertTrue(self.controller.apply_options(profile="balanced"))
+                    snapshot = self.controller.status_snapshot()
+                    runner.drain()
+                    self.assertEqual(snapshot["state"], STATE_LOADING)
+                    self.assertEqual((snapshot["download_done"], snapshot["download_total"]), (0, 0))
+                    self.assertEqual(self.controller.state, STATE_IDLE)
+                    self.assertEqual(self.controller.status_snapshot()["download_total"], 0)
+
+    def test_runtime_switch_preserves_explicit_download_bytes_and_rejects_stale_progress(self):
+        self._ready()
+        callbacks = []
+        entered, release = threading.Event(), threading.Event()
+        runner = ThreadRunner()
+
+        def prepare(profile, language, progress=None, **kwargs):
+            callbacks.append(progress)
+            progress(100, 100)
+
+        def download(profile, progress=None, **kwargs):
+            progress(25, 200)
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic explicit download timed out")
+
+        with mock.patch.object(self.controller._provider, "profile_installed", return_value=False), \
+                mock.patch.object(self.controller, "_unload_provider", return_value=True), \
+                mock.patch.object(self.controller, "_start_monitor"), \
+                mock.patch.object(self.controller, "_model_loaded"), \
+                mock.patch.object(self.controller._provider, "prepare", side_effect=prepare), \
+                mock.patch.object(self.controller._provider, "download_profile", side_effect=download):
+            self.assertTrue(self.controller.apply_options(profile="accuracy"))
+            self.controller.task_runner = runner
+            try:
+                self.assertTrue(self.controller.download_profile("compact"))
+                self.assertTrue(entered.wait(1))
+                cancel_event = self.controller._model_download_cancel
+                generation = self.controller._session_generation
+                self.assertTrue(self.controller.apply_options(profile="balanced"))
+                self.assertEqual(self.controller._session_generation, generation + 1)
+                callbacks[0](99, 100)  # Old runtime cannot overwrite explicit progress.
+                snapshot = self.controller.status_snapshot()
+                self.assertEqual(snapshot["state"], STATE_LOADING)
+                self.assertTrue(snapshot["download_active"])
+                self.assertEqual(snapshot["download_profile"], "compact")
+                self.assertEqual((snapshot["download_done"], snapshot["download_total"]), (25, 200))
+                self.assertIs(self.controller._model_download_cancel, cancel_event)
+                self.assertFalse(cancel_event.is_set())
+            finally:
+                release.set()
+                for thread in runner.threads:
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(self.controller.state, STATE_IDLE)
+            callbacks[-1](99, 100)  # A finished runtime load cannot publish either.
+            self.assertEqual(self.controller.status_snapshot()["download_total"], 0)
+
+    def test_failed_load_is_cleared_by_an_actual_fresh_switch_and_success(self):
+        with mock.patch.object(self.controller._provider, "prepare",
+                               side_effect=VoiceRuntimeError("synthetic load failure")):
+            self.controller.enable()
+        self.assertEqual(self.controller.state, STATE_UNAVAILABLE)
+        self.assertTrue(self.controller.status_snapshot()["load_failed"])
+        runner = ReorderedRunner()
+        self.controller.task_runner = runner
+        with mock.patch.object(self.controller, "_unload_provider", return_value=True), \
+                mock.patch.object(self.controller, "_start_monitor"), \
+                mock.patch.object(self.controller, "_model_loaded"), \
+                mock.patch.object(self.controller._provider, "prepare"):
+            self.assertTrue(self.controller.apply_options(profile="accuracy"))
+            self.assertEqual(self.controller.state, STATE_LOADING)
+            self.assertFalse(self.controller.status_snapshot()["load_failed"])
+            runner.drain()
+            self.assertEqual(self.controller.state, STATE_IDLE)
+            self.assertFalse(self.controller.status_snapshot()["load_failed"])
+
+    def _assert_superseded_initial_load(self, failure=None):
+        old_enter, old_release, new_enter, new_release = (threading.Event() for _ in range(4))
+        runner = ThreadRunner()
+        self.controller.task_runner = runner
+        published = []
+        self.controller._on_status_change = lambda: published.append(self.controller.status_snapshot())
+
+        def prepare(profile, language, progress=None, **kwargs):
+            if profile == "balanced":
+                old_enter.set()
+                if not old_release.wait(2):
+                    raise AssertionError("synthetic initial load timed out")
+                progress(100, 100)
+                if failure:
+                    raise failure("synthetic superseded load failure")
+            else:
+                progress(40, 200)
+                new_enter.set()
+                if not new_release.wait(2):
+                    raise AssertionError("synthetic replacement load timed out")
+
+        with mock.patch.object(self.controller._provider, "prepare", side_effect=prepare), \
+                mock.patch.object(self.controller, "_unload_provider", return_value=True), \
+                mock.patch.object(self.controller, "_model_loaded"), \
+                mock.patch.object(self.controller, "_start_monitor") as start_monitor:
+            try:
+                self.controller.enable()
+                self.assertTrue(old_enter.wait(1))
+                self.assertTrue(self.controller.apply_options(profile="accuracy"))
+                published.clear()
+                old_release.set()
+                self.assertTrue(new_enter.wait(1))
+                snapshot = self.controller.status_snapshot()
+                self.assertEqual(snapshot["state"], STATE_LOADING)
+                self.assertFalse(snapshot["retry_available"])
+                self.assertFalse(snapshot["load_failed"])
+                self.assertEqual((snapshot["download_done"], snapshot["download_total"]), (40, 200))
+                self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
+                self.assertFalse(self.capture.started)
+                self.assertFalse(any(item["state"] != STATE_LOADING for item in published))
+                self.notify.assert_not_called()
+                start_monitor.assert_not_called()
+            finally:
+                old_release.set()
+                new_release.set()
+                for thread in runner.threads:
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(self.controller.state, STATE_IDLE)
+            self.assertTrue(self.controller.status_snapshot()["retry_available"])
+            self.assertFalse(self.controller.status_snapshot()["load_failed"])
+            start_monitor.assert_called_once_with()
+            self.notify.assert_not_called()
+
+    def test_superseded_initial_load_success_cannot_publish_ready_for_replacement(self):
+        self._assert_superseded_initial_load()
+
+    def test_superseded_initial_load_runtime_error_cannot_publish_failure_for_replacement(self):
+        self._assert_superseded_initial_load(VoiceRuntimeError)
+
+    def test_superseded_initial_load_unexpected_error_cannot_publish_failure_for_replacement(self):
+        self._assert_superseded_initial_load(RuntimeError)
+
+    def test_queued_initial_load_keeps_its_admitted_generation(self):
+        runner = ReorderedRunner()
+        self.controller.task_runner = runner
+        status = mock.Mock()
+        self.controller._on_status_change = status
+        with mock.patch.object(self.controller._provider, "prepare") as prepare, \
+                mock.patch.object(self.controller, "_model_loaded"), \
+                mock.patch.object(self.controller, "_unload_provider", return_value=True), \
+                mock.patch.object(self.controller, "_start_monitor") as start_monitor:
+            self.controller.enable()
+            self.assertTrue(self.controller.apply_options(profile="accuracy"))
+            status.reset_mock()
+            old_worker, args = runner.pending.pop(0)
+            try:
+                old_worker(*args)
+                prepare.assert_not_called()
+                status.assert_not_called()
+                start_monitor.assert_not_called()
+                self.assertEqual(self.controller.state, STATE_LOADING)
+                self.assertFalse(self.controller.status_snapshot()["retry_available"])
+            finally:
+                runner.drain()
+            self.assertEqual(self.controller.state, STATE_IDLE)
+            self.assertEqual(prepare.call_args.args[:2], ("accuracy", self.controller.settings.language))
+
+    def test_initial_load_superseded_before_prepare_cannot_borrow_replacement_context(self):
+        checked, resume, prepared, finish = (threading.Event() for _ in range(4))
+        runner = ThreadRunner()
+        self.controller.task_runner = runner
+
+        def capture_available():
+            checked.set()
+            if not resume.wait(2):
+                raise AssertionError("synthetic capture check timed out")
+            return True
+
+        def prepare(profile, language, progress=None, **kwargs):
+            progress(40, 200)
+            prepared.set()
+            if not finish.wait(2):
+                raise AssertionError("synthetic replacement prepare timed out")
+
+        with mock.patch.object(self.controller, "capture_available", side_effect=capture_available), \
+                mock.patch.object(self.controller._provider, "prepare", side_effect=prepare) as provider_prepare, \
+                mock.patch.object(self.controller, "_model_loaded"), \
+                mock.patch.object(self.controller, "_unload_provider", return_value=True), \
+                mock.patch.object(self.controller, "_start_monitor") as start_monitor:
+            try:
+                self.controller.enable()
+                self.assertTrue(checked.wait(1))
+                self.assertTrue(self.controller.apply_options(profile="accuracy"))
+                resume.set()
+                self.assertTrue(prepared.wait(1))
+                provider_prepare.assert_called_once()
+                self.assertEqual(provider_prepare.call_args.args[0], "accuracy")
+                self.assertEqual(self.controller.state, STATE_LOADING)
+                self.assertEqual(self.controller.status_snapshot()["download_done"], 40)
+                self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
+                start_monitor.assert_not_called()
+            finally:
+                resume.set()
+                finish.set()
+                for thread in runner.threads:
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(self.controller.state, STATE_IDLE)
+            self.assertTrue(self.controller.status_snapshot()["retry_available"])
+            self.notify.assert_not_called()
+
+    def _assert_initial_load_cannot_overwrite_stopped_state(self, action):
+        entered, release = threading.Event(), threading.Event()
+        runner = ThreadRunner()
+        self.controller.task_runner = runner
+
+        def prepare(*args, **kwargs):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic stopped load timed out")
+            raise VoiceRuntimeError("synthetic cancelled load failure")
+
+        stopper = threading.Thread(target=getattr(self.controller, action))
+        with mock.patch.object(self.controller._provider, "prepare", side_effect=prepare), \
+                mock.patch.object(self.controller, "_start_monitor") as start_monitor:
+            try:
+                self.controller.enable()
+                self.assertTrue(entered.wait(1))
+                stopper.start()
+                self.assertTrue(self.controller._cancel.wait(1))
+            finally:
+                release.set()
+                if stopper.ident is not None:
+                    stopper.join(2)
+                    self.assertFalse(stopper.is_alive())
+                for thread in runner.threads:
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(self.controller.state, STATE_UNAVAILABLE)
+            self.assertFalse(self.controller.status_snapshot()["load_failed"])
+            self.assertFalse(self.controller.status_snapshot()["retry_available"])
+            start_monitor.assert_not_called()
+            self.notify.assert_not_called()
+
+    def test_initial_load_error_after_disable_cannot_overwrite_stopped_state(self):
+        self._assert_initial_load_cannot_overwrite_stopped_state("disable")
+
+    def test_initial_load_error_after_shutdown_cannot_overwrite_stopped_state(self):
+        self._assert_initial_load_cannot_overwrite_stopped_state("shutdown")
 
     def test_enable_after_disable_returns_to_idle(self):
         self._ready()

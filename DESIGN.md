@@ -254,10 +254,29 @@ On navigation / page / content / selection:
   **Chat** keeps a temporary conversation for each recent recording, with a
   bottom composer and sources, Copy, and Save on each answer. Follow-ups receive
   bounded context; transcript segments remain the source of factual evidence.
-- **Ditado:** choose the active model and language, then use the hotkey. Model
-  downloads and privacy controls belong in settings. Keep history beside the
-  primary save action; corrections, command reload, licenses, and model removal
-  live in the secondary actions menu.
+- **Ditado:** lead with the controller's actual readiness, model, language and
+  shortcut. Enabled does not imply ready: loading, failure, a recording holding
+  dictation and shortcut editing have written states. Five recent dictations
+  show local dates, translated states, a tone and an 80-character preview;
+  retry appears only for a selection with recoverable audio while the controller
+  can admit it. Copy never pastes into an old target. A read error is written
+  separately from a confirmed empty history. The full history uses the same
+  projection, capped at 200 rows, with Escape/Close and themed window chrome.
+  History reads and audio eligibility checks run off Tk, with one pending read
+  per view and guarded delivery after teardown; byte-progress ticks trigger no
+  new history scans or tray-menu rebuilds. Download byte callbacks emit at most
+  four times per second; lifecycle states always emit immediately.
+  The configuration scrolls above a fixed save/discard bar. Dirty fields survive
+  status updates; a clean form follows externally changed settings. Save becomes
+  clean only after the controller accepts and persists the options. Saving
+  retains the current enabled intent; the header toggle owns activation.
+  Shortcut fields capture a key press and validate conflicts on blur. Both global
+  shortcut observers pass keys through while the field owns a state-only edit
+  token, with a visible hint. Epochs fence queued callbacks and clear held-key
+  state across focus changes; blur or teardown releases only its own token.
+  An active dictation or recording refuses editing. Model downloads and privacy
+  controls stay in Settings; corrections,
+  command reload, licenses, and model removal stay in the secondary menu.
 - **Configurações:** show one settings section at a time. Changes identify
   whether they apply immediately or to the next recording.
 
