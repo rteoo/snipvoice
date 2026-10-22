@@ -57,6 +57,17 @@ class SummaryFlowTests(unittest.TestCase):
         self.assertNotIn("risks", kwargs["profile"]["sections"])
         self.assertEqual(view.summary_pending, ("session-1", 1))
 
+    def test_requested_cancellation_preserves_summary_and_uses_warning(self):
+        view = self.view
+        view.generate_report()
+        view._action = Mock()
+        view.cancel_summary_generation()
+        view._action.assert_called_once_with("cancel_processing", kinds=frozenset({"report"}), urgent=True)
+        view._report_generated("session-1", None, "synthetic cancelled work", request=1)
+        self.assertEqual(said(view)[:2], ("problem", "O resumo foi cancelado"))
+        self.assertEqual(view.messages.current("library").tone, "warning")
+        view._show_summary.assert_not_called()
+
     def test_empty_focus_is_optional_and_duplicate_generation_is_blocked(self):
         view = self.view
         view.summary_focus.set("  ")

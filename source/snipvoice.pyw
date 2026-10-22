@@ -500,6 +500,11 @@ class Snipvoice:
                 window,
                 models_parent=getattr(meeting_view, "transcription_models_parent", None),
             )
+        meeting_view.attach_voice_status(
+            lambda: {"enabled": bool(self.voice is not None and self.voice.is_enabled()),
+                     "state": self.voice.state if self.voice is not None else "disabled",
+                     "status": self.voice.status_label() if self.voice is not None else ""}, tab,
+        )
         self._build_manager_nav(ui, nav, notebook)
         notebook.select(meeting_view.recording_tab)
         # Keep the four destinations available from the keyboard while focus
@@ -550,10 +555,12 @@ class Snipvoice:
                 colors = ui.nav_button_colors(bg, selected=selected)
                 plane = colors.get("bg", bg)
                 item.configure(bg=plane)
-                button.configure(font=ui.body_strong() if selected else ui.body(), **colors)
+                button.configure(text=notebook.tab(tab_id, "text"),
+                                 font=ui.body_strong() if selected else ui.body(), **colors)
                 marker.configure(bg=ui.accent_mark if selected else plane)
 
         notebook.bind("<<NotebookTabChanged>>", highlight, add="+")
+        notebook.bind("<<ManagerStatusChanged>>", highlight, add="+")
         highlight()
 
     def _reopen_manager_for_appearance(self, root, preference):

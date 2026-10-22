@@ -1349,6 +1349,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         }
         view.controller.get_transcript.return_value = [{"text": "a" * 10000, "track": "microphone", "start": 0}]
         view.load_session("two")
+        self.assertEqual(view._selection_generation, 1)
+        view.detail_sections.select.assert_not_called()
         self.assertFalse(view.detail_ready)
         metadata, segments = view._submit.call_args.args[1]()
         self.assertNotIn("notes", metadata)
@@ -1572,11 +1574,34 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.notebook = mock.Mock()
         view.library_tab = mock.Mock()
         view.load_session = mock.Mock()
+        view._visible_destination = mock.Mock(return_value="recording")
         view._recording_finished({"session_id": "meeting-2", "processing": True})
         view.refresh_library.assert_called_once_with()
         view.notebook.select.assert_called_once_with(view.library_tab)
         view.load_session.assert_called_once_with("meeting-2")
         self.assertEqual(view.processing_target, "meeting-2")
+
+    def test_recording_finished_does_not_move_a_user_who_left_recording(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.dirty = False
+        view.refresh_library = mock.Mock()
+        view.notebook = mock.Mock()
+        view.load_session = mock.Mock()
+        view._visible_destination = mock.Mock(return_value="settings")
+        view._recording_finished({"session_id": "new-recording", "processing": True})
+        view.notebook.select.assert_not_called()
+        view.load_session.assert_not_called()
+
+    def test_resetting_transcript_content_preserves_the_chosen_presentation(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.transcript_document = Text()
+        view.transcript_document_request = 0
+        view.bridge = mock.Mock()
+        view.copy_transcript_button = mock.Mock()
+        view.transcript_style = Variable("Com horários")
+        view._sync_transcript_style = mock.Mock()
+        view._reset_transcript_document()
+        self.assertEqual(view.transcript_style.get(), "Com horários")
 
     def test_recording_finished_preserves_dirty_title_and_does_not_load_new_recording(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -2721,6 +2746,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.report_profile_choice.set(label)
         view._report_profile_changed()
         view.detail_sections.select("summary")
+        view.summary_setup_toggle.invoke()
         view.summary_focus_toggle.invoke()
         view.summary_focus.insert("1.0", "Priorize o acompanhamento.")
         generated = {"summary": "Conversa revisada.", "feedback": [{"text": "A busca é útil."}],
@@ -3459,12 +3485,12 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view._recording_sources = "both"
         snapshot = self._recording_snapshot(system="recovering", system_age=20.0)
         snapshot["capture_health"]["microphone"] = {"state": "disconnected", "reason": "",
-                                                    "last_packet_age": 20.0}
+                                                    "last_packet_age": 14.0}
         view._sync_recording_trouble(snapshot, now=500.0)
         texts = [w.cget("text") for w in descendants(view.recording_trouble)
                  if isinstance(w, tk.Label)]
-        self.assertIn("Sem áudio do microfone e do sistema há 20 s", texts)
-        self.assertEqual(view.source_captions["microphone"].cget("text"), "Sem áudio · há 20 s")
+        self.assertIn("Sem áudio do microfone e do sistema · maior interrupção: 20 s", texts)
+        self.assertEqual(view.source_captions["microphone"].cget("text"), "Sem áudio · há 14 s")
         self.assertEqual(view.source_captions["system"].cget("text"), "Reconectando… · há 20 s")
         view._sync_recording_trouble({**snapshot, "state": "idle"}, now=501.0)
         self.assertIsNone(view.recording_trouble.kind)
@@ -3558,6 +3584,146 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                 view._show_cancel(button, False)
                 self.root.update_idletasks()
                 self.assertEqual((row.winfo_reqwidth(), row.winfo_reqheight()), before)
+
+    def test_every_parked_cancel_is_painted_above_its_slot_in_its_page(self):
+        view, notebook = self._ready_recorder()
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        previous_topmost = view.window.attributes("-topmost")
+        try:
+            # Keep the synthetic fixture above the editor while checking real
+            # desktop hit targets; a foreign window can otherwise cover it.
+            view.window.attributes("-topmost", True)
+            view.window.lift()
+            for name, panel, section in (
+                    ("semantic_cancel_button", None, None),
+                    ("cross_cancel_button", "cross", None),
+                    ("rebuild_cancel_button", "tools", None),
+                    ("cancel_processing_button", None, "transcript"),
+                    ("cancel_summary_button", None, "summary"),
+                    ("summary_download_cancel_button", None, "models")):
+                with self.subTest(button=name):
+                    for key, widget in view.library_panels.items():
+                        if widget.winfo_manager():
+                            view._toggle_library_panel(key)
+                    notebook.select(view.settings_tab if section == "models" else view.library_tab)
+                    if panel:
+                        view._toggle_library_panel(panel)
+                    if section == "models":
+                        view.settings_sections.select("models")
+                        view.model_sections.select("summary")
+                    elif section:
+                        view._show_library_detail(True)
+                        view.detail_sections.select(section)
+                        if section == "summary" and not view.summary_setup.winfo_manager():
+                            view.summary_setup_toggle.invoke()
+                    button = getattr(view, name)
+                    view._show_cancel(button, True)
+                    self.root.update()
+                    if section in {"models", "summary"}:
+                        canvas = view.settings_canvas if section == "models" else view.detail_canvas
+                        canvas.yview_moveto(1)
+                        self.root.update()
+                    self.assertTrue(button.winfo_ismapped())
+                    center = (button.winfo_rootx() + button.winfo_width() // 2,
+                              button.winfo_rooty() + button.winfo_height() // 2)
+                    # Mapped is insufficient: a later-created sibling can cover
+                    # the label and intercept clicks while all size checks pass.
+                    self.assertIs(self.root.winfo_containing(*center), button)
+                    view._show_cancel(button, False)
+                    self.assertFalse(button.winfo_manager())
+        finally:
+            view.window.attributes("-topmost", previous_topmost)
+
+    def test_readiness_strip_is_one_quiet_line_when_healthy_and_names_trouble(self):
+        view, _notebook = self._ready_recorder()
+        view._submit = mock.Mock(return_value=True)
+        view.readiness_probe.settle({"profile": "balanced", "voice": {"enabled": True}}, None)
+        view._summary_inventory_state = "ready"
+        view._readiness_next_render = 0
+        view._sync_readiness(now=0)
+        self.assertEqual(len(view.readiness_strip.winfo_children()), 1)
+        self.assertEqual(view._readiness_rows[0].key, "healthy")
+        view.retention_ready = False
+        view.startup_status = "Synthetic startup recovery"
+        view._summary_inventory_state = "unknown"
+        view.readiness_probe.settle(None, "synthetic inventory read error")
+        view._sync_readiness(now=1)
+        self.assertEqual([row.key for row in view._readiness_rows], ["startup", "inventory", "summary"])
+        self.assertEqual(len([w for w in descendants(view.readiness_strip) if isinstance(w, tk.Button)]), 3)
+
+    def test_processing_banner_is_only_for_its_selected_session_and_audio_percent(self):
+        view, notebook = self._ready_recorder()
+        self.root.after_cancel(view.after_id)
+        view.after_id = None
+        notebook.select(view.library_tab)
+        view._show_library_detail(True)
+        view.selected = "one"
+        live = {"processing": True, "processing_session": "one", "processing_kind": "transcription",
+                "postprocess": "Synthetic transcription"}
+        view._sync_processing_banner(live, now=10)
+        view._sync_processing_banner(live, now=25)
+        self.root.update()
+        self.assertTrue(view.processing_banner.winfo_ismapped())
+        self.assertIn("00:00:15", view.processing_banner_label.cget("text"))
+        self.assertFalse(view.detail_processing_progress.winfo_manager())
+        cancel = next(widget for widget in descendants(view.processing_banner)
+                      if isinstance(widget, tk.Button) and widget.cget("text") == "Cancelar")
+        cancel.invoke()
+        wait_for(lambda: view.controller.cancel_processing.called)
+        view.controller.cancel_processing.assert_called_once_with()
+        live["audio_export"] = {"session_id": "one", "stage": "encoding", "percent": 42}
+        view._sync_processing_banner(live, now=26)
+        self.assertEqual(float(view.detail_processing_progress.cget("value")), 42)
+        self.assertIn("42%", view.processing_banner_label.cget("text"))
+        view.selected = "other"
+        view._sync_processing_banner(live, now=27)
+        self.assertFalse(view.processing_banner.winfo_manager())
+
+    def test_summary_defaults_to_result_and_preserves_an_explicit_detail_choice(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.library_tab)
+        view._show_library_detail(True)
+        view.selected = "one"
+        view._load_transcript_document = mock.Mock()
+        view.refresh_reports = mock.Mock()
+        metadata = {"id": "one", "title": "Synthetic meeting", "status": "completed", "duration": 45,
+                    "summary": "Synthetic saved summary", "tracks": {}, "final_available": False}
+        view._detail_loaded("one", (metadata, []), None)
+        self.assertEqual(view.detail_sections.current, "summary")
+        self.assertFalse(view.summary_setup.winfo_manager())
+        view.detail_sections.buttons["files"].invoke()
+        view._submit = mock.Mock(return_value=True)
+        view.load_session("other")
+        self.assertEqual(view.detail_sections.current, "files")
+        view._detail_loaded("other", ({**metadata, "id": "other"}, []), None)
+        self.assertEqual(view.detail_sections.current, "files")
+
+    def test_summary_completion_respects_navigation_and_explicit_section_changes(self):
+        view, notebook = self._ready_recorder()
+        notebook.select(view.library_tab)
+        self.root.update()
+        view.selected, view.summary_text = "one", "Synthetic summary"
+        context = view._current_completion_context()
+        view._summary_completed("one", context)
+        self.assertEqual(view.detail_sections.current, "summary")
+        view.detail_sections.buttons["files"].invoke()
+        view._summary_completed("one", context)
+        self.assertEqual(view.detail_sections.current, "files")
+        notebook.select(view.settings_tab)
+        self.root.update()
+        view._summary_completed("one", context)
+        self.assertEqual(notebook.select(), str(view.settings_tab))
+
+    def test_waveform_lanes_hide_when_idle_and_return_for_source_preview(self):
+        view, _notebook = self._ready_recorder()
+        free = {"state": "idle", "processing": False, "levels": {}, "elapsed": 0}
+        self._poll_once(view, free)
+        self.assertFalse(view.waveform.winfo_manager())
+        self._poll_once(view, {**free, "previewing": True})
+        self.assertEqual(view.waveform.winfo_manager(), "grid")
+        self._poll_once(view, self._recording_snapshot())
+        self.assertEqual(view.waveform.winfo_manager(), "grid")
 
     def test_disabled_recovery_controls_name_what_they_wait_for(self):
         view, _notebook = self._ready_recorder()

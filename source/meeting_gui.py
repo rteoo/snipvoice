@@ -38,6 +38,9 @@ from summary_models import (
     summary_model_is_installed,
 )
 import ui_theme
+from ops_status import (
+    ReadinessProbe, completion_can_select, processing_view, readiness_rows, recent_attention,
+)
 from voice_catalog import available_languages, format_size, selectable_catalog
 from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY
 
@@ -667,12 +670,13 @@ class SectionSwitcher:
     directly; only the chosen frame is packed into ``container``.
     """
 
-    def __init__(self, ui, nav, container, *, vertical=False, on_select=None):
+    def __init__(self, ui, nav, container, *, vertical=False, on_select=None, on_user_select=None):
         self.ui = ui
         self.nav = nav
         self.container = container
         self.vertical = vertical
         self.on_select = on_select
+        self.on_user_select = on_user_select
         self.frames = {}
         self.buttons = {}
         self.markers = {}
@@ -685,7 +689,7 @@ class SectionSwitcher:
         # 2px underline below a horizontal one. No selection plane, no copper text.
         marker = tk.Frame(item, bg=bg, width=3, height=16 if self.vertical else 2)
         button = tk.Button(
-            item, text=title, font=self.ui.body(), command=lambda: self.select(key),
+            item, text=title, font=self.ui.body(), command=lambda: self.user_select(key),
             anchor="w" if self.vertical else "center",
             **self.ui.nav_button_colors(bg), **self.ui.button_chrome(compact=True, ring=False),
         )
@@ -705,6 +709,11 @@ class SectionSwitcher:
         if self.current is None:
             self.select(key)
         return frame
+
+    def user_select(self, key):
+        if self.on_user_select is not None:
+            self.on_user_select(key)
+        self.select(key)
 
     def select(self, key):
         if key == self.current:
@@ -880,10 +889,25 @@ class MeetingWindow:
         self._summary_reason = ""
         self._playback_failure = None
         self.summary_text = ""
+        self.readiness_probe = ReadinessProbe()
+        self._readiness_next_render = 0.0
+        self._readiness_rows = None
+        self._summary_inventory_state = "pending"
+        self.voice_status_getter = None
+        self.voice_tab = None
+        self._navigation_generation = 0
+        self._detail_section_generation = 0
+        self._selection_generation = 0
+        self._detail_section_chosen = False
+        self._processing_banner_key = None
+        self._processing_started = None
+        self._completion_context = None
+        self._summary_cancel_requested = None
         self._build()
         if not self.embedded:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Destroy>", self._destroyed, add="+")
+        self.window.bind("<Control-Shift-C>", self._copy_summary_shortcut, add="+")
         self._submit("settings", self.settings_getter, self._settings_loaded)
         self._submit(
             "privacy_defaults",
@@ -1130,6 +1154,174 @@ class MeetingWindow:
             return tr("Página {page} · 1 gravação", page=page)
         return tr("Página {page} · {count} gravações", page=page, count=count)
 
+    def attach_voice_status(self, getter, tab):
+        """The app supplies an in-memory voice snapshot and its existing destination."""
+        self.voice_status_getter, self.voice_tab = getter, tab
+
+    def _sync_readiness(self, now=None):
+        if not hasattr(self, "readiness_probe"):
+            return
+        now = time.monotonic() if now is None else now
+        if now < self._readiness_next_render:
+            return
+        self._readiness_next_render = now + 1.0
+        probe = self.readiness_probe
+        if probe.admit(now):
+            preferred = self._effective_profile()
+            voice_reader = self.voice_status_getter
+
+            def read():
+                reader = getattr(self.controller, "installed_transcription_profile", None)
+                if not callable(reader):
+                    raise RuntimeError("Installed transcription inventory is unavailable")
+                return {"profile": reader(preferred),
+                        "voice": voice_reader() if voice_reader is not None else None}
+
+            if not self.bridge.submit("readiness", read, probe.settle):
+                probe.settle(None, "busy")
+        attention = recent_attention(self.session_items.values())
+        rows = readiness_rows(
+            self.snapshot, probe, summary_state=self._summary_inventory_state,
+            voice_available=self.voice_status_getter is not None,
+            startup_ready=self.retention_ready, startup_text=self.startup_status,
+            attention_count=len(attention))
+        if rows != self._readiness_rows:
+            self._readiness_rows = rows
+            for child in self.readiness_strip.winfo_children():
+                child.destroy()
+            actions = {
+                "startup": self._readiness_startup_details,
+                "inventory": self._open_transcription_models,
+                "transcription": self._open_transcription_models,
+                "summary": self.open_summary_models,
+                "job": self._cancel_current_job,
+                "attention": self._open_attention_recording,
+                "dictation": lambda: self.notebook.select(self.voice_tab),
+            }
+            for item in rows:
+                row = tk.Frame(self.readiness_strip, bg=self.ui.card)
+                row.pack(fill="x", pady=(0, self.ui.space_xs))
+                row.columnconfigure(0, weight=1)
+                self._wrap_label(row, item.text, bg=self.ui.card, fg=getattr(self.ui, item.tone),
+                                 font=self.ui.caption(), anchor="w", justify="left").grid(
+                                     row=0, column=0, sticky="ew")
+                if item.action:
+                    self._button(row, item.action, actions[item.key]).grid(
+                        row=0, column=1, sticky="e", padx=(self.ui.space_sm, 0))
+        self._sync_navigation_badges(attention)
+
+    def _readiness_startup_details(self):
+        self._fail("recording", tr("Recuperação local pendente."), self.startup_status, tone="warning")
+        self.recording_canvas.yview_moveto(0)
+
+    def _open_transcription_models(self):
+        self.notebook.select(self.settings_tab)
+        self.settings_sections.select("models")
+        self.model_sections.select("transcription")
+
+    def _open_attention_recording(self):
+        attention = recent_attention(self.session_items.values())
+        if not attention:
+            return
+        self.notebook.select(self.library_tab)
+        session_id = attention[0]["id"]
+        if self.sessions.exists(session_id):
+            # The existing selection handler owns the unsaved-edit decision.
+            self.sessions.selection_set(session_id)
+            self.sessions.see(session_id)
+        else:
+            self.refresh_library()
+
+    def _cancel_current_job(self):
+        if getattr(self, "summary_pending", None):
+            self._summary_cancel_requested = self.summary_pending
+        self._action("cancel_processing", urgent=True)
+
+    def _sync_navigation_badges(self, attention):
+        state = self.snapshot.get("state")
+        recording = tr("Gravação")
+        if state in CAPTURE_STATES:
+            recording += "\n● " + tr("{state} · {time}", state=tr(STATE_LABELS.get(state, state)),
+                                     time=format_time(self.snapshot.get("elapsed")).removeprefix("00:"))
+        elif self.snapshot.get("processing"):
+            recording += "\n" + tr("Processando")
+        library = tr("Biblioteca")
+        if attention:
+            library += "\n" + tr("Atenção nesta página: {count}", count=len(attention))
+        labels = [(self.recording_tab, recording), (self.library_tab, library)]
+        if self.voice_tab is not None:
+            voice = self.readiness_probe.voice
+            badge = tr("Ativo") if isinstance(voice, dict) and voice.get("enabled") else (
+                tr("Desligado") if isinstance(voice, dict) else tr("Verificando…"))
+            if isinstance(voice, dict) and voice.get("enabled") and voice.get("state") == "unavailable":
+                badge = tr("Indisponível")
+            labels.append((self.voice_tab, tr("Ditado") + "\n" + badge))
+        changed = False
+        for tab, label in labels:
+            if self.notebook.tab(tab, "text") != label:
+                self.notebook.tab(tab, text=label)
+                changed = True
+        if changed:
+            self.notebook.event_generate("<<ManagerStatusChanged>>")
+
+    def _detail_user_selected(self, _key):
+        self._detail_section_chosen = True
+        self._detail_section_generation += 1
+
+    def _current_completion_context(self):
+        return (self.selected, self._visible_destination(),
+                getattr(self, "_navigation_generation", 0),
+                getattr(self, "_detail_section_generation", 0),
+                getattr(self, "_selection_generation", 0))
+
+    def _sync_processing_banner(self, snapshot, now=None):
+        if not hasattr(self, "processing_banner"):
+            return
+        now = time.monotonic() if now is None else now
+        session = snapshot.get("processing_session") if snapshot.get("processing") else None
+        if session != getattr(self, "_processing_started_session", None):
+            self._processing_started_session = session
+            self._processing_started = now
+        started = self._processing_started if self._processing_started is not None else now
+        value = processing_view(snapshot, self.selected, started, now)
+        if value is None:
+            self.processing_banner.pack_forget()
+            self._processing_banner_key = None
+            return
+        if self._completion_context is None or self._completion_context[0] != session:
+            self._completion_context = self._current_completion_context()
+        self.completion_receipt.pack_forget()
+        key = (session, value["stage"], value["elapsed"], value["percent"])
+        if key == self._processing_banner_key:
+            return
+        self._processing_banner_key = key
+        self.processing_banner_label.configure(text=tr("{stage} · {elapsed}",
+            stage=value["stage"], elapsed=format_time(value["elapsed"])))
+        if value["percent"] is None:
+            self.detail_processing_progress.pack_forget()
+        else:
+            self.processing_banner_label.configure(text=tr("{stage} · {elapsed} · {percent}%",
+                stage=value["stage"], elapsed=format_time(value["elapsed"]), percent=int(value["percent"])))
+            self.detail_processing_progress.configure(value=value["percent"])
+            self.detail_processing_progress.pack(fill="x", pady=(self.ui.space_xs, 0))
+        self.processing_banner.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0), before=self.detail_nav)
+
+    def _summary_completed(self, session_id, context=None):
+        if not hasattr(self, "completion_receipt") or not self.summary_text or self.selected != session_id:
+            return
+        self.completion_receipt.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0), before=self.detail_nav)
+        if self._visible_destination() == "library" and context is not None and completion_can_select(context, session=session_id,
+                destination=self._visible_destination(), navigation=getattr(self, "_navigation_generation", 0),
+                section=getattr(self, "_detail_section_generation", 0),
+                selection=getattr(self, "_selection_generation", 0)):
+            self.detail_sections.select("summary")
+
+    def _copy_summary_shortcut(self, _event=None):
+        if self._visible_destination() == "library" and self.selected and self.summary_text:
+            self.copy_summary()
+            return "break"
+        return None
+
     def _sync_library_processing(self, snapshot):
         """Mark the recording a job works on as Processando, in its row and its header."""
         live = None
@@ -1149,6 +1341,10 @@ class MeetingWindow:
                 self._show_processing_issue(self.processing_issue)
             else:
                 self._refresh_processing_issue(self.selected)
+                if getattr(self, "detail_ready", False):
+                    self._completed_processing_context = (self.selected, getattr(self, "_completion_context", None))
+                    self.processing_target = self.selected
+                    self._completion_context = None
 
     def _refresh_processing_issue(self, session_id):
         """Replace the step failure shown for a recording whose job just ended.
@@ -1292,6 +1488,7 @@ class MeetingWindow:
         if current:
             self._destination = current
         if left != current:
+            self._navigation_generation = getattr(self, "_navigation_generation", 0) + 1
             self.messages.leave(left)
 
     def _results_not_refreshed(self, error, session_id):
@@ -1326,6 +1523,8 @@ class MeetingWindow:
         def on_mousewheel(event):
             widget = getattr(event, "widget", None)
             while widget is not None and widget is not region:
+                if getattr(widget, "_wheel_target", target) is not target:
+                    return None
                 widget = getattr(widget, "master", None)
             if widget is not region:
                 return None
@@ -1368,6 +1567,7 @@ class MeetingWindow:
         view.columnconfigure(0, weight=1)
         view.rowconfigure(0, weight=1)
         canvas = tk.Canvas(view, background=self.ui.surface, highlightthickness=0, borderwidth=0)
+        view._wheel_target = canvas
         scrollbar = ttk.Scrollbar(view, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=0, column=0, sticky="nsew")
@@ -1608,8 +1808,10 @@ class MeetingWindow:
         recording.columnconfigure(0, weight=1, uniform="recording")
         recording.columnconfigure(1, weight=1, uniform="recording")
         recording.rowconfigure(0, weight=1)
-        activity = self._card(recording, pady=card_pady)
-        activity.grid(row=0, column=0, sticky="nsew", padx=(0, self.ui.space_md))
+        activity_view, self.readiness_canvas, _left_holder, activity_content = self._scroll_area(recording)
+        activity_view.grid(row=0, column=0, sticky="nsew", padx=(0, self.ui.space_md))
+        activity = self._card(activity_content, pady=card_pady)
+        activity.pack(fill="both", expand=True)
         self.recording_activity = activity
         monitor = self._card(recording, pady=card_pady)
         monitor.grid(row=0, column=1, sticky="nsew")
@@ -1625,13 +1827,17 @@ class MeetingWindow:
         )
         self.recording_options_button.grid(row=0, column=1, sticky="e", pady=(0, self.ui.space_sm))
         activity.columnconfigure(1, weight=1)
+        # Readiness lives above setup in its own scrollable card. Even a full
+        # inventory/recovery warning stack cannot push the right-hand Stop away.
+        self.readiness_strip = tk.Frame(activity, bg=self.ui.card)
+        self.readiness_strip.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, self.ui.space_sm))
         self._label(activity, tr("Título da reunião (opcional)"), anchor="w",
-                    bg=self.ui.card).grid(row=1, column=0, columnspan=2, sticky="ew")
+                    bg=self.ui.card).grid(row=2, column=0, columnspan=2, sticky="ew")
         self.record_title_entry = self._entry(activity, self.record_title)
-        self.record_title_entry.grid(row=2, column=0, columnspan=2, sticky="ew",
+        self.record_title_entry.grid(row=3, column=0, columnspan=2, sticky="ew",
                                      pady=(2, recording_gap))
         sources = tk.Frame(activity, bg=self.ui.card)
-        sources.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, recording_gap))
+        sources.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, recording_gap))
         sources.columnconfigure(1, weight=1)
         self.source_checks = {}
         self.endpoint_hints = {}
@@ -1791,6 +1997,9 @@ class MeetingWindow:
             return
         if running:
             getattr(button, button._cancel_manager)(**button._cancel_options)
+            # The reserved slot is a younger sibling and otherwise paints over
+            # this placed control even though Tk reports the button as mapped.
+            button.lift()
         else:
             button.place_forget()
 
@@ -1847,6 +2056,7 @@ class MeetingWindow:
                                     if tr(label) == self.summary_display.get()))
 
     def _refresh_summary_models(self):
+        self._summary_inventory_state = "pending"
         for button in self.summary_model_buttons.values():
             button.configure(text=tr("Verificando…"), state="disabled")
         self._submit(
@@ -1858,9 +2068,11 @@ class MeetingWindow:
 
     def _summary_inventory_loaded(self, installed, error):
         if error:
+            self._summary_inventory_state = "unknown"
             self.summary_model_status.set(error)
             return
         self.summary_model_installed = dict(installed)
+        self._summary_inventory_state = "ready" if any(installed.values()) else "missing"
         for model_id, button in self.summary_model_buttons.items():
             button.configure(text=tr("Remover") if installed.get(model_id) else tr("Baixar"),
                              state="normal")
@@ -2148,6 +2360,20 @@ class MeetingWindow:
         self._label(state_row, "", textvariable=self.detail_meta, fg=self.ui.text_muted).pack(side="left")
         # A failed or cancelled processing step shows here, above every section.
         self.processing_issue_slot = tk.Frame(self.detail_frame, bg=self.ui.surface)
+        self.processing_banner = tk.Frame(self.detail_frame, bg=self.ui.info_bg,
+                                          highlightthickness=1, highlightbackground=self.ui.info)
+        job_row = tk.Frame(self.processing_banner, bg=self.ui.info_bg)
+        job_row.pack(fill="x", padx=self.ui.space_sm, pady=self.ui.space_xs)
+        self.processing_banner_label = self._wrap_label(job_row, "", bg=self.ui.info_bg,
+            anchor="w", justify="left", font=self.ui.caption())
+        self.processing_banner_label.pack(side="left", fill="x", expand=True)
+        self._button(job_row, tr("Cancelar"), self._cancel_current_job).pack(side="right", padx=(self.ui.space_sm, 0))
+        self.detail_processing_progress = ttk.Progressbar(self.processing_banner, maximum=100)
+        self.completion_receipt = tk.Frame(self.detail_frame, bg=self.ui.surface)
+        self._label(self.completion_receipt, tr("Resumo pronto"), font=self.ui.caption(),
+                    fg=self.ui.text_muted).pack(side="left")
+        ui_theme.button(self.completion_receipt, tr("Copiar resumo (Ctrl+Shift+C)"), self.copy_summary,
+                        "quiet", resolved=self.ui).pack(side="right")
         detail_nav = tk.Frame(self.detail_frame, bg=self.ui.surface)
         detail_nav.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0))
         self.detail_nav = detail_nav
@@ -2163,6 +2389,7 @@ class MeetingWindow:
         self.detail_sections = SectionSwitcher(
             self.ui, detail_nav, right,
             on_select=lambda _key: self.detail_canvas.yview_moveto(0),
+            on_user_select=self._detail_user_selected,
         )
         transcript_page = self.detail_sections.add("transcript", tr("Transcrição"))
         summary_page = self.detail_sections.add("summary", tr("Resumo"))
@@ -2252,7 +2479,9 @@ class MeetingWindow:
 
         # Processing is independent of the selected presentation format.
         actions = ttk.Frame(transcript_page, style="Meeting.TFrame")
-        actions.pack(fill="x", padx=(12, 0), pady=(0, 4))
+        # Keep Cancel above flexible review text: the selected-job banner must
+        # not move an existing processing control below the minimum viewport.
+        actions.pack(fill="x", padx=(12, 0), pady=(0, 4), before=self.transcript_document_frame)
         actions.columnconfigure(0, weight=1)
         self.transcript_processing_actions = actions
         # The running step is named above the buttons, in a line that wraps at
@@ -2315,8 +2544,10 @@ class MeetingWindow:
         summary_header.pack(fill="x", padx=(12, 0))
         self._label(summary_header, tr("Resumo"), font=self.ui.font(11, "bold"),
                     fg=self.ui.text_strong).pack(side="left")
+        self.summary_setup_toggle = self._button(summary_page, tr("Gerar resumo") + " ▾", self._toggle_summary_setup)
+        self.summary_setup_toggle.pack(anchor="w", padx=(12, 0), pady=(self.ui.space_sm, 0))
         summary_setup = ttk.Frame(summary_page, style="Meeting.TFrame")
-        summary_setup.pack(fill="x", padx=(12, 0), pady=(8, 0))
+        self.summary_setup = summary_setup
         self._label(summary_setup, tr("Formato"), anchor="w").pack(fill="x")
         self.report_profile_choice = tk.StringVar(self.window)
         self.report_profile_box = ttk.Combobox(
@@ -2349,15 +2580,15 @@ class MeetingWindow:
             self.summary_focus_panel, tr("Ex.: priorize próximos passos e dúvidas que precisam de decisão."),
             fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x")
-        generate_row = ttk.Frame(summary_page, style="Meeting.TFrame")
-        generate_row.pack(fill="x", padx=(12, 0), pady=(8, 0))
+        generate_row = ttk.Frame(summary_setup, style="Meeting.TFrame")
+        generate_row.pack(fill="x", pady=(8, 0))
         self.regenerate_summary_button = self._button(
             generate_row, tr("Gerar resumo"), self.summarize, accent=True,
         )
         self.regenerate_summary_button.pack(side="left")
         self.cancel_summary_button = self._button(
             generate_row, tr("Cancelar"),
-            lambda: self._action("cancel_processing", kinds=frozenset({"report"}), urgent=True),
+            self.cancel_summary_generation,
         )
         self._park_cancel(self.cancel_summary_button, "pack", side="left", padx=6)
         self.summary_status = tk.StringVar(
@@ -2366,7 +2597,7 @@ class MeetingWindow:
         self._wrap_label(summary_page, "", textvariable=self.summary_status,
                          fg=self.ui.text_muted, anchor="w").pack(fill="x", padx=12, pady=(4, 0))
         summary_body = ttk.Frame(summary_page, style="Meeting.TFrame")
-        summary_body.pack(fill="both", expand=True, padx=(12, 0), pady=(6, 0))
+        summary_body.pack(fill="both", expand=True, padx=(12, 0), pady=(6, 0), after=summary_header)
         self.summary = tk.Text(summary_body, height=12, wrap="word", font=self.ui.font(),
                                padx=self.ui.space_sm, pady=self.ui.space_sm,
                                spacing3=self.ui.space_sm,
@@ -3265,6 +3496,8 @@ class MeetingWindow:
         self.summary_generation = getattr(self, "summary_generation", 0) + 1
         request = self.summary_generation
         self.summary_pending = (session_id, request)
+        self._summary_cancel_requested = None
+        self._summary_completion_context = self._current_completion_context()
         self.summary_status.set(tr("Gerando {name} localmente… O resumo atual será preservado.", name=profile["name"]))
         self._sync_summary_controls()
         submitted = self._submit(
@@ -3277,6 +3510,24 @@ class MeetingWindow:
         if not submitted:
             self._report_generated(session_id, None, tr("Fila de operações ocupada."), request=request)
 
+    def cancel_summary_generation(self):
+        if not getattr(self, "summary_pending", None):
+            return
+        self._summary_cancel_requested = self.summary_pending
+        self._action("cancel_processing", kinds=frozenset({"report"}), urgent=True)
+
+    def _toggle_summary_setup(self):
+        if self.summary_setup.winfo_manager():
+            self.summary_setup.pack_forget()
+        else:
+            self.summary_setup.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0),
+                                    after=self.summary_setup_toggle)
+        self._sync_summary_setup_label()
+
+    def _sync_summary_setup_label(self):
+        label = tr("Gerar outra versão") if self.summary_text else tr("Gerar resumo")
+        self.summary_setup_toggle.configure(text=label + (" ▴" if self.summary_setup.winfo_manager() else " ▾"))
+
     def _report_generated(self, session_id, value, error, request=None):
         if self.closed:
             return
@@ -3288,13 +3539,19 @@ class MeetingWindow:
             return
         if error or not isinstance(value, dict):
             self.summary_status.set(self._summary_hint(getattr(self, "summary_text", "")))
+            if getattr(self, "_summary_cancel_requested", None) == (session_id, request):
+                self._fail("library", tr("O resumo foi cancelado"),
+                           tr("O resumo anterior foi preservado. Gere de novo quando quiser."),
+                           tone="warning", session=session_id)
+                return
             self._fail("library", tr("Não foi possível gerar o resumo"),
                        tr("O resumo anterior foi preservado. Gere de novo quando quiser."),
-                       error=error, session=session_id)
+                       error=error, session=session_id, action=(tr("Gerar resumo"), self.summarize))
             return
         self._show_summary(value)
         self.summary_status.set(tr("Resumo salvo nesta gravação. Você pode copiar ou gerar outra versão."))
         self.refresh_reports(session_id, preferred_report_id=value.get("report_id"))
+        self._summary_completed(session_id, getattr(self, "_summary_completion_context", None))
 
     def refresh_reports(self, session_id=None, *, preferred_report_id=None):
         session_id = session_id or self.selected
@@ -4354,7 +4611,9 @@ class MeetingWindow:
             silent = max(self._silent_for[track] for track in shown)
             names = [tr(SOURCE_PROSE[track]) for track in shown]
             sources_text = names[0] if len(names) == 1 else tr("{first} e {second}", first=names[0], second=names[1])
-            title = tr("Sem áudio {sources} há {duration}", sources=sources_text, duration=format_silence(silent))
+            title = (tr("Sem áudio {sources} há {duration}", sources=sources_text, duration=format_silence(silent))
+                     if len(shown) == 1 else tr("Sem áudio {sources} · maior interrupção: {duration}",
+                         sources=sources_text, duration=format_silence(silent)))
             if "disconnected" in shown.values():
                 body = tr("A gravação continua e retoma quando o dispositivo voltar. "
                           "Reconecte-o; outro dispositivo só vale na próxima gravação.")
@@ -4430,6 +4689,8 @@ class MeetingWindow:
                                       parent=self.window):
             return
         self.start_after_interrupt = "window"
+        if getattr(self, "summary_pending", None):
+            self._summary_cancel_requested = self.summary_pending
         self._say("recording", tr("Interrompendo {job}; a gravação começa em seguida.", job=job))
 
         def cancelled(_issued, error):
@@ -5474,6 +5735,7 @@ class MeetingWindow:
         self.load_session(session_id)
 
     def load_session(self, session_id):
+        self._selection_generation = getattr(self, "_selection_generation", 0) + 1
         self._action("stop_playback", urgent=True)
         self.selected = session_id
         # What the page said about another recording does not describe this one.
@@ -5481,7 +5743,8 @@ class MeetingWindow:
         self._reset_transcript_document()
         self._show_summary("")
         self._show_library_detail(True)
-        self.detail_sections.select("transcript")
+        if hasattr(self, "completion_receipt"):
+            self.completion_receipt.pack_forget()
         self.report_request = getattr(self, "report_request", 0) + 1
         self.ask_request = getattr(self, "ask_request", 0) + 1
         self.citation_request = getattr(self, "citation_request", 0) + 1
@@ -5630,6 +5893,9 @@ class MeetingWindow:
         self._render_annotations(self.speaker_labels, self.annotation_generation)
         self._update_transcript_paging_controls()
         self._show_summary(metadata.get("summary"))
+        if (metadata.get("summary") and not getattr(self, "_detail_section_chosen", False)
+                and self.detail_sections.current == "transcript"):
+            self.detail_sections.select("summary")
         self._load_transcript_document()
         self.refresh_reports(session_id)
         pending_search = getattr(self, "pending_search_resolution", None)
@@ -5849,11 +6115,11 @@ class MeetingWindow:
     def _sync_transcript_style(self):
         if self.transcript_style.get() == tr("Com horários"):
             self.transcript_document_frame.pack_forget()
-            self.timed_transcript.pack(fill="both", expand=True, before=self.transcript_processing_actions)
+            self.timed_transcript.pack(fill="both", expand=True, after=self.transcript_processing_actions)
         else:
             self.timed_transcript.pack_forget()
             self.transcript_document_frame.pack(fill="both", expand=True, padx=(12, 0),
-                                                before=self.transcript_processing_actions)
+                                                after=self.transcript_processing_actions)
 
     def _transcript_style_changed(self, _event=None):
         self._sync_transcript_style()
@@ -5870,7 +6136,6 @@ class MeetingWindow:
         self.transcript_document.delete("1.0", "end")
         self.transcript_document.configure(state="disabled")
         self.copy_transcript_button.configure(state="disabled")
-        self.transcript_style.set(tr("Texto completo"))
         self._sync_transcript_style()
 
     def _load_transcript_document(self):
@@ -6396,7 +6661,7 @@ class MeetingWindow:
         self.processing_target = session_id
         self._say("library", tr("Processamento local iniciado. O resultado aparecerá quando terminar."))
 
-    def refresh_outputs(self, session_id):
+    def refresh_outputs(self, session_id, *, completion_context=None, completed=False):
         if self.selected != session_id:
             return
         revision, offset = self.transcript_revision, self.transcript_offset
@@ -6448,6 +6713,8 @@ class MeetingWindow:
             self.refresh_reports(session_id)
             self._say("library", tr("Resultado local atualizado. Revise a transcrição e o resumo."),
                       session=session_id)
+            if completed and not processing_issue and summary:
+                self._summary_completed(session_id, completion_context)
         self._submit("outputs", read, loaded)
 
     def copy_summary(self):
@@ -6473,6 +6740,8 @@ class MeetingWindow:
             self.copy_summary_button.configure(state="normal" if text else "disabled")
         if hasattr(self, "summary_status"):
             self.summary_status.set(self._summary_hint(text))
+        if hasattr(self, "summary_setup_toggle"):
+            self._sync_summary_setup_label()
 
     def _summary_hint(self, text):
         """What the line under Gerar resumo says while nothing is running."""
@@ -6556,7 +6825,7 @@ class MeetingWindow:
             return
         if snapshot.get("processing"):
             self.processing_target = session_id
-        if not self.dirty:
+        if not self.dirty and self._visible_destination() == "recording":
             self.notebook.select(self.library_tab)
             self.load_session(session_id)
 
@@ -6661,6 +6930,8 @@ class MeetingWindow:
             self._sync_start_blocked(self.snapshot, start_ready)
             self._sync_processing_cancel(self.snapshot)
             self._sync_library_processing(self.snapshot)
+            self._sync_processing_banner(self.snapshot)
+            self._sync_readiness()
             if self.start_after_interrupt and start_ready:
                 origin, self.start_after_interrupt = self.start_after_interrupt, None
                 self.request_start(origin)
@@ -6681,6 +6952,12 @@ class MeetingWindow:
             self._sync_audio_export_progress()
             self._sync_library_controls(self.snapshot)
             self.waveform.clear()
+            if active or self.snapshot.get("previewing"):
+                self.waveform.grid()
+                self.recording_monitor.rowconfigure(0, weight=1)
+            else:
+                self.waveform.grid_remove()
+                self.recording_monitor.rowconfigure(0, weight=0)
             for track, values in self.snapshot.get("waveforms", {}).items():
                 if track in ("microphone", "system"):
                     self.waveform.append_block(track, values)
@@ -6708,7 +6985,10 @@ class MeetingWindow:
                 if error:
                     self._adjusted_audio_target = None
                 if target:
-                    self.refresh_outputs(target)
+                    context = getattr(self, "_completed_processing_context", None)
+                    self._completed_processing_context = None
+                    self.refresh_outputs(target, completion_context=context[1] if context and context[0] == target else None,
+                                         completed=bool(context and context[0] == target))
         except Exception as exc:
             current = self.messages.current("recording")
             if current is None or current.key != "poll":

@@ -11,11 +11,13 @@ without touching the last valid install.
 """
 
 import hashlib
+from collections import OrderedDict
 import json
 import os
 import re
 import shutil
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 
@@ -29,6 +31,11 @@ CACHE_DIR_NAME = "voice-models"
 MANIFEST_NAME = "manifest.json"
 PARTIAL_SUFFIX = ".partial"
 MAX_REDIRECTS = 5
+_READONLY_VERIFIED = OrderedDict()
+_READONLY_VERIFIED_LOCK = threading.Lock()
+# ceiling: 64 detached inventory results; larger model fleets may use an
+# owner-scoped cache. File and manifest stat changes invalidate every hit.
+_READONLY_VERIFIED_LIMIT = 64
 CHUNK_SIZE = 1024 * 1024
 # ceiling: single-file GGUF downloads only. A catalog entry that points at an
 # archive needs a path-safe extractor before it can be added.
@@ -94,13 +101,15 @@ def _read_manifest(path):
     return data if isinstance(data, dict) else None
 
 
-def model_is_installed(entry, cache_dir):
+def model_is_installed(entry, cache_dir, *, refresh_manifest=True):
     """True when the pinned file exists and its verified manifest is current.
 
     A matching manifest and file stat avoid re-reading multi-gigabyte models on
     every tray/menu check. Older manifests, or files whose stat changed, are
     hashed once and receive an atomic manifest upgrade when valid.
     """
+    if not refresh_manifest:
+        return _model_is_installed_readonly(entry, cache_dir)
     path = model_path(cache_dir, entry)
     manifest = _read_manifest(manifest_path(cache_dir, entry))
     if manifest is None or not os.path.isfile(path):
@@ -130,6 +139,48 @@ def model_is_installed(entry, cache_dir):
         # the optimization metadata; the next check will hash again.
         pass
     return True
+
+
+def _model_is_installed_readonly(entry, cache_dir):
+    """Validate without upgrading manifests; legacy bytes are hashed once per stat identity.
+
+    Missing files mean absent. IO failures propagate so readiness can say
+    unknown. As with persisted verified_stat, a stat-preserving external
+    rewrite is outside this optimization's detection boundary.
+    """
+    path, manifest_file = model_path(cache_dir, entry), manifest_path(cache_dir, entry)
+    try:
+        stat, manifest_stat = os.stat(path), os.stat(manifest_file)
+    except FileNotFoundError:
+        return False
+    identity = tuple(entry.get(key) for key in _MANIFEST_IDENTITY_FIELDS)
+    key = (os.path.abspath(path), tuple(_stat_metadata(stat).items()),
+           tuple(_stat_metadata(manifest_stat).items()), identity)
+    with _READONLY_VERIFIED_LOCK:
+        if key in _READONLY_VERIFIED:
+            _READONLY_VERIFIED.move_to_end(key)
+            return _READONLY_VERIFIED[key]
+    # Read directly: the ordinary loader deliberately treats unreadable files
+    # as absent, whereas an operational readiness probe must expose unknown.
+    with open(manifest_file, "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    valid = False
+    if isinstance(manifest, dict) and stat.st_size == entry["size_bytes"]:
+        valid = (all(manifest.get(field) == entry.get(field) for field in _MANIFEST_IDENTITY_FIELDS)
+                 and manifest.get("verified_stat") == _stat_metadata(stat))
+        if not valid:
+            try:
+                valid = _hash_file(path) == entry["sha256"]
+            except VoiceModelError as exc:
+                raise OSError("Local model bytes could not be verified") from exc
+    if (_stat_metadata(os.stat(path)) != _stat_metadata(stat)
+            or _stat_metadata(os.stat(manifest_file)) != _stat_metadata(manifest_stat)):
+        raise OSError("Local model inventory changed during verification")
+    with _READONLY_VERIFIED_LOCK:
+        _READONLY_VERIFIED[key] = valid
+        while len(_READONLY_VERIFIED) > _READONLY_VERIFIED_LIMIT:
+            _READONLY_VERIFIED.popitem(last=False)
+    return valid
 
 
 def installed_model_path(entry, cache_dir):

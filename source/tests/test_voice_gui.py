@@ -1056,10 +1056,10 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             buttons = [
                 widget for widget in _descendants(window)
                 if isinstance(widget, tk.Button)
-                and widget.cget("text") in {"Gravação", "Biblioteca", "Ditado", "Configurações"}
+                and widget.cget("text").partition("\n")[0] in {"Gravação", "Biblioteca", "Ditado", "Configurações"}
                 and notebook not in _ancestors(widget)
             ]
-            labels = [button.cget("text") for button in buttons]
+            labels = [button.cget("text").partition("\n")[0] for button in buttons]
             logos = [
                 widget for widget in _descendants(window)
                 if isinstance(widget, tk.Label) and widget.cget("image")

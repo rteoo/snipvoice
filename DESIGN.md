@@ -200,7 +200,13 @@ On navigation / page / content / selection:
   copper action beside **Pausar** (**Retomar** while paused); a control that
   cannot act is not drawn. Each source's meter carries a written health line
   ("Recebendo sinal", "Sem áudio · há 1 min 05 s", "Não incluído nesta
-  gravação").
+  gravação"). A readiness strip leads the independently scrollable left setup
+  card: a quiet line when local models are ready, otherwise compact rows for
+  pending or unknown inventory, missing models, current processing, recent-page
+  failures, dictation off and startup recovery. Each actionable row has one
+  command. It does not enlarge the right-hand transport. Waveform lanes hide
+  while idle and return for preview or capture. A combined lost-source warning
+  labels the longest interruption; captions retain each source's own duration.
 - **Biblioteca:** search and select a recording, then read the full transcript.
   Full text with paragraphs is the default; users can switch to timestamps
   afterward without running transcription again. Copy and export use that
@@ -211,12 +217,19 @@ On navigation / page / content / selection:
   There are no manual category, tag, person, series, or status filters.
   New recordings use installed transcription and summary models automatically;
   unavailable models are skipped without downloads. Summaries are readable and
-  saved automatically. **Resumo** starts with a format picker for meeting notes,
+  saved automatically. **Resumo** starts with its readable result. A collapsed
+  secondary row opens generation and its format picker for meeting notes,
   interviews, one-on-ones, sales calls, and feedback conversations. Optional
   focus guidance is collapsed under Personalizar. Generate saves a new version;
   the complete readable result and Copy remain in the main view. Version history
   and custom format management appear when requested. Saved chat answers do not
   replace the summary shown when a recording is reopened.
+  Reselection preserves the chosen detail section and transcript presentation;
+  a saved summary becomes the default only before an explicit section choice.
+  The selected recording's processing banner shows the controller stage,
+  elapsed time since observation and Cancel. Only real audio-export progress
+  supplies a percentage. A completed summary offers Copy (Ctrl+Shift+C) and
+  selects Resumo only while its original navigation/section context remains.
   **Chat** keeps a temporary conversation for each recent recording, with a
   bottom composer and sources, Copy, and Save on each answer. Follow-ups receive
   bounded context; transcript segments remain the source of factual evidence.
@@ -228,6 +241,20 @@ On navigation / page / content / selection:
   whether they apply immediately or to the next recording.
 
 ## Interaction contract
+
+- Readiness inventory runs through the background bridge, admitting at most
+  one outstanding read per second. Summary inventory reuses its existing
+  off-thread load. Pending/unknown inventory never becomes an all-clear line.
+  Transcription selection follows the controller's actual installed fallback
+  order without refreshing manifests. A bounded 64-entry in-memory cache avoids
+  rehashing legacy models; model-file or manifest stat changes invalidate a hit.
+  Like persisted verified-stat metadata, an external rewrite preserving every
+  stat identity is outside this optimization's detection boundary. The probe
+  downloads nothing and writes no manifest.
+- WP5 source validation covers eight dark/light, size and language combinations
+  with actual window captures. The final full suite ran 1,549 tests in 198.969s
+  and matched all 60 expected NumPy failure headers exactly, with 20 skipped.
+  This is a baseline match, not an all-green suite or packaged-build proof.
 
 - The current state appears beside the action it governs. Errors identify a
   next step, and technical detail is available on demand.

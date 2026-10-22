@@ -1,6 +1,30 @@
 """English (US) interface catalog: pt-BR source literal -> translation."""
 
 EN_US = {
+    # Meeting readiness and post-stop progress
+    'Abrir Ditado': 'Open Dictation',
+    'Atenção nesta página: {count}': 'Attention on this page: {count}',
+    'Ativo': 'On',
+    'Copiar resumo (Ctrl+Shift+C)': 'Copy summary (Ctrl+Shift+C)',
+    'Desligado': 'Off',
+    'Ditado desligado.': 'Dictation is off.',
+    'Gerar outra versão': 'Generate another version',
+    'Modelos locais prontos.': 'Local models ready.',
+    'Não foi possível verificar o modelo de resumo.': 'Could not check the summary model.',
+    'Não foi possível verificar os modelos locais.': 'Could not check local models.',
+    'Resumo pronto': 'Summary ready',
+    'Sem modelo de resumo instalado.': 'No summary model installed.',
+    'Sem modelo de transcrição instalado.': 'No transcription model installed.',
+    'Sem áudio {sources} · maior interrupção: {duration}': 'No audio {sources} · longest interruption: {duration}',
+    'Ver': 'View',
+    'Ver detalhes': 'View details',
+    'Ver modelos': 'View models',
+    'Verificando modelo de resumo…': 'Checking summary model…',
+    'Verificando modelos locais…': 'Checking local models…',
+    'Gravações com problemas nesta página: {count}': 'Recordings with problems on this page: {count}',
+    '{stage} · {elapsed}': '{stage} · {elapsed}',
+    '{stage} · {elapsed} · {percent}%': '{stage} · {elapsed} · {percent}%',
+    '{state} · {time}': '{state} · {time}',
     # Opt-in local semantic meeting retrieval
     'A biblioteca excede o limite de 20000 trechos da busca semântica.': 'The library exceeds the semantic search limit of 20000 passages.',
     'A busca semântica ainda está encerrando.': 'Semantic search is still shutting down.',
@@ -78,6 +102,7 @@ EN_US = {
     'Histórico de Voz': 'Voice History',
     'A gravação aguarda a recuperação local do SnipVoice.': "Recording is waiting for SnipVoice's local recovery.",
     'Entrada por voz indisponível. Verifique o runtime de transcrição.': 'Voice input unavailable. Check the transcription runtime.',
+    'Indisponível': 'Unavailable',
     'Ditado': 'Dictation',
     'Recuperação local concluída; revise a lixeira se necessário.': 'Local recovery finished; check the trash if needed.',
     'A recuperação local exige reconciliação manual; gravação, hotkeys e exclusões estão bloqueadas.': 'Local recovery needs manual reconciliation; recording, hotkeys and deletions are blocked.',

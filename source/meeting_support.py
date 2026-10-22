@@ -911,7 +911,15 @@ class MeetingController:
             self._postprocess = tr("Pós-processamento concluído") if not errors else tr("Processamento interrompido; tente novamente.")
         return errors, resource_live
 
-    def _installed_voice_profile(self, preferred):
+    def installed_transcription_profile(self, preferred=None):
+        """Read installed-only ASR selection on an IO worker, using the pipeline's fallback order."""
+        if self.voice is None:
+            return None
+        if preferred is None:
+            preferred = getattr(getattr(self.voice, "settings", None), "profile", None)
+        return self._installed_voice_profile(preferred, refresh_manifest=False)
+
+    def _installed_voice_profile(self, preferred, *, refresh_manifest=True):
         """Return the preferred installed ASR profile, then the default, then catalog order."""
         from voice_catalog import DEFAULT_PROFILE, catalog_entry, selectable_catalog
         from voice_models import model_is_installed
@@ -922,12 +930,19 @@ class MeetingController:
             if entry is not None and entry not in entries:
                 entries.append(entry)
         entries.extend(entry for entry in selectable_catalog() if entry not in entries)
+        read_errors = []
         for entry in entries:
             try:
-                if model_is_installed(entry, self.voice.cache_dir):
+                installed = (model_is_installed(entry, self.voice.cache_dir) if refresh_manifest
+                             else model_is_installed(entry, self.voice.cache_dir, refresh_manifest=False))
+                if installed:
                     return entry["profile"]
-            except (OSError, TypeError, ValueError):
+            except (OSError, TypeError, ValueError) as exc:
+                if not refresh_manifest:
+                    read_errors.append(exc)
                 continue
+        if read_errors:
+            raise OSError("Installed transcription inventory could not be verified") from read_errors[0]
         return None
 
     @staticmethod
