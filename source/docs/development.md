@@ -1,6 +1,6 @@
 # Development
 
-Snipvoice source is `1.2.1` on the `stable` channel (the upcoming `v1.2.1`).
+Snipvoice source is `1.3.0` on the `stable` channel (release candidate `v1.3.0`).
 Runtime dependencies and native voice dependencies remain in separate manifests.
 Use an existing interpreter; do not implicitly update host tooling or packages.
 
