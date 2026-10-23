@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 - 2026-10-22
+
+- Adopt the operations-first Teô design system across the manager, dialogs, and floating controls, with clear readiness, progress, failure, and recovery states.
+- Keep processing alive when the manager window closes, and improve recording cancellation, library recovery, and safe deletion workflows.
+- Add keyboard-first navigation and clearer, selectable transcript and chat content across the main workflows.
+
 ## 1.2.1 - 2026-10-05
 
 - Add a Voice Commands editor inside Dictation for managing literal spoken commands and their inserted text.
