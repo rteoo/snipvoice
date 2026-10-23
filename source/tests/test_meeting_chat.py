@@ -4,6 +4,7 @@ import gc
 import tkinter as tk
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from meeting_chat import MeetingChat
 import ui_theme
@@ -17,6 +18,26 @@ def descendants(widget):
     return result
 
 
+class AnswerPresentationLogicTests(unittest.TestCase):
+    def test_answer_height_includes_wrapped_final_line_and_never_sets_pixel_width(self):
+        message = mock.Mock()
+        message.count.return_value = (7,)
+        message.cget.return_value = 1
+        MeetingChat._answer_height(message)
+        message.count.assert_called_once_with("1.0", "end-1c", "displaylines")
+        message.configure.assert_called_once_with(height=8)
+        message.configure.reset_mock()
+        message.cget.return_value = 8
+        MeetingChat._answer_height(message)
+        message.configure.assert_not_called()
+
+    def test_select_answer_is_scoped_to_that_text_only(self):
+        focused, other = mock.Mock(), mock.Mock()
+        self.assertEqual(MeetingChat._select_answer(focused), "break")
+        focused.tag_add.assert_called_once_with("sel", "1.0", "end-1c")
+        other.tag_add.assert_not_called()
+
+
 class MeetingChatTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -25,7 +46,7 @@ class MeetingChatTests(unittest.TestCase):
             cls.root.withdraw()
         except tk.TclError as exc:
             raise unittest.SkipTest(f"Tk initialization unavailable: {exc}") from exc
-        cls.theme = ui_theme.build_theme("light", system="windows")
+        cls.theme = ui_theme.build_theme("light", system=ui_theme.current_os())
 
     @classmethod
     def tearDownClass(cls):
@@ -40,10 +61,13 @@ class MeetingChatTests(unittest.TestCase):
         self.chat = MeetingChat(
             self.window, self.theme,
             on_send=lambda value: self.events.append(("send", value)),
+            on_cancel=lambda: self.events.append(("cancel",)),
             on_new=lambda: self.events.append(("new",)),
             on_save=lambda value: self.events.append(("save", value)),
             on_copy=lambda value: self.events.append(("copy", value)),
             on_source=lambda turn, source: self.events.append(("source", turn, source)),
+            on_retry=lambda turn_id: self.events.append(("retry", turn_id)),
+            copy_details=lambda text, done: (self.events.append(("copy_details", text)), done(True)),
         )
         self.chat.pack(fill="both", expand=True)
         self.root.update()
@@ -59,6 +83,44 @@ class MeetingChatTests(unittest.TestCase):
     def _buttons(self, text):
         return [item for item in descendants(self.chat)
                 if isinstance(item, tk.Button) and item.cget("text") == text]
+
+    def test_answers_are_selectable_readonly_and_resize_by_wrapped_display_lines(self):
+        answer = ("Synthetic answer with selectable words and an emoji 😀. " * 35).strip()
+        self.chat.render([{"id": 1, "question": "Synthetic", "answer": answer, "status": "complete"}])
+        self.root.update()
+        message = next(widget for widget, _inset in self.chat._message_widgets if isinstance(widget, tk.Text))
+        self.assertEqual(message.get("1.0", "end-1c"), answer)
+        self.assertEqual((str(message.cget("state")), str(message.cget("wrap"))), ("disabled", "word"))
+        self.assertEqual(int(message.cget("width")), 1, "Text width is characters; pack owns pixel width")
+        narrow_height = int(message.cget("height"))
+        self.assertEqual(narrow_height, message.count("1.0", "end-1c", "displaylines")[0] + 1)
+        message.focus_force()
+        self.root.update()
+        message.event_generate("<Control-a>")
+        self.root.update()
+        self.assertEqual(message.get("sel.first", "sel.last"), answer)
+        # Exercise Tk's actual readonly copy binding without touching the OS clipboard.
+        copied = []
+        message.tk.call("rename", "clipboard", "wp10_original_clipboard")
+        message.tk.createcommand("clipboard", lambda *args: copied.append(args) or "")
+        try:
+            message.event_generate("<<Copy>>")
+            self.root.update()
+            self.assertTrue(any(args[0] == "append" and args[-1] == answer for args in copied), copied)
+        finally:
+            message.tk.deletecommand("clipboard")
+            message.tk.call("rename", "wp10_original_clipboard", "clipboard")
+        message.event_generate("<KeyPress-x>")
+        self.root.update()
+        self.assertEqual(message.get("1.0", "end-1c"), answer)
+        if self.theme.system != "darwin":
+            self.assertEqual(int(message.cget("highlightthickness")), 2)
+        self.window.geometry("760x320")
+        self.root.update()
+        self.assertLess(int(message.cget("height")), narrow_height)
+        self.assertEqual(int(message.cget("height")), message.count("1.0", "end-1c", "displaylines")[0] + 1)
+        self.assertTrue(self.chat.composer.winfo_ismapped())
+
 
     def test_empty_state_suggestion_and_keyboard_composer(self):
         self.assertTrue(self.chat._empty.winfo_ismapped())
@@ -82,8 +144,8 @@ class MeetingChatTests(unittest.TestCase):
             {"id": 12, "question": "Q2", "answer": "", "status": "pending",
              "citations": [], "saved": False, "saving": False},
             {"id": 13, "question": "Q3", "answer": "", "status": "error",
-             "error": "Falhou", "uncertainty": "Tente novamente.", "citations": [],
-             "saved": False, "saving": False},
+             "error": "Nada foi salvo.", "details": "RuntimeError: runtime unavailable",
+             "citations": [], "saved": False, "saving": False},
         ])
         self.root.update()
         self.assertFalse(self.chat._empty.winfo_ismapped())
@@ -96,9 +158,68 @@ class MeetingChatTests(unittest.TestCase):
         self.assertIn(("copy", 11), self.events)
         self.assertIn(("save", 11), self.events)
         messages = [item.cget("text") for item in descendants(self.chat) if isinstance(item, tk.Message)]
+        messages += [item.get("1.0", "end-1c") for item in descendants(self.chat)
+                     if isinstance(item, tk.Text) and str(item.cget("state")) == "disabled"]
         self.assertIn("Pensando…", messages)
-        self.assertIn("Falhou", messages)
-        self.assertIn("Tente novamente.", messages)
+        # A failed answer is an InfoBar, not a red line under an empty bubble.
+        self.assertNotIn("Nada foi salvo.", messages)
+        labels = [item.cget("text") for item in descendants(self.chat) if isinstance(item, tk.Label)]
+        self.assertIn("Não foi possível responder", labels)
+        self.assertIn("Nada foi salvo.", labels)
+
+    def test_failed_answer_is_a_danger_infobar_with_retry_and_copyable_details(self):
+        self.chat.render([
+            {"id": 21, "question": "Q", "answer": "", "status": "error",
+             "error": "Nada foi salvo.", "details": "RuntimeError: runtime unavailable",
+             "citations": [], "saved": False, "saving": False},
+        ])
+        self.root.update()
+        bars = [item for item in descendants(self.chat) if isinstance(item, tk.Frame)
+                and str(item.cget("highlightbackground")) == self.theme.danger
+                and str(item.cget("bg")) == self.theme.danger_bg]
+        self.assertEqual(len(bars), 1)
+        self._buttons("Tentar novamente")[0].invoke()
+        self.assertEqual(self.events, [("retry", 21)])
+        # The cause stays behind Detalhes, with a Copiar that reaches the clipboard seam.
+        self._buttons("Detalhes" if self.theme.icon_family else "Detalhes ▾")[0].invoke()
+        self.root.update()
+        self._buttons("Copiar")[-1].invoke()
+        self.assertIn(("copy_details", "RuntimeError: runtime unavailable"), self.events)
+
+    def test_uncertainty_tone_follows_the_level_and_always_writes_it(self):
+        self.chat.render([
+            {"id": index, "question": "Q", "answer": "A", "status": "complete",
+             "citations": [], "saved": False, "saving": False, "uncertainty": level}
+            for index, level in enumerate(("low", "medium", "high", "Talvez"), 1)
+        ])
+        self.root.update()
+        expected = {"Incerteza baixa", "Incerteza média", "Incerteza alta", "Talvez"}
+        tones = {item.cget("text"): str(item.cget("fg")) for item in descendants(self.chat)
+                 if isinstance(item, tk.Message) and item.cget("text") in expected}
+        self.assertEqual(tones, {
+            "Incerteza baixa": self.theme.text_muted,
+            "Incerteza média": self.theme.warning,
+            "Incerteza alta": self.theme.danger,
+            "Talvez": self.theme.text_muted,
+        })
+
+    def test_notice_sits_above_the_composer_and_takes_no_room_until_shown(self):
+        self.assertFalse(self.chat._notice.winfo_ismapped())
+        self.chat.show_notice("warning", "Falta um modelo de resumo", "Instale um modelo.",
+                              action=("Abrir Configurações › Modelos",
+                                      lambda: self.events.append(("open_models",))))
+        self.root.update()
+        self.assertTrue(self.chat._notice.winfo_ismapped())
+        self.assertLess(self.chat._notice.winfo_rooty(), self.chat._composer.winfo_rooty())
+        self._buttons("Abrir Configurações › Modelos")[0].invoke()
+        self.assertEqual(self.events, [("open_models",)])
+        # A second notice replaces the first.
+        self.chat.show_notice("danger", "Outro", "Texto.")
+        self.assertEqual(len(self.chat._notice.winfo_children()), 1)
+        self.chat.clear_notice()
+        self.root.update()
+        self.assertFalse(self.chat._notice.winfo_ismapped())
+        self.assertEqual(self.chat._notice.winfo_children(), [])
 
     def test_controls_disable_send_during_busy_and_save_when_not_allowed(self):
         self.chat.set_question("pergunta")
@@ -117,6 +238,25 @@ class MeetingChatTests(unittest.TestCase):
         self.assertEqual(self._buttons("Copiar")[0].cget("state"), "normal")
         self.assertEqual(self._buttons("Salvar")[0].cget("state"), "disabled")
 
+    def test_cancel_exists_only_while_an_answer_is_pending(self):
+        self.assertFalse(self.chat.cancel_button.winfo_ismapped())
+        self.chat._cancel()
+        self.assertEqual(self.events, [])
+        send_x = self.chat.send_button.winfo_rootx()
+        self.chat.set_controls(busy=True, pending=True, can_send=True)
+        self.root.update()
+        self.assertTrue(self.chat.cancel_button.winfo_ismapped())
+        self.assertEqual(self.chat.cancel_button.cget("state"), "normal")
+        self.assertEqual(self.chat.send_button.cget("state"), "disabled")
+        # Enviar keeps its place while Cancelar comes and goes beside it.
+        self.assertEqual(self.chat.send_button.winfo_rootx(), send_x)
+        self.chat.cancel_button.invoke()
+        self.assertEqual(self.events, [("cancel",)])
+        self.chat.set_controls(busy=True, pending=False, can_send=True)
+        self.root.update()
+        self.assertFalse(self.chat.cancel_button.winfo_ismapped())
+        self.assertEqual(self.chat.send_button.winfo_rootx(), send_x)
+
     def test_long_turn_wraps_and_composer_stays_visible_at_small_height(self):
         self.chat.set_height(320)
         self.chat.render([{
@@ -132,11 +272,15 @@ class MeetingChatTests(unittest.TestCase):
         self.assertGreater(self.chat._message_widgets[0][0].winfo_height(), 0)
         self.assertGreater(self.chat._message_widgets[1][0].winfo_height(), 0)
         self.assertLessEqual(self.chat._message_widgets[1][0].cget("width"), self.chat.canvas.winfo_width())
-        for message, _inset in self.chat._message_widgets[:2]:
+        for message, inset in self.chat._message_widgets[:2]:
+            # A full wrapped line plus its padding fits the space the turn
+            # leaves it, and the message gets everything it asks for. (A line
+            # of wide glyphs can wrap short of the configured width.)
             self.assertLessEqual(
                 int(message.cget("width")) + 2 * self.theme.space_sm,
-                message.winfo_width(),
+                message.master.winfo_width() - inset,
             )
+            self.assertLessEqual(message.winfo_reqwidth(), message.winfo_width())
         self.assertLessEqual(
             self.chat.send_button.winfo_rootx() + self.chat.send_button.winfo_width(),
             self.chat.winfo_rootx() + self.chat.winfo_width(),

@@ -258,7 +258,8 @@ class VoiceHotkeyMonitor:
     press/release handlers. They never open devices, load models, or touch Tk.
     """
 
-    def __init__(self, dictation_chord, command_chord, on_press, on_release, on_escape=None):
+    def __init__(self, dictation_chord, command_chord, on_press, on_release, on_escape=None,
+                 passthrough_state=None):
         self.dictation_chord = dictation_chord
         self.command_chord = command_chord
         self._on_press = on_press
@@ -270,6 +271,26 @@ class VoiceHotkeyMonitor:
         self._darwin_suppressed_key = None
         self._win32_suppressed_key = None
         self._listener = None
+        self._passthrough_state = passthrough_state
+        self._passthrough_epoch = None
+
+    def _passes_through(self):
+        """A Tk-free ``(epoch, editing)`` snapshot gates callbacks and filters.
+
+        An epoch changes on both edit edges, including an edit with no keyboard
+        events. Stale modifiers, repeats and paired suppression never cross it.
+        """
+        if self._passthrough_state is None:
+            return False
+        epoch, editing = self._passthrough_state()
+        if epoch != self._passthrough_epoch:
+            self._held.clear()
+            self._pressed_keys.clear()
+            self._active_mode = None
+            self._darwin_suppressed_key = None
+            self._win32_suppressed_key = None
+            self._passthrough_epoch = epoch
+        return bool(editing)
 
     def start(self):
         from pynput import keyboard
@@ -320,6 +341,8 @@ class VoiceHotkeyMonitor:
         return max(matches, key=lambda item: (item[0], item[1] == MODE_COMMAND))[1]
 
     def _handle_press(self, key):
+        if self._passes_through():
+            return
         name = _key_name(key)
         if name in {self.dictation_chord.key, self.command_chord.key, "esc", "escape"}:
             if name in self._pressed_keys:
@@ -349,6 +372,8 @@ class VoiceHotkeyMonitor:
         self._on_press(mode)
 
     def _handle_release(self, key):
+        if self._passes_through():
+            return
         name = _key_name(key)
         self._pressed_keys.discard(name)
         if name in _MODIFIER_ALIASES.values():
@@ -409,6 +434,8 @@ class VoiceHotkeyMonitor:
 
     def _darwin_intercept(self, event_type, event):
         """Suppress only an armed chord's final key down/up on macOS."""
+        if self._passes_through():
+            return event
         try:
             from Quartz import kCGEventKeyDown, kCGEventKeyUp
         except (ImportError, AttributeError):
@@ -430,6 +457,8 @@ class VoiceHotkeyMonitor:
 
     def _win32_filter(self, msg, data):
         # Swallow only the final key of an armed chord so it does not type.
+        if self._passes_through():
+            return True
         vk = getattr(data, "vkCode", None)
         name = _WIN32_VK_NAMES.get(vk) if isinstance(vk, int) else None
         listener = self._listener

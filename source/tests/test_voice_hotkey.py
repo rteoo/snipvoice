@@ -368,6 +368,80 @@ class ListenerFilterTests(unittest.TestCase):
             self.assertIsNone(monitor._darwin_intercept(11, fake_event))
 
 
+class EditPassthroughTests(unittest.TestCase):
+    def _monitor(self, gate, events):
+        return VoiceHotkeyMonitor(
+            parse_chord("ctrl+alt+space"), parse_chord("ctrl+alt+shift+space"),
+            on_press=lambda mode: events.append(("press", mode)),
+            on_release=lambda mode: events.append(("release", mode)),
+            on_escape=lambda: events.append(("escape", None)),
+            passthrough_state=lambda: tuple(gate))
+
+    def test_edit_forwards_keys_without_callbacks_or_windows_suppression(self):
+        from pynput.keyboard import Key
+        gate, events = [0, False], []
+        monitor = self._monitor(gate, events)
+        monitor._listener = mock.Mock()
+        monitor._handle_press(Key.ctrl)
+        monitor._handle_press(Key.alt)
+        gate[:] = [1, True]
+        for key in (Key.space, Key.esc):
+            monitor._handle_press(key)
+            monitor._handle_release(key)
+        data = mock.Mock(vkCode=0x20)
+        self.assertTrue(monitor._win32_filter(0x100, data))
+        self.assertTrue(monitor._win32_filter(0x101, data))
+        monitor._listener.suppress_event.assert_not_called()
+        self.assertEqual(events, [])
+        self.assertFalse(monitor._held)
+        self.assertFalse(monitor._pressed_keys)
+
+    def test_mac_edit_intercept_returns_original_event_and_clears_pending_pair(self):
+        gate, events = [0, False], []
+        monitor = self._monitor(gate, events)
+        monitor._passes_through()
+        monitor._darwin_suppressed_key = "space"
+        monitor._win32_suppressed_key = "space"
+        gate[:] = [1, True]
+        event = object()
+        self.assertIs(monitor._darwin_intercept(10, event), event)
+        self.assertIs(monitor._darwin_intercept(11, event), event)
+        self.assertIsNone(monitor._darwin_suppressed_key)
+        self.assertIsNone(monitor._win32_suppressed_key)
+        self.assertEqual(events, [])
+
+    def test_no_events_during_edit_still_clears_held_modifiers_on_blur(self):
+        from pynput.keyboard import Key
+        gate, events = [0, False], []
+        monitor = self._monitor(gate, events)
+        monitor._handle_press(Key.ctrl)
+        monitor._handle_press(Key.alt)
+        gate[:] = [2, False]  # Focus and blur occurred without a keyboard event.
+        monitor._handle_press(Key.space)
+        monitor._handle_press(Key.space)  # Auto repeat must not acquire an old chord.
+        monitor._handle_release(Key.space)
+        self.assertEqual(events, [])
+        monitor._handle_press(Key.ctrl)
+        monitor._handle_press(Key.alt)
+        monitor._handle_press(Key.space)
+        monitor._handle_release(Key.space)
+        self.assertEqual(events, [("press", MODE_DICTATION), ("release", MODE_DICTATION)])
+
+    def test_stale_release_and_escape_do_not_cross_an_edit_epoch(self):
+        from pynput.keyboard import Key
+        gate, events = [0, False], []
+        monitor = self._monitor(gate, events)
+        for key in (Key.ctrl, Key.alt, Key.space):
+            monitor._handle_press(key)
+        gate[:] = [1, True]
+        monitor._handle_press(Key.esc)
+        gate[:] = [2, False]
+        monitor._handle_release(Key.space)
+        monitor._handle_release(Key.alt)
+        self.assertEqual(events, [("press", MODE_DICTATION)])
+        self.assertIsNone(monitor._active_mode)
+
+
 class SettingsTests(unittest.TestCase):
     def test_bad_profile_and_hotkey_fall_back(self):
         warnings = []

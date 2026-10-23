@@ -97,6 +97,13 @@ class CatalogCoverageTests(unittest.TestCase):
     def test_translations_are_not_blank(self):
         self.assertEqual([key for key, value in EN_US.items() if not value.strip()], [])
 
+    def test_no_message_sends_the_person_to_the_recording_tab(self):
+        """What goes wrong is written on the page where it happens, never "veja a aba Gravação"."""
+        pointers = ("aba Gravação", "na Gravação", "Recording tab", "on the Recording")
+        texts = {_literal(arg) for _, _, _, arg, _ in _marked_calls()} - {None}
+        texts |= set(EN_US) | set(EN_US.values())
+        self.assertEqual(sorted(text for text in texts if any(pointer in text for pointer in pointers)), [])
+
 
 if __name__ == "__main__":
     unittest.main()

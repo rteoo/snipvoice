@@ -88,7 +88,8 @@ from pynput.keyboard import Controller
 import pystray
 from PIL import Image
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+import weakref
+from tkinter import messagebox, ttk
 
 import app_paths
 import data_relocation
@@ -105,7 +106,7 @@ from voice_dispatch import VoiceTarget
 from voice_indicator import VoiceStatusIndicator
 from voice_support import VoiceController
 from meeting_library import MeetingLibrary
-from meeting_support import MeetingController
+from meeting_support import CAPTURE_STATES, MeetingController, start_blocker
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "1.2.1"
@@ -124,6 +125,98 @@ APP_MUTEX_HANDLES = []
 RELAUNCH_FLAG = "--relaunch"
 # A relaunched copy waits for the exiting instance to release the lock.
 RELAUNCH_LOCK_WAIT_SECONDS = 60
+
+
+def voice_history_status(value):
+    """A saved dictation's written state and semantic tone."""
+    labels = {
+        "recording": (N_("Gravando"), "info"),
+        "pending": (N_("Pendente"), "warning"),
+        "transcribed": (N_("Transcrito"), "text"),
+        "completed": (N_("Concluído"), "text"),
+        "failed": (N_("Falhou"), "danger"),
+        "interrupted": (N_("Interrompido"), "warning"),
+        "cancelled": (N_("Cancelado"), "text_muted"),
+    }
+    label, tone = labels.get(value, (N_("Desconhecido"), "text_muted"))
+    return tr(label), tone
+
+
+def voice_history_attention(count):
+    if count == 1:
+        return tr("1 ditado precisa de atenção. Selecione um item para ver as ações disponíveis.")
+    return tr("{count} ditados precisam de atenção. Selecione um item para ver as ações disponíveis.", count=count)
+
+
+class _HistoryCallbackLease:
+    """Only the GUI owns/resolves the callback that retains history widgets."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.active = threading.Event()
+        self.active.set()
+
+    def close(self):
+        self.active.clear()
+        self.callback = None
+
+
+def _post_history_result(gui_ref, lease_ref, active, quitting, result):
+    if not active.is_set() or quitting.is_set():
+        return False
+    gui = gui_ref()
+    if gui is None:
+        return False
+
+    def deliver(_root):
+        if not active.is_set() or quitting.is_set():
+            return
+        lease = lease_ref()
+        if lease is not None and lease.callback is not None:
+            lease.callback(result)
+    try:
+        return gui.submit(deliver)
+    except RuntimeError:
+        if not active.is_set() or quitting.is_set() or getattr(gui, "_stopping", False):
+            return False
+        raise
+
+
+def voice_profile_downloading(snapshot, profile, selected_profile):
+    """Attribute shared byte counters to their current explicit/runtime owner."""
+    if snapshot.get("download_active"):
+        return snapshot.get("download_profile") == profile
+    return bool(snapshot.get("state") == "loading" and snapshot.get("download_total")
+                and profile == selected_profile)
+
+
+def voice_status_presentation(voice):
+    """Describe actual controller readiness without probing models or disk."""
+    from meeting_gui import PROFILE_LABELS, hotkey_display
+    snapshot = voice.status_snapshot()
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    state = snapshot.get("state")
+    if snapshot.get("meeting_busy"):
+        label, tone = tr("Aguardando a gravação"), "warning"
+    elif snapshot.get("shortcut_editing"):
+        label, tone = tr("Atalhos pausados para configurar"), "info"
+    elif state == "unavailable" and snapshot.get("load_failed"):
+        label, tone = tr("Falha ao carregar o ditado. Verifique o modelo em Configurações."), "danger"
+    elif state == "loading":
+        label, tone = tr("Carregando ditado…"), "info"
+    elif not voice.is_enabled():
+        label, tone = tr("Ditado desligado"), "text_muted"
+    elif state == "idle":
+        label, tone = tr("Ditado pronto"), "success"
+    elif state in {"recording", "transcribing", "routing"}:
+        label, tone = voice.status_label(), "info"
+    else:
+        label, tone = tr("Ditado indisponível. Verifique o modelo em Configurações."), "warning"
+    mode = tr("segurar") if getattr(voice.settings, "activation_mode", "hold") == "hold" else tr("iniciar/parar")
+    detail = " · ".join((tr(PROFILE_LABELS.get(voice.settings.profile, "")),
+                         voice.settings.language, hotkey_display(voice.settings.hotkey), mode))
+    return f"{label}\n{detail}", tone
 
 
 def acquire_single_instance_mutex():
@@ -172,6 +265,7 @@ class Snipvoice:
         )
         self.icon = None
         self.manager_window = None
+        self._manager_resume_after = None
         self._manager_notebook = None
         self._manager_voice_tab = None
         self._manager_voice_refresher = None
@@ -181,6 +275,9 @@ class Snipvoice:
         self._manager_library_tab = None
         self.voice_status_indicator = None
         self._recording_indicator_after = None
+        self._meeting_menu_key = None
+        self._manager_view_state = None
+        self._tray_close_notified = False
         self._quitting = threading.Event()
         self._autostart_state = platform_support.AUTOSTART_ABSENT
         self._notification_lock = threading.Lock()
@@ -221,6 +318,8 @@ class Snipvoice:
 
     def _show_meetings(self, root):
         self._show_manager_window(root)
+        if self.meetings.snapshot().get("state") not in CAPTURE_STATES:
+            return
         notebook = self._manager_notebook
         tab = self._manager_recording_tab
         if notebook is None or tab is None:
@@ -249,7 +348,8 @@ class Snipvoice:
                     # Keyboard callbacks only enqueue a GUI request.  They do
                     # not read settings, open capture devices, show Tk, or join.
                     on_press=lambda mode: self._meeting_hotkey_request(),
-                    on_release=lambda mode: None)
+                    on_release=lambda mode: None,
+                    passthrough_state=self.voice.hotkey_edit_state)
                 monitor.start()
                 self._meeting_monitor = monitor
             except Exception:
@@ -259,13 +359,22 @@ class Snipvoice:
         """Bounded keyboard callback: enqueue the shared GUI toggle path."""
         if self._quitting.is_set() or not self._meeting_startup_ready:
             return False
+        epoch, editing = self.voice.hotkey_edit_state()
+        if editing:
+            return False
         try:
-            return bool(self.gui.submit(self._meeting_hotkey_on_gui))
+            @functools.wraps(self._meeting_hotkey_on_gui)
+            def dispatch(root):
+                self._meeting_hotkey_on_gui(root, hotkey_epoch=epoch)
+            return bool(self.gui.submit(dispatch))
         except Exception:
             return False
 
-    def _meeting_hotkey_on_gui(self, root):
+    def _meeting_hotkey_on_gui(self, root, *, hotkey_epoch=None):
         if self._quitting.is_set() or not self._meeting_startup_ready:
+            return
+        epoch, editing = self.voice.hotkey_edit_state()
+        if editing or hotkey_epoch is not None and hotkey_epoch != epoch:
             return
         view = self._manager_meeting_view
         if view is None or getattr(view, "closed", False):
@@ -372,11 +481,15 @@ class Snipvoice:
         if self.manager_window is not None and self.manager_window.winfo_exists():
             self.manager_window.deiconify()
             self.manager_window.lift()
+            view = self._manager_meeting_view
+            if view is not None:
+                view.set_visible(True)
             return
         appearance = ui_theme.normalize_preference(self.settings.get("appearance"))
         ui = ui_theme.bind(root, preference=appearance)
         window = tk.Toplevel(root)
         self.manager_window = window
+        window._snipvoice_set_icon = self._set_window_icon
         window.title(APP_DISPLAY_NAME)
         geometry, min_width, min_height = ui.manager_window_size
         window.geometry(geometry)
@@ -403,7 +516,7 @@ class Snipvoice:
             logo_label.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, ui.space_sm))
         tk.Label(
             identity,
-            text=APP_DISPLAY_NAME,
+            text="SnipVoice",
             font=ui.font(12, "bold"),
             bg=ui.surface_alt,
             fg=ui.text_strong,
@@ -411,32 +524,32 @@ class Snipvoice:
         ).grid(row=0, column=1, sticky="w")
         tk.Label(
             identity,
-            text=tr("Gravações e ditado"),
-            font=ui.font(9),
+            text=APP_DISPLAY_NAME.removeprefix("SnipVoice "),
+            font=ui.caption(),
             bg=ui.surface_alt,
             fg=ui.text_muted,
             anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(2, 0))
+        ).grid(row=1, column=1, sticky="w", pady=(ui.space_xs, 0))
         nav = tk.Frame(sidebar, bg=ui.surface_alt)
-        nav.pack(fill=tk.X)
+        nav.pack(fill=tk.BOTH, expand=True)
         privacy = tk.Frame(sidebar, bg=ui.surface_alt)
         privacy.pack(side=tk.BOTTOM, fill=tk.X, padx=(ui.space_sm, 0))
         tk.Label(
             privacy,
             text=tr("100% local"),
-            font=ui.font(8, "bold"),
+            font=ui.caption(),
             bg=ui.surface_alt,
-            fg=ui.success,
+            fg=ui.text_muted,
             anchor="w",
         ).pack(fill=tk.X)
         tk.Label(
             privacy,
             text=tr("sem upload automático"),
-            font=ui.font(8),
+            font=ui.caption(),
             bg=ui.surface_alt,
             fg=ui.text_muted,
             anchor="w",
-        ).pack(fill=tk.X, pady=(1, 0))
+        ).pack(fill=tk.X, pady=(ui.space_xs, 0))
 
         notebook = ttk.Notebook(window, style="Pages.TNotebook")
         self._manager_notebook = notebook
@@ -447,19 +560,22 @@ class Snipvoice:
             lambda: dict(self.settings), self._persist_voice_settings,
             on_settings_changed=lambda: self.task_runner.start(
                 self._rebuild_meeting_monitor, name="meeting-hotkey"),
-            on_recording_state_changed=lambda _state, _snapshot: self.refresh_tray_menu(),
+            on_recording_state_changed=self._manager_recording_state_changed,
             on_appearance_changed=lambda preference: self._reopen_manager_for_appearance(
                 root, preference,
             ),
             on_language_changed=lambda language: self._reopen_manager_for_language(
                 root, language,
             ),
+            set_window_icon=self._set_window_icon,
             data_location=self.data_location,
             relocate_data=self.request_data_relocation,
             models_location=self.models_location,
             relocate_models=self.request_models_relocation,
         )
         self._manager_meeting_view = meeting_view
+        meeting_view.preference_gate = self._before_manager_preference
+        meeting_view.on_forms_settled = self._manager_forms_settled
         self._manager_recording_tab = meeting_view.recording_tab
         self._manager_library_tab = meeting_view.library_tab
         meeting_view.set_startup_status(
@@ -498,12 +614,21 @@ class Snipvoice:
                 window,
                 models_parent=getattr(meeting_view, "transcription_models_parent", None),
             )
-        self._build_manager_nav(ui, nav, notebook)
+        meeting_view.attach_voice_status(
+            lambda: {"enabled": bool(self.voice is not None and self.voice.is_enabled()),
+                     "state": self.voice.state if self.voice is not None else "disabled",
+                     "status": self.voice.status_label() if self.voice is not None else ""}, tab,
+        )
+        self._build_manager_nav(ui, nav, notebook, self._select_manager_destination)
         notebook.select(meeting_view.recording_tab)
+        saved_state = getattr(self, "_manager_view_state", None)
+        if saved_state is not None:
+            meeting_view.restore_view_state(saved_state)
+            self._manager_view_state = None
         # Keep the four destinations available from the keyboard while focus
         # remains inside a recording, search, or settings control.
         def select_destination(index):
-            notebook.select(index)
+            self._select_manager_destination(index)
             return "break"
 
         for index in range(4):
@@ -512,6 +637,9 @@ class Snipvoice:
                 lambda _event, tab_index=index: select_destination(tab_index),
             )
         window.protocol("WM_DELETE_WINDOW", self._close_settings_window)
+        window.bind("<FocusIn>", lambda event: self._reprobe_manager_appearance(root, ui)
+                    if event.widget is window else None, add="+")
+        window.bind("<Control-s>", self._save_manager_voice_shortcut, add="+")
         window_width, window_height = (int(value) for value in geometry.split("x"))
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
@@ -522,81 +650,202 @@ class Snipvoice:
         window.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     @staticmethod
-    def _build_manager_nav(ui, nav, notebook):
+    def _build_manager_nav(ui, nav, notebook, on_select=None):
         """One sidebar button per notebook page, in tab order, tracking selection."""
         bg = nav.cget("background")
         items = {}
-        for tab_id in notebook.tabs():
+        for index, tab_id in enumerate(notebook.tabs()):
             item = tk.Frame(nav, bg=bg)
-            item.pack(fill=tk.X, pady=1)
-            marker = tk.Frame(item, bg=bg, width=3)
-            marker.pack(side=tk.LEFT, fill=tk.Y)
-            chrome = ui.button_chrome(compact=True)
-            if chrome:
-                # Keep the keyboard focus ring, but no idle border around each item.
-                chrome["highlightbackground"] = bg
+            item.pack(side=tk.BOTTOM if index == 3 else tk.TOP, fill=tk.X, pady=ui.space_xs)
+            # Windows selection indicator: a 3x16 pill on the selection plane.
+            marker = tk.Frame(item, bg=bg, width=3, height=16)
+            marker.pack(side=tk.LEFT)
+            icon = tk.Label(item, text=ui.icon(("record", "library", "dictation", "settings")[index]),
+                            font=ui.icon_font(), fg=ui.text_muted, bg=bg, takefocus=False)
+            icon.pack(side=tk.LEFT, padx=ui.space_sm)
+            icon.bind("<Button-1>", lambda _event, target=tab_id: (on_select or notebook.select)(target))
             button = tk.Button(
-                item, text=notebook.tab(tab_id, "text"), font=ui.font(10), anchor="w",
-                command=lambda target=tab_id: notebook.select(target),
-                **ui.nav_button_colors(bg), **chrome,
+                item, text=notebook.tab(tab_id, "text"), font=ui.body(), anchor="w",
+                command=lambda target=tab_id: (on_select or notebook.select)(target),
+                **ui.nav_button_colors(bg), **ui.button_chrome(compact=True, ring=False),
             )
+            ui_theme.focus_ring(button, ui)
             button.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            items[str(tab_id)] = (button, marker)
+            items[str(tab_id)] = (item, button, marker, icon)
 
         def highlight(_event=None):
             current = str(notebook.select())
-            for tab_id, (button, marker) in items.items():
+            for tab_id, (item, button, marker, icon) in items.items():
                 selected = tab_id == current
-                button.configure(
-                    font=ui.font(10, "bold" if selected else None),
-                    **ui.nav_button_colors(bg, selected=selected),
-                )
-                marker.configure(bg=ui.accent if selected else bg)
+                colors = ui.nav_button_colors(bg, selected=selected)
+                plane = colors.get("bg", bg)
+                item.configure(bg=plane)
+                button.configure(text=notebook.tab(tab_id, "text"),
+                                 font=ui.body_strong() if selected else ui.body(), **colors)
+                marker.configure(bg=ui.accent_mark if selected else plane)
+                icon.configure(bg=plane, fg=ui.select_fg if selected else ui.text_muted)
 
         notebook.bind("<<NotebookTabChanged>>", highlight, add="+")
+        notebook.bind("<<ManagerStatusChanged>>", highlight, add="+")
         highlight()
 
-    def _reopen_manager_for_appearance(self, root, preference):
-        """Rebuild the manager after a persisted appearance change.
+    def _manager_recording_state_changed(self, state, _snapshot):
+        self.refresh_tray_menu()
+        window = self.manager_window
+        if window is not None and window.winfo_exists():
+            labels = {"starting": tr("Iniciando"), "recording": tr("Gravando"),
+                      "paused": tr("Pausado"), "stopping": tr("Salvando")}
+            window.title(APP_DISPLAY_NAME + (" · " + labels[state] if state in labels else ""))
 
-        ``MeetingWindow.close`` retains its normal unsaved-edit prompt. If the
-        user cancels that prompt, the new preference remains saved and will be
-        applied the next time the manager opens.
-        """
+    def _reopen_manager_for_appearance(self, root, preference):
+        """Publish the persisted preference only at current rebuild admission."""
         preference = ui_theme.normalize_preference(preference)
-        self.settings["appearance"] = preference
-        self._reopen_manager(root, before_reopen=ui_theme.reset)
+        self._reopen_manager(root, before_reopen=ui_theme.reset, preflight_done=True,
+                             publish=lambda: self.settings.update(appearance=preference))
 
     def _reopen_manager_for_language(self, root, language):
         """Apply a persisted interface language to the tray and a rebuilt manager."""
-        self.settings["language"] = i18n.set_language(language)
-        self.refresh_tray_menu()
-        self._reopen_manager(root)
+        def publish():
+            self.settings["language"] = i18n.set_language(language)
+            self.refresh_tray_menu()
+        self._reopen_manager(root, preflight_done=True, publish=publish)
 
-    def _reopen_manager(self, root, *, before_reopen=None):
+    def _before_manager_preference(self, operation):
+        form = getattr(self, "_manager_voice_form", None)
+        view = self._manager_meeting_view
+        if ((form and form["saving"]()) or getattr(view, "_title_save_pending", None) or any(draft["saving"] for draft in
+                getattr(view, "_settings_drafts", {}).values())):
+            self._manager_preference_waiter = operation
+            return
+        operation()
+
+    def _manager_forms_settled(self):
+        if (getattr(self, "_manager_preference_waiter", None) is None or self._quitting.is_set()
+                or getattr(self, "_manager_resume_after", None) is not None):
+            return
+        owner = self.manager_window
+        if owner is None:
+            return
+        def resume():
+            if getattr(self, "_manager_resume_after", None) != (owner, token):
+                return
+            self._manager_resume_after = None
+            if self.manager_window is not owner or self._quitting.is_set():
+                return
+            operation = getattr(self, "_manager_preference_waiter", None)
+            if operation is not None:
+                self._manager_preference_waiter = None
+                self._before_manager_preference(operation)
+        token = owner.after_idle(resume)
+        self._manager_resume_after = (owner, token)
+
+    def _cancel_manager_resume(self):
+        pending, self._manager_resume_after = getattr(self, "_manager_resume_after", None), None
+        if pending is not None:
+            owner, token = pending
+            owner.after_cancel(token)
+
+    def _reprobe_manager_appearance(self, root, ui):
+        if (getattr(self, "_system_reprobe_pending", False) or self._quitting.is_set()
+                or not ui_theme.system_appearance_changed(self.manager_window, ui)):
+            return
+        self._system_reprobe_pending = True
+        def rebuild():
+            self._reopen_manager(root, before_reopen=ui_theme.reset, preflight_done=True)
+            self._system_reprobe_pending = False
+        def cancelled():
+            self._system_reprobe_pending = False
+        self._manager_meeting_view._request_preference(rebuild, cancelled)
+
+    def _save_manager_voice_shortcut(self, _event=None):
+        if (str(self._manager_notebook.select()) == str(self._manager_voice_tab)
+                and getattr(self, "_manager_voice_form", None)):
+            if self._manager_voice_form["dirty"]():
+                self._manager_voice_form["save"]()
+            return "break"
+
+    def _select_manager_destination(self, target):
+        notebook = self._manager_notebook
+        target = notebook.tabs()[target] if isinstance(target, int) else target
+        current = str(notebook.select())
+        if current == str(target):
+            return
+        def select():
+            notebook.select(target)
+        if current == str(self._manager_meeting_view.settings_tab):
+            self._manager_meeting_view.request_leave_settings(select)
+        elif current == str(self._manager_voice_tab):
+            form = getattr(self, "_manager_voice_form", None)
+            if form and (form["dirty"]() or form["saving"]()):
+                if form["saving"]():
+                    form["after_save"] = select
+                    return
+                answer = ui_theme.confirm_draft(self.manager_window)
+                if answer == "save":
+                    form["after_save"] = select
+                    form["save"]()
+                elif answer == "discard":
+                    form["discard"]()
+                    select()
+                return
+            select()
+        else:
+            select()
+
+    def _reopen_manager(self, root, *, before_reopen=None, preflight_done=False, publish=None):
+        requested_owner = getattr(self, "manager_window", None)
         def reopen():
             if before_reopen is not None:
                 before_reopen()
             self._show_manager_window(root)
-            view = self._manager_meeting_view
-            if view is not None and self._manager_notebook is not None:
-                try:
-                    self._manager_notebook.select(view.settings_tab)
-                except tk.TclError:
-                    pass
 
         def finish():
             self._destroy_manager_window()
             root.after_idle(reopen)
 
-        view = self._manager_meeting_view
-        if view is not None and not view.closed:
-            view.close(destroy=False, after_close=finish)
+        def admitted():
+            if (self._quitting.is_set()
+                    or preflight_done and self.manager_window is not requested_owner):
+                return
+            if publish is not None:
+                publish()
+            view = self._manager_meeting_view
+            if view is not None and not view.closed:
+                self._manager_view_state = view.capture_view_state()
+                form = getattr(self, "_manager_voice_form", None)
+                if form:
+                    self._manager_voice_restore = form["capture"]()
+                if preflight_done:
+                    view.close_without_prompt(destroy=False, after_close=finish)
+                else:
+                    view.close(destroy=False, after_close=finish)
+            else:
+                finish()
+        if preflight_done:
+            # Recheck at execution, after any current completion callback's UI
+            # work returns. Saves may have been admitted since initial preflight.
+            root.after_idle(lambda: self._before_manager_preference(admitted)
+                            if self.manager_window is requested_owner and not self._quitting.is_set() else None)
         else:
-            finish()
+            admitted()
 
     def _close_settings_window(self, force=False):
         meeting_view = self._manager_meeting_view
+        if not force:
+            window = self.manager_window
+            if window is not None:
+                window.withdraw()
+                if meeting_view is not None:
+                    meeting_view.set_visible(False)
+                if not getattr(self, "_tray_close_notified", False) and self.icon is not None:
+                    try:
+                        self.icon.notify(tr("SnipVoice continua na bandeja; gravação e processamento continuam"),
+                                         "SnipVoice")
+                    except Exception:
+                        self.logger.warning("Could not show the close-to-tray notice")
+                    else:
+                        self._tray_close_notified = True
+            return
         if meeting_view is not None and not meeting_view.closed:
             if force:
                 meeting_view.close_without_prompt(destroy=False)
@@ -606,7 +855,10 @@ class Snipvoice:
         self._destroy_manager_window()
 
     def _destroy_manager_window(self):
+        self._cancel_manager_resume()
         self._manager_voice_refresher = None
+        self._manager_voice_form = None
+        self._manager_preference_waiter = None
         self._manager_voice_tk_vars = []
         self._manager_voice_tab = None
         self._manager_notebook = None
@@ -806,10 +1058,22 @@ class Snipvoice:
                 self._meeting_monitor = None
         self.meetings.shutdown()
         self.voice.shutdown()
-        self.gui.submit(lambda root: self._close_settings_window(force=True))
+        self.gui.submit(self._shutdown_gui_owner)
         self.gui.stop()
         if self.icon is not None:
             self.icon.stop()
+
+    def _shutdown_gui_owner(self, root):
+        """Release every app-owned Tk reference on its owner at actual Quit."""
+        self._cancel_manager_resume()
+        timer, self._recording_indicator_after = getattr(self, "_recording_indicator_after", None), None
+        if timer is not None:
+            root.after_cancel(timer)
+        indicator, self.voice_status_indicator = self.voice_status_indicator, None
+        if indicator is not None:
+            indicator.destroy()
+        self._close_settings_window(force=True)
+        gc.collect()
 
     def run(self, *, show_settings=False):
         if platform_support.tk_runs_on_main_thread():
@@ -891,11 +1155,15 @@ class Snipvoice:
     def _meeting_menu_label(self, _item=None):
         try:
             snapshot = self.meetings.snapshot()
-            state = snapshot.get("state", "idle") if isinstance(snapshot, dict) else "idle"
+            if not isinstance(snapshot, dict):
+                snapshot = {}
         except Exception:
-            state = "idle"
-        if state in {"starting", "recording", "paused", "stopping"}:
+            snapshot = {}
+        if snapshot.get("state", "idle") in CAPTURE_STATES:
             return tr("Gravação em andamento")
+        job = start_blocker(snapshot)
+        if job:
+            return tr("Iniciar gravação (aguardando {job})", job=job)
         return tr("Iniciar gravação")
 
     def _meeting_start_enabled(self, _item=None):
@@ -903,8 +1171,7 @@ class Snipvoice:
             return False
         try:
             snapshot = self.meetings.snapshot()
-            state = snapshot.get("state", "idle")
-            return state == "idle" and not snapshot.get("processing", False)
+            return snapshot.get("state", "idle") == "idle" and not start_blocker(snapshot)
         except Exception:
             return False
 
@@ -928,13 +1195,19 @@ class Snipvoice:
             )
         except Exception as exc:
             self.logger.warning(f"Não foi possível atualizar o indicador de voz: {exc}")
-        if snapshot["state"] not in {"recording", "transcribing", "routing"}:
+        tray_state = (snapshot.get("state"), snapshot.get("download_active"),
+                      snapshot.get("download_profile"), snapshot.get("enabled"),
+                      snapshot.get("meeting_busy"), voice.settings.profile,
+                      voice.settings.language)
+        changed = tray_state != getattr(self, "_voice_tray_state", None)
+        self._voice_tray_state = tray_state
+        if changed and snapshot["state"] not in {"recording", "transcribing", "routing"}:
             self.refresh_tray_menu()
 
 
     def _render_voice_status(self, root, snapshot):
         if self.voice_status_indicator is None:
-            self.voice_status_indicator = VoiceStatusIndicator(root)
+            self.voice_status_indicator = VoiceStatusIndicator(root, on_open=self._queue_indicator_target)
         meeting = self.meetings.snapshot()
         if (meeting.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
                 or meeting.get("processing") and (meeting.get("audio_export") or {}).get("stage")
@@ -943,17 +1216,33 @@ class Snipvoice:
         else:
             self.voice_status_indicator.update(snapshot["state"], snapshot["mode"])
         self._refresh_manager_voice_tab()
+        for refresh in tuple(getattr(self, "_voice_history_refreshers", ())):
+            refresh()
 
 
     def _render_recording_indicator(self, root, snapshot):
         if self.voice_status_indicator is None:
-            self.voice_status_indicator = VoiceStatusIndicator(root)
+            self.voice_status_indicator = VoiceStatusIndicator(root, on_open=self._queue_indicator_target)
         window = self.manager_window
         hidden = window is None or window.state() in {"withdrawn", "iconic"}
         if hidden:
             self.voice_status_indicator.update_meeting(snapshot)
         else:
             self.voice_status_indicator.hide()
+
+    def _queue_indicator_target(self, session_id=None):
+        # A Cocoa target/action frame must never call Tcl, even on the main thread.
+        self.gui.submit(lambda _root: self._open_indicator_target(session_id))
+
+    def _open_indicator_target(self, session_id=None):
+        # Called only by a deliberate pointer click on the GUI-owned HUD.
+        self._show_manager_window(self.gui.root)
+        view = self._manager_meeting_view
+        if session_id and view is not None:
+            self._manager_notebook.select(view.library_tab)
+            view.load_session(session_id)
+        elif view is not None:
+            self._manager_notebook.select(view.recording_tab)
 
     def _poll_recording_indicator(self, root):
         """Observe capture independently of manager lifetime, using only the Tk pump."""
@@ -964,12 +1253,28 @@ class Snipvoice:
             return
         snapshot = self.meetings.snapshot()
         voice = self.voice.status_snapshot()
+        # The tray menu names what holds Start; redraw it only when that changes.
+        menu_key = (snapshot.get("state"), start_blocker(snapshot))
+        if menu_key != self._meeting_menu_key:
+            self._meeting_menu_key = menu_key
+            self.refresh_tray_menu()
+        from voice_indicator import indicator_content, meeting_indicator_content
+        content = meeting_indicator_content(snapshot)
+        voice_content = indicator_content(voice.get("state"), voice.get("mode"))
+        tooltip = APP_DISPLAY_NAME + (" · " + content[1] if content else
+                                      " · " + voice_content[0] if voice_content else "")
+        if self.icon is not None and getattr(self, "_tray_status_title", None) != tooltip:
+            self._tray_status_title = tooltip
+            self.icon.title = tooltip
         if (snapshot.get("state") in {"starting", "recording", "paused", "stopping", "postprocessing"}
                 or snapshot.get("processing") and (snapshot.get("audio_export") or {}).get("stage")
                 in {"preparing", "encoding", "finalizing"}
                 or voice.get("state") not in {"recording", "transcribing", "routing"}):
             self._render_recording_indicator(root, snapshot)
-        self._recording_indicator_after = root.after(200, lambda: self._poll_recording_indicator(root))
+        busy = (snapshot.get("state") in CAPTURE_STATES or snapshot.get("processing")
+                or voice.get("state") in {"recording", "transcribing", "routing"})
+        self._recording_indicator_after = root.after(200 if busy else 1000,
+                                                    lambda: self._poll_recording_indicator(root))
 
 
     def _refresh_manager_voice_tab(self):
@@ -1026,9 +1331,29 @@ class Snipvoice:
             if not messagebox.askyesno(tr("Entrada por voz"), message):
                 self._refresh_manager_voice_tab()
                 return
-        self.voice.enable()
-        self.refresh_tray_menu()
-        self._refresh_manager_voice_tab()
+        if getattr(self, "_voice_enable_pending", False):
+            return
+        self._voice_enable_pending = True
+        voice = self.voice
+
+        def enable():
+            try:
+                if self.voice is voice and not self._quitting.is_set():
+                    voice.enable()
+                    self.refresh_tray_menu()
+            except Exception:
+                self.notify_error(tr("Não foi possível ativar o ditado. Tente novamente."), key="voice-enable")
+            finally:
+                def finished(_root):
+                    self._voice_enable_pending = False
+                    if self.voice is voice:
+                        self._refresh_manager_voice_tab()
+                self.gui.submit(finished)
+        try:
+            self.task_runner.start(enable, name="voice-enable")
+        except Exception:
+            self._voice_enable_pending = False
+            self.notify_error(tr("Não foi possível ativar o ditado. Tente novamente."), key="voice-enable")
 
 
     def open_voice_settings(self, icon=None, item=None):
@@ -1061,12 +1386,12 @@ class Snipvoice:
         """Show model licenses in a bounded, scrollable child window."""
         ui = ui_theme.theme()
         dialog = tk.Toplevel(owner)
+        ui_theme.prepare_dialog(dialog, owner, resolved=ui, set_icon=self._set_window_icon)
         dialog.title(tr("Licenças e atribuições"))
         dialog.geometry("700x420")
         dialog.minsize(520, 300)
         dialog.configure(bg=ui.surface)
         dialog.transient(owner)
-        self._set_window_icon(dialog)
 
         container = tk.Frame(dialog, bg=ui.surface, padx=16, pady=16)
         container.pack(fill=tk.BOTH, expand=True)
@@ -1079,7 +1404,7 @@ class Snipvoice:
             font=ui.font(11, "bold"),
             bg=ui.surface,
             fg=ui.text,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_md))
 
         notice_text = tk.Text(
             container,
@@ -1088,7 +1413,7 @@ class Snipvoice:
             relief=tk.FLAT,
             highlightthickness=1,
             highlightbackground=ui.border,
-            padx=10,
+            padx=ui.space_md,
             pady=8,
             **ui.text_colors(),
         )
@@ -1103,12 +1428,8 @@ class Snipvoice:
         notice_text.insert("1.0", "\n\n".join(notices))
         notice_text.configure(state=tk.DISABLED)
 
-        tk.Button(
-            container,
-            text=tr("Fechar"),
-            width=ui.button_width(10),
-            command=dialog.destroy,
-            **ui.button_colors(),
+        ui_theme.button(
+            container, tr("Fechar"), dialog.destroy, width=ui.button_width(10), resolved=ui,
         ).grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
 
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
@@ -1124,6 +1445,7 @@ class Snipvoice:
 
         ui = ui_theme.theme()
         dialog = tk.Toplevel(owner)
+        ui_theme.prepare_dialog(dialog, owner, resolved=ui, set_icon=self._set_window_icon)
         dialog.title(tr("Correções da transcrição"))
         dialog.transient(owner)
         dialog.resizable(True, True)
@@ -1138,7 +1460,7 @@ class Snipvoice:
             font=ui.font(9),
             wraplength=560,
             justify="left",
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", pady=(0, ui.space_md))
         list_frame = tk.Frame(container, bg=ui.surface)
         list_frame.pack(fill=tk.BOTH, expand=True)
         listbox = tk.Listbox(
@@ -1146,7 +1468,9 @@ class Snipvoice:
             height=8,
             font=ui.mono_font(9),
             **ui.listbox_colors(),
+            **ui.entry_chrome(),
         )
+        ui_theme.focus_ring(listbox, ui, shrink=("bd",))
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=listbox.yview)
         listbox.configure(yscrollcommand=scrollbar.set)
         listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1166,50 +1490,33 @@ class Snipvoice:
                 return
             source = list(replacements)[selection[0]]
             replacement = replacements[source]
-            new_value = simpledialog.askstring(
-                tr("Substituição"), tr("Texto para substituir: {source}", source=source),
-                initialvalue=replacement, parent=dialog,
-            )
-            if new_value is None:
+            values = correction_form(source, replacement)
+            if values is None:
                 return
             checked = dict(replacements)
-            checked[source] = new_value
-            if not validate_replacements(checked):
-                messagebox.showerror(
-                    tr("Correção inválida"),
-                    tr("A substituição não pode ser vazia ou muito longa."),
-                    parent=dialog,
-                )
-                return
-            replacements[source] = new_value
-            redraw()
-
-        def add_entry():
-            source = simpledialog.askstring(
-                tr("Nova correção"),
-                tr("Texto reconhecido incorretamente:"),
-                parent=dialog,
-            )
-            if source is None:
-                return
-            replacement = simpledialog.askstring(
-                tr("Nova correção"),
-                tr("Substituir por:"),
-                parent=dialog,
-            )
-            if replacement is None:
-                return
-            checked = dict(replacements)
-            checked[source] = replacement
-            if not validate_replacements(checked):
-                messagebox.showerror(
-                    tr("Correção inválida"),
-                    tr("O texto não pode ser vazio ou muito longo."),
-                    parent=dialog,
-                )
-                return
+            checked.pop(source)
+            checked[values["source"]] = values["replacement"]
             replacements.clear()
             replacements.update(checked)
+            redraw()
+
+        def correction_form(source="", replacement=""):
+            def validate(values):
+                candidate = dict(replacements)
+                candidate.pop(source, None)
+                candidate[values["source"]] = values["replacement"]
+                if validate_replacements(candidate) != candidate:
+                    raise ValueError(tr("O texto não pode ser vazio ou muito longo."))
+            return ui_theme.form_dialog(dialog, tr("Correções da transcrição"),
+                (("source", tr("Texto reconhecido incorretamente:"), source),
+                 ("replacement", tr("Substituir por:"), replacement)),
+                validate=validate, set_icon=self._set_window_icon)
+
+        def add_entry():
+            values = correction_form()
+            if values is None:
+                return
+            replacements[values["source"]] = values["replacement"]
             redraw()
 
         def remove_entry():
@@ -1219,18 +1526,13 @@ class Snipvoice:
                 redraw()
 
         actions = tk.Frame(container, bg=ui.surface)
-        actions.pack(fill=tk.X, pady=(10, 0))
+        actions.pack(fill=tk.X, pady=(ui.space_md, 0))
         for label, command in (
             (tr("Adicionar"), add_entry),
             (tr("Editar"), edit_selected),
             (tr("Remover"), remove_entry),
         ):
-            tk.Button(
-                actions,
-                text=label,
-                command=command,
-                **ui.button_colors(),
-            ).pack(side=tk.LEFT, padx=(0, 6))
+            ui_theme.button(actions, label, command, resolved=ui).pack(side=tk.LEFT, padx=(0, ui.space_sm))
 
         def save_and_close():
             checked = validate_replacements(replacements)
@@ -1251,18 +1553,10 @@ class Snipvoice:
             self.voice.settings.voice_replacements = checked
             dialog.destroy()
 
-        tk.Button(
-            actions,
-            text=tr("Salvar"),
-            command=save_and_close,
-            **ui.button_colors(accent=True),
-        ).pack(side=tk.RIGHT)
-        tk.Button(
-            actions,
-            text=tr("Cancelar"),
-            command=dialog.destroy,
-            **ui.button_colors(),
-        ).pack(side=tk.RIGHT, padx=(0, 6))
+        ui_theme.button(actions, tr("Salvar"), save_and_close, "primary",
+                        resolved=ui).pack(side=tk.RIGHT)
+        ui_theme.button(actions, tr("Cancelar"), dialog.destroy,
+                        resolved=ui).pack(side=tk.RIGHT, padx=(0, ui.space_sm))
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
         redraw()
         center_on_screen(dialog)
@@ -1277,11 +1571,11 @@ class Snipvoice:
 
         ui = ui_theme.theme()
         dialog = tk.Toplevel(owner)
+        ui_theme.prepare_dialog(dialog, owner, resolved=ui, set_icon=self._set_window_icon)
         dialog.title(tr("Comandos por voz"))
         dialog.transient(owner)
         dialog.geometry("680x570")
         dialog.minsize(560, 510)
-        ui_theme.apply_window_chrome(dialog, ui)
         container = tk.Frame(dialog, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         container.pack(fill=tk.BOTH, expand=True)
         tk.Label(
@@ -1308,12 +1602,14 @@ class Snipvoice:
         empty_label.pack(anchor="w", pady=(ui.space_xs, ui.space_sm))
         tk.Label(container, text=tr("Frase falada"), bg=ui.surface, fg=ui.text,
                  font=ui.font()).pack(anchor="w")
-        phrase = tk.Entry(container, font=ui.font(), **ui.entry_colors(), **ui.entry_chrome())
+        phrase = tk.Entry(container, font=ui.body(), **ui.entry_colors(), **ui.entry_chrome())
+        ui_theme.focus_ring(phrase, ui, shrink=("bd",))
         phrase.pack(fill=tk.X, pady=(ui.space_xs, ui.space_sm))
         tk.Label(container, text=tr("Texto a inserir"), bg=ui.surface, fg=ui.text,
                  font=ui.font()).pack(anchor="w")
         text = tk.Text(container, height=5, wrap=tk.WORD, font=ui.font(),
-                       **ui.text_colors())
+                       **ui.text_colors(), **ui.entry_chrome())
+        ui_theme.focus_ring(text, ui, shrink=("bd",))
         text.pack(fill=tk.BOTH, expand=True, pady=(ui.space_xs, ui.space_sm))
 
         def redraw():
@@ -1375,8 +1671,7 @@ class Snipvoice:
         for label, callback in ((tr("Novo comando"), clear_form),
                                 (tr("Aplicar comando"), apply_command),
                                 (tr("Remover"), remove_command)):
-            button = tk.Button(actions, text=label, command=callback, font=ui.font(),
-                               **ui.button_colors(), **ui.button_chrome(compact=True))
+            button = ui_theme.button(actions, label, callback, resolved=ui)
             button.pack(side=tk.LEFT, padx=(0, ui.space_sm))
             controls.append(button)
 
@@ -1431,8 +1726,8 @@ class Snipvoice:
         footer.pack(fill=tk.X)
         for label, callback, accent in ((tr("Salvar comandos"), save, True),
                                          (tr("Cancelar"), close, False)):
-            button = tk.Button(footer, text=label, command=callback, font=ui.font(),
-                               **ui.button_colors(accent=accent), **ui.button_chrome())
+            button = ui_theme.button(footer, label, callback, "primary" if accent else "neutral",
+                                     resolved=ui)
             button.pack(side=tk.RIGHT, padx=(ui.space_sm, 0))
             controls.append(button)
         tree.bind("<<TreeviewSelect>>", selected)
@@ -1445,7 +1740,7 @@ class Snipvoice:
         return dialog
 
 
-    def _build_voice_settings_controls(self, parent, owner, models_parent=None):
+    def _build_voice_settings_controls(self, parent, owner, models_parent=None, actions_parent=None):
         """Build Ditado controls and, when supplied, the Configurações model inventory."""
         from voice_catalog import (
             available_languages,
@@ -1468,6 +1763,7 @@ class Snipvoice:
             master=owner, value=self.voice.settings.command_hotkey
         )
         activation_mode = tk.StringVar(master=owner, value=ACTIVATION_HOLD)
+        form = {"baseline": None, "syncing": False, "saving": False}
         self._manager_voice_tk_vars = [
             selected,
             language,
@@ -1477,6 +1773,8 @@ class Snipvoice:
         ]
         profile_labels = []
         download_buttons = []
+        inventory_state = [None]
+        installed_profiles = {}
 
         # The Configurações page owns the long download inventory. The fallback keeps direct
         # callers and older embedded views functional while the manager view is
@@ -1508,68 +1806,63 @@ class Snipvoice:
 
         def profile_label(entry):
             installed = voice_models.model_is_installed(entry, self.voice.cache_dir)
-            status = tr("instalado") if installed else tr("não baixado")
-            return tr(
-                "{purpose}\n"
-                "Download {size} · "
-                "{license} · {status}",
-                purpose=tr(entry["purpose"]), size=format_size(entry["size_bytes"]),
-                license=entry["license_id"], status=status,
-            )
+            return tr("Baixado") if installed else tr("Não baixado")
 
         def refresh_profile_labels():
+            snapshot = self.voice.status_snapshot()
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            inventory_key = (snapshot.get("download_active"), snapshot.get("state"),
+                             snapshot.get("download_profile"))
+            inventory_changed = inventory_state[0] != inventory_key
+            inventory_state[0] = inventory_key
             for button, entry in profile_labels:
                 try:
                     if not button.winfo_exists():
                         continue
                 except tk.TclError:
                     continue
-                button.configure(text=profile_label(entry))
+                downloading = voice_profile_downloading(snapshot, entry["profile"], self.voice.settings.profile)
+                if downloading:
+                    total = snapshot.get("download_total")
+                    button.configure(text=tr("Baixando {percent}%", percent=min(100, int(
+                        100 * snapshot.get("download_done", 0) / total))) if total else tr("Baixando…"), fg=ui.info)
+                elif inventory_changed:
+                    button.configure(text=profile_label(entry), fg=ui.text_muted)
             for button, entry in download_buttons:
                 try:
                     if not button.winfo_exists():
                         continue
                 except tk.TclError:
                     continue
-                installed = voice_models.model_is_installed(
-                    entry, self.voice.cache_dir
-                )
-                downloading = self.voice.model_download_in_progress(
-                    entry["profile"]
-                )
-                if installed:
+                if inventory_changed or entry["profile"] not in installed_profiles:
+                    installed_profiles[entry["profile"]] = voice_models.model_is_installed(
+                        entry, self.voice.cache_dir)
+                installed = installed_profiles[entry["profile"]]
+                downloading = voice_profile_downloading(snapshot, entry["profile"],
+                                                        self.voice.settings.profile)
+                if snapshot.get("download_active") and snapshot.get("download_profile") == entry["profile"]:
+                    button.configure(text=tr("Cancelar"), state=tk.NORMAL)
+                elif installed:
                     button.configure(text=tr("Baixado"), state=tk.DISABLED)
                 elif downloading:
-                    button.configure(text=tr("Baixando…"), state=tk.DISABLED)
+                    button.configure(text=tr("Aguarde"), state=tk.DISABLED)
                 else:
                     button.configure(text=tr("Baixar"), state=tk.NORMAL)
 
-        for entry in visible:
-            row = tk.Frame(models_card, bg=ui.card)
-            row.pack(fill=tk.X, anchor="w", pady=ui.space_xs)
-            label = tk.Label(
-                row,
-                text=profile_label(entry),
-                anchor="w",
-                justify="left",
-                wraplength=wrap - 110,
-                bg=ui.card,
-                fg=ui.text,
-                font=ui.font(9),
-            )
-            label.pack(side=tk.LEFT, fill=tk.X, expand=True, anchor="w")
-            profile_labels.append((label, entry))
-            download_button = tk.Button(
-                row,
-                text=tr("Baixar"),
-                width=ui.button_width(10),
-                command=lambda item=entry: download_model(item),
-                font=ui.font(),
-                **ui.button_colors(),
-                **ui.button_chrome(compact=True),
+        table = ui_theme.model_table(models_card, ui)
+        for index, entry in enumerate(visible, 1):
+            label, row = ui_theme.model_table_row(table, index,
+                (entry["upstream_model"], tr(entry["purpose"]), format_size(entry["size_bytes"]), entry["license_id"]), ui)
+            download_button = ui_theme.button(
+                row, tr("Baixar"), lambda item=entry: self.voice.cancel_profile_download(item["profile"])
+                if self.voice.model_download_in_progress(item["profile"]) else download_model(item),
+                width=0, resolved=ui,
             )
             download_button.pack(side=tk.RIGHT, padx=(8, 0))
             download_buttons.append((download_button, entry))
+            label.configure(text=profile_label(entry))
+            profile_labels.append((label, entry))
 
         def update_language_options(*_args):
             profile = selected.get()
@@ -1685,14 +1978,15 @@ class Snipvoice:
             fg=ui.text,
             font=ui.font(9),
         ).grid(row=1, column=0, sticky="w", padx=(0, 12), pady=4)
-        tk.Entry(
+        dictation_entry = ui_theme.focus_ring(tk.Entry(
             shortcut_frame,
-            textvariable=hotkey,
-            font=ui.font(9),
+            textvariable=tk.StringVar(master=owner),
+            font=ui.body(),
             width=28,
             **ui.entry_colors(),
             **ui.entry_chrome(),
-        ).grid(row=1, column=1, sticky="ew", pady=4)
+        ), ui, shrink=("bd",))
+        dictation_entry.grid(row=1, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
             text=tr("Comando por voz:"),
@@ -1700,17 +1994,18 @@ class Snipvoice:
             fg=ui.text,
             font=ui.font(9),
         ).grid(row=2, column=0, sticky="w", padx=(0, 12), pady=4)
-        tk.Entry(
+        command_entry = ui_theme.focus_ring(tk.Entry(
             shortcut_frame,
-            textvariable=command_hotkey,
-            font=ui.font(9),
+            textvariable=tk.StringVar(master=owner),
+            font=ui.body(),
             width=28,
             **ui.entry_colors(),
             **ui.entry_chrome(),
-        ).grid(row=2, column=1, sticky="ew", pady=4)
+        ), ui, shrink=("bd",))
+        command_entry.grid(row=2, column=1, sticky="ew", pady=4)
         tk.Label(
             shortcut_frame,
-            text=tr("Formato: ctrl+alt+space, ctrl+shift+f8, etc."),
+            text=tr("Selecione o campo e pressione o atalho. Tab avança; Esc sai do campo."),
             bg=ui.card,
             fg=ui.text_muted,
             font=ui.font(8),
@@ -1728,6 +2023,82 @@ class Snipvoice:
             text=tr("Mãos livres: pressione o atalho para iniciar e novamente para parar. Vale para os dois atalhos. Esc cancela."),
             bg=ui.card, fg=ui.text_muted, font=ui.font(8), wraplength=wrap, justify="left",
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        shortcut_error = tk.Label(shortcut_frame, bg=ui.card, fg=ui.danger,
+                                  font=ui.caption(), wraplength=wrap, justify="left")
+        shortcut_error.grid(row=6, column=0, columnspan=2, sticky="w")
+        editing_voice = self.voice
+
+        def validate_shortcuts(_event=None):
+            try:
+                dictation = parse_chord(hotkey.get())
+                command = parse_chord(command_hotkey.get())
+                candidate = dict(self.settings, voice_hotkey=dictation.spec,
+                                 voice_command_hotkey=command.spec)
+                if dictation == command:
+                    raise ValueError("duplicate hotkeys")
+                validate_hotkey_conflicts(candidate)
+            except ValueError:
+                shortcut_error.configure(text=tr("Use atalhos diferentes, com modificador e tecla, sem conflito com a gravação."), fg=ui.danger)
+                return False
+            shortcut_error.configure(text="", fg=ui.text_muted)
+            return True
+
+        def bind_capture(widget, variable):
+            editing = {"token": None, "ready": False}
+
+            def end_edit(_event=None):
+                token = editing["token"]
+                editing["token"], editing["ready"] = None, False
+                if token is not None:
+                    token.clear()
+                    editing_voice.end_hotkey_edit(token)
+                if shortcut_error.winfo_exists():
+                    validate_shortcuts()
+
+            def begin_edit(_event=None):
+                token = threading.Event()
+                token.set()
+                editing["token"] = token
+                editing["ready"] = editing_voice.begin_hotkey_edit(token) is True
+                shortcut_error.configure(text=tr("Atalhos globais pausados. Pressione o novo atalho.") if editing["ready"] else
+                                         tr("Aguarde o ditado terminar antes de capturar um atalho."),
+                                         fg=ui.info if editing["ready"] else ui.warning)
+
+            def display(*_args):
+                widget.setvar(widget.cget("textvariable"), " + ".join(
+                    part.capitalize() for part in variable.get().split("+") if part))
+
+            def capture(event):
+                key = event.keysym.lower()
+                if key in {"tab", "iso_left_tab"}:
+                    return None
+                if key == "escape":
+                    widget.tk_focusNext().focus_set()
+                    return "break"
+                if not editing["ready"]:
+                    return "break"
+                if key.startswith(("control", "alt", "shift", "meta", "super", "win")):
+                    return "break"
+                modifiers = [name for mask, name in ((0x4, "ctrl"), (0x8, "alt"),
+                                                      (0x20000, "alt"), (0x1, "shift"),
+                                                      (0x40, "cmd" if sys.platform == "darwin" else "win"))
+                             if event.state & mask]
+                key = {"return": "enter", "kp_enter": "enter"}.get(key, key)
+                try:
+                    variable.set(parse_chord("+".join(dict.fromkeys([*modifiers, key]))).spec)
+                except ValueError:
+                    shortcut_error.configure(text=tr("Pressione um modificador e uma tecla para definir o atalho."), fg=ui.danger)
+                return "break"
+
+            variable.trace_add("write", display)
+            widget.bind("<KeyPress>", capture)
+            widget.bind("<FocusIn>", begin_edit, add="+")
+            widget.bind("<FocusOut>", end_edit, add="+")
+            widget.bind("<Destroy>", end_edit, add="+")
+            display()
+
+        bind_capture(dictation_entry, hotkey)
+        bind_capture(command_entry, command_hotkey)
 
         commands_card = tk.Frame(parent, padx=ui.space_lg, pady=ui.space_md, **ui.card_options())
         commands_card.pack(fill=tk.X, pady=(0, ui.space_md))
@@ -1735,15 +2106,33 @@ class Snipvoice:
                  font=ui.font(11, "bold")).pack(side=tk.LEFT)
         commands_count = tk.Label(commands_card, bg=ui.card, fg=ui.text_muted, font=ui.font(9))
         commands_count.pack(side=tk.LEFT, padx=ui.space_sm)
-        tk.Button(commands_card, text=tr("Configurar comandos…"),
-                  command=lambda: self._show_voice_commands(owner), font=ui.font(),
-                  **ui.button_colors(), **ui.button_chrome(compact=True)).pack(side=tk.RIGHT)
+        ui_theme.button(commands_card, tr("Configurar comandos…"),
+                        lambda: self._show_voice_commands(owner), resolved=ui).pack(side=tk.RIGHT)
 
-        def refresh_form():
+        def form_values():
+            return tuple(variable.get() for variable in self._manager_voice_tk_vars)
+
+        def update_dirty(*_args):
+            if form["syncing"]:
+                return
+            dirty = form_values() != form["baseline"]
+            save_button.configure(state=tk.DISABLED if form["saving"] or not dirty else tk.NORMAL)
+            discard_button.configure(state=tk.NORMAL if dirty and not form["saving"] else tk.DISABLED)
+            save_status.configure(text=tr("Salvando…") if form["saving"] else
+                                  tr("Alterações não salvas") if dirty else tr("Configuração salva"),
+                                  fg=ui.text_muted)
+
+        def refresh_form(force=False):
             refresh_profile_labels()
             voice = self.voice
             if voice is None:
                 return
+            commands_count.configure(text=tr("1 comando") if len(self.snippets) == 1
+                                     else tr("{count} comandos", count=len(self.snippets)))
+            if not force and (form["saving"] or form["baseline"] is not None
+                              and form_values() != form["baseline"]):
+                return
+            form["syncing"] = True
             selected.set(voice.settings.profile)
             language.set(voice.settings.language)
             hotkey.set(voice.settings.hotkey)
@@ -1751,8 +2140,6 @@ class Snipvoice:
             configured_mode = getattr(voice.settings, "activation_mode", ACTIVATION_HOLD)
             activation_mode.set(configured_mode if configured_mode in (ACTIVATION_HOLD, ACTIVATION_TOGGLE)
                                 else ACTIVATION_HOLD)
-            commands_count.configure(text=tr("1 comando") if len(self.snippets) == 1
-                                     else tr("{count} comandos", count=len(self.snippets)))
             update_language_options()
             model_display.set(
                 profile_display_labels.get(selected.get(), selected.get())
@@ -1760,8 +2147,17 @@ class Snipvoice:
             language_display.set(
                 language_display_labels.get(language.get(), language.get())
             )
+            form["baseline"] = form_values()
+            form["syncing"] = False
+            validate_shortcuts()
+            update_dirty()
 
         def apply_voice_settings():
+            if form["saving"]:
+                return
+            pending_leave, form_api["after_save"] = form_api.get("after_save"), None
+            if not validate_shortcuts():
+                return
             profile = selected.get()
             try:
                 dictation_chord = parse_chord(hotkey.get())
@@ -1817,16 +2213,47 @@ class Snipvoice:
             options = dict(profile=profile, language=language.get(),
                            hotkey=dictation_chord.spec, command_hotkey=command_chord.spec,
                            activation_mode=activation_mode.get())
+            saved_values = form_values()
+            voice = self.voice
+            form["saving"] = True
+            form_api["after_save"] = pending_leave
+            update_dirty()
 
             def apply():
-                with self._settings_lock:
-                    self.voice.apply_options(**options)
-                if not self.voice.is_enabled():
-                    self.voice.enable()
-                self.refresh_tray_menu()
-                self.gui.submit(lambda _root: self._refresh_manager_voice_tab())
+                succeeded = False
+                try:
+                    if self.voice is not voice or self._quitting.is_set():
+                        return
+                    if voice.apply_options(**options) is not True:
+                        return
+                    self.refresh_tray_menu()
+                    succeeded = True
+                except Exception:
+                    self.logger.warning("Could not apply dictation settings")
+                finally:
+                    def finished(_root):
+                        if (self.voice is not voice or self._quitting.is_set()
+                                or not buttons.winfo_exists()):
+                            return
+                        form["saving"] = False
+                        if succeeded:
+                            form["baseline"] = saved_values
+                        update_dirty()
+                        if not succeeded:
+                            save_status.configure(text=tr("Não foi possível salvar. Tente novamente."), fg=ui.danger)
+                        after, form_api["after_save"] = form_api.get("after_save"), None
+                        if succeeded and after and not form_api["dirty"]():
+                            after()
+                        self._manager_forms_settled()
+                    self.gui.submit(finished)
 
-            self.task_runner.start(apply, name="voice-settings")
+            try:
+                self.task_runner.start(apply, name="voice-settings")
+            except Exception:
+                form["saving"] = False
+                form_api["after_save"] = None
+                update_dirty()
+                save_status.configure(text=tr("Não foi possível salvar. Tente novamente."), fg=ui.danger)
 
         def download_model(entry):
             if voice_models.model_is_installed(entry, self.voice.cache_dir):
@@ -1857,27 +2284,37 @@ class Snipvoice:
                 parent=owner,
             ):
                 return
-            self.voice.delete_active_model()
-            self.refresh_tray_menu()
-            self._refresh_manager_voice_tab()
+            voice = self.voice
+
+            def remove():
+                voice.delete_active_model()
+                self.refresh_tray_menu()
+                self.gui.submit(lambda _root: self._refresh_manager_voice_tab()
+                                if self.voice is voice and buttons.winfo_exists() else None)
+            self.task_runner.start(remove, name="voice-model-remove")
 
         def action_button(text, command, accent=False):
-            return tk.Button(
-                buttons,
-                text=text,
-                command=command,
-                font=ui.font(),
-                **ui.button_colors(accent=accent),
-                **ui.button_chrome(),
-            )
+            # X11 lacks Win32's extra native button inset. Keep this new save
+            # bar at Compact height without changing shared controls in WP8.
+            options = {"pady": 6} if ui.system == "linux" else {}
+            return ui_theme.button(buttons, text, command, "primary" if accent else "neutral",
+                                   resolved=ui, **options)
 
-        buttons = tk.Frame(parent, bg=ui.surface)
+        action_host = actions_parent if actions_parent is not None else parent
+        buttons = tk.Frame(action_host, bg=ui.surface)
         buttons.pack(fill=tk.X, pady=(ui.space_sm, 0))
-        action_button(tr("Salvar e usar"), apply_voice_settings, accent=True).pack(side=tk.LEFT)
+        save_button = action_button(tr("Salvar"), apply_voice_settings, accent=True)
+        save_button.pack(side=tk.LEFT)
+        discard_button = action_button(tr("Descartar"), lambda: refresh_form(force=True))
+        discard_button.pack(side=tk.LEFT, padx=(ui.space_sm, 0))
+        save_status = tk.Label(action_host, bg=ui.surface, fg=ui.text_muted, font=ui.caption())
+        save_status.pack(anchor="w", pady=(ui.space_xs, 0))
         more_button = tk.Menubutton(
-            buttons, text=tr("Mais opções ▾"), direction="below", font=ui.font(),
+            buttons, text=tr("Mais opções ▾"), direction="below", font=ui.body(),
             **ui.button_colors(), **ui.button_chrome(),
         )
+        ui_theme.disclosure(more_button, tr("Mais opções"), resolved=ui)
+        ui_theme.focus_ring(more_button, ui)
         menu_colors = {}
         if ui.system != "darwin":
             menu_colors = {
@@ -1901,7 +2338,28 @@ class Snipvoice:
             side=tk.RIGHT, padx=(0, ui.space_sm),
         )
 
+        for variable in self._manager_voice_tk_vars:
+            variable.trace_add("write", update_dirty)
+        def restore(values):
+            form["syncing"] = True
+            for variable, value in zip(self._manager_voice_tk_vars, values["values"]):
+                variable.set(value)
+            form["baseline"] = values["baseline"]
+            form["syncing"] = False
+            update_language_options()
+            model_display.set(profile_display_labels.get(selected.get(), selected.get()))
+            validate_shortcuts()
+            update_dirty()
+        form_api = self._manager_voice_form = {
+            "capture": lambda: {"values": form_values(), "baseline": form["baseline"]},
+            "saving": lambda: form["saving"], "dirty": lambda: form_values() != form["baseline"],
+            "save": apply_voice_settings, "discard": lambda: refresh_form(force=True), "after_save": None,
+        }
         refresh_form()
+        previous = getattr(self, "_manager_voice_restore", None)
+        if previous is not None:
+            restore(previous)
+            self._manager_voice_restore = None
         return refresh_form
 
 
@@ -1910,11 +2368,11 @@ class Snipvoice:
         ui = ui_theme.theme()
         main = tk.Frame(parent, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         main.pack(fill=tk.BOTH, expand=True)
+        footer = tk.Frame(main, bg=ui.surface)
+        footer.pack(side=tk.BOTTOM, fill=tk.X)
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
-        status_text = (
-            self.voice.status_label() if self.voice is not None else tr("Entrada por voz")
-        )
+        status_text, status_tone = voice_status_presentation(self.voice)
 
         def refresh():
             voice = self.voice
@@ -1929,7 +2387,8 @@ class Snipvoice:
                 checkbox.select()
             else:
                 checkbox.deselect()
-            status_label.configure(text=voice.status_label())
+            text, tone = voice_status_presentation(voice)
+            status_label.configure(text=text, fg=getattr(ui, tone))
             refresh_form()
 
         def on_toggle():
@@ -1954,7 +2413,7 @@ class Snipvoice:
             font=ui.font(10, "bold"),
             **ui.checkbutton_colors(ui.card),
         )
-        checkbox.pack(anchor="w")
+        checkbox.pack(side=tk.RIGHT, anchor="n")
         if enabled:
             checkbox.select()
         else:
@@ -1965,127 +2424,256 @@ class Snipvoice:
             text=status_text,
             font=ui.font(9),
             bg=ui.card,
-            fg=ui.text_muted,
+            fg=getattr(ui, status_tone),
             wraplength=640,
             justify="left",
         )
         status_label.pack(anchor="w", pady=(ui.space_xs, 0))
 
+        recent = tk.Frame(main, bg=ui.surface)
+        recent.pack(fill=tk.X, pady=(0, ui.space_md))
+        self._build_voice_history_rows(recent, root, limit=5, height=3)
+        tk.Label(main, text=tr("Configuração do ditado"), bg=ui.surface,
+                 fg=ui.text_strong, font=ui.heading()).pack(anchor="w", pady=(0, ui.space_sm))
+        config_host = tk.Frame(main, bg=ui.surface)
+        config_host.pack(fill=tk.BOTH, expand=True)
+        config_canvas = tk.Canvas(config_host, bg=ui.surface, bd=0, highlightthickness=0,
+                                  takefocus=False, height=180)
+        config_scroll = ttk.Scrollbar(config_host, orient=tk.VERTICAL, command=config_canvas.yview)
+        config_canvas.configure(yscrollcommand=config_scroll.set)
+        config_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        config_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        config = tk.Frame(config_canvas, bg=ui.surface)
+        config_item = config_canvas.create_window((0, 0), window=config, anchor="nw")
+        config.bind("<Configure>", lambda _event: config_canvas.configure(
+            scrollregion=config_canvas.bbox("all")))
+        config_canvas.bind("<Configure>", lambda event: config_canvas.itemconfigure(
+            config_item, width=event.width))
+
         refresh_form = self._build_voice_settings_controls(
-            main,
+            config,
             root,
             models_parent=models_parent,
+            actions_parent=footer,
         )
+        for widget in (config_canvas, config, *self._voice_descendants(config)):
+            self._bind_mousewheel(widget, config_canvas)
+            widget.bind("<FocusIn>", lambda event: self._reveal_voice_field(
+                event.widget, config, config_canvas), add="+")
         self._manager_voice_refresher = refresh
         refresh()
 
+
+    @staticmethod
+    def _voice_descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from Snipvoice._voice_descendants(child)
+
+    @staticmethod
+    def _reveal_voice_field(widget, content, canvas):
+        content.update_idletasks()
+        total = max(1, content.winfo_height())
+        top = widget.winfo_rooty() - content.winfo_rooty()
+        visible_top = canvas.canvasy(0)
+        if top < visible_top:
+            canvas.yview_moveto(max(0, top / total))
+        elif top + widget.winfo_height() > visible_top + canvas.winfo_height():
+            canvas.yview_moveto(max(0, (top + widget.winfo_height() - canvas.winfo_height()) / total))
+
+    def _build_voice_history_rows(self, parent, owner, *, limit, height):
+        """Bound history projection; all reads and retry checks run off Tk."""
+        from meeting_text import format_local_timestamp
+        ui = ui_theme.theme()
+        tk.Label(parent, text=tr("Últimos ditados") if limit == 5 else tr("Gravações recuperáveis"),
+                 font=ui.body_strong(), bg=ui.surface, fg=ui.text).pack(anchor="w")
+        state_line = tk.Label(parent, text=tr("Carregando histórico…"), bg=ui.surface,
+                              fg=ui.text_muted, font=ui.caption(), anchor="w", width=1,
+                              wraplength=640, justify="left")
+        state_line.pack(fill=tk.X, pady=(ui.space_xs, 0))
+        state_line.bind("<Configure>", lambda event: state_line.configure(wraplength=max(120, event.width)))
+        actions = tk.Frame(parent, bg=ui.surface)
+        actions.pack(side=tk.BOTTOM, fill=tk.X, pady=(ui.space_xs, 0))
+        frame = tk.Frame(parent, bg=ui.card)
+        frame.pack(fill=tk.BOTH, expand=True, pady=(ui.space_xs, 0))
+        columns = (("time", "status", "transcript") if limit == 5 else
+                   ("time", "status", "provider", "transcript"))
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=height,
+                            selectmode="browse", style="Manager.Treeview")
+        for column, label, width in (("time", tr("Data"), 145), ("status", tr("Estado"), 110),
+                                     ("transcript", tr("Transcrição / erro"), 340)):
+            tree.heading(column, text=label)
+            tree.column(column, width=width, minwidth=80, stretch=column == "transcript")
+        if limit != 5:
+            tree.heading("provider", text=tr("Provedor"))
+            tree.column("provider", width=85, minwidth=60, stretch=False)
+        for tone in ("text", "text_muted", "info", "warning", "danger"):
+            tree.tag_configure(tone, foreground=getattr(ui, tone))
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        state = {"pending": False, "again": False, "key": None, "rows": {}, "alive": True}
+        voice = self.voice
+        gui_ref = weakref.ref(self.gui)
+        quitting = getattr(self, "_quitting", threading.Event())
+
+        def selected():
+            selection = tree.selection()
+            return state["rows"].get(selection[0]) if selection else None
+
+        def update_actions(_event=None):
+            entry = selected()
+            snapshot = voice.status_snapshot()
+            ready = isinstance(snapshot, dict) and snapshot.get("retry_available") is True
+            can_retry = bool(entry and entry.get("retryable") and ready)
+            retry.configure(state=tk.NORMAL if can_retry else tk.DISABLED)
+            if limit == 5:
+                if can_retry:
+                    retry.pack(side=tk.LEFT, before=copy)
+                else:
+                    retry.pack_forget()
+            copy.configure(state=tk.NORMAL if entry and entry.get("transcript") else tk.DISABLED)
+
+        def run_action(kind):
+            entry = selected()
+            if entry is None:
+                return
+            record_id = entry["id"]
+
+            def work():
+                try:
+                    succeeded = (voice.retry_history(record_id) if kind == "retry"
+                                 else voice.copy_history_transcript(record_id))
+                except Exception:
+                    succeeded = False
+                _post_history_result(gui_ref, lease_ref, active, quitting, ("action", succeeded))
+            self.task_runner.start(work, name="voice-history-action")
+
+        retry = ui_theme.button(actions, tr("Tentar novamente"), lambda: run_action("retry"), resolved=ui)
+        retry.pack(side=tk.LEFT)
+        copy = ui_theme.button(actions, tr("Copiar transcrição"), lambda: run_action("copy"), resolved=ui)
+        copy.pack(side=tk.LEFT, padx=(ui.space_sm, 0))
+        ui_theme.button(actions, tr("Atualizar"), lambda: refresh(force=True), resolved=ui).pack(side=tk.RIGHT)
+        tree.bind("<<TreeviewSelect>>", update_actions)
+
+        def apply_result(result):
+            if not state["alive"] or self.voice is not voice:
+                return
+            if result[0] == "action":
+                refresh(force=True)
+                if not result[1]:
+                    state_line.configure(text=tr("A ação não foi concluída. Atualize o histórico e tente novamente."), fg=ui.danger)
+                return
+            rows, failed = result[1:]
+            if not state["alive"] or self.voice is not voice:
+                return
+            state["pending"] = False
+            selection = tree.selection()
+            tree.delete(*tree.get_children())
+            state["rows"] = {entry["id"]: entry for entry in rows[:limit]}
+            attention = 0
+            for entry in state["rows"].values():
+                label, tone = voice_history_status(entry.get("status"))
+                attention += entry.get("status") in {"failed", "interrupted", "pending"}
+                preview = " ".join(str(entry.get("transcript") or entry.get("error") or "").split())[:80]
+                values = (format_local_timestamp(entry.get("created_at")), label)
+                if limit != 5:
+                    values += (entry.get("provider", "—"),)
+                tree.insert("", tk.END, iid=entry["id"], values=(*values, preview), tags=(tone,))
+            if failed:
+                state_line.configure(text=tr("Não foi possível ler o histórico. Use Atualizar para tentar novamente."), fg=ui.danger)
+            elif not rows:
+                state_line.configure(text=tr("Nenhuma gravação."), fg=ui.text_muted)
+            elif attention:
+                state_line.configure(text=voice_history_attention(attention), fg=ui.warning)
+            else:
+                state_line.configure(text=tr("Ditados recentes sem pendências."), fg=ui.text_muted)
+            chosen = selection[0] if selection and selection[0] in state["rows"] else next(iter(state["rows"]), None)
+            if chosen:
+                tree.selection_set(chosen)
+            update_actions()
+            if state["again"]:
+                state["again"] = False
+                refresh(force=True)
+
+        def refresh(*, force=False):
+            if not state["alive"] or self.voice is not voice:
+                return
+            snapshot = voice.status_snapshot()
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            key = (snapshot.get("state"), snapshot.get("retry_available"), snapshot.get("enabled"))
+            update_actions()
+            if not force and state["key"] == key:
+                return
+            if state["pending"]:
+                state["again"] = True
+                return
+            state["key"] = key
+            state["pending"] = True
+
+            def read():
+                rows, failed = [], False
+                try:
+                    rows = voice.history_rows(limit=limit)
+                    if not isinstance(rows, list):
+                        raise ValueError("history result must be a list")
+                except Exception:
+                    failed = True
+                _post_history_result(gui_ref, lease_ref, active, quitting, ("rows", rows, failed))
+            self.task_runner.start(read, name="voice-history-read")
+
+        lease = _HistoryCallbackLease(apply_result)
+        lease_ref, active = weakref.ref(lease), lease.active
+        parent._voice_history_lease = lease
+        callbacks = getattr(self, "_voice_history_refreshers", None)
+        if callbacks is None:
+            callbacks = self._voice_history_refreshers = []
+        callbacks.append(refresh)
+
+        def destroyed(event):
+            if event.widget is parent:
+                state["alive"] = False
+                lease.close()
+                parent._voice_history_lease = None
+                if refresh in callbacks:
+                    callbacks.remove(refresh)
+        parent.bind("<Destroy>", destroyed, add="+")
+        self._bind_mousewheel(tree, tree)
+        refresh()
+        return tree, refresh
 
     def _open_voice_history(self, root):
         """Show recoverable recordings without replaying them into stale targets."""
         ui = ui_theme.theme()
         history_window = tk.Toplevel(root)
-        history_window.title(tr("Histórico de Voz"))
+        ui_theme.prepare_dialog(history_window, root, resolved=ui, set_icon=self._set_window_icon)
+        history_window.title(tr("Histórico de voz"))
         history_window.geometry("760x400")
         history_window.minsize(620, 300)
         history_window.configure(bg=ui.surface)
         history_window.transient(root)
-        self._set_window_icon(history_window)
-
-        outer = tk.Frame(history_window, bg=ui.surface, padx=14, pady=14)
+        outer = tk.Frame(history_window, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         outer.pack(fill=tk.BOTH, expand=True)
-        outer.grid_columnconfigure(0, weight=1)
-        outer.grid_rowconfigure(1, weight=1)
+        close_row = tk.Frame(outer, bg=ui.surface)
+        close_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(ui.space_sm, 0))
+        opener = root.focus_get()
 
-        tk.Label(
-            outer,
-            text=tr("Gravações recuperáveis"),
-            font=ui.font(11, "bold"),
-            bg=ui.surface,
-            fg=ui.text,
-        ).grid(row=0, column=0, sticky="w")
+        def close(_event=None):
+            history_window.destroy()
+            if opener is not None and opener.winfo_exists():
+                opener.focus_set()
+            return "break"
 
-        frame = tk.Frame(
-            outer,
-            bg=ui.card,
-            highlightbackground=ui.border,
-            highlightthickness=1,
-        )
-        frame.grid(row=1, column=0, sticky="nsew", pady=(10, 8))
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_rowconfigure(0, weight=1)
-
-        columns = ("time", "status", "provider", "transcript")
-        tree = ttk.Treeview(frame, columns=columns, show="headings", height=12)
-        tree.heading("time", text=tr("Data"))
-        tree.heading("status", text=tr("Estado"))
-        tree.heading("provider", text=tr("Provedor"))
-        tree.heading("transcript", text=tr("Transcrição / erro"))
-        tree.column("time", width=145, anchor="center", stretch=False)
-        tree.column("status", width=95, anchor="center", stretch=False)
-        tree.column("provider", width=80, anchor="center", stretch=False)
-        tree.column("transcript", width=400, anchor="w")
-
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        def refresh_rows():
-            tree.delete(*tree.get_children())
-            voice = self.voice
-            entries = voice.history_entries() if voice is not None else []
-            if not entries:
-                tree.insert("", tk.END, values=("—", tr("vazio"), "—", tr("Nenhuma gravação.")))
-                return
-            for entry in entries:
-                summary = entry.get("transcript") or entry.get("error") or ""
-                tree.insert(
-                    "",
-                    tk.END,
-                    iid=entry["id"],
-                    values=(
-                        entry.get("created_at", "—"),
-                        entry.get("status", "—"),
-                        entry.get("provider", "—"),
-                        summary,
-                    ),
-                )
-
-        def selected_id():
-            selection = tree.selection()
-            return selection[0] if selection and self.voice is not None else None
-
-        def retry_selected():
-            record_id = selected_id()
-            if record_id and self.voice.retry_history(record_id):
-                history_window.after(500, refresh_rows)
-
-        def copy_selected():
-            record_id = selected_id()
-            if record_id and not self.voice.copy_history_transcript(record_id):
-                self.notify_error(
-                    tr("Esta gravação ainda não tem uma transcrição para copiar."),
-                    key="voice-history-copy",
-                )
-
-        actions = tk.Frame(outer, bg=ui.surface)
-        actions.grid(row=2, column=0, sticky="w")
-        tk.Button(
-            actions,
-            text=tr("Tentar novamente"),
-            command=retry_selected,
-            **ui.button_colors(accent=True),
-        ).pack(side=tk.LEFT)
-        tk.Button(
-            actions,
-            text=tr("Copiar transcrição"),
-            command=copy_selected,
-            **ui.button_colors(),
-        ).pack(side=tk.LEFT, padx=(8, 0))
-
-        refresh_rows()
-        self._bind_mousewheel(tree, tree)
+        ui_theme.button(close_row, tr("Fechar"), close, resolved=ui).pack(side=tk.RIGHT)
+        rows = tk.Frame(outer, bg=ui.surface)
+        rows.pack(fill=tk.BOTH, expand=True)
+        self._build_voice_history_rows(rows, history_window, limit=200, height=7)
+        history_window.bind("<Escape>", close)
+        history_window.protocol("WM_DELETE_WINDOW", close)
         center_dialog(history_window, root)
+        return history_window
 
 
     def _bind_mousewheel(self, widget, target=None):

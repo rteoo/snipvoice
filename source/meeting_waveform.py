@@ -160,9 +160,12 @@ class MeetingWaveform(tk.Canvas):
     redraws, so the audio callback never paints or calls Tcl.
     """
 
-    STATES = ("idle", "checking", "recording", "paused")
+    # "processing" and "waiting": idle, but a job or another hold keeps the
+    # recorder from starting, so it is not "Pronto".
+    STATES = ("idle", "processing", "waiting", "checking", "recording", "paused")
     _DEFAULT_TRACK_LABELS = {"microphone": N_("Microfone"), "system": N_("Sistema")}
-    _DEFAULT_STATE_LABELS = {"idle": N_("Pronto"), "checking": N_("Testando"),
+    _DEFAULT_STATE_LABELS = {"idle": N_("Pronto"), "processing": N_("Processando"),
+                             "waiting": N_("Aguardando"), "checking": N_("Testando"),
                              "recording": N_("Gravando"), "paused": N_("Pausado")}
 
     def __init__(self, master, model=None, *, theme=None, poll_ms=40,
@@ -193,6 +196,7 @@ class MeetingWaveform(tk.Canvas):
         self.bind("<Configure>", self._on_configure, add="+")
         self.bind("<Destroy>", self._on_destroy, add="+")
         self._poll_id = self.after(self.poll_ms, self._drain_pending)
+        self._visible = True
         self._request_redraw()
 
     @property
@@ -250,7 +254,7 @@ class MeetingWaveform(tk.Canvas):
         self._request_redraw()
 
     def _request_redraw(self):
-        if self._destroyed or self._redraw_pending:
+        if self._destroyed or self._redraw_pending or not self._visible:
             return
         self._redraw_pending = True
         try:
@@ -259,6 +263,7 @@ class MeetingWaveform(tk.Canvas):
             self._redraw_pending = False
 
     def _drain_pending(self):
+        self._poll_id = None
         if self._destroyed:
             return
         changed = False
@@ -275,12 +280,29 @@ class MeetingWaveform(tk.Canvas):
         except tk.TclError:
             self._destroyed = True
 
+    def set_visible(self, visible):
+        """Suspend both the queue timer and painting while this page is hidden."""
+        visible = bool(visible)
+        if visible == self._visible:
+            return
+        self._visible = visible
+        if not visible:
+            for name in ("_poll_id", "_redraw_id"):
+                pending = getattr(self, name, None)
+                if pending is not None:
+                    self.after_cancel(pending)
+                    setattr(self, name, None)
+            self._redraw_pending = False
+        else:
+            self._drain_pending()
+            self._request_redraw()
+
     def _wave_color(self, track):
-        if self._state == "paused":
-            return self.ui.warning
-        if self._state == "idle":
-            return self.ui.text_muted
-        return self.ui.accent if track == "microphone" else self.ui.success
+        # Chart roles: the microphone is the primary series, the system the
+        # comparison; a paused, idle, processing or waiting signal is context.
+        if self._state in {"paused", "idle", "processing", "waiting"}:
+            return self.ui.chart_neutral
+        return self.ui.chart_primary if track == "microphone" else self.ui.chart_secondary
 
     def _redraw(self):
         self._redraw_pending = False
@@ -307,7 +329,7 @@ class MeetingWaveform(tk.Canvas):
             self.create_text(
                 margin_x, lane_top - label_height / 2.0,
                 text=tr(self.track_labels.get(track, track)), anchor="w",
-                fill=self.ui.text, font=self.ui.font(9, "bold"), tags=("labels",),
+                fill=self.ui.text, font=self.ui.body_strong(), tags=("labels",),
             )
             points = self.model.geometry(track, lane_width, lane_height, x=margin_x, y=lane_top)
             if points:
@@ -318,7 +340,7 @@ class MeetingWaveform(tk.Canvas):
                 )
         self.create_text(
             width - margin_x, 8, text=self.status_text, anchor="ne",
-            fill=self.ui.text_muted, font=self.ui.font(8), tags=("status",),
+            fill=self.ui.text_muted, font=self.ui.caption(), tags=("status",),
         )
 
     def _on_destroy(self, event):

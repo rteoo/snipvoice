@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 
-from i18n import tr
+from i18n import N_, tr
 from meeting_audio import NativeCapture
 from meeting_mixdown import MixdownCancelled, export_mixdown
 from meeting_library import MeetingLibrary, REPORT_HISTORY_LIMIT as LIBRARY_REPORT_HISTORY_LIMIT
@@ -29,12 +29,84 @@ from meeting_titles import initial_recording_title, refine_recording_title, safe
 _UNSET = object()
 
 
+class _RequestCancellation:
+    """Read-only cancellation shared by the controller and one UI request.
+
+    The request Event must survive the controller clearing its reusable active
+    Event at admission. Intelligence and runtime consumers only call is_set().
+    """
+
+    def __init__(self, active, request):
+        self.active, self.request = active, request
+
+    def is_set(self):
+        return self.active.is_set() or self.request.is_set()
+
+
+def _check_request_cancelled(event):
+    if event is not None and event.is_set():
+        raise RuntimeError(tr("A operação foi cancelada; o áudio salvo e os arquivos anteriores foram preservados."))
+
+
 WAVEFORM_POINTS = 360
 WAVEFORM_BLOCK_POINTS = 24
 TRANSCRIPT_PAGE_SIZE = 100
 TRANSCRIPT_LIMIT = 500
 REPORT_HISTORY_LIMIT = LIBRARY_REPORT_HISTORY_LIMIT
 PLAYBACK_PROGRESS_INTERVAL = 0.25
+CAPTURE_STATES = frozenset({"starting", "recording", "paused", "stopping"})
+# What holds the processing lane, as people name it ("Aguardando o resumo").
+# Multi-step jobs (a recording's automatic post-processing, an import, a
+# manual transcription) report their current step here as they advance.
+JOB_LABELS = {
+    "final_audio": N_("o áudio final"),
+    "transcription": N_("a transcrição"),
+    "summary": N_("o resumo"),
+    "capture_cleanup": N_("a liberação dos arquivos temporários"),
+    "report": N_("o resumo"),
+    "ask": N_("a resposta do chat"),
+    "cross_question": N_("a pergunta entre gravações"),
+    "save_answer": N_("o salvamento da resposta"),
+    "import": N_("a importação de áudio"),
+    "model_import": N_("a importação do modelo"),
+    "export": N_("a exportação"),
+    "preview": N_("o teste das fontes"),
+}
+# The steps of one recording's own pipeline. Stopping one keeps the original
+# audio, and the Library offers the step again; every other job just stops.
+PIPELINE_JOBS = frozenset({"final_audio", "transcription", "summary", "capture_cleanup"})
+
+
+def processing_job_label(snapshot):
+    """Name the running processing job and step ("o resumo"), or "" when none runs."""
+    if not snapshot.get("processing"):
+        return ""
+    label = JOB_LABELS.get(snapshot.get("processing_kind"))
+    # A snapshot without a kind still holds the lane; name the lane itself.
+    return tr(label) if label else tr("o processamento")
+
+
+def start_blocker(snapshot):
+    """Name the controller work a capture start waits for, or "" when none.
+
+    A pure projection of ``MeetingController.snapshot()`` shared by the
+    manager and the tray. Capture states and ``unavailable`` are named by the
+    state itself, so they return "".
+    """
+    state = snapshot.get("state", "idle")
+    if state == "postprocessing":
+        return processing_job_label(snapshot) or tr("o processamento")
+    if state != "idle":
+        return ""
+    if snapshot.get("processing"):
+        return processing_job_label(snapshot)
+    if snapshot.get("final_copy"):
+        return tr("a cópia do áudio final")
+    if (snapshot.get("playback") or {}).get("active"):
+        return tr("a reprodução")
+    if snapshot.get("retention_active"):
+        return tr("a retenção local")
+    return ""
 
 
 def _report_history_projection(report):
@@ -211,6 +283,7 @@ class MeetingController:
         self._audio_export_progress = None
         self._processing = False
         self._processing_session = None
+        self._processing_kind = None
         self._retention_active = False
         self._retention_service = None
         self._privacy_defaults = None
@@ -443,6 +516,9 @@ class MeetingController:
                     self._playback_position = playback_position
             return {"state": self._state, "session_id": self._session_id,
                     "error": self._error, "processing": self._processing,
+                    "processing_kind": self._processing_kind,
+                    "processing_session": self._processing_session,
+                    "final_copy": self._final_copy_active,
                     "retention_active": self._retention_active,
                     "last_status": self._last_status, "partial": bool(self._source_errors),
                     "elapsed": max(0.0, time.monotonic() - self._started)
@@ -540,7 +616,7 @@ class MeetingController:
                 raise failure
             return {"enabled": enabled, "peaks": peaks, "errors": tuple(sorted(errors))}
 
-        return self._file_work(work)
+        return self._file_work(work, kind="preview")
 
     def start(self, settings, title=""):
         if isinstance(settings, dict):
@@ -726,11 +802,21 @@ class MeetingController:
                         self._queue_projection(session)
                 except Exception:
                     error = error or tr("Não foi possível finalizar os metadados; a recuperação ocorrerá ao reabrir.")
-            if session is not None and not error and clean_stop and not self._closed:
+            admitted = False
+            if session is not None and not error and clean_stop:
+                # Checked under the lock shutdown takes to close, so a quit
+                # either prevents this job or finds it running and cancels it.
                 with self._lock:
-                    self._state = "postprocessing"
-                    self._processing = True
-                    self._processing_session = session
+                    admitted = not self._closed
+                    if admitted:
+                        self._state = "postprocessing"
+                        self._processing = True
+                        self._processing_session = session
+                        self._processing_kind = "final_audio"
+                        # A fresh event: no cancel aimed at the capture or an
+                        # earlier job can skip the final audio, transcript or summary.
+                        self._cancel = threading.Event()
+            if admitted:
                 try:
                     postprocess_errors, postprocess_resource_live = self._postprocess_recording(
                         session, title, settings)
@@ -752,6 +838,8 @@ class MeetingController:
                 self._levels = {"microphone": 0.0, "system": 0.0}
                 self._processing = False
                 self._processing_session = None
+                self._processing_kind = None
+                self._cancel.clear()
                 # Retain the reservation and block a new capture if teardown is unproven.
                 self._state = "idle" if clean_stop else "unavailable"
             if error:
@@ -786,6 +874,7 @@ class MeetingController:
             try:
                 with self._lock:
                     self._postprocess = tr("Transcrevendo localmente")
+                    self._processing_kind = "transcription"
                 from meeting_transcription import transcribe_meeting
                 from voice_catalog import default_language_for_profile
                 self.store.save_processing_state(session_id, "transcription", "processing")
@@ -814,6 +903,7 @@ class MeetingController:
             try:
                 with self._lock:
                     self._postprocess = tr("Gerando o resumo local")
+                    self._processing_kind = "summary"
                 from meeting_summary import summarize_meeting
                 self.store.save_processing_state(session_id, "summary", "processing")
                 summarize_meeting(self.store, session_id, summary_model,
@@ -840,7 +930,15 @@ class MeetingController:
             self._postprocess = tr("Pós-processamento concluído") if not errors else tr("Processamento interrompido; tente novamente.")
         return errors, resource_live
 
-    def _installed_voice_profile(self, preferred):
+    def installed_transcription_profile(self, preferred=None):
+        """Read installed-only ASR selection on an IO worker, using the pipeline's fallback order."""
+        if self.voice is None:
+            return None
+        if preferred is None:
+            preferred = getattr(getattr(self.voice, "settings", None), "profile", None)
+        return self._installed_voice_profile(preferred, refresh_manifest=False)
+
+    def _installed_voice_profile(self, preferred, *, refresh_manifest=True):
         """Return the preferred installed ASR profile, then the default, then catalog order."""
         from voice_catalog import DEFAULT_PROFILE, catalog_entry, selectable_catalog
         from voice_models import model_is_installed
@@ -851,12 +949,19 @@ class MeetingController:
             if entry is not None and entry not in entries:
                 entries.append(entry)
         entries.extend(entry for entry in selectable_catalog() if entry not in entries)
+        read_errors = []
         for entry in entries:
             try:
-                if model_is_installed(entry, self.voice.cache_dir):
+                installed = (model_is_installed(entry, self.voice.cache_dir) if refresh_manifest
+                             else model_is_installed(entry, self.voice.cache_dir, refresh_manifest=False))
+                if installed:
                     return entry["profile"]
-            except (OSError, TypeError, ValueError):
+            except (OSError, TypeError, ValueError) as exc:
+                if not refresh_manifest:
+                    read_errors.append(exc)
                 continue
+        if read_errors:
+            raise OSError("Installed transcription inventory could not be verified") from read_errors[0]
         return None
 
     @staticmethod
@@ -1328,7 +1433,7 @@ class MeetingController:
         from meeting_files import export_highlight_clip
         return self._file_work(lambda: export_highlight_clip(
             self.store, session_id, highlight, path, cancel_event=self._cancel,
-        ), session_id=session_id)
+        ), session_id=session_id, kind="export")
 
     def rename_session(self, session_id, title, *, expected_generation=_UNSET):
         """Rename a recording without rewriting legacy notes or bookmarks."""
@@ -1361,13 +1466,14 @@ class MeetingController:
             self._annotation_generations[session_id] = result["generation"]
         return True
 
-    def _launch_processing(self, function, session_id=None):
+    def _launch_processing(self, function, session_id=None, *, kind):
         with self._lock:
             if (self._closed or self._retention_active or self._processing
                     or self._final_copy_active or self._state != "idle"):
                 return False
             self._processing = True
             self._processing_session = session_id
+            self._processing_kind = kind
             self._audio_export_progress = None
             self._error = ""
             self._cancel.clear()
@@ -1383,6 +1489,10 @@ class MeetingController:
                     with self._lock:
                         self._processing = False
                         self._processing_session = None
+                        self._processing_kind = None
+                        # A cancel belongs to the job it stopped; reads that
+                        # default to this event must not inherit it.
+                        self._cancel.clear()
 
             self._processing_thread = threading.Thread(target=worker, daemon=True)
             self._processing_thread.start()
@@ -1391,7 +1501,7 @@ class MeetingController:
     def transcribe(self, session_id, profile, language):
         def work():
             self._transcribe_and_summarize(session_id, profile, language)
-        return self._launch_processing(work, session_id=session_id)
+        return self._launch_processing(work, session_id=session_id, kind="transcription")
 
     def _transcribe_and_summarize(self, session_id, profile, language, preferred_summary=None):
         """Run installed-only transcription and summary on one processing lane."""
@@ -1400,6 +1510,7 @@ class MeetingController:
         token = self.voice.reserve_for_meeting()
         release = True
         try:
+            self._processing_step("transcription")
             self.store.save_processing_state(session_id, "transcription", "processing")
             try:
                 transcribe_meeting(
@@ -1442,6 +1553,7 @@ class MeetingController:
         if not model or self._cancel.is_set():
             return False
         from meeting_summary import summarize_meeting
+        self._processing_step("summary")
         self.store.save_processing_state(session_id, "summary", "processing")
         try:
             summarize_meeting(self.store, session_id, model, cancel_event=self._cancel)
@@ -1470,8 +1582,26 @@ class MeetingController:
             # Keep legacy bundles sidecar-free until a human mutation occurs.
             self.library.store.update(session_id, title=refined)
 
-    def cancel_processing(self):
-        self._cancel.set()
+    def cancel_processing(self, kinds=None):
+        """Cancel the running processing job; return whether a cancel was issued.
+
+        A capture has no job to cancel, so a request during one is refused:
+        the shared event would otherwise reach the recording's automatic
+        post-processing. ``kinds`` limits the cancel to those job kinds, so a
+        window cancels only the work it asked for.
+        """
+        with self._lock:
+            if self._state in CAPTURE_STATES or not self._processing:
+                return False
+            if kinds is not None and self._processing_kind not in kinds:
+                return False
+            self._cancel.set()
+            return True
+
+    def _processing_step(self, kind):
+        """Report the running job's current step as its ``processing_kind``."""
+        with self._lock:
+            self._processing_kind = kind
 
     def import_model(self, profile, path):
         from voice_models import import_local_model
@@ -1481,7 +1611,7 @@ class MeetingController:
                 import_local_model(profile, path, self.voice.cache_dir, cancel_event=self._cancel)
             finally:
                 self.voice.release_meeting(token)
-        return self._launch_processing(work)
+        return self._launch_processing(work, kind="model_import")
 
     def import_audio(self, path, settings):
         from meeting_files import import_audio
@@ -1501,15 +1631,17 @@ class MeetingController:
                 )
             self._queue_projection(session_id)
             return session_id
-        return self._file_work(work)
+        return self._file_work(work, kind="import")
 
     def recover_audio(self, session_id, settings=None):
         """Resume final MP3 preparation while preserving every prior artifact."""
         return self._launch_processing(
             lambda: self._prepare_mp3(session_id, settings=settings), session_id=session_id,
+            kind="final_audio",
         )
 
     def _prepare_mp3(self, session_id, settings=None):
+        self._processing_step("final_audio")
         recover_capture_compaction(self.store, session_id)
         metadata = self.store.get(session_id, include_events=False)
         if metadata.get("status") == "recording":
@@ -1543,6 +1675,7 @@ class MeetingController:
         verification = final.get("verification")
         if not isinstance(verification, dict):
             raise RuntimeError(tr("O MP3 precisa ser verificado antes de liberar espaço."))
+        self._processing_step("capture_cleanup")
         self.store.save_processing_state(session_id, "capture_cleanup", "processing")
         try:
             recover_capture_compaction(self.store, session_id)
@@ -1560,7 +1693,7 @@ class MeetingController:
     def export(self, session_id, path, format="markdown"):
         return self._file_work(lambda: self.library.export(
             session_id, path, format, cancel_event=self._cancel,
-        ), session_id=session_id)
+        ), session_id=session_id, kind="export")
 
     def export_transcript(self, session_id, path, *, style="full_text", revision=None):
         """Export one complete formatted transcript through the file worker."""
@@ -1570,12 +1703,12 @@ class MeetingController:
                 self.store, session_id, path, style=style, revision=revision,
                 cancel_event=self._cancel,
             )
-        return self._file_work(operation, session_id=session_id)
+        return self._file_work(operation, session_id=session_id, kind="export")
 
     def export_mixdown(self, session_id, path, enhance_microphone=False):
         return self._file_work(lambda: self._export_audio(
             session_id, path, enhance_microphone=enhance_microphone,
-        ), session_id=session_id)
+        ), session_id=session_id, kind="export")
 
     def _export_audio(self, session_id, path, *, enhance_microphone=False, save_final=False):
         """Publish bounded worker progress; saved means file and metadata committed."""
@@ -1657,7 +1790,7 @@ class MeetingController:
             raise ValueError(tr("Salve a faixa original como MP3."))
         return self._file_work(lambda: export_mixdown(
             self.store, session_id, path, tracks=(track,), cancel_event=self._cancel,
-        ), session_id=session_id)
+        ), session_id=session_id, kind="export")
 
     def export_final_audio(self, session_id, path):
         """Copy the saved final audio as-is; it needs no raw tracks."""
@@ -1769,26 +1902,33 @@ class MeetingController:
         with self._lock:
             if self._playback_active or (self._play_thread and self._play_thread.is_alive()):
                 return False
-            return self._launch_processing(work, session_id=session_id)
+            return self._launch_processing(work, session_id=session_id, kind="final_audio")
 
-    def _file_work(self, operation, session_id=None):
-        # Caller is an IO worker; reserve admission without another nested thread.
+    def _file_work(self, operation, session_id=None, *, kind, cancel_event=None):
+        # Caller is a worker; reserve admission without another nested thread.
+        # A request's cancellation intent must survive clearing the reusable
+        # active-job Event below, including bridge-to-controller handoff races.
         with self._lock:
             if (self._closed or self._retention_active or self._processing
                     or self._final_copy_active or self._state != "idle"
                     or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
                 raise RuntimeError(tr("Aguarde a gravação, reprodução ou processamento terminar."))
+            _check_request_cancelled(cancel_event)
             self._processing = True
             self._processing_session = session_id
+            self._processing_kind = kind
             self._audio_export_progress = None
             self._cancel.clear()
             self._file_done.clear()
         try:
+            _check_request_cancelled(cancel_event)
             return operation()
         finally:
             with self._lock:
                 self._processing = False
                 self._processing_session = None
+                self._processing_kind = None
+                self._cancel.clear()
                 self._file_done.set()
 
     def summarize(self, session_id, model):
@@ -1799,7 +1939,7 @@ class MeetingController:
                     raise ValueError(tr("Nenhum modelo de resumo instalado; instale um modelo local antes de gerar o resumo."))
             finally:
                 self.voice.release_meeting(token)
-        return self._launch_processing(work, session_id=session_id)
+        return self._launch_processing(work, session_id=session_id, kind="summary")
 
     def _intelligence(self):
         """Build the installed-only intelligence seam on the IO worker."""
@@ -1884,30 +2024,40 @@ class MeetingController:
         )
 
     def generate_report(self, session_id, model, *, profile=None, revision=None,
-                        language=None, focus=None):
+                        language=None, focus=None, cancel_event=None):
         """Generate one immutable structured report off the GUI thread."""
+        event = self._cancel if cancel_event is None else _RequestCancellation(self._cancel, cancel_event)
         def work():
+            _check_request_cancelled(event)
             token = self.voice.reserve_for_meeting()
             try:
-                return self._intelligence().generate_report(
+                _check_request_cancelled(event)
+                result = self._intelligence().generate_report(
                     session_id, model, profile=profile, revision=revision,
-                    language=language, focus=focus, cancel_event=self._cancel,
+                    language=language, focus=focus, cancel_event=event,
                 )
+                # Intelligence owns the final cancel check before its immutable
+                # write. Once it returns, a committed report remains a success.
+                return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work, session_id=session_id)
+        return self._file_work(work, session_id=session_id, kind="report", cancel_event=cancel_event)
 
     def ask_this_meeting(self, session_id, question, model, *, revision=None,
-                         revision_id=None, language=None, history=None):
+                         revision_id=None, language=None, history=None, cancel_event=None):
         """Run a memory-only answer; nothing is saved until save_answer()."""
+        event = self._cancel if cancel_event is None else _RequestCancellation(self._cancel, cancel_event)
         def work():
+            _check_request_cancelled(event)
             token = self.voice.reserve_for_meeting()
             try:
+                _check_request_cancelled(event)
                 result = self._intelligence().ask_this_meeting(
                     session_id, question, model, revision=revision,
                     revision_id=revision_id, language=language,
-                    cancel_event=self._cancel, include_provenance=True, history=history,
+                    cancel_event=event, include_provenance=True, history=history,
                 )
+                _check_request_cancelled(event)
                 if isinstance(result, dict):
                     result = dict(result)
                     provenance = result.get("_provenance")
@@ -1922,22 +2072,28 @@ class MeetingController:
                             else None
                         )
                     result["revision"] = selected_revision
+                _check_request_cancelled(event)
                 return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work, session_id=session_id)
+        return self._file_work(work, session_id=session_id, kind="ask", cancel_event=cancel_event)
 
-    def ask_across_meetings(self, question, model, *, filters=None, **kwargs):
+    def ask_across_meetings(self, question, model, *, filters=None, cancel_event=None, **kwargs):
         """Run bounded memory-only Q&A over the filtered meeting library."""
+        event = self._cancel if cancel_event is None else _RequestCancellation(self._cancel, cancel_event)
         def work():
+            _check_request_cancelled(event)
             token = self.voice.reserve_for_meeting()
             try:
-                return self._intelligence().ask_across_meetings(
-                    question, model, filters=filters, cancel_event=self._cancel, **kwargs,
+                _check_request_cancelled(event)
+                result = self._intelligence().ask_across_meetings(
+                    question, model, filters=filters, cancel_event=event, **kwargs,
                 )
+                _check_request_cancelled(event)
+                return result
             finally:
                 self.voice.release_meeting(token)
-        return self._file_work(work)
+        return self._file_work(work, kind="cross_question", cancel_event=cancel_event)
 
     ask_cross_meeting = ask_across_meetings
     ask_cross_meetings = ask_across_meetings
@@ -1964,7 +2120,7 @@ class MeetingController:
                 session_id, normalized, model, question=selected_question,
                 revision=selected_revision, provenance=provenance,
             )
-        return self._file_work(work, session_id=session_id)
+        return self._file_work(work, session_id=session_id, kind="save_answer")
 
     def export_report(self, session_id, report_id, path, format="markdown", section=None):
         from meeting_files import export_report
@@ -1979,7 +2135,7 @@ class MeetingController:
         return self._file_work(lambda: export_report(
             self.library.get_report(session_id, report_id), path, format=format, section=section,
             cancel_event=self._cancel,
-        ), session_id=session_id)
+        ), session_id=session_id, kind="export")
 
     def play(self, session_id, track, start=0.0):
         from meeting_files import play_audio

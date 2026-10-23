@@ -50,15 +50,22 @@ class RecordingIndicatorEntrypointTests(unittest.TestCase):
         self.app.voice.status_snapshot.return_value = {"state": "idle", "mode": None}
         self.app._quitting = threading.Event()
         self.app._recording_indicator_after = None
+        self.app._meeting_menu_key = None
+        self.app.icon = None
         self.root = mock.Mock()
 
     def test_poll_survives_closed_manager_and_observes_controller_state(self):
-        for state in ("starting", "recording", "paused", "stopping", "postprocessing"):
-            snapshot = {"state": state, "elapsed": 136}
+        for state, processing, interval in (
+            ("starting", False, 200), ("recording", False, 200),
+            ("paused", False, 200), ("stopping", False, 200),
+            ("postprocessing", True, 200), ("idle", True, 200),
+            ("idle", False, 1000),
+        ):
+            snapshot = {"state": state, "processing": processing, "elapsed": 136}
             self.app.meetings.snapshot.return_value = snapshot
             self.app._poll_recording_indicator(self.root)
             self.app.voice_status_indicator.update_meeting.assert_called_with(snapshot)
-            self.root.after.assert_called_with(200, mock.ANY)
+            self.root.after.assert_called_with(interval, mock.ANY)
 
     def test_recording_indicator_follows_manager_minimize_and_restore(self):
         self.app.manager_window = mock.Mock()
@@ -77,6 +84,28 @@ class RecordingIndicatorEntrypointTests(unittest.TestCase):
         self.app._poll_recording_indicator(self.root)
         self.app.voice_status_indicator.update_meeting.assert_not_called()
         self.app.voice_status_indicator.hide.assert_not_called()
+
+    def test_tray_start_names_its_blocker_and_redraws_only_when_it_changes(self):
+        self.app._meeting_startup_ready = True
+        self.app.refresh_tray_menu = mock.Mock()
+        self.app.meetings.snapshot.return_value = {"state": "idle", "processing": True,
+                                                   "processing_kind": "report"}
+        self.assertEqual(self.app._meeting_menu_label(), "Iniciar gravação (aguardando o resumo)")
+        self.assertFalse(self.app._meeting_start_enabled())
+        for _ in range(3):
+            self.app._poll_recording_indicator(self.root)
+        self.app.refresh_tray_menu.assert_called_once_with()
+        self.app.meetings.snapshot.return_value = {"state": "idle", "processing": False}
+        self.app._poll_recording_indicator(self.root)
+        self.assertEqual(self.app.refresh_tray_menu.call_count, 2)
+        self.assertEqual(self.app._meeting_menu_label(), "Iniciar gravação")
+        self.assertTrue(self.app._meeting_start_enabled())
+        self.app.meetings.snapshot.return_value = {"state": "idle", "playback": {"active": True}}
+        self.assertEqual(self.app._meeting_menu_label(), "Iniciar gravação (aguardando a reprodução)")
+        self.assertFalse(self.app._meeting_start_enabled())
+        self.app.meetings.snapshot.return_value = {"state": "recording"}
+        self.assertEqual(self.app._meeting_menu_label(), "Gravação em andamento")
+        self.assertFalse(self.app._meeting_start_enabled())
 
     def test_shutdown_stops_poll_and_hides_overlay(self):
         self.app._quitting.set()

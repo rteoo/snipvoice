@@ -6,6 +6,31 @@ with the non-activating style is the supported Cocoa surface for an overlay
 that must leave the dictation target frontmost.
 """
 
+import ui_theme
+from i18n import tr
+
+
+_ACTION_TARGET = None
+
+
+def _action_target_class():
+    """Register one Objective-C target class, including across manager rebuilds."""
+    global _ACTION_TARGET
+    if _ACTION_TARGET is None:
+        from Foundation import NSObject
+
+        class SnipVoiceOverlayActions(NSObject):
+            def open_(self, sender):
+                if self.open_callback is not None:
+                    self.open_callback()
+
+            def dismiss_(self, sender):
+                if self.dismiss_callback is not None:
+                    self.dismiss_callback()
+
+        _ACTION_TARGET = SnipVoiceOverlayActions
+    return _ACTION_TARGET
+
 
 def nonactivating_panel_style(appkit):
     """Return the two load-bearing style bits for the native overlay."""
@@ -38,13 +63,13 @@ def order_panel_without_activation(appkit, panel):
 
 
 class MacVoiceStatusPanel:
-    """Small click-through panel; call only from the Tk pump on macOS."""
+    """Nonactivating panel; open callbacks must enqueue to the Tk pump."""
 
     WIDTH = 220
     HEIGHT = 42
     BOTTOM_MARGIN = 72
 
-    def __init__(self):
+    def __init__(self, on_open=None, on_dismiss=None):
         import AppKit
 
         self._appkit = AppKit
@@ -65,7 +90,7 @@ class MacVoiceStatusPanel:
         panel.setFloatingPanel_(True)
         panel.setBecomesKeyOnlyIfNeeded_(True)
         panel.setHidesOnDeactivate_(False)
-        panel.setIgnoresMouseEvents_(True)
+        panel.setIgnoresMouseEvents_(False)
         panel.setCollectionBehavior_(
             AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
             | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
@@ -89,21 +114,36 @@ class MacVoiceStatusPanel:
         content.addSubview_(dot)
 
         title = AppKit.NSTextField.labelWithString_("")
-        title.setFrame_(AppKit.NSMakeRect(40, 10, 166, 22))
+        title.setFrame_(AppKit.NSMakeRect(40, 10, 142, 22))
         title.setFont_(
             AppKit.NSFont.systemFontOfSize_weight_(13, AppKit.NSFontWeightSemibold)
         )
         title.setTextColor_(AppKit.NSColor.labelColor())
         content.addSubview_(title)
 
+        target = _action_target_class().alloc().init()
+        target.open_callback, target.dismiss_callback = on_open, on_dismiss
+        self._action_target = target  # Cocoa target/action does not retain its target.
+        for frame, action, label, tooltip in (
+            (AppKit.NSMakeRect(0, 0, 184, self.HEIGHT), "open:", "", tr("Abrir")),
+            (AppKit.NSMakeRect(184, 0, 36, self.HEIGHT), "dismiss:", "×", tr("Fechar")),
+        ):
+            button = AppKit.NSButton.alloc().initWithFrame_(frame)
+            button.setBordered_(False)
+            button.setTitle_(label)
+            button.setToolTip_(tooltip)
+            button.setTarget_(target)
+            button.setAction_(action)
+            content.addSubview_(button)
+
         panel.setContentView_(content)
         self.panel = panel
         self.dot = dot
         self.title = title
 
-    def update(self, title, accent_name):
+    def update(self, title, tone):
         self.title.setStringValue_(title)
-        self.dot.setTextColor_(self._accent_color(accent_name))
+        self.dot.setTextColor_(self._tone_color(tone))
         self._position()
         return order_panel_without_activation(self._appkit, self.panel)
 
@@ -111,18 +151,27 @@ class MacVoiceStatusPanel:
         self.panel.orderOut_(None)
 
     def destroy(self):
+        self._action_target.open_callback = None
+        self._action_target.dismiss_callback = None
         self.panel.orderOut_(None)
         self.panel.close()
 
     def is_visible(self):
         return bool(self.panel.isVisible())
 
-    def _accent_color(self, name):
-        if name == "warning":
-            return self._appkit.NSColor.systemOrangeColor()
-        if name == "success":
-            return self._appkit.NSColor.systemGreenColor()
-        return self._appkit.NSColor.controlAccentColor()
+    def _tone_color(self, tone):
+        """The status dot: Ink & Copper for live capture, system colors otherwise."""
+        colors = self._appkit.NSColor
+        if tone == "live":
+            red, green, blue = ui_theme.rgb(ui_theme.theme().overlay_live)
+            return colors.colorWithSRGBRed_green_blue_alpha_(red, green, blue, 1.0)
+        if tone == "ok":
+            return colors.systemGreenColor()
+        if tone == "trouble":
+            return colors.systemRedColor()
+        if tone == "muted":
+            return colors.systemGrayColor()
+        return colors.controlAccentColor()
 
     def _position(self):
         screen = self._appkit.NSScreen.mainScreen()

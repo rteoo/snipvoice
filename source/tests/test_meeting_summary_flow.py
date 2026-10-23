@@ -1,9 +1,13 @@
 """Summary template generation, saved versions, and stale callbacks."""
 
+import os
+import sys
 import unittest
 from unittest.mock import Mock
 
-from meeting_gui import MeetingWindow
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from message_support import new_view, said
 
 
 class Variable:
@@ -19,8 +23,7 @@ class Variable:
 
 class SummaryFlowTests(unittest.TestCase):
     def setUp(self):
-        self.view = view = MeetingWindow.__new__(MeetingWindow)
-        view.closed = False
+        self.view = view = new_view()
         view.selected = "session-1"
         view.detail_ready = True
         view.transcript_revision = "revision-1"
@@ -28,7 +31,6 @@ class SummaryFlowTests(unittest.TestCase):
         view.summary_model_installed = {"local-model": True}
         view.summary_focus = Variable("Prioritize confirmed next steps.")
         view.summary_status = Variable()
-        view.status = Variable()
         view.summary_pending = None
         view.summary_generation = 0
         view.snapshot = {"state": "idle", "processing": False}
@@ -36,10 +38,11 @@ class SummaryFlowTests(unittest.TestCase):
                         "sections": ["summary", "key_points", "decisions", "action_items"]}
         view._selected_report_profile = Mock(return_value=self.profile)
         view.controller = Mock()
+        view.bridge = Mock()
+        view.bridge.cancel_queued.return_value = False
         view._submit = Mock(return_value=True)
         view._sync_summary_controls = Mock()
         view._show_summary = Mock()
-        view._remember_operation_error = Mock()
         view.refresh_reports = Mock()
 
     def test_generation_captures_template_focus_model_and_revision(self):
@@ -55,6 +58,22 @@ class SummaryFlowTests(unittest.TestCase):
         self.assertEqual(kwargs["revision"], "revision-1")
         self.assertNotIn("risks", kwargs["profile"]["sections"])
         self.assertEqual(view.summary_pending, ("session-1", 1))
+
+    def test_requested_cancellation_preserves_summary_and_uses_warning(self):
+        view = self.view
+        view.generate_report()
+        cancel_event = view.summary_request_cancel
+        view._action = Mock()
+        view.cancel_summary_generation()
+        self.assertTrue(cancel_event.is_set())
+        view.bridge.cancel_queued.assert_called_once_with("generate_report")
+        view._action.assert_not_called()
+        view._submit.call_args.args[1]()
+        self.assertIs(view.controller.generate_report.call_args.kwargs["cancel_event"], cancel_event)
+        view._report_generated("session-1", None, "synthetic cancelled work", request=1)
+        self.assertEqual(said(view)[:2], ("problem", "O resumo foi cancelado"))
+        self.assertEqual(view.messages.current("library").tone, "warning")
+        view._show_summary.assert_not_called()
 
     def test_empty_focus_is_optional_and_duplicate_generation_is_blocked(self):
         view = self.view
@@ -91,7 +110,13 @@ class SummaryFlowTests(unittest.TestCase):
         view._submit.call_args.args[2](None, "Model failed")
         self.assertIsNone(view.summary_pending)
         view._show_summary.assert_not_called()
-        self.assertIn("preservado", view.summary_status.get())
+        # The failure is written on Biblioteca with the cause behind Detalhes;
+        # the summary line goes back to its own hint.
+        kind, title, body, details = said(view)
+        self.assertEqual((kind, title), ("problem", "Não foi possível gerar o resumo"))
+        self.assertIn("preservado", body)
+        self.assertIn("Model failed", details)
+        self.assertNotIn("preservado", view.summary_status.get())
         view._submit.return_value = False
         view.generate_report()
         self.assertIsNone(view.summary_pending)

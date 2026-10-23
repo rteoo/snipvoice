@@ -16,6 +16,22 @@ from voice_history import (
 
 
 class VoiceHistoryTests(unittest.TestCase):
+    def test_strict_listing_distinguishes_unreadable_from_empty(self):
+        self.assertEqual(self.store.list_entries(strict=True), [])
+        with mock.patch("voice_history.os.listdir", side_effect=PermissionError("synthetic")):
+            self.assertEqual(self.store.list_entries(), [])
+            with self.assertRaises(PermissionError):
+                self.store.list_entries(strict=True)
+
+    def test_strict_listing_rejects_invalid_metadata(self):
+        recording = self._recording()
+        recording.finish_capture([0.25])
+        with open(self.store._metadata_path(recording.record_id), "w", encoding="utf-8") as handle:
+            handle.write("[]")
+        self.assertEqual(self.store.list_entries(), [])
+        with self.assertRaises(ValueError):
+            self.store.list_entries(strict=True)
+
     def test_retention_removes_only_expired_known_inactive_files(self):
         recording = self._recording()
         recording.finish_capture([0.25])
@@ -46,7 +62,9 @@ class VoiceHistoryTests(unittest.TestCase):
         self.assertIsNotNone(self.store.get(recording.record_id))
 
     def setUp(self):
-        self.root = tempfile.mkdtemp()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = temporary.name
         self.store = VoiceHistoryStore(self.root)
 
     def _recording(self):
