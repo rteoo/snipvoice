@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml"><img src="https://github.com/rteoo/snipvoice/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.2.1"><img src="https://img.shields.io/badge/stable-v1.2.1-blue.svg" alt="Stable v1.2.1"></a>
+  <a href="https://github.com/rteoo/snipvoice/releases/tag/v1.3.0"><img src="https://img.shields.io/badge/stable-v1.3.0-blue.svg" alt="Stable v1.3.0"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
 </p>
 
@@ -46,7 +46,7 @@ recordings, shortcuts, process identity, and installers.
 ## Quick start
 
 Download the package for your platform from the
-[stable v1.2.1 release](https://github.com/rteoo/snipvoice/releases/tag/v1.2.1).
+[stable v1.3.0 release](https://github.com/rteoo/snipvoice/releases/tag/v1.3.0).
 To run from source with Python installed:
 
 ```powershell
@@ -77,7 +77,7 @@ and the feature is enabled from **Configurar voz…**.
 ### Releases and installers
 
 The current stable release is
-[`v1.2.1`](https://github.com/rteoo/snipvoice/releases/tag/v1.2.1):
+[`v1.3.0`](https://github.com/rteoo/snipvoice/releases/tag/v1.3.0):
 
 | Platform | Package |
 | --- | --- |
@@ -93,6 +93,12 @@ The packages are not notarized or publisher-signed. Windows SmartScreen and
 macOS Gatekeeper may therefore require the standard manual confirmation on first
 launch. The Windows installer uses no administrator rights and installs under
 `%LOCALAPPDATA%\Programs\Snipvoice`. Application data stays outside the package.
+
+### What's new in v1.3.0
+
+- The manager, dialogs, and floating controls use the operations-first design system, with clear readiness, progress, failure, and recovery states.
+- Processing continues when the manager closes, with safer recording cancellation, library recovery, and deletion.
+- Keyboard-first navigation and clearer, selectable transcript and chat content improve the main workflows.
 
 ### What's new in v1.2.1
 
