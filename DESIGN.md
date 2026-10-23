@@ -472,6 +472,45 @@ Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execu�
 
 ## Release gates
 
+### Settings and secondary surfaces
+
+- Recording defaults and Privacy each have one dirty, valid Save/Discard bar.
+  Ctrl+S acts on the visible section. Recording Save owns only its visible
+  model, language, shortcut, output-folder and volume defaults; capture-page
+  source/device choices remain independent. Directory existence is checked by
+  the Save worker, never by a keystroke's validation trace.
+- Appearance radios and interface language apply immediately after an unsaved
+  recording-title decision. A pending title save must finish successfully first.
+  Cancel changes neither disk nor global language. Failed persistence restores
+  the prior choice. System appearance is re-probed on manager activation.
+- Rebuilds retain Python values and original saved baselines, restoring deferred
+  settings after their asynchronous initial loads. Voice and section saves
+  defer preference publication and rebuild until their callbacks settle; final
+  admission rechecks saves and pending title work after the callback returns.
+  Later title edits retain their original baseline through the matching detail
+  load. Privacy Save awaits both initial privacy and workspace retention reads.
+  Explicit user
+  navigation offers Save, Discard or Stay; Quit never waits for that decision.
+- `prepare_dialog` owns theme, transient owner, icon and base chrome. The caller
+  owns visibility, focus, grab and waits. The two primary-manager constructors
+  and the deliberately nonactivating HUD are explicit source-scan exemptions.
+  Corrections and custom report formats use one labeled form with inline errors.
+- Model tables share Model, Quality, Size, License, State and Action columns;
+  sizes align right and progress belongs to the actual model. An explicit
+  dictation download's Cancel sets only that profile's dedicated event and keeps
+  resumable bytes, enabled intent and capture unchanged.
+- Version labels use local time; technical provenance is collapsed. Cross
+  citations resolve canonical title, time and a bounded excerpt off Tk, with
+  at most sixteen source rows. Device labels fit their actual font and disclose
+  full friendly names on hover or focus without changing endpoint identity.
+- History workers hold weak delivery references; Destroy invalidates the
+  GUI-owned callback lease. Quit cancels the owned indicator timer and clears
+  and destroys the indicator on the GUI owner. Normal manager rebuilding does
+  not destroy the independently owned HUD.
+
+These changes require the source/native checks below before being treated as
+verified platform behavior; they do not certify a packaged build.
+
 Each gate is passed, failed, or not tested, with its evidence. A browser or
 scratch-harness screenshot cannot pass a packaged-build gate.
 
@@ -479,10 +518,10 @@ scratch-harness screenshot cannot pass a packaged-build gate.
 |---|---|---|
 | Palette and contrast | Passed | `tests/test_ui_theme.py` pins both palettes and checks 4.5:1 text and 3:1 boundaries, focus, marks and chart roles. |
 | Dark and Light appearance | Passed (source build) | Real manager built from source with synthetic data, both appearances, Gravação, Biblioteca detail, Ditado and every Configurações section. |
-| Live System appearance changes | Failed | The manager re-reads the OS theme only when it is rebuilt. |
+| Live System appearance changes | Implemented; runtime verification pending | Manager activation re-probes System appearance and uses the guarded rebuild path. |
 | Windows contrast themes | Not tested | Palette does not yet yield to high-contrast system colors. |
 | Minimum window 1040 × 700 and default 1120 × 820 | Passed (source build, 100% scale) | No control narrower or shorter than requested at either size; the recording page fits without scrolling at the minimum (`tests/test_voice_gui.py`). The library with a selected recording and its InfoBar clips nothing at 1040×700, 1120×820 and 1440×900 in both appearances (scratch harness on the source build). With a lost source the recording page keeps meters, warning and transport in view at 1040×700 (`tests/test_voice_gui.py`); a Library message bar fits at the minimum width (`tests/test_meeting_gui.py`). |
-| Compact 32px density | Passed | Buttons, menu buttons, entries and comboboxes measure 33px, list rows 32px, at 96 DPI; `tests/test_ui_theme.py` and `tests/test_voice_gui.py` check that the Ditado action row keeps one height. |
+| Compact 32px density | Passed on Windows source baseline; cross-platform sizing changes pending verification | The button factory measures native requests to enforce the minimum. Existing Rename and action-row geometry assertions remain required on every CI platform. |
 | Visible keyboard focus | Passed (source build) for buttons, menu buttons, comboboxes, entries, text fields, list boxes, lists, the slider and navigation | Before/after captures in both appearances, including the chat composer, the summary focus field and the citation list; `tests/test_ui_theme.py` checks that text fields and list boxes keep their size through focus. Checkboxes keep Win32's dotted rectangle. |
 | Full keyboard path, tab order | Not tested | |
 | Display scaling 125/150/200%, mixed DPI | Not tested | The source declares no DPI awareness; fonts follow Tk's scaling factor. |

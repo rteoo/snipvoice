@@ -473,6 +473,15 @@ class VoiceController:
                 return False
             return profile is None or profile == self._model_download_profile
 
+    def cancel_profile_download(self, profile):
+        """Cancel only the matching explicit catalog download, keeping its bytes."""
+        with self._lock:
+            if not self._model_download_active or self._model_download_profile != profile:
+                return False
+            self._model_download_cancel.set()
+        self._emit_status()
+        return True
+
     def _clear_runtime_progress_locked(self):
         # An explicit catalog download owns the shared byte counters until its
         # worker finishes, even when a runtime switch is admitted meanwhile.

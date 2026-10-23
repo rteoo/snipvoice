@@ -60,6 +60,304 @@ class Variable:
         self.value = value
 
 
+class SettingsPersistenceLogicTests(unittest.TestCase):
+    def test_trash_confirmation_withdraws_before_prepare_and_focuses_only_viewable_cancel(self):
+        for already_viewable in (False, True):
+            with self.subTest(already_viewable=already_viewable):
+                view = self.make_view()
+                view._trash_confirmation_text, view._wrap_label = mock.Mock(return_value="Synthetic"), mock.Mock()
+                dialog, cancel = mock.Mock(), mock.Mock()
+                events = []
+                dialog.withdraw.side_effect = lambda: events.append("withdraw")
+                dialog.deiconify.side_effect = lambda: events.append("present")
+                dialog.grab_set.side_effect = lambda: events.append("grab")
+                dialog.wait_window.side_effect = lambda: events.append("wait")
+                cancel.winfo_viewable.return_value = already_viewable
+                def visible():
+                    events.append("cancel visible")
+                    cancel.winfo_viewable.return_value = True
+                def focus():
+                    self.assertTrue(cancel.winfo_viewable())
+                    events.append("focus")
+                cancel.wait_visibility.side_effect, cancel.focus_set.side_effect = visible, focus
+                view._button = mock.Mock(side_effect=lambda _parent, label, _command:
+                                         cancel if label == "Cancelar" else mock.Mock())
+                def prepare(*args, **kwargs):
+                    self.assertEqual(events, ["withdraw"])
+                    events.append("prepare")
+                with mock.patch("meeting_gui.tk.Toplevel", return_value=dialog), \
+                        mock.patch("meeting_gui.tk.Frame"), mock.patch("meeting_gui.tk.Text"), \
+                        mock.patch("meeting_gui.ui_theme.prepare_dialog", side_effect=prepare):
+                    self.assertFalse(view._confirm_trash({}, "Synthetic"))
+                self.assertEqual(events[:3], ["withdraw", "prepare", "present"])
+                self.assertEqual(events[-3:], ["grab", "focus", "wait"])
+                dialog.wait_visibility.assert_not_called()
+                self.assertEqual(cancel.wait_visibility.call_count, 0 if already_viewable else 1)
+
+    def make_view(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.closed, view.dirty, view.settings_loaded = False, False, True
+        view.ui = ui_theme.build_theme("dark", system="windows", preference="dark")
+        view.raw_settings = {}
+        view.settings = resolve_meeting_settings({})
+        defaults = dict(profile="balanced", language="auto", hotkey="", summary_model="qwen3.5-2b-q4",
+                        destination="", voice_boost=False, privacy_notice_enabled=False,
+                        privacy_notice_language="pt-BR", qa_mode="explicit_save", whole_meeting_auto=False,
+                        whole_meeting_after_days="90", trash_days="30")
+        for name, value in defaults.items():
+            setattr(view, name, Variable(value))
+        for name in ("profile_display", "language_display", "summary_display", "destination_label"):
+            setattr(view, name, Variable())
+        view.language_box = mock.Mock()
+        view.profile_box = mock.Mock()
+        view.whole_meeting_days_entry = mock.Mock()
+        view.privacy_validation_fields = {"whole_meeting_after_days": view.whole_meeting_days_entry}
+        view.recording_validation_fields = {"profile": view.profile_box}
+        view._sync_raw_policy_controls, view._sync_qa_controls = mock.Mock(), mock.Mock()
+        view._sync_source_controls, view._sync_shortcut_hint = mock.Mock(), mock.Mock()
+        view._settings_drafts = {key: dict(baseline=view._draft_values(key), saving=False, after=None,
+                                          save=mock.Mock(), discard=mock.Mock(), status=mock.Mock())
+                                 for key in ("recording", "privacy")}
+        view._restored_settings_drafts = {}
+        view.settings_sections = mock.Mock(current="recording")
+        view.persist_settings, view._submit = mock.Mock(return_value=True), mock.Mock(return_value=True)
+        view._say, view._fail, view.refresh_library = mock.Mock(), mock.Mock(), mock.Mock()
+        view.on_settings_changed = None
+        view.window = mock.Mock()
+        view.input_enabled, view.output_enabled = Variable(False), Variable(True)
+        return view
+
+    def test_recording_save_and_discard_do_not_persist_or_reset_capture_choices(self):
+        view = self.make_view()
+        baseline = dict(view._settings_drafts["recording"]["baseline"])
+        view.profile.set("accuracy")
+        view.voice_boost.set(True)
+        view.save_settings()
+        operation, callback = view._submit.call_args.args[1:3]
+        callback(operation(), None)
+        payload = view.persist_settings.call_args.args[0]
+        self.assertEqual(set(payload), {"meeting_profile", "meeting_language", "meeting_hotkey",
+                                       "meeting_summary_model", "meeting_destination", "meeting_voice_boost"})
+        self.assertEqual(payload["meeting_profile"], "accuracy")
+        self.assertEqual((view.input_enabled.get(), view.output_enabled.get()), (False, True))
+        view._settings_drafts["recording"]["baseline"] = baseline
+        view.discard_settings_section("recording")
+        self.assertEqual(view.profile.get(), "balanced")
+        self.assertFalse(view.voice_boost.get())
+        self.assertEqual((view.input_enabled.get(), view.output_enabled.get()), (False, True))
+
+    def test_restore_overlays_async_settings_load_with_original_baseline(self):
+        view = self.make_view()
+        original = dict(view._settings_drafts["recording"]["baseline"])
+        working = dict(original, profile="accuracy", hotkey="ctrl+shift+f8")
+        view._settings_drafts["recording"]["baseline"] = None
+        view._restored_settings_drafts = {"recording": {"values": working, "baseline": original}}
+        view.options, view.devices = {}, []
+        view._render_devices, view.refresh_report_profiles = mock.Mock(), mock.Mock()
+        view._settings_loaded({"meeting_profile": "compact"}, None)
+        self.assertEqual(view._draft_values("recording"), working)
+        self.assertEqual(view._settings_drafts["recording"]["baseline"], original)
+        view._settings_drafts["recording"]["save"].configure.assert_called_with(state="normal")
+
+    def test_invalid_privacy_draft_disables_save_and_focuses_the_invalid_field(self):
+        view = self.make_view()
+        view.whole_meeting_auto.set(True)
+        view.whole_meeting_after_days.set("nan")
+        view._sync_settings_bar("privacy")
+        view._settings_drafts["privacy"]["save"].configure.assert_called_with(state="disabled")
+        self.assertEqual(view._invalid_settings_field, ("privacy", "whole_meeting_after_days"))
+        self.assertFalse(view._save_settings_section("privacy"))
+        view.whole_meeting_days_entry.focus_set.assert_called_once_with()
+        view.persist_settings.assert_not_called()
+
+    def test_rebuild_before_initial_settings_load_does_not_restore_a_loading_baseline(self):
+        view = self.make_view()
+        view._settings_drafts["recording"]["baseline"] = None
+        saved = view.capture_settings_drafts()
+        self.assertNotIn("recording", saved)
+        view._restored_settings_drafts = saved
+        view.profile.set("compact")
+        view._section_loaded("recording")
+        self.assertEqual(view._settings_drafts["recording"]["baseline"]["profile"], "compact")
+        view._settings_drafts["recording"]["status"].configure.assert_called_with(
+            text=ui_theme.tr("Configuração salva"), fg=view.ui.text_muted)
+
+    def test_live_recording_draft_validation_never_stats_the_destination(self):
+        view = self.make_view()
+        view.destination.set(os.path.abspath(os.path.join("synthetic", "remote-folder")))
+        view.hotkey.set("ctrl+shift+f8")
+        with mock.patch("meeting_gui.os.path.isdir", side_effect=AssertionError("GUI directory IO")), \
+                mock.patch("meeting_gui.os.stat", side_effect=AssertionError("GUI stat IO")):
+            view._sync_settings_bar("recording")
+            view._recording_settings_payload()
+        view._settings_drafts["recording"]["save"].configure.assert_called_with(state="normal")
+
+    def test_save_worker_directory_failure_keeps_draft_and_focuses_destination(self):
+        view = self.make_view()
+        path = os.path.abspath(os.path.join("synthetic", "missing-folder"))
+        view.destination.set(path)
+        target, label = mock.Mock(), mock.Mock()
+        view.recording_validation_fields["destination"] = target
+        view.recording_field_errors = {"destination": label}
+        view.save_settings()
+        operation, callback = view._submit.call_args.args[1:3]
+        with mock.patch("meeting_gui.os.path.isdir", return_value=False):
+            with self.assertRaises(ValueError) as failure:
+                operation()
+        callback(None, str(failure.exception))
+        view.persist_settings.assert_not_called()
+        self.assertEqual(view.destination.get(), path)
+        self.assertNotEqual(view._draft_values("recording"), view._settings_drafts["recording"]["baseline"])
+        target.focus_set.assert_called_once_with()
+        self.assertIn("⚠", label.configure.call_args.kwargs["text"])
+
+    def test_settings_leave_stay_discard_and_failed_save_are_truthful(self):
+        view = self.make_view()
+        view.hotkey.set("ctrl+shift+f8")
+        after = mock.Mock()
+        with mock.patch("meeting_gui.ui_theme.confirm_draft", return_value=None):
+            view.request_leave_settings(after)
+        after.assert_not_called()
+        with mock.patch("meeting_gui.ui_theme.confirm_draft", return_value="save"):
+            view.request_leave_settings(after)
+        callback = view._submit.call_args.args[2]
+        callback(None, "synthetic persistence failure")
+        after.assert_not_called()
+        self.assertNotEqual(view._draft_values("recording"), view._settings_drafts["recording"]["baseline"])
+        with mock.patch("meeting_gui.ui_theme.confirm_draft", return_value="discard"):
+            view.request_leave_settings(after)
+        after.assert_called_once_with()
+        self.assertEqual(view.hotkey.get(), "")
+
+    def title_view(self):
+        view = self.make_view()
+        view.dirty, view.selected, view.detail_ready = True, "one", True
+        view.title, view.appearance_display = Variable("Changed title"), Variable(APPEARANCE_LABELS["light"])
+        view.appearance_status = Variable()
+        view.on_appearance_changed = mock.Mock()
+        view._sync_trash_controls = mock.Mock()
+        return view
+
+    def test_preference_cancel_precedes_persistence_and_restores_choice(self):
+        view = self.title_view()
+        with mock.patch("meeting_gui.messagebox.askyesnocancel", return_value=None):
+            view.save_appearance()
+        view._submit.assert_not_called()
+        view.persist_settings.assert_not_called()
+        self.assertEqual(view.appearance_display.get(), APPEARANCE_LABELS["dark"])
+
+    def test_preference_waits_for_existing_title_save_without_prompting_again(self):
+        view = self.title_view()
+        view.save_title()
+        title_callback = view._submit.call_args.args[2]
+        with mock.patch("meeting_gui.messagebox.askyesnocancel", side_effect=AssertionError("duplicate prompt")):
+            view.save_appearance()
+        self.assertEqual(view._submit.call_count, 1)
+        view.persist_settings.assert_not_called()
+        title_callback(True, None)
+        self.assertEqual(view._submit.call_args.args[0], "save_appearance")
+        view._submit.call_args.args[1]()
+        view.persist_settings.assert_called_once_with({"appearance": "light"})
+
+    def test_failed_title_save_rolls_back_pending_preference_without_writing_it(self):
+        view = self.title_view()
+        with mock.patch("meeting_gui.messagebox.askyesnocancel", return_value=True):
+            view.save_appearance()
+        view._submit.call_args.args[2](False, "synthetic rename failure")
+        view.persist_settings.assert_not_called()
+        self.assertEqual(view.appearance_display.get(), APPEARANCE_LABELS["dark"])
+
+    def test_cross_citation_enrichment_is_bounded_and_uses_canonical_text(self):
+        view = self.make_view()
+        view.controller = mock.Mock()
+        view.controller.resolve_search_result.return_value = {
+            "title": "Synthetic planning", "start": 125, "text": "canonical " * 100}
+        labels = view._cross_source_labels(view.controller, [{"session_id": str(index)} for index in range(20)])
+        self.assertEqual(len(labels), 16)
+        self.assertEqual(view.controller.resolve_search_result.call_count, 16)
+        self.assertTrue(all(label.startswith("Synthetic planning · 00:02:05 · canonical") for label in labels))
+        self.assertLessEqual(max(map(len, labels)), 200 + 120 + 16)
+
+    def initial_privacy_view(self):
+        view = self.make_view()
+        view._privacy_initial_loaded = view._workspace_initial_loaded = False
+        view._settings_drafts["privacy"]["baseline"] = None
+        view.privacy_status = Variable()
+        view.privacy_defaults, view.retention_defaults = {}, {}
+        view.privacy_save_inflight = False
+        view.controller = mock.Mock()
+        view.privacy_notice_check = mock.Mock()
+        view.trash_days_entry = mock.Mock()
+        return view
+
+    def test_privacy_save_waits_for_both_initial_responses_in_either_order(self):
+        for first in ("privacy", "workspace"):
+            with self.subTest(first=first):
+                view = self.initial_privacy_view()
+                privacy = {"recording_notice": {"enabled": False, "language": "pt-BR"}, "qa_mode": "explicit_save"}
+                workspace = {"generation": 3, "privacy_defaults": privacy,
+                             "retention_defaults": {"trash_days": 90, "whole_meeting": {"mode": "keep"}}}
+                responses = {"privacy": lambda: view._privacy_loaded(privacy, None),
+                             "workspace": lambda: view._workspace_loaded(workspace, None)}
+                responses[first]()
+                self.assertIsNone(view._settings_drafts["privacy"]["baseline"])
+                self.assertNotIn("carregada", view.privacy_status.get())
+                view.privacy_notice_check.configure.assert_called_with(state="disabled")
+                view.privacy_notice_enabled.set(True)
+                view.save_privacy_settings()
+                view._submit.assert_not_called()
+                responses["workspace" if first == "privacy" else "privacy"]()
+                self.assertEqual(view._settings_drafts["privacy"]["baseline"]["trash_days"], "90")
+                view.privacy_notice_check.configure.assert_called_with(state="normal")
+                view.privacy_notice_enabled.set(True)
+                view.save_privacy_settings()
+                view._submit.call_args.args[1]()
+                submitted = view.controller.update_workspace.call_args.args[0]
+                self.assertTrue(submitted["privacy_defaults"]["recording_notice"]["enabled"])
+                self.assertEqual(submitted["retention_defaults"]["trash_days"], 90)
+
+    def test_initial_privacy_or_workspace_failure_never_establishes_save_baseline(self):
+        for failed in ("privacy", "workspace"):
+            with self.subTest(failed=failed):
+                view = self.initial_privacy_view()
+                view._privacy_loaded({}, "synthetic unavailable" if failed == "privacy" else None)
+                view._workspace_loaded({"retention_defaults": {"trash_days": 90}},
+                                       "synthetic unavailable" if failed == "workspace" else None)
+                self.assertIsNone(view._settings_drafts["privacy"]["baseline"])
+                view.save_privacy_settings()
+                view._submit.assert_not_called()
+                self.assertNotIn("carregada", view.privacy_status.get())
+
+    def test_delayed_privacy_restore_overlays_only_after_complete_initial_baseline(self):
+        view = self.initial_privacy_view()
+        baseline = dict(view._draft_values("privacy"), trash_days="90")
+        working = dict(baseline, privacy_notice_enabled=True)
+        view._restored_settings_drafts = {"privacy": {"baseline": baseline, "values": working}}
+        view._privacy_loaded({}, None)
+        self.assertIn("privacy", view._restored_settings_drafts)
+        self.assertIsNone(view._settings_drafts["privacy"]["baseline"])
+        view._workspace_loaded({"retention_defaults": {"trash_days": 90}}, None)
+        self.assertEqual(view._draft_values("privacy"), working)
+        self.assertEqual(view._settings_drafts["privacy"]["baseline"], baseline)
+
+    def test_later_title_draft_survives_actual_matching_detail_delivery(self):
+        view = self.make_view()
+        view.selected, view.title = "one", Variable("Saved")
+        view._restored_title_draft = ("one", "Later title edit", "Original baseline")
+        for name in ("_explain_capture", "_set_audio_capabilities", "_render_detail_state", "_show_processing_issue",
+                     "_sync_trash_controls", "_render_transcript", "_render_annotations",
+                     "_update_transcript_paging_controls", "_show_summary", "_load_transcript_document", "refresh_reports"):
+            setattr(view, name, mock.Mock())
+        for name in ("playback_position", "playback_clock", "audio_overview"):
+            setattr(view, name, Variable())
+        view.playback_seek = mock.Mock()
+        view._detail_loaded("one", ({"title": "Saved"}, []), None)
+        self.assertEqual(view.title.get(), "Later title edit")
+        self.assertEqual(view._saved_title, "Original baseline")
+        self.assertTrue(view.dirty)
+        self.assertIsNone(view._restored_title_draft)
+
+
 class ReplayChoiceTests(unittest.TestCase):
     def test_final_mix_is_primary_even_after_raw_retention(self):
         tracks = {"microphone": {"available": False, "raw_removed": True},
@@ -1492,9 +1790,13 @@ class MeetingGuiLogicTests(unittest.TestCase):
         button = mock.Mock()
         view.summary_model_buttons = {"qwen": button}
         view.summary_model_status = Variable()
+        view.toggle_summary_model = mock.Mock()
         view._summary_inventory_loaded({"qwen": True}, None)
         self.assertEqual(view.summary_model_installed, {"qwen": True})
-        button.configure.assert_called_once_with(text="Remover", state="normal")
+        options = button.configure.call_args.kwargs
+        self.assertEqual((options["text"], options["state"]), ("Remover", "normal"))
+        options["command"]()
+        view.toggle_summary_model.assert_called_once_with("qwen")
 
     def test_summary_download_shows_license_and_uses_background_job(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -2027,7 +2329,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         }
         view._submit = mock.Mock(return_value=True)
         view.controller = mock.Mock()
-        with mock.patch("meeting_gui.simpledialog.askstring", return_value="custom-copy"):
+        with mock.patch("meeting_gui.ui_theme.form_dialog", return_value={"name": "custom-copy", "instructions": "Use facts."}):
             view.duplicate_report_profile()
 
         operation = view._submit.call_args.args[1]
@@ -2051,8 +2353,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._submit = mock.Mock(return_value=True)
         view.controller = mock.Mock()
         with mock.patch(
-            "meeting_gui.simpledialog.askstring",
-            side_effect=["Perfil", "custom-profile"],
+            "meeting_gui.ui_theme.form_dialog",
+            return_value={"name": "Perfil", "instructions": "Use facts."},
         ):
             view.create_report_profile()
 
@@ -2728,11 +3030,13 @@ class ManagerLifecycleLogicTests(unittest.TestCase):
         view.transcript_style_box = mock.Mock()
         view.transcript_style_box.current.return_value = 1
         view.selected, view.library_cursor, view.library_back_stack = "synthetic", "cursor", [None, "cursor"]
+        view.dirty, view.title, view._saved_title = True, Variable("Later draft"), "Original title"
         view.detail_sections, view.sessions = mock.Mock(), mock.Mock()
         view.detail_sections.current = "ask"
         view.sessions.yview.return_value = (0.4, 0.8)
         state = view.capture_view_state()
         self.assertIsInstance(state, ManagerViewState)
+        self.assertEqual(state.title_draft, ("synthetic", "Later draft", "Original title"))
         self.assertEqual((state.destination, state.query, state.selection, state.detail_section,
                           state.transcript_style, state.list_scroll),
                          ("voice", "synthetic query", "synthetic", "ask", "timestamped", 0.4))
@@ -3854,8 +4158,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             titles = [notebook.tab(tab_id, "text") for tab_id in notebook.tabs()]
             self.assertTrue(view.embedded)
             self.assertEqual(
-                tuple(view.appearance_box.cget("values")),
-                tuple(APPEARANCE_LABELS.values()),
+                tuple(widget.cget("text") for widget in view.appearance_box.winfo_children()),
+                tuple(APPEARANCE_LABELS[key] for key in ("dark", "light", "system")),
             )
             self.assertIs(view.window, manager)
             self.assertIs(view.notebook, notebook)
@@ -3872,7 +4176,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                 str(widget.cget("text")) for widget in settings_widgets
                 if isinstance(widget, tk.Button)
             ]
-            self.assertEqual(settings_radios, [])
+            self.assertEqual(len(settings_radios), 3)
             self.assertNotIn("Salvar modelo padrão", settings_buttons)
             self.assertIn("Cancelar download", settings_buttons)
             recording_buttons = [
@@ -3899,8 +4203,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         controller.devices.return_value = []
         controller.list_sessions.return_value = []
         manager = tk.Toplevel(self.root)
-        # Short enough that the summary-model section overflows its viewport.
-        manager.geometry("1120x560")
+        # Exercise a mapped settings section with a real vertical overflow.
+        manager.geometry("1120x420")
         notebook = ttk.Notebook(manager)
         notebook.pack(fill="both", expand=True)
         view = add_meeting_tabs(
@@ -3908,15 +4212,18 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         )
         try:
             notebook.select(view.settings_tab)
-            view.settings_sections.select("models")
-            view.model_sections.select("summary")
+            view.settings_sections.select("recording")
             self.root.update()
             view.settings_canvas.yview_moveto(0)
             self.root.update()
             target = next(
                 widget for widget in descendants(view.settings_content)
-                if isinstance(widget, tk.Label) and "Qwen3.5 4B" in widget.cget("text")
+                if isinstance(widget, tk.Label) and widget.cget("text") == "Modelo de transcrição local"
             )
+            self.assertTrue(target.winfo_ismapped())
+            region = tuple(map(float, view.settings_canvas.cget("scrollregion").split()))
+            self.assertGreater(region[3] - region[1], view.settings_canvas.winfo_height())
+            self.assertLess(view.settings_canvas.yview()[1], 1)
             before = view.settings_canvas.yview()[0]
 
             if sys.platform.startswith(("win", "darwin")):

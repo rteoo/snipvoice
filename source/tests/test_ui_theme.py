@@ -10,6 +10,7 @@ from datetime import datetime
 import os
 import re
 import sys
+import types
 import tkinter as tk
 from tkinter import font as tkfont
 import unittest
@@ -477,6 +478,101 @@ class ThemeCacheTests(unittest.TestCase):
 
 
 class WidgetOptionTests(unittest.TestCase):
+    def test_prepare_dialog_has_no_modal_or_focus_side_effects(self):
+        owner, window, icon = mock.Mock(), mock.Mock(), mock.Mock()
+        owner.winfo_toplevel.return_value = owner
+        window.winfo_ismapped.return_value = True
+        ui = ui_theme.build_theme("dark", system="windows")
+        with mock.patch.object(ui_theme, "apply_window_chrome") as chrome:
+            self.assertIs(ui_theme.prepare_dialog(window, owner, resolved=ui, set_icon=icon), window)
+        chrome.assert_called_once_with(window, ui)
+        icon.assert_called_once_with(window)
+        window.transient.assert_called_once_with(owner)
+        for name in ("grab_set", "wait_window", "wait_visibility", "focus_set", "focus_force", "withdraw", "deiconify"):
+            getattr(window, name).assert_not_called()
+
+    def test_unmapped_windows_dialog_applies_chrome_once_on_own_map_and_keeps_other_bindings(self):
+        class Registry:
+            def __init__(self):
+                self.commands, self.bindings = {}, {}
+            def createcommand(self, name, callback):
+                self.commands[name] = callback
+            def deletecommand(self, name):
+                del self.commands[name]
+            def call(self, *args):
+                if len(args) == 1 and isinstance(args[0], tuple):
+                    args = args[0]
+                if args[0] != "bind":
+                    raise AssertionError(args)
+                key = args[1:3]
+                if len(args) == 3:
+                    return self.bindings.get(key, "")
+                script = args[3]
+                self.bindings[key] = self.bindings.get(key, "") + script[1:] if script.startswith("+") else script
+                return ""
+        class Window(tk.Misc):
+            def __init__(self):
+                self.tk, self._tclCommands, self.master, self._w = Registry(), [], None, ".dialog"
+            def configure(self, **kwargs):
+                pass
+            def transient(self, parent):
+                pass
+            def winfo_ismapped(self):
+                return False
+        for destroy_before_map in (False, True):
+            with self.subTest(destroy_before_map=destroy_before_map):
+                window, owner = Window(), mock.Mock()
+                owner.winfo_toplevel.return_value = owner
+                other = window.bind("<Map>", lambda _event: None, add="+")
+                old_script = window.tk.bindings[(window._w, "<Map>")]
+                ui = ui_theme.build_theme("dark", system="windows")
+                with mock.patch.object(ui_theme, "apply_window_chrome") as chrome:
+                    ui_theme.prepare_dialog(window, owner, resolved=ui)
+                    chrome.assert_not_called()
+                    self.assertIn(other, window.tk.commands)
+                    own = next(name for name in window.tk.commands if name != other)
+                    if not destroy_before_map:
+                        callback = window.tk.commands[own]
+                        callback(types.SimpleNamespace(widget=object()))
+                        chrome.assert_not_called()
+                        callback(types.SimpleNamespace(widget=window))
+                        callback(types.SimpleNamespace(widget=window))
+                        chrome.assert_called_once_with(window, ui)
+                        self.assertEqual(window.tk.bindings[(window._w, "<Map>")], old_script)
+                        self.assertIn(other, window.tk.commands)
+                        self.assertNotIn(own, window.tk.commands)
+                    tk.Misc.destroy(window)
+                    self.assertEqual(window.tk.commands, {})
+                    self.assertIsNone(window._tclCommands)
+                    if destroy_before_map:
+                        chrome.assert_not_called()
+
+    def test_nonwindows_unmapped_dialog_keeps_immediate_inert_chrome_behavior(self):
+        window, owner = mock.Mock(), mock.Mock()
+        ui = ui_theme.build_theme("dark", system="linux")
+        with mock.patch.object(ui_theme, "apply_window_chrome") as chrome:
+            ui_theme.prepare_dialog(window, owner, resolved=ui)
+        chrome.assert_called_once_with(window, ui)
+        window.bind.assert_not_called()
+
+    def test_elision_fits_the_actual_font_width_and_keeps_short_names(self):
+        font = mock.Mock()
+        font.measure.side_effect = lambda value: len(value) * 9
+        self.assertEqual(ui_theme.ellipsize("USB", font, 100), "USB")
+        fitted = ui_theme.ellipsize("Synthetic long device name", font, 90)
+        self.assertTrue(fitted.endswith("…"))
+        self.assertLessEqual(font.measure(fitted), 90)
+
+    def test_system_reprobe_does_not_change_a_fixed_preference_or_cached_theme(self):
+        ui = ui_theme.build_theme("dark", system="windows", preference="dark")
+        before = ui_theme._current
+        with mock.patch.object(ui_theme, "_probe_kind", return_value="windows") as probe:
+            self.assertFalse(ui_theme.system_appearance_changed(mock.Mock(), ui))
+            probe.assert_not_called()
+            ui.preference = "system"
+            self.assertTrue(ui_theme.system_appearance_changed(mock.Mock(), ui))
+        self.assertIs(ui_theme._current, before)
+
 
     def test_widget_helpers_are_inert_off_macos(self):
         # Win32's own defaults for these widgets are already correct in the
@@ -871,6 +967,16 @@ class TtkThemeSelectionTests(unittest.TestCase):
         class FakeTk:
             def call(self, *args):
                 calls.append(args)
+                if args == ("ttk::combobox::PopdownWindow", ".device"):
+                    return ".device.popdown"
+                if args[:2] == ("winfo", "exists"):
+                    return args[2] == ".device.popdown.f.l"
+                if args == (".device.popdown.f.l", "cget", "-font"):
+                    return "TkTextFont"
+                if args[:3] != ("ttk::style", "configure", "system.Device.TCombobox"):
+                    raise AssertionError(args)
+
+            getboolean = staticmethod(bool)
 
         class FakeWindow:
             def winfo_width(self):
@@ -902,11 +1008,35 @@ class TtkThemeSelectionTests(unittest.TestCase):
             font.return_value.measure.return_value = 360
             self.assertIsNone(
                 ui_theme.configure_combobox_popdown(FakeCombo(), theme, fit_values=True))
-        self.assertEqual(len(calls), 1)
-        command, subcommand, style, option, offset = calls[0]
+        self.assertIn((".device.popdown.f.l", "cget", "-font"), calls)
+        command, subcommand, style, option, offset = calls[-1]
         self.assertEqual((command, subcommand, style, option),
                          ("ttk::style", "configure", "system.Device.TCombobox", "-postoffset"))
         self.assertGreaterEqual(200 + offset[2], 360)
+
+    def test_aqua_font_feature_detection_reads_listbox_and_menu_without_native_mutation(self):
+        theme = ui_theme.build_theme("dark", system="darwin")
+        for child in (".f.l", ".menu"):
+            with self.subTest(child=child):
+                calls = []
+                native = ".device.popdown" + child
+                def call(*args):
+                    calls.append(args)
+                    if args == ("ttk::combobox::PopdownWindow", ".device"):
+                        return ".device.popdown"
+                    if args[:2] == ("winfo", "exists"):
+                        return args[2] == native
+                    if args == (native, "cget", "-font"):
+                        return "SyntheticNativeFont"
+                    raise AssertionError(args)
+                combo = mock.Mock()
+                combo.__str__ = mock.Mock(return_value=".device")
+                combo.tk.call.side_effect = call
+                combo.tk.getboolean.side_effect = bool
+                with mock.patch.object(ui_theme.tkfont, "Font") as font:
+                    self.assertIs(ui_theme.combobox_font(combo, theme), font.return_value)
+                font.assert_called_once_with(root=combo, font="SyntheticNativeFont")
+                self.assertFalse(any("configure" in args for args in calls))
 
     def test_dark_manager_styles_replace_clam_light_defaults(self):
         style = Recorder()
@@ -1245,6 +1375,35 @@ class GuiSourceTests(unittest.TestCase):
 
     SOURCES = ("snipvoice.pyw", "meeting_gui.py", "meeting_chat.py", "meeting_waveform.py",
                "voice_indicator.py")
+
+    def test_secondary_windows_use_prepare_dialog_with_explicit_primary_and_hud_exemptions(self):
+        exemptions = {("snipvoice.pyw", "_show_manager_window"), ("meeting_gui.py", "__init__"),
+                      ("voice_indicator.py", "_build")}
+        found = set()
+        root = os.path.join(os.path.dirname(__file__), "..")
+        for name in ("snipvoice.pyw", "meeting_gui.py", "voice_indicator.py", "ui_theme.py"):
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                source = handle.read()
+            lines, stack = source.splitlines(), []
+            case = self
+            class Scan(ast.NodeVisitor):
+                def visit_FunctionDef(self, node):
+                    stack.append(node.name)
+                    self.generic_visit(node)
+                    stack.pop()
+                def visit_Call(self, node):
+                    if isinstance(node.func, ast.Attribute) and node.func.attr == "Toplevel":
+                        key = (name, stack[-1])
+                        if key in exemptions:
+                            found.add(key)
+                        else:
+                            case.assertIn("prepare_dialog(", "\n".join(lines[node.lineno:node.lineno + 3]), key)
+                    self.generic_visit(node)
+            Scan().visit(ast.parse(source))
+        self.assertEqual(found, exemptions)
+        for name in ("meeting_gui.py", "snipvoice.pyw"):
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                self.assertNotIn("simpledialog", handle.read())
 
     def _sources(self):
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

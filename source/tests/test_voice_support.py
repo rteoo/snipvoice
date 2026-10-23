@@ -100,6 +100,32 @@ class ReorderedRunner:
 class DictationProjectionTests(unittest.TestCase):
     """Pure status/projection contracts; no capture, Tk, models or NumPy."""
 
+    def test_cancel_profile_download_only_sets_the_matching_explicit_event(self):
+        controller = self._edit_controller()
+        controller._model_download_active = True
+        controller._model_download_profile = "compact"
+        controller._model_download_cancel = threading.Event()
+        controller._cancel = threading.Event()
+        controller._download_done, controller._download_total = 25, 200
+        controller._state = STATE_RECORDING
+        controller._provider = mock.Mock()
+        self.assertFalse(controller.cancel_profile_download("accuracy"))
+        controller._emit_status.assert_not_called()
+        self.assertFalse(controller._model_download_cancel.is_set())
+        self.assertTrue(controller.cancel_profile_download("compact"))
+        controller._emit_status.assert_called_once_with()
+        self.assertTrue(controller._model_download_cancel.is_set())
+        self.assertFalse(controller._cancel.is_set())
+        self.assertEqual((controller._download_done, controller._download_total), (25, 200))
+        self.assertEqual(controller._model_download_profile, "compact")
+        self.assertEqual(controller._state, STATE_RECORDING)
+        self.assertEqual(controller._session_generation, 0)
+        self.assertTrue(controller.settings.enabled)
+        controller._provider.assert_not_called()
+        controller._provider.unload.assert_not_called()
+        controller._model_download_active = False
+        self.assertFalse(controller.cancel_profile_download("compact"))
+
     def test_only_progress_callbacks_are_throttled(self):
         controller = VoiceController.__new__(VoiceController)
         controller._lock = threading.Lock()

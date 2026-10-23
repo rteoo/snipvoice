@@ -13,7 +13,7 @@ import threading
 import time
 import types
 import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, simpledialog, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from clipboard_support import Clipboard
 import data_relocation
@@ -606,6 +606,9 @@ class ManagerViewState:
     cursor: object = None
     back_stack: list = field(default_factory=lambda: [None])
     chats: dict = field(default_factory=dict)
+    settings_drafts: dict = field(default_factory=dict)
+    settings_section: str = "general"
+    title_draft: tuple | None = None
 
 
 def manager_poll_interval(snapshot):
@@ -769,7 +772,8 @@ class SectionSwitcher:
 
     def user_select(self, key):
         if self.on_user_select is not None:
-            self.on_user_select(key)
+            if self.on_user_select(key) is False:
+                return
         self.select(key)
 
     def select(self, key):
@@ -808,6 +812,7 @@ class MeetingWindow:
             raise ValueError("window and notebook must be supplied together")
         self.embedded = window is not None
         self.window = window or tk.Toplevel(root)
+        self.window._snipvoice_set_icon = self._dialog_icon
         self.notebook = notebook
         if not self.embedded:
             self.window.title(tr("Gravações e reuniões"))
@@ -857,6 +862,9 @@ class MeetingWindow:
         self.dirty = False
         self.loading = False
         self.settings_loaded = False
+        self._settings_drafts = {}
+        self._restored_settings_drafts = {}
+        self._title_leave_continuation = None
         self.detail_ready = False
         self.processing_target = None
         self.summary_download_cancel = None
@@ -877,6 +885,8 @@ class MeetingWindow:
         }
         self.workspace_generation = 0
         self.privacy_ready = False
+        self._privacy_initial_loaded = False
+        self._workspace_initial_loaded = False
         self.privacy_save_inflight = False
         # Application startup normally sets this false until recovery and the
         # privacy cache have completed.  Standalone/embedded callers keep the
@@ -1008,10 +1018,21 @@ class MeetingWindow:
             transcript_style=tuple(TRANSCRIPT_STYLES.values())[max(0, self.transcript_style_box.current())],
             list_scroll=self.sessions.yview()[0], cursor=self.library_cursor,
             back_stack=list(self.library_back_stack), chats=chats,
+            settings_drafts=self.capture_settings_drafts(),
+            settings_section=self.settings_sections.current if hasattr(self, "settings_sections") else "general",
+            title_draft=(self.selected, self.title.get(), self._saved_title)
+            if self.dirty and self.selected else None,
         )
 
     def restore_view_state(self, state):
         self._restoring_view_state = state
+        self._restored_settings_drafts = copy.deepcopy(state.settings_drafts)
+        self._restored_title_draft = state.title_draft
+        if hasattr(self, "settings_sections"):
+            self.settings_sections.select(state.settings_section)
+        for section in ("recording", "privacy"):
+            if getattr(self, "_settings_drafts", {}).get(section, {}).get("baseline") is not None:
+                self._section_loaded(section)
         self.query.set(state.query)
         self._cancel_library_search()
         self.library_cursor = state.cursor
@@ -1049,6 +1070,11 @@ class MeetingWindow:
         return "break"
 
     def _save_title_shortcut(self, _event=None):
+        if self._visible_destination() == "settings":
+            section = self.settings_sections.current
+            if section in ("recording", "privacy"):
+                self._save_settings_section(section)
+                return "break"
         if self._visible_destination() == "library" and self.dirty:
             self._end_title_edit()
             return "break"
@@ -1137,7 +1163,8 @@ class MeetingWindow:
             panel.pack_forget()
             toggle.configure(text=f"{label} ▾")
         else:
-            panel.pack(fill="x", padx=(12, 0), pady=(4, 0))
+            options = {"after": toggle} if panel.master is toggle.master else {}
+            panel.pack(fill="x", padx=(12, 0), pady=(4, 0), **options)
             toggle.configure(text=f"{label} ▴")
 
     def _refresh_library_toggles(self):
@@ -1343,6 +1370,7 @@ class MeetingWindow:
         )
 
     def _build_search_models(self, parent):
+        from embedding_models import MODEL
         self._label(parent, tr("Busca"), font=self.ui.heading()).pack(anchor="w")
         self.semantic_enabled = tk.BooleanVar(self.window, False)
         self.semantic_cancel = None
@@ -1351,11 +1379,17 @@ class MeetingWindow:
                        **self.ui.checkbutton_colors(self.ui.surface)).pack(anchor="w")
         controls = tk.Frame(parent, bg=self.ui.surface)
         controls.pack(fill="x", pady=self.ui.space_sm)
-        self._button(controls, tr("Instalar modelo…"), self.install_embedding_model).pack(side="left")
+        table = ui_theme.model_table(parent, self.ui)
+        state, actions = ui_theme.model_table_row(table, 1,
+            (MODEL["name"], tr("Busca semântica"), format_model_size(MODEL["size_bytes"]), MODEL["license_id"]), self.ui)
+        self.semantic_model_action = self._button(actions, tr("Instalar modelo…"), self.install_embedding_model)
+        self.semantic_model_action.pack(side="left")
         self._button(controls, tr("Reindexar"), self.rebuild_semantic_index).pack(side="left", padx=(4, 0))
         self.semantic_cancel_button = self._button(controls, tr("Cancelar"), self.cancel_semantic_operation)
         self._park_cancel(self.semantic_cancel_button, "pack", side="left", padx=(4, 0))
         self.semantic_status = tk.StringVar(self.window, tr("Busca por palavras ativa."))
+        self.semantic_progress_state = [None]
+        state.configure(textvariable=self.semantic_status)
         self._wrap_label(parent, "", textvariable=self.semantic_status,
                          fg=self.ui.text_muted).pack(fill="x")
         repair = tk.Frame(parent, bg=self.ui.surface)
@@ -1975,6 +2009,7 @@ class MeetingWindow:
         self.settings_sections = SectionSwitcher(
             self.ui, settings_nav, settings_content, vertical=True,
             on_select=lambda _key: settings_canvas.yview_moveto(0),
+            on_user_select=self._settings_section_requested,
         )
         general = self.settings_sections.add("general", tr("Geral"))
         recording_settings = self.settings_sections.add("recording", tr("Gravação"))
@@ -2065,15 +2100,21 @@ class MeetingWindow:
             (tr("Atalho de gravação (opcional)"), self._entry(defaults, self.hotkey)),
             (tr("Modelo de resumo local"), self.summary_box),
         ]
-        for row, (label, widget) in enumerate(default_rows, 2):
+        self.recording_validation_fields = {}
+        self.recording_field_errors = {}
+        for index, (label, widget) in enumerate(default_rows):
+            row = 2 + index * 2
+            name = ("profile", "language", "hotkey", "summary_model")[index]
+            self.recording_validation_fields[name] = widget
             self._label(defaults, label, anchor="w", bg=self.ui.card).grid(
                 row=row, column=0, sticky="w", padx=(0, self.ui.space_lg), pady=3,
             )
             widget.grid(row=row, column=1, sticky="ew", pady=3)
+            error = self._wrap_label(defaults, "", bg=self.ui.card, fg=self.ui.danger,
+                                     font=self.ui.caption(), anchor="w")
+            error.grid(row=row + 1, column=1, sticky="ew")
+            self.recording_field_errors[name] = error
         defaults.columnconfigure(1, weight=1)
-        self._button(defaults, tr("Salvar como padrão"), self.save_settings, accent=True).grid(
-            row=2 + len(default_rows), column=1, sticky="e", pady=(self.ui.space_sm, 0),
-        )
         compact_recording = self.window.winfo_screenheight() <= 800
         card_pady = max(2, self.ui.space_xs // 2) if compact_recording else self.ui.space_sm
         recording_gap = self.ui.space_xs if compact_recording else self.ui.space_sm
@@ -2097,6 +2138,10 @@ class MeetingWindow:
             row=1, column=0, sticky="w", pady=(row_pady, 0),
         )
         destination_row.grid(row=2, column=0, sticky="ew", pady=(0, row_pady))
+        self.recording_validation_fields["destination"] = destination_entry
+        error = self._wrap_label(settings_card, "", bg=self.ui.card, fg=self.ui.danger, anchor="w")
+        error.grid(row=3, column=0, sticky="ew")
+        self.recording_field_errors["destination"] = error
         settings_card.columnconfigure(0, weight=1)
         automation = tk.Frame(settings_card, bg=self.ui.card)
         self._wrap_label(
@@ -2108,7 +2153,7 @@ class MeetingWindow:
             font=self.ui.font(), anchor="w", **self.ui.checkbutton_colors(self.ui.card),
         )
         self.voice_boost_check.pack(anchor="w", fill="x", pady=(self.ui.space_xs, 0))
-        automation_row = 3
+        automation_row = 4
         self._label(settings_card, tr("Depois de gravar"), anchor="w", bg=self.ui.card).grid(
             row=automation_row, column=0, sticky="w", pady=(row_pady, 0))
         automation.grid(row=automation_row + 1, column=0, sticky="ew", pady=(0, row_pady))
@@ -2122,9 +2167,8 @@ class MeetingWindow:
             fg=self.ui.text_muted, font=self.ui.font(9),
         )
         note.grid(row=note_row, column=0, sticky="ew", pady=note_pady)
-        commands = tk.Frame(settings_card, bg=self.ui.card)
-        commands.grid(row=note_row + 1, column=0, sticky="w")
-        self._button(commands, tr("Salvar como padrão"), self.save_settings).pack(side="left")
+        self._build_settings_bar(recording_settings, "recording")
+        self._build_settings_bar(privacy, "privacy")
         # Setup and transport on the left, the live signal on the right: side
         # by side the page fits the window instead of scrolling one tall card.
         recording.columnconfigure(0, weight=1, uniform="recording")
@@ -2189,6 +2233,10 @@ class MeetingWindow:
             ))
             combo.grid(row=line + 1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
             combo.bind("<<ComboboxSelected>>", self._source_selection_changed)
+            combo._device_elision = True
+            combo.bind("<Configure>", lambda event, key=track: self._device_width_changed(key, event.width), add="+")
+            ui_theme.tooltip(combo, lambda key=track: getattr(self, "_endpoint_full_names", {}).get(key, {}).get(
+                self.endpoint_vars[key].get(), self.endpoint_vars[key].get()))
             hint = self._wrap_label(
                 sources, "", bg=self.ui.card, fg=self.ui.text_muted, anchor="w",
                 justify="left", font=self.ui.font(8),
@@ -2328,12 +2376,14 @@ class MeetingWindow:
     def _sync_job_cancels(self):
         """Show each Cancel while, and only while, the job it stops runs."""
         for name, running in (
-            ("semantic_cancel_button", getattr(self, "semantic_cancel", None) is not None),
+            ("semantic_cancel_button", getattr(self, "semantic_cancel", None) is not None
+             and not getattr(self, "_semantic_model_download_active", False)),
             ("rebuild_cancel_button", getattr(self, "rebuild_cancel", None) is not None),
             ("cross_cancel_button", bool(getattr(self, "cross_pending", None))),
             ("cancel_summary_button", bool(getattr(self, "summary_pending", None))),
             ("summary_download_cancel_button",
-             getattr(self, "summary_download_cancel", None) is not None),
+             getattr(self, "summary_download_cancel", None) is not None
+             and not getattr(self, "_summary_download_profile", None)),
         ):
             button = getattr(self, name, None)
             if button is not None:
@@ -2341,23 +2391,17 @@ class MeetingWindow:
 
     def _build_summary_models(self, parent):
         self.summary_model_buttons = {}
+        self.summary_model_states = {}
         entries = summary_catalog()
         compact = len(entries) > 5
-        for entry in entries:
-            row = self._card(parent, pady=self.ui.space_sm if compact else self.ui.space_md)
-            row.pack(fill="x", pady=2 if compact else self.ui.space_xs)
-            copy = tk.Frame(row, bg=self.ui.card)
-            copy.pack(side="left", fill="x", expand=True, padx=(0, 12))
-            self._label(copy, f'{tr(entry["label"])} · {format_model_size(entry["size_bytes"])} · '
-                        f'{entry["license_id"]}', anchor="w",
-                        bg=self.ui.card, fg=self.ui.text_strong,
-                        font=self.ui.font(weight="bold")).pack(fill="x")
-            self._wrap_label(copy, tr(entry["description"]), anchor="w", justify="left",
-                             bg=self.ui.card, fg=self.ui.text_muted).pack(
-                            fill="x", pady=(2 if compact else 4, 0))
+        table = ui_theme.model_table(parent, self.ui)
+        for index, entry in enumerate(entries, 1):
+            status, row = ui_theme.model_table_row(table, index,
+                (entry["name"], tr(entry["label"]), format_model_size(entry["size_bytes"]), entry["license_id"]), self.ui)
             button = self._button(row, "", lambda model_id=entry["id"]: self.toggle_summary_model(model_id))
             button.pack(side="right", anchor="n")
             self.summary_model_buttons[entry["id"]] = button
+            self.summary_model_states[entry["id"]] = status
         # The status line and the download's Cancel share one row that keeps the
         # button's height, so a download starting moves nothing below it.
         status_row = ttk.Frame(parent, style="Meeting.TFrame")
@@ -2397,7 +2441,10 @@ class MeetingWindow:
         self._summary_inventory_state = "ready" if any(installed.values()) else "missing"
         for model_id, button in self.summary_model_buttons.items():
             button.configure(text=tr("Remover") if installed.get(model_id) else tr("Baixar"),
-                             state="normal")
+                             state="normal", command=lambda item=model_id: self.toggle_summary_model(item))
+            label = getattr(self, "summary_model_states", {}).get(model_id)
+            if label is not None:
+                label.configure(text=tr("Baixado") if installed.get(model_id) else tr("Não baixado"))
 
     def toggle_summary_model(self, model_id):
         entry = summary_catalog_entry(model_id)
@@ -2433,11 +2480,17 @@ class MeetingWindow:
                    terms=terms), parent=self.window):
             return
         self.summary_download_cancel = threading.Event()
+        self._summary_download_profile = model_id
         event = self.summary_download_cancel
         with self.summary_progress_lock:
             self.summary_progress = (entry["name"], 0, entry["size_bytes"])
         for button in self.summary_model_buttons.values():
             button.configure(state="disabled")
+        label = getattr(self, "summary_model_states", {}).get(model_id)
+        if label is not None:
+            label.configure(text=tr("Baixando…"), fg=self.ui.info)
+            self.summary_model_buttons[model_id].configure(
+                text=tr("Cancelar"), state="normal", command=self.cancel_summary_download)
         self.summary_model_status.set(tr("Baixando {name} com verificação SHA-256…", name=entry["name"]))
         self._sync_job_cancels()
         submitted = self._submit(
@@ -2468,6 +2521,7 @@ class MeetingWindow:
 
     def _summary_model_finished(self, entry, error, removed=False):
         self.summary_download_cancel = None
+        self._summary_download_profile = None
         self._sync_job_cancels()
         with self.summary_progress_lock:
             self.summary_progress = None
@@ -2935,9 +2989,9 @@ class MeetingWindow:
         # Structured local reports.  The generated envelope remains immutable;
         # the editor below writes only a reviewed artifact through the library.
         self.report_tools_toggle = self._button(
-            summary_page, tr("Versões e modelos personalizados") + " ▾",
+            summary_page, tr("Versões") + " ▾",
             lambda: self._toggle_detail_panel(
-                self.report_frame, self.report_tools_toggle, tr("Versões e modelos personalizados"),
+                self.report_frame, self.report_tools_toggle, tr("Versões"),
             ),
         )
         self.report_tools_toggle.pack(anchor="w", padx=12, pady=(12, 0))
@@ -2945,7 +2999,7 @@ class MeetingWindow:
         report_frame = self.report_frame
         report_header = tk.Frame(report_frame, bg=self.ui.card)
         report_header.pack(fill="x")
-        self._label(report_header, tr("Versões salvas e modelos personalizados"), bg=self.ui.card,
+        self._label(report_header, tr("Versões salvas"), bg=self.ui.card,
                     fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(side="left")
         self._wrap_label(
             report_frame,
@@ -2953,15 +3007,19 @@ class MeetingWindow:
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
         ).pack(fill="x", pady=(2, 6))
         profile_row = tk.Frame(report_frame, bg=self.ui.card)
-        profile_row.pack(fill="x", pady=2)
-        self._button(profile_row, tr("Criar"), self.create_report_profile).pack(side="left")
-        self._button(profile_row, tr("Duplicar"), self.duplicate_report_profile).pack(side="left", padx=(6, 0))
-        self._button(profile_row, tr("Editar"), self.edit_report_profile).pack(side="left", padx=(6, 0))
+        format_toggle = self._button(report_frame, tr("Formatos personalizados") + " ▾",
+            lambda: self._toggle_detail_panel(profile_row, format_toggle, tr("Formatos personalizados")))
+        format_toggle.pack(anchor="w", pady=self.ui.space_xs)
+        self._button(profile_row, tr("Criar"), self.create_report_profile).grid(row=0, column=0, sticky="ew")
+        self._button(profile_row, tr("Duplicar"), self.duplicate_report_profile).grid(row=0, column=1, sticky="ew", padx=3)
+        self._button(profile_row, tr("Editar"), self.edit_report_profile).grid(row=0, column=2, sticky="ew")
         self.report_disable_button = self._button(profile_row, tr("Desativar"), self.disable_report_profile)
-        self.report_disable_button.pack(side="left", padx=(6, 0))
+        self.report_disable_button.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         self.report_enable_button = self._button(profile_row, tr("Ativar"), self.enable_report_profile)
-        self.report_enable_button.pack(side="left", padx=(6, 0))
-        self._button(profile_row, tr("Excluir"), self.delete_report_profile, danger=True).pack(side="left", padx=(6, 0))
+        self.report_enable_button.grid(row=1, column=1, sticky="ew", padx=3, pady=(3, 0))
+        self._button(profile_row, tr("Excluir"), self.delete_report_profile, danger=True).grid(row=1, column=2, sticky="ew", pady=(3, 0))
+        for column in range(3):
+            profile_row.columnconfigure(column, weight=1)
         history_row = tk.Frame(report_frame, bg=self.ui.card)
         history_row.pack(fill="x", pady=2)
         self._label(history_row, tr("Histórico"), bg=self.ui.card).pack(side="left", padx=(0, 6))
@@ -2984,7 +3042,11 @@ class MeetingWindow:
         self._button(section_row, tr("Copiar seção"), self.copy_report_section).pack(side="left", padx=(6, 0))
         self._button(section_row, tr("Exportar…"), self.export_report).pack(side="left", padx=(6, 0))
         self.report_provenance = tk.StringVar(self.window, tr("Nenhum relatório selecionado."))
-        self._wrap_label(report_frame, "", textvariable=self.report_provenance, bg=self.ui.card,
+        provenance = tk.Frame(report_frame, bg=self.ui.card)
+        disclosure = self._button(report_frame, tr("Detalhes da versão") + " ▾",
+            lambda: self._toggle_detail_panel(provenance, disclosure, tr("Detalhes da versão")))
+        disclosure.pack(anchor="w", pady=self.ui.space_xs)
+        self._wrap_label(provenance, "", textvariable=self.report_provenance, bg=self.ui.card,
                          fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=2)
         self.report_editor = tk.Text(report_frame, height=6, wrap="word", font=self.ui.font(),
                                      **self.ui.text_colors(), **self.ui.entry_chrome())
@@ -3093,8 +3155,10 @@ class MeetingWindow:
             return line, check
 
         def hint(row, text):
-            self._wrap_label(card, text, bg=self.ui.card, fg=self.ui.text_muted, anchor="w",
-                             justify="left").grid(row=row, column=0, sticky="ew", padx=(24, 0))
+            label = self._wrap_label(card, text, bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left")
+            label.grid(row=row, column=0, sticky="ew", padx=(24, 0))
+            label._validation_hint = text
+            return label
 
         def days_entry(line, variable):
             entry = self._entry(line, variable, 5)
@@ -3111,23 +3175,27 @@ class MeetingWindow:
         self.privacy_notice_language_box.pack(side="left", padx=(self.ui.space_xs, 0))
         self.privacy_notice_language_box.bind("<<ComboboxSelected>>", lambda _event: self.privacy_notice_language.set(
             displayed_key(i18n.LANGUAGE_NAMES, self.privacy_notice_language_display.get())))
-        hint(3, tr("Um texto para ler ou colar na chamada avisando que a reunião será gravada."))
+        self.privacy_field_errors = {"privacy_notice_language": hint(3, tr("Um texto para ler ou colar na chamada avisando que a reunião será gravada."))}
 
         _line, self.qa_never_save_check = option(4, tr("Nunca salvar respostas do chat"), self.qa_never_save,
                                                  self._qa_never_save_changed)
-        hint(5, tr("As respostas somem ao fechar a gravação, e o botão Salvar fica oculto."))
+        self.privacy_field_errors["qa_mode"] = hint(5, tr("As respostas somem ao fechar a gravação, e o botão Salvar fica oculto."))
 
-        line, _check = option(6, tr("Mover gravações para a lixeira automaticamente após"),
+        line, self.whole_meeting_auto_check = option(6, tr("Mover gravações para a lixeira automaticamente após"),
                               self.whole_meeting_auto, self._sync_raw_policy_controls)
         self.whole_meeting_days_entry = days_entry(line, self.whole_meeting_after_days)
-        hint(7, tr("A gravação inteira vai para a lixeira, de onde ainda pode ser restaurada."))
+        self.privacy_field_errors["whole_meeting_after_days"] = hint(7, tr("A gravação inteira vai para a lixeira, de onde ainda pode ser restaurada."))
 
         trash = tk.Frame(card, bg=self.ui.card)
         trash.grid(row=8, column=0, sticky="w", pady=(self.ui.space_md, 0))
         self._label(trash, tr("Manter itens na lixeira por"), bg=self.ui.card).pack(side="left")
-        self._entry(trash, self.trash_days, 5).pack(side="left", padx=self.ui.space_xs)
+        self.trash_days_entry = self._entry(trash, self.trash_days, 5)
+        self.trash_days_entry.pack(side="left", padx=self.ui.space_xs)
         self._label(trash, tr("dias"), bg=self.ui.card).pack(side="left")
-        hint(9, tr("Depois disso, Esvaziar expirados, na lixeira da Biblioteca, apaga esses itens de vez."))
+        self.privacy_field_errors["trash_days"] = hint(9, tr("Depois disso, Esvaziar expirados, na lixeira da Biblioteca, apaga esses itens de vez."))
+        self.privacy_validation_fields = {
+            "whole_meeting_after_days": self.whole_meeting_days_entry, "trash_days": self.trash_days_entry,
+            "privacy_notice_language": self.privacy_notice_language_box, "qa_mode": self.qa_never_save_check}
 
         self._wrap_label(
             card,
@@ -3140,8 +3208,204 @@ class MeetingWindow:
         self.privacy_status = tk.StringVar(self.window, tr("Configurações de privacidade carregando…"))
         self._label(footer, "", textvariable=self.privacy_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w").pack(side="left")
-        self._button(footer, tr("Salvar privacidade"), self.save_privacy_settings, accent=True).pack(side="right")
         self._sync_raw_policy_controls()
+
+    def _draft_variables(self, section):
+        names = (("profile", "language", "hotkey", "summary_model", "destination", "voice_boost")
+                 if section == "recording" else
+                 ("privacy_notice_enabled", "privacy_notice_language", "qa_mode",
+                  "whole_meeting_auto", "whole_meeting_after_days", "trash_days"))
+        return {name: getattr(self, name) for name in names}
+
+    def _draft_values(self, section):
+        return {name: variable.get() for name, variable in self._draft_variables(section).items()}
+
+    def _put_draft_values(self, section, values):
+        for name, variable in self._draft_variables(section).items():
+            if name in values:
+                variable.set(values[name])
+        if section == "recording":
+            self.profile_display.set(profile_display_label(self.profile.get()))
+            self._profile_changed()
+            self.summary_display.set(tr(SUMMARY_LABELS[self.summary_model.get()]))
+            self.destination_label.set(destination_display(self.destination.get()))
+        else:
+            self._sync_raw_policy_controls()
+            self._sync_qa_controls()
+
+    def _recording_settings_payload(self):
+        if not self.settings_loaded:
+            raise ValueError(tr("Aguarde o carregamento das configurações antes de gravar ou salvar."))
+        values = self._draft_values("recording")
+        payload = {"meeting_" + name: values[name] for name in
+                   ("hotkey", "summary_model", "destination", "voice_boost", "language", "profile")}
+        raw = dict(self.raw_settings, **payload)
+        if values["profile"] == FOLLOW_DICTATION:
+            raw["voice_profile"] = self._effective_profile()
+        validated_settings(raw, raw.get("voice_hotkey", DEFAULT_DICTATION_HOTKEY),
+                           raw.get("voice_command_hotkey", DEFAULT_COMMAND_HOTKEY))
+        if payload["meeting_destination"] and not os.path.isabs(payload["meeting_destination"]):
+            raise ValueError(tr("Pasta dos arquivos finais: escolha uma pasta existente e absoluta."))
+        return payload
+
+    def _settings_section_error(self, section):
+        field = "profile" if section == "recording" else "whole_meeting_after_days"
+        try:
+            if section == "recording":
+                field = "language"
+                if self.language.get() not in available_languages(self._effective_profile()):
+                    raise ValueError(tr("Este modelo usa detecção automática de idioma. Selecione auto."))
+                field = "hotkey"
+                validate_hotkey_conflicts(dict(self.raw_settings, meeting_hotkey=self.hotkey.get()))
+                field = "destination"
+                path = self.destination.get()
+                if path and not os.path.isabs(path):
+                    raise ValueError(tr("Pasta dos arquivos finais: escolha uma pasta existente e absoluta."))
+                field = "profile"
+                self._recording_settings_payload()
+            else:
+                days = self._policy_days(self.whole_meeting_after_days.get(), field=tr("Reunião"))
+                if self.whole_meeting_auto.get() and not days:
+                    raise ValueError(tr("Reunião: informe após quantos dias mover para a lixeira."))
+                field = "trash_days"
+                self._policy_days(self.trash_days.get(), field=tr("Lixeira"))
+                field = "qa_mode"
+                if self.qa_mode.get() not in {"memory_only", "explicit_save"}:
+                    raise ValueError(tr("Escolha um modo de Q&A válido."))
+                field = "privacy_notice_language"
+                if self.privacy_notice_language.get() not in {"pt-BR", "en-US"}:
+                    raise ValueError(tr("Escolha um idioma válido."))
+        except (ValueError, TypeError) as exc:
+            self._invalid_settings_field = (section, field)
+            return str(exc)
+        self._invalid_settings_field = None
+        return ""
+
+    def _build_settings_bar(self, parent, section):
+        bar = tk.Frame(parent, bg=self.ui.surface)
+        bar.pack(fill="x", pady=self.ui.space_sm)
+        status = self._wrap_label(bar, "", fg=self.ui.text_muted)
+        status.pack(fill="x", side="bottom", pady=(self.ui.space_xs, 0))
+        save = self._button(bar, tr("Salvar"), lambda: self._save_settings_section(section), accent=True)
+        save.pack(side="left")
+        discard = self._button(bar, tr("Descartar"), lambda: self.discard_settings_section(section))
+        discard.pack(side="left", padx=(self.ui.space_sm, 0))
+        self._settings_drafts[section] = dict(baseline=None, saving=False, after=None,
+                                             save=save, discard=discard, status=status)
+        for variable in self._draft_variables(section).values():
+            variable.trace_add("write", lambda *_args, key=section: self._sync_settings_bar(key))
+        self._sync_settings_bar(section)
+
+    def _sync_settings_bar(self, section):
+        draft = getattr(self, "_settings_drafts", {}).get(section)
+        if draft is None:
+            return
+        if section == "privacy":
+            ready = self._privacy_form_ready()
+            for name in ("privacy_notice_check", "qa_never_save_check", "whole_meeting_auto_check",
+                         "whole_meeting_days_entry", "trash_days_entry", "privacy_notice_language_box"):
+                control = getattr(self, name, None)
+                if control is not None:
+                    state = ("readonly" if name == "privacy_notice_language_box" else "normal") if ready else "disabled"
+                    if name == "whole_meeting_days_entry" and not self.whole_meeting_auto.get():
+                        state = "disabled"
+                    control.configure(state=state)
+        values = self._draft_values(section)
+        dirty = draft["baseline"] is not None and values != draft["baseline"]
+        error = self._settings_section_error(section) if dirty else ""
+        target = getattr(self, "_invalid_settings_field", None) if error else None
+        for name, label in getattr(self, "recording_field_errors", {}).items() if section == "recording" else ():
+            label.configure(text="⚠ " + error if target == (section, name) else "")
+        if section == "privacy":
+            for name, label in getattr(self, "privacy_field_errors", {}).items():
+                invalid = target == (section, name)
+                label.configure(text="⚠ " + error if invalid else label._validation_hint,
+                                fg=self.ui.danger if invalid else self.ui.text_muted)
+        draft["save"].configure(state="normal" if dirty and not error and not draft["saving"] else "disabled")
+        draft["discard"].configure(state="normal" if dirty and not draft["saving"] else "disabled")
+        draft["status"].configure(text=(tr("Carregando…") if draft["baseline"] is None else
+                                         "⚠ " + error if error else tr("Salvando…") if draft["saving"]
+                                         else tr("Alterações não salvas") if dirty else tr("Configuração salva")),
+                                  fg=self.ui.danger if error else self.ui.text_muted)
+
+    def _section_loaded(self, section):
+        draft = getattr(self, "_settings_drafts", {}).get(section)
+        if draft is None:
+            return
+        if section == "privacy" and not self._privacy_form_ready():
+            self._sync_settings_bar(section)
+            return
+        restored = self._restored_settings_drafts.pop(section, None)
+        draft["baseline"] = copy.deepcopy(restored["baseline"] if restored else self._draft_values(section))
+        if restored:
+            self._put_draft_values(section, restored["values"])
+        self._sync_settings_bar(section)
+
+    def capture_settings_drafts(self):
+        return {key: {"values": self._draft_values(key), "baseline": copy.deepcopy(draft["baseline"])}
+                for key, draft in getattr(self, "_settings_drafts", {}).items()
+                if draft["baseline"] is not None}
+
+    def discard_settings_section(self, section):
+        draft = self._settings_drafts[section]
+        if draft["baseline"] is not None and not draft["saving"]:
+            self._put_draft_values(section, draft["baseline"])
+            self._sync_settings_bar(section)
+
+    def _save_settings_section(self, section):
+        draft = self._settings_drafts[section]
+        if draft["baseline"] is None or draft["saving"] or draft["baseline"] == self._draft_values(section):
+            return False
+        if self._settings_section_error(section):
+            self._sync_settings_bar(section)
+            field = self._invalid_settings_field[1]
+            target = (self.recording_validation_fields.get(field, self.profile_box) if section == "recording"
+                      else self.privacy_validation_fields.get(field, self.whole_meeting_days_entry))
+            target.focus_set()
+            draft["after"] = None
+            return False
+        (self.save_settings if section == "recording" else self.save_privacy_settings)()
+        return draft["saving"]
+
+    def _section_saved(self, section, values, succeeded):
+        draft = getattr(self, "_settings_drafts", {}).get(section)
+        if draft is None:
+            return
+        draft["saving"] = False
+        after, draft["after"] = draft["after"], None
+        if succeeded:
+            draft["baseline"] = copy.deepcopy(values)
+        self._sync_settings_bar(section)
+        if succeeded and after and self._draft_values(section) == values:
+            after()
+        settled = getattr(self, "on_forms_settled", None)
+        if settled:
+            settled()
+
+    def _settings_section_requested(self, key):
+        current = self.settings_sections.current
+        if current == key:
+            return True
+        self.request_leave_settings(lambda: self.settings_sections.select(key))
+        return False
+
+    def request_leave_settings(self, after):
+        section = self.settings_sections.current
+        draft = getattr(self, "_settings_drafts", {}).get(section)
+        if draft and draft["saving"]:
+            draft["after"] = after
+            return
+        if draft is None or draft["baseline"] is None or draft["baseline"] == self._draft_values(section):
+            after()
+            return
+        draft["after"] = None
+        answer = ui_theme.confirm_draft(self.window)
+        if answer == "discard":
+            self.discard_settings_section(section)
+            after()
+        elif answer == "save":
+            draft["after"] = after
+            self._save_settings_section(section)
 
     def _qa_never_save_changed(self):
         self.qa_mode.set("memory_only" if self.qa_never_save.get() else "explicit_save")
@@ -3281,14 +3545,12 @@ class MeetingWindow:
             values=tuple(i18n.LANGUAGE_NAMES.values()), state="readonly", width=22,
         )
         self.interface_language_box.grid(row=2, column=0, sticky="w")
+        self.interface_language_box.bind("<<ComboboxSelected>>", lambda _event: self.save_language())
         self.interface_language_status = tk.StringVar(self.window, "")
         self._label(
             card, "", textvariable=self.interface_language_status, bg=self.ui.card,
             fg=self.ui.text_muted, anchor="w",
         ).grid(row=2, column=1, sticky="w", padx=(self.ui.space_md, 0))
-        self._button(card, tr("Aplicar idioma"), self.save_language, accent=True).grid(
-            row=2, column=2, sticky="e",
-        )
         card.columnconfigure(1, weight=1)
 
     def save_language(self):
@@ -3301,17 +3563,29 @@ class MeetingWindow:
             return
         if language == i18n.current_language():
             return
+        self._request_preference(
+            lambda: self._persist_language(language),
+            lambda: self.interface_language_display.set(i18n.LANGUAGE_NAMES[i18n.current_language()]))
+
+    def _persist_language(self, language):
+        self._set_preference_saving(True)
         self.interface_language_status.set(tr("Salvando idioma…"))
 
+        persist = self.persist_settings
         def save():
-            if self.persist_settings({"language": language}) is False:
+            if persist({"language": language}) is False:
                 raise ValueError(tr("Não foi possível salvar o idioma."))
             return language
 
-        self._submit("save_language", save, self._language_saved, urgent=True)
+        if not self._submit("save_language", save, self._language_saved, urgent=True):
+            self._set_preference_saving(False)
+            self.interface_language_display.set(i18n.LANGUAGE_NAMES[i18n.current_language()])
+            self.interface_language_status.set(tr("Não foi possível salvar o idioma."))
 
     def _language_saved(self, language, error):
+        self._set_preference_saving(False)
         if error:
+            self.interface_language_display.set(i18n.LANGUAGE_NAMES[i18n.current_language()])
             self.interface_language_status.set("")
             self._fail("settings", tr("Não foi possível salvar o idioma"),
                        tr("O idioma anterior continua em uso. Aplique de novo."), error=error)
@@ -3348,13 +3622,12 @@ class MeetingWindow:
             self.window,
             tr(APPEARANCE_LABELS[preference]),
         )
-        self.appearance_box = ttk.Combobox(
-            card,
-            textvariable=self.appearance_display,
-            values=tuple(tr(label) for label in APPEARANCE_LABELS.values()),
-            state="readonly",
-            width=18,
-        )
+        self.appearance_box = tk.Frame(card, bg=self.ui.card)
+        for key in ("dark", "light", "system"):
+            tk.Radiobutton(self.appearance_box, text=tr(APPEARANCE_LABELS[key]),
+                           value=tr(APPEARANCE_LABELS[key]), variable=self.appearance_display,
+                           command=self.save_appearance, font=self.ui.body(),
+                           **self.ui.checkbutton_colors(self.ui.card)).pack(side="left", padx=(0, self.ui.space_sm))
         self.appearance_box.grid(row=2, column=0, sticky="w")
         self.appearance_status = tk.StringVar(
             self.window,
@@ -3368,12 +3641,6 @@ class MeetingWindow:
             fg=self.ui.text_muted,
             anchor="w",
         ).grid(row=2, column=1, sticky="w", padx=(self.ui.space_md, 0))
-        self._button(
-            card,
-            tr("Aplicar aparência"),
-            self.save_appearance,
-            accent=True,
-        ).grid(row=2, column=2, sticky="e")
         card.columnconfigure(1, weight=1)
 
     def save_appearance(self):
@@ -3385,18 +3652,57 @@ class MeetingWindow:
         except StopIteration:
             self.appearance_status.set(tr("Escolha uma aparência válida."))
             return
+        self._request_preference(
+            lambda: self._persist_appearance(preference),
+            lambda: self.appearance_display.set(tr(APPEARANCE_LABELS[ui_theme.normalize_preference(self.ui.preference)])))
+
+    def _request_preference(self, operation, rollback):
+        if getattr(self, "_preference_saving", False):
+            rollback()
+            return
+        def preflight():
+            if getattr(self, "closed", False):
+                return
+            if getattr(self, "_title_save_pending", None):
+                self._title_leave_continuation = (operation, rollback)
+                return
+            if getattr(self, "dirty", False):
+                answer = messagebox.askyesnocancel(tr("Título não salvo"), tr("Salvar o título antes de fechar?"), parent=self.window)
+                if answer is None:
+                    rollback()
+                    return
+                if answer:
+                    self._title_leave_continuation = (operation, rollback)
+                    self.save_title()
+                    return
+                self._end_title_edit(cancel=True)
+            operation()
+        gate = getattr(self, "preference_gate", None)
+        if gate:
+            gate(preflight)
+        else:
+            preflight()
+
+    def _persist_appearance(self, preference):
+        self._set_preference_saving(True)
         self.appearance_status.set(tr("Salvando aparência local…"))
 
+        persist = self.persist_settings
         def save():
-            result = self.persist_settings({"appearance": preference})
+            result = persist({"appearance": preference})
             if result is False:
                 raise ValueError(tr("Não foi possível salvar a aparência."))
             return preference
 
-        self._submit("save_appearance", save, self._appearance_saved, urgent=True)
+        if not self._submit("save_appearance", save, self._appearance_saved, urgent=True):
+            self._set_preference_saving(False)
+            self.appearance_display.set(tr(APPEARANCE_LABELS[ui_theme.normalize_preference(self.ui.preference)]))
+            self.appearance_status.set(tr("Não foi possível salvar a aparência."))
 
     def _appearance_saved(self, preference, error):
+        self._set_preference_saving(False)
         if error:
+            self.appearance_display.set(tr(APPEARANCE_LABELS[ui_theme.normalize_preference(self.ui.preference)]))
             self.appearance_status.set(
                 tr(APPEARANCE_STATUS[ui_theme.normalize_preference(self.ui.preference)]))
             self._fail("settings", tr("Não foi possível salvar a aparência"),
@@ -3408,6 +3714,20 @@ class MeetingWindow:
         self.appearance_status.set(tr("Aparência salva. Atualizando a janela…"))
         if self.on_appearance_changed:
             self.window.after_idle(lambda: self.on_appearance_changed(preference))
+
+    def _set_preference_saving(self, saving):
+        self._preference_saving = saving
+        language = getattr(self, "interface_language_box", None)
+        if language is not None:
+            language.configure(state="disabled" if saving else "readonly")
+        appearance = getattr(self, "appearance_box", None)
+        if appearance is not None:
+            for radio in appearance.winfo_children():
+                radio.configure(state="disabled" if saving else "normal")
+
+    def _privacy_form_ready(self):
+        return (getattr(self, "_privacy_initial_loaded", True)
+                and getattr(self, "_workspace_initial_loaded", True))
 
     def _sync_raw_policy_controls(self):
         for entry_name, variable_name in (("whole_meeting_days_entry", "whole_meeting_auto"),):
@@ -3431,6 +3751,9 @@ class MeetingWindow:
     def _apply_workspace_settings(self, workspace):
         if not isinstance(workspace, dict):
             return
+        draft = getattr(self, "_settings_drafts", {}).get("privacy")
+        working = self._draft_values("privacy") if draft and draft["baseline"] is not None else None
+        preserve = working if draft and (draft["saving"] or working != draft["baseline"]) else None
         generation = workspace.get("generation", 0)
         if isinstance(generation, int) and generation >= 0:
             self.workspace_generation = generation
@@ -3476,6 +3799,10 @@ class MeetingWindow:
         self.trash_days.set(f"{float(self.retention_defaults.get('trash_days', 30)):g}")
         self._sync_raw_policy_controls()
         self._sync_qa_controls()
+        if preserve is not None:
+            self._put_draft_values("privacy", preserve)
+        else:
+            self._section_loaded("privacy")
 
     def _sync_qa_controls(self):
         mode = self.qa_mode.get() if hasattr(self, "qa_mode") else "explicit_save"
@@ -3492,6 +3819,9 @@ class MeetingWindow:
             )
 
     def save_privacy_settings(self):
+        if not self._privacy_form_ready():
+            self.privacy_status.set(tr("Configurações de privacidade carregando…"))
+            return
         if self.privacy_save_inflight:
             self.privacy_status.set(tr("Aguarde a atualização de privacidade em andamento."))
             return
@@ -3533,30 +3863,36 @@ class MeetingWindow:
             self.privacy_status.set(str(exc))
             return
         expected = self.workspace_generation
+        saved_values = self._draft_values("privacy") if getattr(self, "_settings_drafts", {}).get("privacy") else None
         self.privacy_status.set(tr("Salvando configurações locais…"))
 
+        updater = getattr(self.controller, "update_workspace", None)
+        if not callable(updater):
+            updater = self.controller.library.update_workspace
         def save():
-            updater = getattr(self.controller, "update_workspace", None)
-            if not callable(updater):
-                updater = self.controller.library.update_workspace
             return updater({"privacy_defaults": privacy, "retention_defaults": retention},
                            expected_generation=expected)
 
         self.privacy_save_inflight = True
+        if saved_values is not None:
+            self._settings_drafts["privacy"]["saving"] = True
+            self._sync_settings_bar("privacy")
         submitted = self._submit(
             "save_privacy", save,
-            lambda value, error: self._privacy_saved(value, error, privacy, retention),
+            lambda value, error: self._privacy_saved(value, error, privacy, retention, saved_values),
             urgent=True,
         )
         if not submitted:
             self.privacy_save_inflight = False
             self.privacy_status.set(tr("Não foi possível enfileirar a alteração de privacidade."))
+            self._section_saved("privacy", saved_values, False)
 
-    def _privacy_saved(self, value, error, privacy=None, retention=None):
+    def _privacy_saved(self, value, error, privacy=None, retention=None, saved_values=None):
         self.privacy_save_inflight = False
         if self.closed:
             return
         if error:
+            self._section_saved("privacy", saved_values, False)
             self.privacy_status.set("")
             self._fail("settings", tr("Não foi possível salvar a privacidade"),
                        tr("As opções anteriores continuam valendo. Salve de novo ou reabra a janela."),
@@ -3570,6 +3906,8 @@ class MeetingWindow:
         self.privacy_ready = True
         self.privacy_status.set(tr("Privacidade e retenção salvas localmente."))
         self._sync_qa_controls()
+        if saved_values is not None:
+            self._section_saved("privacy", saved_values, True)
         if self.on_settings_changed:
             self.on_settings_changed()
 
@@ -3704,20 +4042,15 @@ class MeetingWindow:
         self.refresh_report_profiles()
 
     def create_report_profile(self):
-        name = simpledialog.askstring(tr("Novo perfil"), tr("Nome do perfil:"), parent=self.window)
-        if not name:
-            return
-        identifier = simpledialog.askstring(
-            tr("Novo perfil"), tr("Identificador (a-z, 0-9, hífen ou sublinhado):"), parent=self.window,
-        )
-        if not identifier:
-            return
         base = self._selected_report_profile() or {
             "sections": ["summary"], "instructions": "",
         }
+        values = self._report_profile_form("", str(base.get("instructions", "")))
+        if values is None:
+            return
         profile = {
-            "id": identifier.strip(), "name": name.strip(),
-            "instructions": str(base.get("instructions", "")),
+            "id": self._new_profile_identifier(values["name"]), "name": values["name"].strip(),
+            "instructions": values["instructions"],
             "sections": list(base.get("sections", ["summary"])),
             "language": ("pt-BR" if self.language.get() == "auto"
                          else self.language.get() or "pt-BR"),
@@ -3730,16 +4063,18 @@ class MeetingWindow:
         if not current:
             self._say("library", tr("Selecione um perfil para duplicar."))
             return
-        identifier = simpledialog.askstring(tr("Duplicar perfil"), tr("Novo identificador:"), parent=self.window)
-        if not identifier:
+        values = self._report_profile_form(tr("{name} (cópia)", name=current.get("name", tr("Perfil"))),
+                                           str(current.get("instructions", "")))
+        if values is None:
             return
         profile = dict(current)
         profile.pop("version", None)
         profile.pop("profile_hash", None)
         profile.pop("builtin", None)
         profile["disabled"] = False
-        profile["id"] = identifier.strip()
-        profile["name"] = tr("{name} (cópia)", name=current.get("name", tr("Perfil")))
+        profile["id"] = self._new_profile_identifier(values["name"])
+        profile["name"] = values["name"].strip()
+        profile["instructions"] = values["instructions"]
         self._submit("save_report_profile", lambda: self.controller.save_report_profile(profile),
                      self._profile_saved)
 
@@ -3748,16 +4083,10 @@ class MeetingWindow:
         if not current or current.get("builtin"):
             self._say("library", tr("Perfis internos não podem ser editados; duplique um para personalizar."))
             return
-        name = simpledialog.askstring(tr("Editar perfil"), tr("Nome:"), initialvalue=current.get("name", ""), parent=self.window)
-        if name is None:
+        values = self._report_profile_form(str(current.get("name", "")), str(current.get("instructions", "")))
+        if values is None:
             return
-        instructions = simpledialog.askstring(
-            tr("Editar perfil"), tr("Instruções adicionais (texto não confiável):"),
-            initialvalue=current.get("instructions", ""), parent=self.window,
-        )
-        if instructions is None:
-            return
-        profile = dict(current, name=name, instructions=instructions)
+        profile = dict(current, name=values["name"].strip(), instructions=values["instructions"])
         profile.pop("version", None)
         profile.pop("profile_hash", None)
         profile.pop("builtin", None)
@@ -3773,6 +4102,25 @@ class MeetingWindow:
         self._submit("disable_report_profile",
                      lambda: self.controller.disable_report_profile(identifier),
                      self._profile_saved)
+
+    def _new_profile_identifier(self, name):
+        stem = re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower()).strip("-")[:64] or "formato"
+        existing = {item.get("id") for item in getattr(self, "report_profiles", [])}
+        identifier, suffix = stem, 2
+        while identifier in existing:
+            identifier, suffix = f"{stem}-{suffix}", suffix + 1
+        return identifier
+
+    def _report_profile_form(self, name, instructions):
+        def validate(values):
+            if not values["name"].strip() or len(values["name"]) > 128:
+                raise ValueError(tr("Nome: use de 1 a 128 caracteres."))
+            if len(values["instructions"]) > 2000:
+                raise ValueError(tr("Instruções: use até 2.000 caracteres."))
+        return ui_theme.form_dialog(
+            self.window, tr("Formato personalizado"),
+            (("name", tr("Nome"), name), ("instructions", tr("Instruções adicionais"), instructions)),
+            multiline=("instructions",), validate=validate, set_icon=self._dialog_icon)
 
     def enable_report_profile(self):
         current = self._selected_report_profile()
@@ -3968,8 +4316,8 @@ class MeetingWindow:
             profile = next((profile.get("name") for profile in getattr(self, "report_profiles", [])
                             if profile.get("id") == profile_id),
                            tr("Resposta salva") if item.get("kind") == "qa" else tr("Resumo"))
-            created = str(item.get("created_at") or "")[:19].replace("T", " ")
-            labels.append(f"{kind} · {profile} · {created} · {identifier[:12]}")
+            created = format_local_timestamp(item.get("created_at"))
+            labels.append(f"{kind} · {profile} · {created}")
             ids.append(identifier)
         self.report_history_ids = ids
         self.report_history_box.configure(values=labels)
@@ -4493,6 +4841,7 @@ class MeetingWindow:
         if hasattr(self, "controller"):
             self.refresh_report_profiles()
         self._sync_shortcut_hint()
+        self._section_loaded("recording")
 
     def set_startup_status(self, ready, message):
         """Apply app-level recovery admission without exposing private paths."""
@@ -4517,6 +4866,10 @@ class MeetingWindow:
         if self.closed:
             return
         if error or not isinstance(value, dict):
+            self._privacy_initial_loaded = False
+            draft = getattr(self, "_settings_drafts", {}).get("privacy")
+            if draft is not None and draft["baseline"] is None:
+                self._sync_settings_bar("privacy")
             if error:
                 self._fail("settings", tr("Privacidade local indisponível"),
                            tr("A gravação fica bloqueada até ela carregar. Reabra a janela para tentar de novo."),
@@ -4526,6 +4879,7 @@ class MeetingWindow:
                 self.privacy_status.set(tr("Privacidade indisponível; gravação bloqueada até recarregar."))
             return
         self.privacy_defaults = copy.deepcopy(value)
+        self._privacy_initial_loaded = True
         self.privacy_ready = True
         if hasattr(self, "privacy_notice_enabled"):
             notice = value.get("recording_notice", {})
@@ -4535,7 +4889,9 @@ class MeetingWindow:
             self.privacy_notice_language.set(notice.get("language", "pt-BR"))
             self.qa_mode.set(value.get("qa_mode", "explicit_save"))
             self._sync_qa_controls()
-            self.privacy_status.set(tr("Privacidade local carregada."))
+            self.privacy_status.set(tr("Privacidade local carregada.") if self._privacy_form_ready()
+                                    else tr("Configurações de privacidade carregando…"))
+        self._section_loaded("privacy")
 
     def _profile_changed(self, _event=None):
         shown = self.profile_display.get()
@@ -4644,25 +5000,49 @@ class MeetingWindow:
             return
         self.settings = settings
         self.raw_settings.update(settings.payload())
-        self._sync_source_controls()
         self._sync_shortcut_hint()
         self._say("settings", tr("Configurações salvas para a próxima gravação."))
         if self.on_settings_changed:
             self.on_settings_changed()
 
     def save_settings(self):
+        draft = getattr(self, "_settings_drafts", {}).get("recording")
+        if draft and draft["saving"]:
+            return
         try:
-            settings = self._current_settings()
+            payload = self._recording_settings_payload()
+            settings = resolve_meeting_settings(dict(self.raw_settings, **payload))
+            values = self._draft_values("recording")
         except (ValueError, StopIteration) as exc:
             self._fail("settings", tr("Não foi possível salvar as configurações"),
                        str(exc) or tr("Revise as configurações e tente de novo."), tone="warning")
             return
+        destination_failed = threading.Event()
+        persist = self.persist_settings
         def save():
-            result = self.persist_settings(settings.payload())
+            path = payload["meeting_destination"]
+            if path and not os.path.isdir(path):
+                destination_failed.set()
+                raise ValueError(tr("Pasta dos arquivos finais: escolha uma pasta existente e absoluta."))
+            result = persist(payload)
             if result is False:
                 raise ValueError(tr("Não foi possível salvar as configurações. Tente novamente."))
             return settings
-        self._submit("save_settings", save, self._saved_settings)
+        def saved(value, error):
+            self._saved_settings(value, error)
+            self._section_saved("recording", values, not error)
+            if destination_failed.is_set():
+                label = getattr(self, "recording_field_errors", {}).get("destination")
+                if label is not None:
+                    label.configure(text="⚠ " + str(error), fg=self.ui.danger)
+                target = getattr(self, "recording_validation_fields", {}).get("destination")
+                if target is not None:
+                    target.focus_set()
+        if draft:
+            draft["saving"] = True
+            self._sync_settings_bar("recording")
+        if not self._submit("save_settings", save, saved):
+            self._section_saved("recording", values, False)
 
     def refresh_devices(self):
         self.preview_status.set(tr("Buscando dispositivos…"))
@@ -4730,11 +5110,43 @@ class MeetingWindow:
         for track in ("microphone", "system"):
             current = dict(self.options.get(track, [])).get(self.endpoint_vars[track].get(), getattr(self.settings, track))
             options = endpoint_options(self.devices, track, current)
+            box = self.endpoint_boxes[track]
+            if getattr(box, "_device_elision", False) is True:
+                font = ui_theme.combobox_font(box, self.ui)
+                available = max(100, box.winfo_width() - self.ui.px(32)) if box.winfo_width() > 1 else self.ui.px(240)
+                full_names, fitted = {}, []
+                for label, selection in options:
+                    display = ui_theme.ellipsize(label, font, available)
+                    suffix = 2
+                    while display in full_names:
+                        tail = f" ({suffix})"
+                        display = ui_theme.ellipsize(label, font, available - font.measure(tail)) + tail
+                        suffix += 1
+                    full_names[display] = label
+                    fitted.append((display, selection))
+                if not hasattr(self, "_endpoint_full_names"):
+                    self._endpoint_full_names = {}
+                self._endpoint_full_names[track] = full_names
+                options = fitted
             self.options[track] = options
             self.endpoint_boxes[track].configure(values=[label for label, _ in options])
             match = next(label for label, selection in options if selection.argument() == current.argument())
             self.endpoint_vars[track].set(match)
         self._sync_source_controls()
+
+    def _device_width_changed(self, track, width):
+        widths = getattr(self, "_device_widths", {})
+        if widths.get(track) == width:
+            return
+        widths[track] = width
+        self._device_widths = widths
+        if getattr(self, "_device_layout_after", None) is not None:
+            self.window.after_cancel(self._device_layout_after)
+        def fit():
+            self._device_layout_after = None
+            if not self.closed:
+                self._render_devices()
+        self._device_layout_after = self.window.after_idle(fit)
 
     def _validated_recording_request(self):
         try:
@@ -5127,6 +5539,7 @@ class MeetingWindow:
                 "Confirm that everyone has been informed and consents."
             )
         dialog = tk.Toplevel(self.window)
+        ui_theme.prepare_dialog(dialog, self.window, resolved=self.ui, set_icon=self._dialog_icon)
         self.recording_notice_dialog = dialog
         dialog.title(tr("Confirmação antes de gravar"))
         dialog.transient(self.window)
@@ -5513,10 +5926,15 @@ class MeetingWindow:
         if self.closed:
             return
         if error or not isinstance(workspace, dict):
+            if not getattr(self, "_workspace_initial_loaded", False):
+                self._workspace_initial_loaded = False
             self._fail("library", tr("Não foi possível carregar as preferências da biblioteca"),
                        tr("Os padrões atuais continuam em uso."), tone="warning", error=error)
             return
+        self._workspace_initial_loaded = True
         self._apply_workspace_settings(workspace)
+        if self._privacy_form_ready() and hasattr(self, "privacy_status"):
+            self.privacy_status.set(tr("Privacidade local carregada."))
 
 
     def ask_across_meetings(self):
@@ -5581,13 +5999,38 @@ class MeetingWindow:
         self.cross_citations.delete(0, "end")
         for item in self.cross_citation_refs:
             self.cross_citations.insert(
-                "end", f"{item.get('session_id', '')} · {item.get('revision_id', '')} · "
-                        f"{item.get('segment_id', '')} · {format_time(item.get('start', 0))}",
+                "end", tr("Carregando fontes…"),
             )
+        citations = copy.deepcopy(self.cross_citation_refs)
+        controller = self.controller
+        self._submit("cross_sources", lambda: MeetingWindow._cross_source_labels(controller, citations),
+                     lambda labels, error: self._cross_sources_loaded(request, labels, error))
         self.cross_status.set(
             tr("Resposta em memória · incerteza {uncertainty} · {count} citações resolvidas.",
                uncertainty=value.get('uncertainty', tr('alta')), count=len(self.cross_citation_refs))
         )
+
+    @staticmethod
+    def _cross_source_labels(controller, citations):
+        labels = []
+        for citation in citations[:16]:
+            try:
+                value = controller.resolve_search_result(dict(citation, source_kind="transcript"))
+                if not isinstance(value, dict):
+                    raise ValueError("unresolved citation")
+                title = str(value.get("title") or tr("Gravação"))[:200]
+                excerpt = " ".join(str(value.get("text") or "").split())[:120]
+                labels.append(f"{title} · {format_time(value.get('start', citation.get('start', 0)))} · {excerpt}")
+            except (ValueError, OSError, KeyError):
+                labels.append(tr("Fonte indisponível"))
+        return labels
+
+    def _cross_sources_loaded(self, request, labels, error):
+        if self.closed or request != self.cross_request:
+            return
+        self.cross_citations.delete(0, "end")
+        for label in labels if not error else [tr("Fonte indisponível") for _ in self.cross_citation_refs]:
+            self.cross_citations.insert("end", label)
 
     def jump_to_cross_citation(self):
         indexes = self.cross_citations.curselection()
@@ -5643,11 +6086,11 @@ class MeetingWindow:
             # Tk cannot name a focused combobox popdown; there is nothing to return to.
             self.trash_opener = None
         dialog = tk.Toplevel(self.window)
+        ui_theme.prepare_dialog(dialog, self.window, resolved=self.ui, set_icon=self._dialog_icon)
         self.trash_dialog = dialog
         dialog.title(tr("Lixeira"))
         dialog.geometry("720x420")
         dialog.transient(self.window)
-        self._dialog_icon(dialog)
         dialog.configure(bg=self.ui.surface)
         pad = self.ui.space_lg
         # Actions and the status line claim the bottom first, so a short
@@ -5908,9 +6351,9 @@ class MeetingWindow:
         word = tr("EXCLUIR")
         pad = self.ui.space_lg
         dialog = tk.Toplevel(owner)
+        ui_theme.prepare_dialog(dialog, owner, resolved=self.ui, set_icon=self._dialog_icon)
         dialog.title(tr("Excluir definitivamente"))
         dialog.transient(owner)
-        self._dialog_icon(dialog)
         dialog.resizable(False, False)
         # A fixed width; the height follows the wrapped text.
         dialog.minsize(480, 0)
@@ -6010,11 +6453,23 @@ class MeetingWindow:
             return
         self.semantic_cancel = threading.Event()
         event = self.semantic_cancel
+        self._semantic_model_download_active = True
+        button = getattr(self, "semantic_model_action", None)
+        if button is not None:
+            button.configure(text=tr("Cancelar"), command=self.cancel_semantic_operation)
         self.semantic_status.set(tr("Baixando modelo com verificação SHA-256…"))
         self._sync_job_cancels()
-        if not self._submit("semantic_model", lambda: download_embedding_model(cancel_event=event),
+        progress_state = getattr(self, "semantic_progress_state", [None])
+        self.semantic_progress_state = progress_state
+        def progress(done, total):
+            progress_state[0] = (done, total)
+        if not self._submit("semantic_model", lambda: download_embedding_model(cancel_event=event,
+                progress=progress),
                             self._semantic_operation_finished):
             self.semantic_cancel = None
+            self._semantic_model_download_active = False
+            if button is not None:
+                button.configure(text=tr("Instalar modelo…"), command=self.install_embedding_model)
             self._sync_job_cancels()
             self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
 
@@ -6050,6 +6505,12 @@ class MeetingWindow:
 
     def _semantic_operation_finished(self, value, error):
         self.semantic_cancel = None
+        self._semantic_model_download_active = False
+        if hasattr(self, "semantic_progress_state"):
+            self.semantic_progress_state[0] = None
+        button = getattr(self, "semantic_model_action", None)
+        if button is not None:
+            button.configure(text=tr("Instalar modelo…"), command=self.install_embedding_model)
         self._sync_job_cancels()
         if error:
             self.semantic_status.set(tr("Operação semântica cancelada ou indisponível. Busca por palavras disponível."))
@@ -6293,10 +6754,21 @@ class MeetingWindow:
             self.detail_sections.select("summary")
         self._load_transcript_document()
         self.refresh_reports(session_id)
+        self._restore_title_draft(session_id)
         pending_search = getattr(self, "pending_search_resolution", None)
         if isinstance(pending_search, dict) and pending_search.get("session_id") == session_id:
             self.pending_search_resolution = None
             self._apply_search_resolution(pending_search, self.search_request)
+
+    def _restore_title_draft(self, session_id):
+        draft = getattr(self, "_restored_title_draft", None)
+        if draft is not None and draft[0] == session_id:
+            self._restored_title_draft = None
+            self.loading = True
+            self.title.set(draft[1])
+            self._saved_title = draft[2]
+            self.dirty = draft[1] != draft[2]
+            self.loading = False
 
     def _explain_capture(self, session_id, metadata):
         """Say why a capture ended as it did, with the recorded cause behind Detalhes."""
@@ -6488,10 +6960,10 @@ class MeetingWindow:
     def _confirm_trash(self, projection, title):
         dialog = tk.Toplevel(self.window)
         dialog.withdraw()
+        ui_theme.prepare_dialog(dialog, self.window, resolved=self.ui, set_icon=self._dialog_icon)
         dialog.title(tr("Mover para a lixeira"))
         dialog.configure(bg=self.ui.surface)
         dialog.transient(self.window)
-        self._dialog_icon(dialog)
         confirmed = False
         def finish(accepted=False):
             nonlocal confirmed
@@ -6521,7 +6993,8 @@ class MeetingWindow:
         dialog.geometry("560x240")
         dialog.minsize(480, 240)
         dialog.deiconify()
-        dialog.wait_visibility()
+        if not cancel.winfo_viewable():
+            cancel.wait_visibility()
         dialog.grab_set()
         cancel.focus_set()
         dialog.wait_window()
@@ -6901,6 +7374,9 @@ class MeetingWindow:
             return
         session_id, title = self.selected, self.title.get()
         if len(title) > 400:
+            continuation, self._title_leave_continuation = getattr(self, "_title_leave_continuation", None), None
+            if continuation:
+                continuation[1]()
             self._say("library", tr("Use um título de até 400 caracteres."))
             return
         self._title_save_pending = (session_id, title)
@@ -6909,11 +7385,16 @@ class MeetingWindow:
             self._title_save_pending = None
             self._sync_trash_controls()
             if error or _value is False:
+                continuation, self._title_leave_continuation = getattr(self, "_title_leave_continuation", None), None
+                if continuation:
+                    continuation[1]()
                 self._fail("library", tr("Não foi possível salvar o título"),
                            tr("O título anterior continua salvo. Tente salvar de novo."),
                            error=error, session=session_id)
+                self._title_work_settled()
                 return
             if self.selected != session_id:
+                self._title_work_settled()
                 return
             self._saved_title = title
             if self.selected == session_id and self.title.get() == title:
@@ -6924,9 +7405,22 @@ class MeetingWindow:
                 after()
             elif after:
                 self._say("library", tr("O título foi alterado novamente. Salve antes de sair."))
+            continuation, self._title_leave_continuation = getattr(self, "_title_leave_continuation", None), None
+            if continuation:
+                (continuation[0] if not self.dirty else continuation[1])()
+            self._title_work_settled()
         if not self._submit("save_title", lambda: self.controller.rename_session(session_id, title), saved):
             self._title_save_pending = None
             self._sync_trash_controls()
+            continuation, self._title_leave_continuation = getattr(self, "_title_leave_continuation", None), None
+            if continuation:
+                continuation[1]()
+            self._title_work_settled()
+
+    def _title_work_settled(self):
+        settled = getattr(self, "on_forms_settled", None)
+        if settled:
+            settled()
 
     def _clear_library_detail(self):
         self._action("stop_playback", urgent=True)
@@ -7456,6 +7950,14 @@ class MeetingWindow:
                     tr("Baixando {name}: {percent}% · verificação SHA-256 antes da instalação",
                        name=name, percent=percent)
                 )
+                label = getattr(self, "summary_model_states", {}).get(getattr(self, "_summary_download_profile", None))
+                if label is not None:
+                    label.configure(text=tr("Baixando {percent}%", percent=min(100, percent)))
+            semantic_progress = getattr(self, "semantic_progress_state", [None])[0]
+            if semantic_progress is not None and self.semantic_cancel is not None:
+                done, total = semantic_progress
+                self.semantic_status.set(tr("Baixando {percent}%", percent=min(100, int(done * 100 / total)))
+                                         if total else tr("Baixando…"))
             rebuild = self.rebuild_progress
             if getattr(self, "rebuild_cancel", None) is not None and isinstance(rebuild, dict):
                 done, total = rebuild.get("done", 0), rebuild.get("total")
@@ -7592,6 +8094,10 @@ class MeetingWindow:
     def close_without_prompt(self, destroy=True, after_close=None):
         if self.closed:
             return
+        self._title_leave_continuation = None
+        if getattr(self, "_device_layout_after", None) is not None:
+            self.window.after_cancel(self._device_layout_after)
+            self._device_layout_after = None
         self._cancel_library_search()
         self.closed = True
         # Closing never cancels a recording's work (its capture, final audio,

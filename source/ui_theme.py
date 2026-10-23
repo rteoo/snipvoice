@@ -137,6 +137,9 @@ class Theme:
         # Compact density: 32px rows.
         self.tree_row_height = 32
 
+    def px(self, value):
+        return round(value * self.px_scale)
+
     def font(self, size=BODY_FONT_SIZE, weight=None):
         """Return a font spec for a legacy size; Windows maps it onto the type ramp."""
         if self.system != "windows":
@@ -790,7 +793,7 @@ def configure_combobox_popdown(combo, resolved=None, *, fit_values=False):
     if fit_values:
         # Callers opt in with their own style so unrelated comboboxes retain
         # their popup geometry. Fit long endpoint names inside the window.
-        font = tkfont.Font(root=combo, font=ui.body())
+        font = combobox_font(combo, ui)
         widest = max((font.measure(str(value)) for value in combo.cget("values")), default=0)
         window = combo.winfo_toplevel()
         width = max(combo.winfo_width(), min(widest + 2 * ui.space_sm + 24,
@@ -800,6 +803,21 @@ def configure_combobox_popdown(combo, resolved=None, *, fit_values=False):
         combo.tk.call("ttk::style", "configure", combo.cget("style"), "-postoffset",
                       (shift, 0, width - combo.winfo_width(), 0))
     return listbox
+
+
+def combobox_font(combo, resolved=None):
+    ui = resolved or theme()
+    if ui.system == "darwin":
+        popup = combo.tk.call("ttk::combobox::PopdownWindow", str(combo))
+        # Tk 8.6 uses a Listbox; Tk 9 uses a native Menu on Aqua. Read only
+        # the actual widget's configured font, leaving native painting intact.
+        native = next((name for name in (f"{popup}.menu", f"{popup}.f.l")
+                       if combo.tk.getboolean(combo.tk.call("winfo", "exists", name))), None)
+        if native is None:
+            raise tk.TclError("combobox popup has no native Menu or Listbox")
+        native_font = combo.tk.call(native, "cget", "-font")
+        return tkfont.Font(root=combo, font=native_font)
+    return tkfont.Font(root=combo, font=ui.body())
 
 
 def _focus_edges(ui):
@@ -1079,10 +1097,215 @@ def button(parent, text, command, variant="neutral", *, resolved=None, **options
         raise ValueError(f"unknown button variant: {variant!r}")
     options.setdefault("font", ui.body())
     if ui.system == "darwin":
-        return tk.Button(parent, text=text, command=command, **options)
-    widget = _ThemedButton(parent, ui, variant, _surface_of(parent), text=text,
-                           command=command, **{**ui.button_chrome(compact=True), **options})
+        widget = tk.Button(parent, text=text, command=command, **options)
+    else:
+        widget = _ThemedButton(parent, ui, variant, _surface_of(parent), text=text,
+                               command=command, **{**ui.button_chrome(compact=True), **options})
+    # Native insets differ between Win32, X11 and Aqua. Measure the real request
+    # rather than relying on Win32's extra five pixels around the same text.
+    missing = max(0, ui.px(32) - widget.winfo_reqheight())
+    if missing:
+        widget.configure(pady=int(widget.cget("pady")) + (missing + 1) // 2)
     return focus_ring(widget, ui)
+
+
+def prepare_dialog(window, owner, *, resolved=None, set_icon=None):
+    """Apply base chrome only; callers own presentation, focus, grabs and waits."""
+    ui = resolved or theme()
+    window.configure(bg=ui.surface)
+    parent = owner.winfo_toplevel()
+    window.transient(parent)
+    if ui.system != "windows" or window.winfo_ismapped():
+        apply_window_chrome(window, ui)
+    else:
+        applied = False
+        def mapped(event):
+            nonlocal applied
+            if event.widget is not window or applied:
+                return
+            applied = True
+            window.unbind("<Map>", binding)
+            apply_window_chrome(window, ui)
+        # Windows chrome flushes idle layout. Wait until the caller presents
+        # its complete dialog instead of mapping an empty Toplevel here.
+        binding = window.bind("<Map>", mapped, add="+")
+    set_icon = set_icon or getattr(parent, "_snipvoice_set_icon", None)
+    if set_icon is not None:
+        set_icon(window)
+        window._snipvoice_set_icon = set_icon
+    return window
+
+
+def form_dialog(owner, title, fields, *, multiline=(), validate=None, set_icon=None):
+    """One bounded themed form; invalid values remain editable in place."""
+    ui = theme()
+    dialog = tk.Toplevel(owner)
+    prepare_dialog(dialog, owner, resolved=ui, set_icon=set_icon)
+    dialog.title(title)
+    dialog.minsize(420, 220)
+    dialog.geometry("560x420" if multiline else "560x280")
+    body = tk.Frame(dialog, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
+    body.pack(fill="both", expand=True)
+    body.columnconfigure(0, weight=1)
+    controls, result = {}, [None]
+    for row, (key, label, value) in enumerate(fields):
+        tk.Label(body, text=label, bg=ui.surface, fg=ui.text, font=ui.body()).grid(
+            row=row * 2, column=0, sticky="w", pady=(ui.space_sm, ui.space_xs))
+        if key in multiline:
+            control = tk.Text(body, height=5, wrap="word", font=ui.body(),
+                              **ui.text_colors(), **ui.entry_chrome())
+            control.insert("1.0", value)
+            body.rowconfigure(row * 2 + 1, weight=1)
+        else:
+            control = tk.Entry(body, font=ui.body(), **ui.entry_colors(), **ui.entry_chrome())
+            control.insert(0, value)
+        focus_ring(control, ui, shrink=("bd",))
+        control.grid(row=row * 2 + 1, column=0, sticky="nsew")
+        controls[key] = control
+    error = tk.Label(body, bg=ui.surface, fg=ui.danger, font=ui.caption(),
+                     anchor="w", justify="left", width=1, wraplength=440)
+    error.grid(row=len(fields) * 2, column=0, sticky="ew", pady=ui.space_sm)
+    error.bind("<Configure>", lambda event: error.configure(wraplength=max(120, event.width)))
+    actions = tk.Frame(body, bg=ui.surface)
+    actions.grid(row=len(fields) * 2 + 1, column=0, sticky="e")
+
+    def save():
+        values = {key: (control.get("1.0", "end-1c") if key in multiline else control.get())
+                  for key, control in controls.items()}
+        try:
+            if validate is not None:
+                validate(values)
+        except ValueError as exc:
+            error.configure(text="⚠ " + str(exc))
+            next(iter(controls.values())).focus_set()
+            return
+        result[0] = values
+        dialog.destroy()
+
+    button(actions, tr("Cancelar"), dialog.destroy, resolved=ui).pack(side="left")
+    button(actions, tr("Salvar"), save, "primary", resolved=ui).pack(side="left", padx=(ui.space_sm, 0))
+    dialog.bind("<Escape>", lambda _event: dialog.destroy())
+    dialog.bind("<Control-s>", lambda _event: save())
+    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+    dialog.wait_visibility()
+    dialog.grab_set()
+    next(iter(controls.values())).focus_set()
+    owner.wait_window(dialog)
+    owner.focus_set()
+    return result[0]
+
+
+def ellipsize(text, font, width):
+    if font.measure(text) <= width:
+        return text
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if font.measure(text[:middle] + "…") <= width:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low] + "…"
+
+
+def confirm_draft(owner):
+    ui = theme()
+    dialog = tk.Toplevel(owner)
+    prepare_dialog(dialog, owner, resolved=ui)
+    dialog.title(tr("Alterações não salvas"))
+    result = [None]
+    body = tk.Frame(dialog, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
+    body.pack(fill="both", expand=True)
+    tk.Label(body, text=tr("Salvar as alterações antes de sair desta seção?"),
+             bg=ui.surface, fg=ui.text, font=ui.body(), wraplength=ui.px(380)).pack(fill="x")
+    row = tk.Frame(body, bg=ui.surface)
+    row.pack(fill="x", pady=(ui.space_md, 0))
+
+    def choose(value):
+        result[0] = value
+        dialog.destroy()
+
+    for label, value, variant in ((tr("Permanecer"), None, "neutral"),
+                                  (tr("Descartar"), "discard", "neutral"),
+                                  (tr("Salvar"), "save", "primary")):
+        button(row, label, lambda item=value: choose(item), variant, resolved=ui).pack(
+            side="left", padx=(0, ui.space_sm))
+    dialog.bind("<Escape>", lambda _event: choose(None))
+    dialog.protocol("WM_DELETE_WINDOW", lambda: choose(None))
+    dialog.wait_visibility()
+    dialog.grab_set()
+    row.winfo_children()[0].focus_set()
+    owner.wait_window(dialog)
+    return result[0]
+
+
+def tooltip(widget, text):
+    """A focus/hover disclosure; no grab or activation is taken."""
+    state = {"window": None, "timer": None}
+
+    def hide(_event=None):
+        if state["timer"] is not None:
+            widget.after_cancel(state["timer"])
+            state["timer"] = None
+        if state["window"] is not None:
+            state["window"].destroy()
+            state["window"] = None
+
+    def show():
+        state["timer"] = None
+        value = text() if callable(text) else text
+        if not value:
+            return
+        ui = theme()
+        window = tk.Toplevel(widget)
+        prepare_dialog(window, widget, resolved=ui)
+        window.overrideredirect(True)
+        window.geometry(f"+{widget.winfo_rootx()}+{widget.winfo_rooty() + widget.winfo_height()}")
+        tk.Label(window, text=value, bg=ui.card, fg=ui.text, font=ui.body(),
+                 padx=ui.space_sm, pady=ui.space_xs, wraplength=ui.px(400), justify="left").pack()
+        state["window"] = window
+
+    def schedule(_event=None):
+        hide()
+        state["timer"] = widget.after(500, show)
+
+    for event in ("<Enter>", "<FocusIn>"):
+        widget.bind(event, schedule, add="+")
+    for event in ("<Leave>", "<FocusOut>", "<Destroy>", "<ButtonPress>"):
+        widget.bind(event, hide, add="+")
+
+
+def model_table(parent, resolved=None):
+    ui = resolved or theme()
+    table = tk.Frame(parent, bg=ui.card)
+    table.pack(fill="x", pady=ui.space_sm)
+    progress_width = int(table.tk.call("font", "measure", ui.body(), tr("Baixando {percent}%", percent=100)))
+    table.columnconfigure(4, minsize=progress_width + 2 * ui.space_xs)
+    for column, (title, weight) in enumerate(zip(
+            (tr("Modelo"), tr("Qualidade"), tr("Tamanho"), tr("Licença"), tr("Estado"), tr("Ação")),
+            (3, 2, 0, 1, 1, 0))):
+        table.columnconfigure(column, weight=weight)
+        tk.Label(table, text=title, bg=ui.card, fg=ui.text_strong, font=ui.body_strong(),
+                 anchor="e" if column == 2 else "w").grid(
+                     row=0, column=column, sticky="ew", padx=ui.space_xs, pady=ui.space_sm)
+    return table
+
+
+def model_table_row(table, row, values, resolved=None):
+    ui = resolved or theme()
+    for column, value in enumerate(values):
+        label = tk.Label(table, text=value, bg=ui.card, fg=ui.text, font=ui.body(),
+                         anchor="e" if column == 2 else "w", justify="left",
+                         width=8 if column == 2 else 1, wraplength=120)
+        label.grid(row=row, column=column, sticky="nsew", padx=ui.space_xs, pady=ui.space_sm)
+        label.bind("<Configure>", lambda event, widget=label: widget.configure(wraplength=max(32, event.width)))
+    status = tk.Label(table, bg=ui.card, fg=ui.text_muted, font=ui.body(), anchor="w",
+                      width=1, wraplength=100, justify="left")
+    status.grid(row=row, column=4, sticky="nsew", padx=ui.space_xs)
+    status.bind("<Configure>", lambda event: status.configure(wraplength=max(32, event.width)))
+    actions = tk.Frame(table, bg=ui.card)
+    actions.grid(row=row, column=5, sticky="e", padx=ui.space_xs, pady=ui.space_xs)
+    return status, actions
 
 
 INFO_BAR_TONES = ("danger", "warning", "info", "success")
@@ -1322,6 +1545,10 @@ def _probe_kind(widget, system):
         # An appearance we cannot read is not a reason to ship an unreadable
         # window: the light palette is the historical behavior.
         return "light"
+
+
+def system_appearance_changed(widget, resolved):
+    return resolved.preference == "system" and _probe_kind(widget, resolved.system) != resolved.kind
 
 
 def _probe_default_size(widget):

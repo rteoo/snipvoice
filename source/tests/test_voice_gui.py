@@ -8,13 +8,17 @@ app's worker-thread Tk root is not something AppKit permits at all.
 """
 
 import os
+import ast
+import inspect
 import sys
 import gc
 import tempfile
 import threading
 import time
 import traceback
+import textwrap
 import unittest
+import weakref
 from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -73,6 +77,21 @@ def _ancestors(widget):
 
 
 class DictationPresentationTests(unittest.TestCase):
+    def test_model_comparison_projects_the_actual_selectable_catalog_contract(self):
+        from voice_catalog import selectable_catalog, format_size
+        source = ast.parse(textwrap.dedent(inspect.getsource(tx.Snipvoice._build_voice_settings_controls)))
+        row = next(node for node in ast.walk(source) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Attribute) and node.func.attr == "model_table_row")
+        projection = compile(ast.Expression(body=row.args[2]), "<actual-model-comparison>", "eval")
+        entries = selectable_catalog()
+        self.assertTrue(entries)
+        for entry in entries:
+            with self.subTest(profile=entry["profile"]):
+                values = eval(projection, {"entry": entry, "tr": tx.tr, "format_size": format_size})
+                self.assertEqual(values, (entry["upstream_model"], tx.tr(entry["purpose"]),
+                                          format_size(entry["size_bytes"]), entry["license_id"]))
+                self.assertTrue(all(isinstance(value, str) and value for value in values))
+
     def test_download_bytes_belong_only_to_the_explicit_or_current_runtime_profile(self):
         snapshot = {"state": "loading", "download_active": True,
                     "download_profile": "compact", "download_done": 25, "download_total": 200}
@@ -212,6 +231,401 @@ class DictationPresentationTests(unittest.TestCase):
 
 
 class ManagerLifecycleTests(unittest.TestCase):
+    def _idle_owner(self):
+        """Actual tkinter scheduling/registry ownership without constructing Tk."""
+        class Registry:
+            def __init__(self):
+                self.commands, self.timers, self.serial = {}, {}, 0
+            def createcommand(self, name, callback):
+                self.commands[name] = callback
+            def deletecommand(self, name):
+                if name not in self.commands:
+                    raise tk.TclError("synthetic command already deleted")
+                del self.commands[name]
+            def splitlist(self, value):
+                return value
+            def call(self, *args):
+                if args[:2] == ("after", "idle"):
+                    self.serial += 1
+                    token = f"after#{self.serial}"
+                    self.timers[token] = args[2]
+                    return token
+                if args[:2] == ("after", "info"):
+                    return (self.timers[args[2]], "idle")
+                if args[:2] == ("after", "cancel"):
+                    self.timers.pop(args[2], None)
+                    return ""
+                raise AssertionError(args)
+            def run(self, token):
+                script = self.timers.pop(token)
+                self.commands[script]()
+        class Owner(tk.Misc):
+            def __init__(self):
+                self.tk, self._tclCommands, self.master = Registry(), [], None
+                self.alive = True
+            def destroy(self):
+                self.alive = False
+                tk.Misc.destroy(self)
+            def report_callback_exception(self, kind, error, trace):
+                raise AssertionError("unexpected synthetic idle exception") from error
+        return Owner()
+
+    def _resume_app(self, owner):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._quitting, app.manager_window = threading.Event(), owner
+        app._manager_voice_form = None
+        app._manager_meeting_view = mock.Mock()
+        app._manager_meeting_view._settings_drafts = {}
+        app._manager_meeting_view._title_save_pending = None
+        return app
+
+    def test_two_completions_keep_one_actual_tk_idle_script_and_clear_before_destroy(self):
+        owner = self._idle_owner()
+        app = self._resume_app(owner)
+        seen = []
+        def destroy():
+            seen.append(app._manager_resume_after)
+            app._destroy_manager_window()
+        app._manager_preference_waiter = destroy
+        app._manager_forms_settled()
+        app._manager_forms_settled()
+        self.assertEqual(len(owner.tk.timers), 1)
+        owner.tk.run(next(iter(owner.tk.timers)))
+        self.assertEqual(seen, [None])
+        self.assertFalse(owner.alive)
+        self.assertEqual(owner.tk.timers, {})
+        self.assertEqual(owner.tk.commands, {})
+
+    def test_destroy_and_quit_cancel_pending_actual_tk_idle_script(self):
+        for teardown in ("destroy", "quit"):
+            with self.subTest(teardown=teardown):
+                owner = self._idle_owner()
+                app = self._resume_app(owner)
+                operation = app._manager_preference_waiter = mock.Mock()
+                app._manager_forms_settled()
+                self.assertEqual(len(owner.tk.timers), 1)
+                if teardown == "destroy":
+                    app._destroy_manager_window()
+                else:
+                    app._quitting.set()
+                    app._recording_indicator_after, app.voice_status_indicator = None, None
+                    app._close_settings_window = mock.Mock()
+                    app._shutdown_gui_owner(mock.Mock())
+                operation.assert_not_called()
+                self.assertIsNone(app._manager_resume_after)
+                self.assertEqual(owner.tk.timers, {})
+                self.assertEqual(owner.tk.commands, {})
+                if owner.alive:
+                    owner.destroy()
+
+    def test_old_resume_and_final_admission_cannot_publish_into_replacement(self):
+        owner, replacement = self._idle_owner(), self._idle_owner()
+        app = self._resume_app(owner)
+        operation = app._manager_preference_waiter = mock.Mock()
+        app._manager_forms_settled()
+        app.manager_window = replacement
+        owner.tk.run(next(iter(owner.tk.timers)))
+        operation.assert_not_called()
+        self.assertIsNone(app._manager_resume_after)
+        root = self._idle_owner()
+        app.settings = {"language": "pt-BR"}
+        app.refresh_tray_menu = mock.Mock()
+        app._reopen_manager_for_language(root, "en-US")
+        app.manager_window = owner
+        with mock.patch.object(tx.i18n, "set_language") as publish:
+            root.tk.run(next(iter(root.tk.timers)))
+        publish.assert_not_called()
+        self.assertEqual(app.settings["language"], "pt-BR")
+        for window in (owner, replacement, root):
+            window.destroy()
+
+    def test_actual_preference_completion_waits_for_later_recording_and_title_save_callbacks(self):
+        from tests.test_meeting_gui import SettingsPersistenceLogicTests, Variable
+        for preference in ("appearance", "language"):
+            for title_error in (None, "synthetic rename failure"):
+                with self.subTest(preference=preference, title_error=title_error):
+                    view = SettingsPersistenceLogicTests().title_view()
+                    view.dirty = False
+                    view._saved_title, view._title_save_pending = "Original title", None
+                    view.interface_language_display = Variable(tx.i18n.LANGUAGE_NAMES["en-US"])
+                    view.interface_language_status = Variable()
+                    view.close_without_prompt = mock.Mock()
+                    view.capture_view_state = lambda: (view.title.get(), view._saved_title, view.dirty)
+                    app = tx.Snipvoice.__new__(tx.Snipvoice)
+                    app._quitting, app._manager_voice_form = threading.Event(), None
+                    app._manager_meeting_view = view
+                    app.settings = {"appearance": "dark", "language": "pt-BR"}
+                    app.refresh_tray_menu = mock.Mock()
+                    queue = []
+                    app.manager_window = root = view.window
+                    root.after_idle.side_effect = queue.append
+                    view.preference_gate, view.on_forms_settled = app._before_manager_preference, app._manager_forms_settled
+                    view.on_appearance_changed = lambda value: app._reopen_manager_for_appearance(root, value)
+                    view.on_language_changed = lambda value: app._reopen_manager_for_language(root, value)
+                    with mock.patch.object(tx.i18n, "set_language", return_value="en-US") as publish, \
+                            mock.patch.object(tx.i18n, "current_language", return_value="pt-BR"), \
+                            mock.patch.object(tx.messagebox, "askyesnocancel", side_effect=AssertionError("duplicate title prompt")):
+                        (view.save_appearance if preference == "appearance" else view.save_language)()
+                        preference_operation, preference_done = view._submit.call_args.args[1:3]
+                        view.hotkey.set("ctrl+shift+f8")
+                        view.save_settings()
+                        recording_operation, recording_done = view._submit.call_args.args[1:3]
+                        preference_done(preference_operation(), None)
+                        while queue:
+                            queue.pop(0)()
+                        view.close_without_prompt.assert_not_called()
+                        publish.assert_not_called()
+                        view.title.set("Title save admitted later")
+                        view.dirty = True
+                        view.save_title()
+                        title_done = view._submit.call_args.args[2]
+                        view.title.set("Still later unsaved edit")
+                        recording_done(recording_operation(), None)
+                        while queue:
+                            queue.pop(0)()
+                        view.close_without_prompt.assert_not_called()
+                        title_done(not title_error, title_error)
+                        view.close_without_prompt.assert_not_called()
+                        while queue:
+                            queue.pop(0)()
+                        view.close_without_prompt.assert_called_once()
+                        self.assertEqual(app._manager_view_state[0], "Still later unsaved edit")
+                        self.assertTrue(app._manager_view_state[2])
+                        self.assertEqual(app.settings[preference], "light" if preference == "appearance" else "en-US")
+
+    def test_final_preference_gate_rechecks_later_saves_and_title_before_publication(self):
+        from tests.test_meeting_gui import SettingsPersistenceLogicTests
+        for preference in ("appearance", "language"):
+            for busy in ("recording", "privacy", "voice"):
+                with self.subTest(preference=preference, busy=busy):
+                    app = tx.Snipvoice.__new__(tx.Snipvoice)
+                    app._quitting = threading.Event()
+                    view = SettingsPersistenceLogicTests().make_view()
+                    view._title_save_pending = None
+                    view.capture_view_state = mock.Mock(return_value="plain-state")
+                    view.close_without_prompt = mock.Mock()
+                    app._manager_meeting_view = view
+                    queue, voice_saving = [], [False]
+                    app.manager_window = root = mock.Mock()
+                    root.after_idle.side_effect = queue.append
+                    app._manager_voice_form = {"saving": lambda: voice_saving[0], "capture": lambda: "voice-draft"}
+                    app.settings = {"appearance": "dark", "language": "pt-BR"}
+                    app.refresh_tray_menu = mock.Mock()
+                    view.on_forms_settled = app._manager_forms_settled
+                    with mock.patch.object(tx.i18n, "set_language", return_value="en-US") as publish_language:
+                        if preference == "appearance":
+                            app._reopen_manager_for_appearance(root, "light")
+                        else:
+                            app._reopen_manager_for_language(root, "en-US")
+                        if busy == "voice":
+                            voice_saving[0] = True
+                        else:
+                            view._settings_drafts[busy]["saving"] = True
+                        self.assertTrue(queue, "Final admission must be deferred until the current callback returns")
+                        queue.pop(0)()
+                        view.close_without_prompt.assert_not_called()
+                        publish_language.assert_not_called()
+                        self.assertEqual(app.settings[preference], "dark" if preference == "appearance" else "pt-BR")
+                        view._title_save_pending = ("one", "Title admitted later")
+                        voice_saving[0] = False
+                        for draft in view._settings_drafts.values():
+                            draft["saving"] = False
+                        app._manager_forms_settled()
+                        view.close_without_prompt.assert_not_called()
+                        queue.pop(0)()
+                        view.close_without_prompt.assert_not_called()
+                        view._title_save_pending = None
+                        view._title_work_settled()
+                        queue.pop(0)()
+                        view.close_without_prompt.assert_called_once()
+                        self.assertEqual(app.settings[preference], "light" if preference == "appearance" else "en-US")
+                        self.assertEqual(app._manager_view_state, "plain-state")
+
+    def test_failed_destination_save_finishes_its_ui_callback_before_queued_rebuild(self):
+        from tests.test_meeting_gui import SettingsPersistenceLogicTests
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._quitting = threading.Event()
+        view = SettingsPersistenceLogicTests().make_view()
+        view._title_save_pending = None
+        app._manager_meeting_view, app._manager_voice_form = view, None
+        app.manager_window = root = mock.Mock()
+        queue, events = [], []
+        root.after_idle.side_effect = queue.append
+        view.on_forms_settled = app._manager_forms_settled
+        view.destination.set(os.path.abspath(os.path.join("synthetic", "missing")))
+        target, label = mock.Mock(), mock.Mock()
+        target.focus_set.side_effect = lambda: events.append("destination focused")
+        label.configure.side_effect = lambda **kwargs: events.append("destination receipt")
+        view.recording_validation_fields["destination"] = target
+        view.recording_field_errors = {"destination": label}
+        view.save_settings()
+        operation, callback = view._submit.call_args.args[1:3]
+        app._before_manager_preference(lambda: events.append("rebuild"))
+        with mock.patch("meeting_gui.os.path.isdir", return_value=False):
+            with self.assertRaises(ValueError) as failure:
+                operation()
+        callback(None, str(failure.exception))
+        self.assertNotIn("rebuild", events)
+        self.assertEqual(events[-1], "destination focused")
+        queue.pop(0)()
+        self.assertEqual(events[-2:], ["destination focused", "rebuild"])
+
+    def _voice_save_function(self):
+        from voice_hotkey import parse_chord
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.voice, app.settings = mock.Mock(), {}
+        app.voice.apply_options.return_value = True
+        app._quitting = threading.Event()
+        app.gui, app.task_runner, app.logger = mock.Mock(), mock.Mock(), mock.Mock()
+        app.gui.submit.side_effect = lambda callback: callback(None)
+        app.task_runner.start.side_effect = lambda operation, **kwargs: operation()
+        app.refresh_tray_menu, app._manager_forms_settled = mock.Mock(), mock.Mock()
+        form = {"saving": False, "baseline": None}
+        form_api = {"after_save": None, "dirty": lambda: values() != form["baseline"]}
+        hotkey, command = mock.Mock(), mock.Mock()
+        hotkey.get.return_value, command.get.return_value = "ctrl+alt+space", "ctrl+alt+shift+space"
+        def values():
+            return (hotkey.get(), command.get())
+        models, boxes = mock.Mock(), mock.Mock()
+        models.model_is_installed.return_value = True
+        boxes.askokcancel.return_value = False
+        selected, language, activation = mock.Mock(), mock.Mock(), mock.Mock()
+        selected.get.return_value, language.get.return_value, activation.get.return_value = "balanced", "auto", "hold"
+        valid = mock.Mock(return_value=True)
+        namespace = dict(self=app, form=form, form_api=form_api, validate_shortcuts=valid,
+                         selected=selected, hotkey=hotkey, command_hotkey=command, parse_chord=parse_chord,
+                         messagebox=boxes, tr=tx.tr, owner=mock.Mock(), voice_models=models,
+                         visible=[{"profile": "balanced", "size_bytes": 100, "license_id": "MIT", "attribution": "Synthetic"}],
+                         format_size=str, validate_hotkey_conflicts=mock.Mock(), language=language,
+                         activation_mode=activation, form_values=values, update_dirty=mock.Mock(),
+                         buttons=mock.Mock(), save_status=mock.Mock(), ui=mock.Mock())
+        source = ast.parse(textwrap.dedent(inspect.getsource(tx.Snipvoice._build_voice_settings_controls)))
+        function = next(node for node in ast.walk(source) if isinstance(node, ast.FunctionDef)
+                        and node.name == "apply_voice_settings")
+        exec(compile(ast.Module(body=[function], type_ignores=[]), "<actual-voice-save>", "exec"), namespace)
+        return namespace["apply_voice_settings"], namespace
+
+    def test_rejected_voice_leave_save_cannot_retarget_a_later_manual_save(self):
+        for rejection in ("invalid", "confirmation", "runner"):
+            with self.subTest(rejection=rejection):
+                save, env = self._voice_save_function()
+                navigate = mock.Mock()
+                env["form_api"]["after_save"] = navigate
+                if rejection == "invalid":
+                    env["validate_shortcuts"].return_value = False
+                elif rejection == "confirmation":
+                    env["voice_models"].model_is_installed.return_value = False
+                else:
+                    env["self"].task_runner.start.side_effect = RuntimeError("synthetic runner failure")
+                save()
+                self.assertIsNone(env["form_api"]["after_save"])
+                self.assertFalse(env["form"]["saving"])
+                navigate.assert_not_called()
+                env["validate_shortcuts"].return_value = True
+                env["voice_models"].model_is_installed.return_value = True
+                env["self"].task_runner.start.side_effect = lambda operation, **kwargs: operation()
+                save()
+                navigate.assert_not_called()
+                self.assertEqual(env["form"]["baseline"], env["form_values"]())
+
+    def test_inflight_voice_save_consumes_the_leave_continuation_exactly_once(self):
+        save, env = self._voice_save_function()
+        queued, navigate = [], mock.Mock()
+        env["self"].task_runner.start.side_effect = lambda operation, **kwargs: queued.append(operation)
+        env["form_api"]["after_save"] = navigate
+        save()
+        save()  # Another shortcut while pending must not consume this continuation.
+        self.assertEqual(len(queued), 1)
+        self.assertIs(env["form_api"]["after_save"], navigate)
+        queued.pop()()
+        navigate.assert_called_once_with()
+        self.assertIsNone(env["form_api"]["after_save"])
+    def test_history_delivery_is_weak_and_destroy_invalidates_queued_results(self):
+        owner = threading.get_ident()
+        finalized, invoked, queue = [], [], []
+        class Callback:
+            def __call__(self, result):
+                invoked.append(result)
+            def __del__(self):
+                finalized.append(threading.get_ident())
+        lease = tx._HistoryCallbackLease(Callback())
+        active, quitting = lease.active, threading.Event()
+        gui = mock.Mock()
+        gui.submit.side_effect = lambda callback: queue.append(callback) or True
+        lease_ref = weakref.ref(lease)
+        worker = threading.Thread(target=lambda: tx._post_history_result(
+            weakref.ref(gui), lease_ref, active, quitting, ("rows", [], False)))
+        worker.start()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(queue), 1)
+        lease.close()
+        self.assertEqual(finalized, [owner])
+        del lease
+        self.assertIsNone(lease_ref())
+        queue.pop()(None)
+        self.assertEqual(invoked, [])
+        gui.submit.reset_mock()
+        self.assertFalse(tx._post_history_result(weakref.ref(gui), lease_ref, active, quitting, ("action", True)))
+        gui.submit.assert_not_called()
+
+    def test_history_stop_race_is_narrow_and_never_resurrects_an_invalid_owner(self):
+        lease = tx._HistoryCallbackLease(mock.Mock())
+        gui = mock.Mock()
+        gui._stopping = False
+        gui.submit.side_effect = RuntimeError("synthetic unexpected failure")
+        with self.assertRaises(RuntimeError):
+            tx._post_history_result(weakref.ref(gui), weakref.ref(lease), lease.active, threading.Event(), ("rows", [], False))
+        gui._stopping = True
+        self.assertFalse(tx._post_history_result(weakref.ref(gui), weakref.ref(lease), lease.active,
+                                                 threading.Event(), ("action", True)))
+        lease.close()
+
+    def test_actual_quit_releases_indicator_and_timer_on_the_calling_owner_only_once(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        root, indicator = mock.Mock(), mock.Mock()
+        app._recording_indicator_after = "synthetic-timer"
+        app.voice_status_indicator = indicator
+        app._close_settings_window = mock.Mock()
+        events = []
+        root.after_cancel.side_effect = lambda token: events.append(("timer", token, threading.get_ident()))
+        indicator.destroy.side_effect = lambda: events.append(("indicator", threading.get_ident()))
+        app._close_settings_window.side_effect = lambda **kwargs: events.append(("manager", threading.get_ident()))
+        owner = threading.get_ident()
+        with mock.patch.object(tx.gc, "collect"):
+            app._shutdown_gui_owner(root)
+            app._shutdown_gui_owner(root)
+        self.assertEqual(events, [("timer", "synthetic-timer", owner), ("indicator", owner),
+                                  ("manager", owner), ("manager", owner)])
+        self.assertIsNone(app.voice_status_indicator)
+        self.assertIsNone(app._recording_indicator_after)
+    def test_preference_rebuild_waits_for_voice_save_completion(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        saving = [True]
+        app._quitting = threading.Event()
+        app._manager_voice_form = {"saving": lambda: saving[0]}
+        app._manager_meeting_view = mock.Mock()
+        app._manager_meeting_view._title_save_pending = None
+        app._manager_meeting_view._settings_drafts = {"privacy": {"saving": False}}
+        app.manager_window = mock.Mock()
+        operation = mock.Mock()
+        app._before_manager_preference(operation)
+        operation.assert_not_called()
+        saving[0] = False
+        app._manager_forms_settled()
+        operation.assert_not_called()
+        app.manager_window.after_idle.call_args.args[0]()
+        operation.assert_called_once_with()
+        self.assertIsNone(app._manager_preference_waiter)
+
+    def test_quit_never_calls_a_draft_leave_guard(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._quitting = threading.Event()
+        app.task_runner = mock.Mock()
+        app._manager_voice_form = mock.Mock(side_effect=AssertionError("quit guard"))
+        app.quit_app(None, None)
+        self.assertTrue(app._quitting.is_set())
+        app.task_runner.start.assert_called_once_with(app._shutdown, name="voice-shutdown")
     def test_close_hides_and_notifies_once_without_closing_the_view(self):
         app = tx.Snipvoice.__new__(tx.Snipvoice)
         app.manager_window, app._manager_meeting_view, app.icon = mock.Mock(), mock.Mock(), mock.Mock()
@@ -239,6 +653,7 @@ class ManagerLifecycleTests(unittest.TestCase):
 
     def test_rebuild_captures_python_context_before_closing_and_destroys_on_callback(self):
         app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app._quitting = threading.Event()
         app._manager_meeting_view, app._destroy_manager_window = mock.Mock(), mock.Mock()
         app._manager_meeting_view.closed = False
         root = mock.Mock()
@@ -260,6 +675,96 @@ class ManagerLifecycleTests(unittest.TestCase):
 
 @unittest.skipUnless(TK_AVAILABLE, TK_SKIP_REASON)
 class ManagerGuiSmokeTests(unittest.TestCase):
+    def _blocked_history_owner_teardown(self, action):
+        entered, release = threading.Event(), threading.Event()
+        workers, owners = [], {}
+        original_runner = self.app.task_runner
+        voice = mock.Mock()
+        voice.status_snapshot.return_value = {"state": "idle", "enabled": True, "retry_available": True}
+        entry = {"id": "synthetic", "status": "failed", "transcript": "synthetic transcript", "retryable": True}
+        def blocked(*args, **kwargs):
+            entered.set()
+            if not release.wait(2):
+                raise AssertionError("synthetic history wait timed out")
+            return True if action else [entry]
+        voice.history_rows.side_effect = (lambda **kwargs: [entry]) if action else blocked
+        voice.copy_history_transcript.side_effect = blocked
+        self.app.voice = voice
+        class Runner:
+            def start(self, fn, *args, name=None):
+                self_case.assertFalse({"self", "tree", "state_line", "refresh", "update_actions"}
+                                      & set(fn.__code__.co_freevars))
+                thread = threading.Thread(target=fn, args=args)
+                workers.append(thread)
+                thread.start()
+        self_case = self
+        self.app.task_runner = Runner()
+        def build(root):
+            owner = tk.Toplevel(root)
+            parent = tk.Frame(owner)
+            parent.pack(fill="both", expand=True)
+            tree, _refresh = self.app._build_voice_history_rows(parent, owner, limit=5, height=2)
+            owners.update(owner=owner, tree=tree)
+        try:
+            self._on_gui(build)
+            if action:
+                deadline = time.monotonic() + 1
+                while not self._on_gui(lambda _root: bool(owners["tree"].get_children())):
+                    if time.monotonic() > deadline:
+                        self.fail("synthetic history delivery timed out")
+                    time.sleep(.01)
+                def copy(_root):
+                    owners["tree"].selection_set("synthetic")
+                    button = next(item for item in _descendants(owners["owner"])
+                                  if isinstance(item, tk.Button) and item.cget("text") == "Copiar transcrição")
+                    button.invoke()
+                self._on_gui(copy)
+            self.assertTrue(entered.wait(1))
+            self._on_gui(lambda _root: owners.pop("owner").destroy())
+            self._on_gui(lambda _root: owners.clear())
+            with mock.patch.object(self.app.gui, "submit", wraps=self.app.gui.submit) as submit:
+                release.set()
+                for thread in workers:
+                    thread.join(2)
+                    self.assertFalse(thread.is_alive())
+                submit.assert_not_called()
+        finally:
+            release.set()
+            for thread in workers:
+                thread.join(2)
+            self._on_gui(lambda _root: owners.pop("owner").destroy() if "owner" in owners else None)
+            self.app.task_runner = original_runner
+
+    def test_blocked_history_read_does_not_submit_after_owner_destroy(self):
+        self._blocked_history_owner_teardown(False)
+
+    def test_blocked_history_action_does_not_submit_after_owner_destroy(self):
+        self._blocked_history_owner_teardown(True)
+    def test_voice_rebuild_restores_python_draft_and_original_baseline(self):
+        voice = _ensure_voice(self.app)
+        def exercise(root):
+            owner = tk.Toplevel(root)
+            frame = tk.Frame(owner)
+            try:
+                self.app._build_voice_settings_controls(frame, owner)
+                self.app._manager_voice_tk_vars[0].set("accuracy")
+                state = self.app._manager_voice_form["capture"]()
+                self.assertNotEqual(state["values"], state["baseline"])
+                owner.destroy()
+                self.app._manager_voice_form = None
+                self.app._manager_voice_restore = state
+                owner = tk.Toplevel(root)
+                frame = tk.Frame(owner)
+                self.app._build_voice_settings_controls(frame, owner)
+                self.assertEqual(self.app._manager_voice_form["capture"](), state)
+                self.app._manager_voice_form["discard"]()
+                self.assertEqual(self.app._manager_voice_form["capture"]()["values"], state["baseline"])
+                self.assertEqual(voice.settings.profile, "balanced")
+            finally:
+                owner.destroy()
+                self.app._manager_voice_form = None
+        with mock.patch("voice_models.model_is_installed", return_value=True):
+            self._on_gui(exercise)
     def setUp(self):
         directory = os.path.join(os.path.dirname(__file__), "tmp")
         os.makedirs(directory, exist_ok=True)
@@ -428,35 +933,47 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         def open_notices(shared_root):
             root = tk.Toplevel(shared_root)
-            root.withdraw()
-            frame = tk.Frame(root)
-            self.app._create_voice_tab(frame, root)
-            menu = next(
-                widget for widget in _descendants(frame)
-                if isinstance(widget, tk.Menu)
-            )
-            menu.invoke(2)
-            dialog = next(
-                child for child in root.winfo_children()
-                if isinstance(child, tk.Toplevel)
-                and child.title() == "Licenças e atribuições"
-            )
-            dialog.update_idletasks()
-            text_widget = next(
-                widget for widget in _descendants(dialog)
-                if isinstance(widget, tk.Text)
-            )
-            scrollbars = [
-                widget for widget in _descendants(dialog)
-                if isinstance(widget, ttk.Scrollbar)
-            ]
-            return (
-                dialog.winfo_width(),
-                dialog.winfo_height(),
-                str(text_widget.cget("state")),
-                text_widget.get("1.0", tk.END),
-                len(scrollbars),
-            )
+            try:
+                root.geometry("1120x820")
+                frame = tk.Frame(root)
+                frame.pack(fill=tk.BOTH, expand=True)
+                self.app._create_voice_tab(frame, root)
+                root.update()
+                self.assertTrue(root.winfo_viewable())
+                self.assertTrue(frame.winfo_ismapped())
+                menu = next(
+                    widget for widget in _descendants(frame)
+                    if isinstance(widget, tk.Menu)
+                )
+                menu.invoke(2)
+                dialog = next(
+                    child for child in root.winfo_children()
+                    if isinstance(child, tk.Toplevel)
+                    and child.title() == "Licenças e atribuições"
+                )
+                dialog.update()
+                self.assertTrue(root.winfo_viewable())
+                self.assertTrue(dialog.winfo_viewable())
+                text_widget = next(
+                    widget for widget in _descendants(dialog)
+                    if isinstance(widget, tk.Text)
+                )
+                scrollbars = [
+                    widget for widget in _descendants(dialog)
+                    if isinstance(widget, ttk.Scrollbar)
+                ]
+                return (
+                    dialog.winfo_width(),
+                    dialog.winfo_height(),
+                    str(text_widget.cget("state")),
+                    text_widget.get("1.0", tk.END),
+                    len(scrollbars),
+                )
+            finally:
+                root.destroy()
+                self.app._manager_voice_refresher = None
+                self.app._manager_voice_form = None
+                self.app._manager_voice_tk_vars = []
 
         width, height, state, notices, scrollbar_count = self._on_gui(open_notices)
         self.assertGreaterEqual(width, 520)
@@ -680,7 +1197,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             models.pack(fill=tk.X)
             self.app._build_voice_settings_controls(frame, owner, models_parent=models)
             button = next(widget for widget in _descendants(models)
-                          if isinstance(widget, tk.Button)
+                          if isinstance(widget, tk.Label)
                           and str(widget.cget("text")) == i18n.tr("Baixando {percent}%", percent=100))
             built.update(models=models, button=button)
 
@@ -919,7 +1436,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         def open_and_save(shared_root):
             with mock.patch.object(tx.tk, "Tk", wraps=tx.tk.Tk) as tk_constructor, \
-                    mock.patch.object(tx.simpledialog, "askstring", side_effect=["Quen", "Qwen"]):
+                    mock.patch.object(tx.ui_theme, "form_dialog", return_value={"source": "Quen", "replacement": "Qwen"}):
                 dialog = self.app._show_voice_replacements(shared_root)
                 self.assertEqual(dialog.master, shared_root)
                 self.assertEqual(dialog.title(), "Correções da transcrição")
@@ -1203,7 +1720,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 ui_theme.theme().kind,
                 ui_theme.theme().preference,
                 view.appearance_display.get(),
-                tuple(view.appearance_box.cget("values")),
+                tuple(widget.cget("text") for widget in view.appearance_box.winfo_children()),
             )
             ui_theme.reset()
             return result
@@ -1211,7 +1728,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         kind, preference, selected, choices = self._on_gui(inspect_manager)
         self.assertEqual((kind, preference), ("dark", "dark"))
         self.assertEqual(selected, "Escuro")
-        self.assertEqual(choices, ("Sistema", "Claro", "Escuro"))
+        self.assertEqual(choices, ("Escuro", "Claro", "Sistema"))
 
     def test_manager_dialogs_take_the_app_icon_from_the_host(self):
         _ensure_voice(self.app)
