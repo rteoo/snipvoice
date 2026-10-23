@@ -4,6 +4,7 @@ import gc
 import tkinter as tk
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from meeting_chat import MeetingChat
 import ui_theme
@@ -15,6 +16,26 @@ def descendants(widget):
         result.append(child)
         result.extend(descendants(child))
     return result
+
+
+class AnswerPresentationLogicTests(unittest.TestCase):
+    def test_answer_height_includes_wrapped_final_line_and_never_sets_pixel_width(self):
+        message = mock.Mock()
+        message.count.return_value = (7,)
+        message.cget.return_value = 1
+        MeetingChat._answer_height(message)
+        message.count.assert_called_once_with("1.0", "end-1c", "displaylines")
+        message.configure.assert_called_once_with(height=8)
+        message.configure.reset_mock()
+        message.cget.return_value = 8
+        MeetingChat._answer_height(message)
+        message.configure.assert_not_called()
+
+    def test_select_answer_is_scoped_to_that_text_only(self):
+        focused, other = mock.Mock(), mock.Mock()
+        self.assertEqual(MeetingChat._select_answer(focused), "break")
+        focused.tag_add.assert_called_once_with("sel", "1.0", "end-1c")
+        other.tag_add.assert_not_called()
 
 
 class MeetingChatTests(unittest.TestCase):
@@ -63,6 +84,44 @@ class MeetingChatTests(unittest.TestCase):
         return [item for item in descendants(self.chat)
                 if isinstance(item, tk.Button) and item.cget("text") == text]
 
+    def test_answers_are_selectable_readonly_and_resize_by_wrapped_display_lines(self):
+        answer = ("Synthetic answer with selectable words and an emoji 😀. " * 35).strip()
+        self.chat.render([{"id": 1, "question": "Synthetic", "answer": answer, "status": "complete"}])
+        self.root.update()
+        message = next(widget for widget, _inset in self.chat._message_widgets if isinstance(widget, tk.Text))
+        self.assertEqual(message.get("1.0", "end-1c"), answer)
+        self.assertEqual((str(message.cget("state")), str(message.cget("wrap"))), ("disabled", "word"))
+        self.assertEqual(int(message.cget("width")), 1, "Text width is characters; pack owns pixel width")
+        narrow_height = int(message.cget("height"))
+        self.assertEqual(narrow_height, message.count("1.0", "end-1c", "displaylines")[0] + 1)
+        message.focus_force()
+        self.root.update()
+        message.event_generate("<Control-a>")
+        self.root.update()
+        self.assertEqual(message.get("sel.first", "sel.last"), answer)
+        # Exercise Tk's actual readonly copy binding without touching the OS clipboard.
+        copied = []
+        message.tk.call("rename", "clipboard", "wp10_original_clipboard")
+        message.tk.createcommand("clipboard", lambda *args: copied.append(args) or "")
+        try:
+            message.event_generate("<<Copy>>")
+            self.root.update()
+            self.assertTrue(any(args[0] == "append" and args[-1] == answer for args in copied), copied)
+        finally:
+            message.tk.deletecommand("clipboard")
+            message.tk.call("rename", "wp10_original_clipboard", "clipboard")
+        message.event_generate("<KeyPress-x>")
+        self.root.update()
+        self.assertEqual(message.get("1.0", "end-1c"), answer)
+        if self.theme.system != "darwin":
+            self.assertEqual(int(message.cget("highlightthickness")), 2)
+        self.window.geometry("760x320")
+        self.root.update()
+        self.assertLess(int(message.cget("height")), narrow_height)
+        self.assertEqual(int(message.cget("height")), message.count("1.0", "end-1c", "displaylines")[0] + 1)
+        self.assertTrue(self.chat.composer.winfo_ismapped())
+
+
     def test_empty_state_suggestion_and_keyboard_composer(self):
         self.assertTrue(self.chat._empty.winfo_ismapped())
         self.assertEqual(len(self._buttons("Resuma os pontos principais")), 1)
@@ -99,6 +158,8 @@ class MeetingChatTests(unittest.TestCase):
         self.assertIn(("copy", 11), self.events)
         self.assertIn(("save", 11), self.events)
         messages = [item.cget("text") for item in descendants(self.chat) if isinstance(item, tk.Message)]
+        messages += [item.get("1.0", "end-1c") for item in descendants(self.chat)
+                     if isinstance(item, tk.Text) and str(item.cget("state")) == "disabled"]
         self.assertIn("Pensando…", messages)
         # A failed answer is an InfoBar, not a red line under an empty bubble.
         self.assertNotIn("Nada foi salvo.", messages)
@@ -120,7 +181,7 @@ class MeetingChatTests(unittest.TestCase):
         self._buttons("Tentar novamente")[0].invoke()
         self.assertEqual(self.events, [("retry", 21)])
         # The cause stays behind Detalhes, with a Copiar that reaches the clipboard seam.
-        self._buttons("Detalhes ▾")[0].invoke()
+        self._buttons("Detalhes" if self.theme.icon_family else "Detalhes ▾")[0].invoke()
         self.root.update()
         self._buttons("Copiar")[-1].invoke()
         self.assertIn(("copy_details", "RuntimeError: runtime unavailable"), self.events)

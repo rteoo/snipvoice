@@ -106,6 +106,23 @@ class VoiceIndicatorContentTests(unittest.TestCase):
 
 
 class MacVoiceIndicatorRoutingTests(unittest.TestCase):
+    def test_reduced_motion_cancels_pending_animation_and_draws_static_bars_without_timer(self):
+        from voice_indicator import VoiceStatusIndicator, _WAVE_HEIGHTS
+        indicator = VoiceStatusIndicator.__new__(VoiceStatusIndicator)
+        indicator.window, indicator.waveform = mock.Mock(), mock.Mock()
+        indicator._animation_after_id = "pending"
+        indicator.waveform_bars = list(range(len(_WAVE_HEIGHTS[0])))
+        with mock.patch("ui_theme.client_area_animation_enabled", return_value=False):
+            indicator._start_animation()
+            indicator._start_animation()
+        indicator.window.after_cancel.assert_called_once_with("pending")
+        indicator.window.after.assert_not_called()
+        self.assertIsNone(indicator._animation_after_id)
+        self.assertEqual(indicator.waveform.coords.call_count, 2 * len(_WAVE_HEIGHTS[0]))
+        with mock.patch("ui_theme.client_area_animation_enabled", return_value=True):
+            indicator._start_animation()
+        indicator.window.after.assert_called_once_with(110, indicator._animate_waveform)
+
     def test_macos_uses_the_native_nonactivating_panel(self):
         from voice_indicator import VoiceStatusIndicator
 

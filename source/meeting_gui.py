@@ -229,6 +229,17 @@ def meter_value(peak):
     return max(0.0, min(1.0, 1.0 + math.log10(min(1.0, peak)) / 3.0))
 
 
+def meter_decibels(peak):
+    """Peak amplitude relative to digital full scale, not acoustic loudness."""
+    try:
+        peak = float(peak)
+    except (TypeError, ValueError):
+        return tr("sem sinal")
+    if not math.isfinite(peak) or peak <= 0:
+        return tr("sem sinal")
+    return f"{20 * math.log10(min(1.0, peak)):.1f} dBFS"
+
+
 def active_transcript_revision(metadata):
     """Choose the library's active revision without loading transcript content."""
     if not isinstance(metadata, dict):
@@ -602,6 +613,7 @@ class ManagerViewState:
     selection: str | None = None
     detail_section: str = "transcript"
     transcript_style: str = "full_text"
+    transcript_audio_expanded: bool = False
     list_scroll: float = 0.0
     cursor: object = None
     back_stack: list = field(default_factory=lambda: [None])
@@ -755,7 +767,7 @@ class SectionSwitcher:
         )
         ui_theme.focus_ring(button, self.ui)
         if self.vertical:
-            item.pack(side="top", fill="x", pady=1)
+            item.pack(side="top", fill="x", pady=self.ui.space_xs)
             marker.pack(side="left")
             button.pack(side="left", fill="x", expand=True)
         else:
@@ -845,6 +857,7 @@ class MeetingWindow:
         self.transcript_document_request = 0
         self.transcript_document_truncated = False
         self.transcript_document_ready = False
+        self.transcript_audio_expanded = False
         self.annotation_generation = 0
         self.speaker_labels = {}
         self.highlights = []
@@ -1016,6 +1029,7 @@ class MeetingWindow:
             destination=self._visible_destination() or "voice", query=self.query.get(), selection=self.selected,
             detail_section=self.detail_sections.current,
             transcript_style=tuple(TRANSCRIPT_STYLES.values())[max(0, self.transcript_style_box.current())],
+            transcript_audio_expanded=getattr(self, "transcript_audio_expanded", False),
             list_scroll=self.sessions.yview()[0], cursor=self.library_cursor,
             back_stack=list(self.library_back_stack), chats=chats,
             settings_drafts=self.capture_settings_drafts(),
@@ -1044,6 +1058,10 @@ class MeetingWindow:
         for label, value in TRANSCRIPT_STYLES.items():
             if value == state.transcript_style:
                 self.transcript_style.set(tr(label))
+        self.transcript_audio_expanded = state.transcript_audio_expanded
+        if hasattr(self, "transcript_audio_toggle"):
+            ui_theme.disclosure(self.transcript_audio_toggle, tr("Trechos para ouvir"),
+                                state.transcript_audio_expanded, self.ui)
         self._sync_transcript_style()
         self.detail_sections.select(state.detail_section)
         self._detail_section_chosen = True
@@ -1161,11 +1179,11 @@ class MeetingWindow:
     def _toggle_detail_panel(self, panel, toggle, label):
         if panel.winfo_manager():
             panel.pack_forget()
-            toggle.configure(text=f"{label} ▾")
+            ui_theme.disclosure(toggle, label, False, self.ui)
         else:
             options = {"after": toggle} if panel.master is toggle.master else {}
             panel.pack(fill="x", padx=(12, 0), pady=(4, 0), **options)
-            toggle.configure(text=f"{label} ▴")
+            ui_theme.disclosure(toggle, label, True, self.ui)
 
     def _refresh_library_toggles(self):
         """Label the optional library tools with their open state."""
@@ -1174,8 +1192,7 @@ class MeetingWindow:
             return
         labels = {"cross": tr("Perguntar à biblioteca"), "tools": tr("Mais")}
         for key, label in labels.items():
-            arrow = "▴" if self.library_panels[key].winfo_manager() else "▾"
-            toggles[key].configure(text=f"{label} {arrow}")
+            ui_theme.disclosure(toggles[key], label, bool(self.library_panels[key].winfo_manager()), self.ui)
 
     def _show_library_detail(self, visible):
         placeholder = getattr(self, "detail_placeholder", None)
@@ -2107,9 +2124,9 @@ class MeetingWindow:
             name = ("profile", "language", "hotkey", "summary_model")[index]
             self.recording_validation_fields[name] = widget
             self._label(defaults, label, anchor="w", bg=self.ui.card).grid(
-                row=row, column=0, sticky="w", padx=(0, self.ui.space_lg), pady=3,
+                row=row, column=0, sticky="w", padx=(0, self.ui.space_lg), pady=self.ui.space_xs,
             )
-            widget.grid(row=row, column=1, sticky="ew", pady=3)
+            widget.grid(row=row, column=1, sticky="ew", pady=self.ui.space_xs)
             error = self._wrap_label(defaults, "", bg=self.ui.card, fg=self.ui.danger,
                                      font=self.ui.caption(), anchor="w")
             error.grid(row=row + 1, column=1, sticky="ew")
@@ -2201,7 +2218,7 @@ class MeetingWindow:
                     bg=self.ui.card).grid(row=2, column=0, columnspan=2, sticky="ew")
         self.record_title_entry = self._entry(activity, self.record_title)
         self.record_title_entry.grid(row=3, column=0, columnspan=2, sticky="ew",
-                                     pady=(2, recording_gap))
+                                     pady=(self.ui.space_xs, recording_gap))
         sources = tk.Frame(activity, bg=self.ui.card)
         sources.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, recording_gap))
         sources.columnconfigure(1, weight=1)
@@ -2231,7 +2248,7 @@ class MeetingWindow:
             combo.configure(postcommand=lambda box=combo: ui_theme.configure_combobox_popdown(
                 box, self.ui, fit_values=True,
             ))
-            combo.grid(row=line + 1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+            combo.grid(row=line + 1, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_xs, 0))
             combo.bind("<<ComboboxSelected>>", self._source_selection_changed)
             combo._device_elision = True
             combo.bind("<Configure>", lambda event, key=track: self._device_width_changed(key, event.width), add="+")
@@ -2242,7 +2259,7 @@ class MeetingWindow:
                 justify="left", font=self.ui.font(8),
             )
             hint.grid(row=line + 2, column=0, columnspan=2, sticky="ew",
-                      pady=(2 if compact_recording else 4, recording_gap))
+                      pady=(self.ui.space_xs if compact_recording else 4, recording_gap))
             self.endpoint_hints[track] = hint
             if row == 0:
                 tk.Frame(sources, bg=self.ui.divider, height=1).grid(
@@ -2263,6 +2280,7 @@ class MeetingWindow:
         self.waveform.grid(row=0, column=0, columnspan=2, sticky="nsew",
                            pady=(0, recording_gap))
         self.meters = {}
+        self.meter_readouts = {}
         self.source_captions = {}
         meters = (("microphone", tr("Nível do microfone")),
                   ("system", tr("Nível do sistema")))
@@ -2270,16 +2288,22 @@ class MeetingWindow:
         for index, (track, label) in enumerate(meters):
             row = 1 + 2 * index
             self._label(monitor, label, anchor="w", bg=self.ui.card).grid(
-                row=row, column=0, sticky="w", padx=(0, 18),
-                pady=(3 if compact_recording else 6, 0),
+                row=row, column=0, sticky="w", padx=(0, self.ui.space_lg),
+                pady=(self.ui.space_xs if compact_recording else self.ui.space_sm, 0),
             )
             # The same series colors as the waveform lanes above.
+            meter_row = tk.Frame(monitor, bg=self.ui.card)
+            meter_row.grid(row=row, column=1, sticky="ew", pady=(self.ui.space_xs, 0))
             meter = ttk.Progressbar(
-                monitor, maximum=1.0,
+                meter_row, maximum=1.0,
                 style="Horizontal.TProgressbar" if track == "microphone"
                 else "Secondary.Horizontal.TProgressbar",
             )
-            meter.grid(row=row, column=1, sticky="ew", pady=(3 if compact_recording else 6, 0))
+            meter.pack(side="left", fill="x", expand=True)
+            readout = self._label(meter_row, tr("sem sinal"), anchor="e", bg=self.ui.card,
+                                  fg=self.ui.text_muted, font=self.ui.mono(), width=12)
+            readout.pack(side="right", padx=(self.ui.space_sm, 0))
+            self.meter_readouts[track] = readout
             self.meters[track] = meter
             # The source's written health sits under its meter; the row keeps its
             # height while the recorder is idle so starting never moves the page.
@@ -2405,7 +2429,7 @@ class MeetingWindow:
         # The status line and the download's Cancel share one row that keeps the
         # button's height, so a download starting moves nothing below it.
         status_row = ttk.Frame(parent, style="Meeting.TFrame")
-        status_row.pack(fill="x", pady=(12 if compact else 18, 12))
+        status_row.pack(fill="x", pady=(12 if compact else self.ui.space_lg, 12))
         status_row.columnconfigure(0, weight=1)
         self.summary_download_cancel_button = self._button(
             status_row, tr("Cancelar download"), self.cancel_summary_download)
@@ -2539,12 +2563,12 @@ class MeetingWindow:
         question_row = tk.Frame(cross_frame, bg=self.ui.card)
         question_row.pack(fill="x")
         self._label(question_row, tr("Perguntar nas gravações"), bg=self.ui.card,
-                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, 6))
+                    font=self.ui.font(9, "bold")).pack(side="left", padx=(0, self.ui.space_sm))
         self.cross_question = tk.StringVar(self.window)
         self._entry(question_row, self.cross_question, 12).pack(side="left", fill="x", expand=True)
-        self._button(question_row, tr("Perguntar"), self.ask_across_meetings).pack(side="left", padx=(6, 0))
+        self._button(question_row, tr("Perguntar"), self.ask_across_meetings).pack(side="left", padx=(self.ui.space_sm, 0))
         self.cross_cancel_button = self._button(question_row, tr("Cancelar"), self.cancel_cross_question)
-        self._park_cancel(self.cross_cancel_button, "pack", side="left", padx=(6, 0))
+        self._park_cancel(self.cross_cancel_button, "pack", side="left", padx=(self.ui.space_sm, 0))
         self.cross_status = tk.StringVar(self.window, tr("Resposta cruzada fica somente na memória."))
         self._label(cross_frame, "", textvariable=self.cross_status, bg=self.ui.card,
                     fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=(4, 0))
@@ -2554,7 +2578,7 @@ class MeetingWindow:
         self.cross_answer.pack(fill="x", pady=(4, 0))
         self.cross_answer.configure(state="disabled")
         cross_citation_row = tk.Frame(cross_frame, bg=self.ui.card)
-        cross_citation_row.pack(fill="x", pady=(2, 0))
+        cross_citation_row.pack(fill="x", pady=(self.ui.space_xs, 0))
         self._label(cross_citation_row, tr("Citações"), bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="left", padx=(0, 4))
         self.cross_citations = tk.Listbox(cross_citation_row, height=2, width=10,
@@ -2563,7 +2587,7 @@ class MeetingWindow:
         ui_theme.focus_ring(self.cross_citations, self.ui, shrink=("bd",))
         self.cross_citations.pack(side="left", fill="x", expand=True)
         self.cross_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_cross_citation())
-        self._button(cross_citation_row, tr("Ir à fonte"), self.jump_to_cross_citation).pack(side="left", padx=(6, 0))
+        self._button(cross_citation_row, tr("Ir à fonte"), self.jump_to_cross_citation).pack(side="left", padx=(self.ui.space_sm, 0))
 
         panes = ttk.Panedwindow(parent, orient="horizontal")
         panes.pack(fill="both", expand=True)
@@ -2610,8 +2634,8 @@ class MeetingWindow:
         action_row = tk.Frame(toolbar, bg=self.ui.card)
         action_row.pack(fill="x", pady=(self.ui.space_sm, 0))
         self.tools_toggle = self._button(action_row, tr("Mais"), self._show_library_menu)
-        self.tools_toggle.pack(side="right", padx=(6, 0))
-        self._button(action_row, tr("Importar áudio…"), self.import_audio).pack(side="right", padx=(6, 0))
+        self.tools_toggle.pack(side="right", padx=(self.ui.space_sm, 0))
+        self._button(action_row, tr("Importar áudio…"), self.import_audio).pack(side="right", padx=(self.ui.space_sm, 0))
         self.library_panel_toggles = {}
         self.library_menu = self._menu()
         self.library_menu.add_command(label=tr("Perguntar à biblioteca"),
@@ -2671,14 +2695,14 @@ class MeetingWindow:
         self.previous_button = self._button(pages, tr("‹ Anterior"), lambda: self.change_page(-1))
         self.previous_button.pack(side="left")
         self.next_button = self._button(pages, tr("Próxima ›"), lambda: self.change_page(1))
-        self.next_button.pack(side="left", padx=(6, 0))
+        self.next_button.pack(side="left", padx=(self.ui.space_sm, 0))
         self.page_label = tk.StringVar(self.window, tr("Página {page}", page=1))
         self._label(pages, "", textvariable=self.page_label, fg=self.ui.text_muted).pack(
             side="left", padx=(8, 0))
         # Full-text hits appear only after a search that found something.
         self.search_results_frame = ttk.Frame(self.library_detail_pane, style="Meeting.TFrame")
         self._label(self.search_results_frame, tr("Encontrado em transcrições e relatórios"),
-                    anchor="w", fg=self.ui.text_muted).pack(fill="x", pady=(8, 2))
+                    anchor="w", fg=self.ui.text_muted).pack(fill="x", pady=(8, self.ui.space_xs))
         self.search_results = ttk.Treeview(
             self.search_results_frame, columns=("source", "meeting", "snippet"), show="headings",
             selectmode="browse", height=4, style="Meeting.Treeview",
@@ -2768,7 +2792,7 @@ class MeetingWindow:
         )
         transcript_page = self.detail_sections.add("transcript", tr("Transcrição"))
         summary_page = self.detail_sections.add("summary", tr("Resumo"))
-        ask_page = self.detail_sections.add("ask", "Chat")
+        ask_page = self.detail_sections.add("ask", tr("Chat"))
         files_page = self.detail_sections.add("files", tr("Arquivos"))
 
         # The player sits above the transcript it plays, so listening and
@@ -2783,7 +2807,7 @@ class MeetingWindow:
         self.play_button.pack(side="left")
         self.replay_stop_button = self._button(player_actions, tr("Parar"), self.stop_selected_recording)
         self.replay_stop_button.configure(state="disabled")
-        self.replay_stop_button.pack(side="left", padx=(6, 0))
+        self.replay_stop_button.pack(side="left", padx=(self.ui.space_sm, 0))
         self.playback_clock = tk.StringVar(self.window, "00:00:00 / 00:00:00")
         self._label(player_actions, "", textvariable=self.playback_clock, bg=self.ui.card,
                     fg=self.ui.text_muted).pack(side="right", padx=(self.ui.space_sm, 0))
@@ -2822,7 +2846,7 @@ class MeetingWindow:
         self.transcript_style_box.pack(side="left")
         self.transcript_style_box.bind("<<ComboboxSelected>>", self._transcript_style_changed)
         self.copy_transcript_button = self._button(format_row, tr("Copiar"), self.copy_transcript, accent=True)
-        self.copy_transcript_button.pack(side="right", padx=(6, 0))
+        self.copy_transcript_button.pack(side="right", padx=(self.ui.space_sm, 0))
         self._button(format_row, tr("Exportar…"), self.export_transcript).pack(side="right")
         self.transcript_document_status = tk.StringVar(
             self.window, tr("Escolha o formato depois de gravar, sem transcrever novamente."),
@@ -2835,7 +2859,10 @@ class MeetingWindow:
         self.transcript_document_frame.pack(fill="both", expand=True, padx=(12, 0))
         self.transcript_document = tk.Text(
             self.transcript_document_frame, height=8, wrap="word", font=self.ui.font(),
-            padx=self.ui.space_md, pady=self.ui.space_md, spacing3=self.ui.space_sm,
+            padx=self.ui.space_md, pady=self.ui.space_md,
+            # Typography: half a rendered body line gives 1.5 line height.
+            spacing2=round(tkfont.Font(root=self.window, font=self.ui.body()).metrics("linespace") / 2),
+            spacing3=self.ui.space_sm,
             **self.ui.text_colors(), **self.ui.entry_chrome(readonly=True),
         )
         ui_theme.focus_ring(self.transcript_document, self.ui, shrink=("bd",))
@@ -2849,6 +2876,15 @@ class MeetingWindow:
         self.transcript_document.configure(yscrollcommand=document_scroll.set)
         self.transcript_document.configure(state="disabled")
         self.transcript_document.bind("<Control-a>", self._select_transcript_text)
+        self.transcript_document.bind("<Configure>", self._transcript_measure)
+        self.transcript_document.tag_configure("timestamp", foreground=self.ui.text_muted,
+                                               font=self.ui.mono(), underline=True)
+        self.transcript_document.bind("<Button-1>", self._timestamp_click, add="+")
+        self.transcript_document.bind("<Return>", self._timestamp_enter, add="+")
+        self.transcript_audio_toggle = self._button(
+            transcript_page, tr("Trechos para ouvir") + " ▾", self._toggle_transcript_audio,
+        )
+        self.transcript_audio_toggle.pack(anchor="w", padx=self.ui.space_md, pady=self.ui.space_sm)
         self.timed_transcript = ttk.Frame(transcript_page, style="Meeting.TFrame")
 
         # Processing is independent of the selected presentation format.
@@ -2870,7 +2906,7 @@ class MeetingWindow:
         action_buttons = ttk.Frame(actions, style="Meeting.TFrame")
         action_buttons.grid(row=1, column=0, sticky="w")
         self.transcribe_button = self._button(action_buttons, tr("Transcrever novamente"), self.transcribe)
-        self.transcribe_button.pack(side="left", padx=(0, 6))
+        self.transcribe_button.pack(side="left", padx=(0, self.ui.space_sm))
         self.cancel_processing_button = self._button(
             action_buttons, tr("Cancelar"), lambda: self._action("cancel_processing", urgent=True),
         )
@@ -2927,7 +2963,7 @@ class MeetingWindow:
         self.report_profile_box = ttk.Combobox(
             summary_setup, textvariable=self.report_profile_choice, state="readonly", width=20,
         )
-        self.report_profile_box.pack(fill="x", pady=(2, 4))
+        self.report_profile_box.pack(fill="x", pady=(self.ui.space_xs, 4))
         self.report_profile_box.bind("<<ComboboxSelected>>", self._report_profile_changed)
         self.summary_format_hint = tk.StringVar(self.window)
         self._wrap_label(
@@ -2940,7 +2976,7 @@ class MeetingWindow:
                 self.summary_focus_panel, self.summary_focus_toggle, tr("Personalizar"),
             ),
         )
-        self.summary_focus_toggle.pack(anchor="w", pady=(6, 0))
+        self.summary_focus_toggle.pack(anchor="w", pady=(self.ui.space_sm, 0))
         self.summary_focus_panel = ttk.Frame(summary_setup, style="Meeting.TFrame")
         self._label(self.summary_focus_panel, tr("Foco adicional (opcional, até 600 caracteres)"),
                     anchor="w").pack(fill="x")
@@ -2949,7 +2985,7 @@ class MeetingWindow:
             **self.ui.text_colors(), **self.ui.entry_chrome(),
         )
         ui_theme.focus_ring(self.summary_focus, self.ui, shrink=("bd",))
-        self.summary_focus.pack(fill="x", pady=(2, 2))
+        self.summary_focus.pack(fill="x", pady=(self.ui.space_xs, self.ui.space_xs))
         self._wrap_label(
             self.summary_focus_panel, tr("Ex.: priorize próximos passos e dúvidas que precisam de decisão."),
             fg=self.ui.text_muted, anchor="w", justify="left",
@@ -2964,14 +3000,14 @@ class MeetingWindow:
             generate_row, tr("Cancelar"),
             self.cancel_summary_generation,
         )
-        self._park_cancel(self.cancel_summary_button, "pack", side="left", padx=6)
+        self._park_cancel(self.cancel_summary_button, "pack", side="left", padx=self.ui.space_sm)
         self.summary_status = tk.StringVar(
             self.window, tr("Escolha um formato. Cada resumo é salvo como uma nova versão nesta gravação."),
         )
         self._wrap_label(summary_page, "", textvariable=self.summary_status,
                          fg=self.ui.text_muted, anchor="w").pack(fill="x", padx=12, pady=(4, 0))
         summary_body = ttk.Frame(summary_page, style="Meeting.TFrame")
-        summary_body.pack(fill="both", expand=True, padx=(12, 0), pady=(6, 0), after=summary_header)
+        summary_body.pack(fill="both", expand=True, padx=(12, 0), pady=(self.ui.space_sm, 0), after=summary_header)
         self.summary = tk.Text(summary_body, height=12, wrap="word", font=self.ui.font(),
                                padx=self.ui.space_sm, pady=self.ui.space_sm,
                                spacing3=self.ui.space_sm,
@@ -3005,55 +3041,55 @@ class MeetingWindow:
             report_frame,
             tr("Abra uma versão anterior ou duplique o formato selecionado para criar o seu."),
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-        ).pack(fill="x", pady=(2, 6))
+        ).pack(fill="x", pady=(self.ui.space_xs, self.ui.space_sm))
         profile_row = tk.Frame(report_frame, bg=self.ui.card)
         format_toggle = self._button(report_frame, tr("Formatos personalizados") + " ▾",
             lambda: self._toggle_detail_panel(profile_row, format_toggle, tr("Formatos personalizados")))
         format_toggle.pack(anchor="w", pady=self.ui.space_xs)
         self._button(profile_row, tr("Criar"), self.create_report_profile).grid(row=0, column=0, sticky="ew")
-        self._button(profile_row, tr("Duplicar"), self.duplicate_report_profile).grid(row=0, column=1, sticky="ew", padx=3)
+        self._button(profile_row, tr("Duplicar"), self.duplicate_report_profile).grid(row=0, column=1, sticky="ew", padx=self.ui.space_xs)
         self._button(profile_row, tr("Editar"), self.edit_report_profile).grid(row=0, column=2, sticky="ew")
         self.report_disable_button = self._button(profile_row, tr("Desativar"), self.disable_report_profile)
-        self.report_disable_button.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+        self.report_disable_button.grid(row=1, column=0, sticky="ew", pady=(self.ui.space_xs, 0))
         self.report_enable_button = self._button(profile_row, tr("Ativar"), self.enable_report_profile)
-        self.report_enable_button.grid(row=1, column=1, sticky="ew", padx=3, pady=(3, 0))
-        self._button(profile_row, tr("Excluir"), self.delete_report_profile, danger=True).grid(row=1, column=2, sticky="ew", pady=(3, 0))
+        self.report_enable_button.grid(row=1, column=1, sticky="ew", padx=self.ui.space_xs, pady=(self.ui.space_xs, 0))
+        self._button(profile_row, tr("Excluir"), self.delete_report_profile, danger=True).grid(row=1, column=2, sticky="ew", pady=(self.ui.space_xs, 0))
         for column in range(3):
             profile_row.columnconfigure(column, weight=1)
         history_row = tk.Frame(report_frame, bg=self.ui.card)
-        history_row.pack(fill="x", pady=2)
-        self._label(history_row, tr("Histórico"), bg=self.ui.card).pack(side="left", padx=(0, 6))
+        history_row.pack(fill="x", pady=self.ui.space_xs)
+        self._label(history_row, tr("Histórico"), bg=self.ui.card).pack(side="left", padx=(0, self.ui.space_sm))
         self.report_history_choice = tk.StringVar(self.window)
         self.report_history_box = ttk.Combobox(
             history_row, textvariable=self.report_history_choice, state="readonly", width=12,
         )
         self.report_history_box.pack(side="left", fill="x", expand=True)
         self.report_history_box.bind("<<ComboboxSelected>>", self._report_history_changed)
-        self._button(history_row, tr("Atualizar"), self.refresh_reports).pack(side="left", padx=(6, 0))
+        self._button(history_row, tr("Atualizar"), self.refresh_reports).pack(side="left", padx=(self.ui.space_sm, 0))
         section_row = tk.Frame(report_frame, bg=self.ui.card)
-        section_row.pack(fill="x", pady=2)
-        self._label(section_row, tr("Seção"), bg=self.ui.card).pack(side="left", padx=(0, 6))
+        section_row.pack(fill="x", pady=self.ui.space_xs)
+        self._label(section_row, tr("Seção"), bg=self.ui.card).pack(side="left", padx=(0, self.ui.space_sm))
         self.report_section_choice = tk.StringVar(self.window)
         self.report_section_box = ttk.Combobox(
             section_row, textvariable=self.report_section_choice, state="readonly", width=10,
         )
         self.report_section_box.pack(side="left", fill="x", expand=True)
         self.report_section_box.bind("<<ComboboxSelected>>", self._report_section_changed)
-        self._button(section_row, tr("Copiar seção"), self.copy_report_section).pack(side="left", padx=(6, 0))
-        self._button(section_row, tr("Exportar…"), self.export_report).pack(side="left", padx=(6, 0))
+        self._button(section_row, tr("Copiar seção"), self.copy_report_section).pack(side="left", padx=(self.ui.space_sm, 0))
+        self._button(section_row, tr("Exportar…"), self.export_report).pack(side="left", padx=(self.ui.space_sm, 0))
         self.report_provenance = tk.StringVar(self.window, tr("Nenhum relatório selecionado."))
         provenance = tk.Frame(report_frame, bg=self.ui.card)
         disclosure = self._button(report_frame, tr("Detalhes da versão") + " ▾",
             lambda: self._toggle_detail_panel(provenance, disclosure, tr("Detalhes da versão")))
         disclosure.pack(anchor="w", pady=self.ui.space_xs)
         self._wrap_label(provenance, "", textvariable=self.report_provenance, bg=self.ui.card,
-                         fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=2)
+                         fg=self.ui.text_muted, anchor="w", justify="left").pack(fill="x", pady=self.ui.space_xs)
         self.report_editor = tk.Text(report_frame, height=6, wrap="word", font=self.ui.font(),
                                      **self.ui.text_colors(), **self.ui.entry_chrome())
         ui_theme.focus_ring(self.report_editor, self.ui, shrink=("bd",))
-        self.report_editor.pack(fill="x", pady=(4, 2))
+        self.report_editor.pack(fill="x", pady=(4, self.ui.space_xs))
         report_actions = tk.Frame(report_frame, bg=self.ui.card)
-        report_actions.pack(fill="x", pady=2)
+        report_actions.pack(fill="x", pady=self.ui.space_xs)
         self._button(report_actions, tr("Salvar revisão"), self.save_report_review).pack(side="left")
         self._label(report_actions, tr("Citações"), bg=self.ui.card, fg=self.ui.text_muted).pack(side="left", padx=(12, 4))
         self.report_citations = tk.Listbox(report_actions, height=2, width=10,
@@ -3062,7 +3098,7 @@ class MeetingWindow:
         ui_theme.focus_ring(self.report_citations, self.ui, shrink=("bd",))
         self.report_citations.pack(side="left", fill="x", expand=True)
         self.report_citations.bind("<Double-Button-1>", lambda _event: self.jump_to_report_citation())
-        self._button(report_actions, tr("Ir à fonte"), self.jump_to_report_citation).pack(side="left", padx=(6, 0))
+        self._button(report_actions, tr("Ir à fonte"), self.jump_to_report_citation).pack(side="left", padx=(self.ui.space_sm, 0))
         self._set_report_profiles([])
 
         self.meeting_chat = MeetingChat(
@@ -3081,7 +3117,8 @@ class MeetingWindow:
                     font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(0, 4))
         exports = ttk.Frame(files_page, style="Meeting.TFrame")
         exports.pack(fill="x", padx=(12, 0), pady=(0, self.ui.space_md))
-        self._button(exports, "Markdown…", lambda: self.export("markdown")).pack(side="left", padx=(0, 6))
+        self._button(exports, tr("Markdown…"), lambda: self.export("markdown")).pack(
+            side="left", padx=(0, self.ui.space_sm))
         self._button(exports, tr("Texto…"), lambda: self.export("text")).pack(side="left")
 
         audio = self._card(files_page, padx=self.ui.space_md, pady=self.ui.space_md)
@@ -3092,7 +3129,7 @@ class MeetingWindow:
         self.final_audio_status = tk.StringVar(self.window, tr("Selecione uma gravação."))
         self._wrap_label(audio, "", textvariable=self.final_audio_status, bg=self.ui.card,
                          fg=self.ui.text_muted, anchor="w", justify="left").grid(
-                             row=1, column=0, sticky="ew", pady=(2, 0))
+                             row=1, column=0, sticky="ew", pady=(self.ui.space_xs, 0))
         self.export_audio_button = self._button(audio, tr("Baixar áudio final…"), self.export_audio)
         self.export_audio_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(self.ui.space_md, 0))
         self.recover_audio_button = self._button(audio, tr("Preparar áudio final"), self.prepare_final_audio)
@@ -3202,7 +3239,7 @@ class MeetingWindow:
             tr("Apagar não garante eliminação forense em SSDs, e cópias que você exportou para outras pastas "
                "não são afetadas."),
             bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
-        ).grid(row=10, column=0, sticky="ew", pady=(self.ui.space_md, 2))
+        ).grid(row=10, column=0, sticky="ew", pady=(self.ui.space_md, self.ui.space_xs))
         footer = tk.Frame(card, bg=self.ui.card)
         footer.grid(row=11, column=0, sticky="ew", pady=(self.ui.space_sm, 0))
         self.privacy_status = tk.StringVar(self.window, tr("Configurações de privacidade carregando…"))
@@ -4212,7 +4249,7 @@ class MeetingWindow:
 
     def _sync_summary_setup_label(self):
         label = tr("Gerar outra versão") if self.summary_text else tr("Gerar resumo")
-        self.summary_setup_toggle.configure(text=label + (" ▴" if self.summary_setup.winfo_manager() else " ▾"))
+        ui_theme.disclosure(self.summary_setup_toggle, label, bool(self.summary_setup.winfo_manager()), self.ui)
         setup_open = bool(self.summary_setup.winfo_manager())
         for widget, primary in (
             (self.copy_summary_button, bool(self.summary_text)),
@@ -7122,13 +7159,58 @@ class MeetingWindow:
         return "break"
 
     def _sync_transcript_style(self):
-        if self.transcript_style.get() == tr("Com horários"):
-            self.transcript_document_frame.pack_forget()
-            self.timed_transcript.pack(fill="both", expand=True, after=self.transcript_processing_actions)
+        self.transcript_document_frame.pack(fill="both", expand=True, padx=(self.ui.space_md, 0),
+                                            after=self.transcript_processing_actions)
+        if getattr(self, "transcript_audio_expanded", False):
+            self.timed_transcript.pack(fill="both", expand=True, after=self.transcript_audio_toggle)
         else:
             self.timed_transcript.pack_forget()
-            self.transcript_document_frame.pack(fill="both", expand=True, padx=(12, 0),
-                                                after=self.transcript_processing_actions)
+
+    def _toggle_transcript_audio(self):
+        self.transcript_audio_expanded = not self.transcript_audio_expanded
+        ui_theme.disclosure(self.transcript_audio_toggle, tr("Trechos para ouvir"),
+                            self.transcript_audio_expanded, self.ui)
+        self._sync_transcript_style()
+
+    def _transcript_measure(self, event):
+        # 680px is a reading measure, not a spacing token. Extra room becomes
+        # symmetric whitespace instead of longer lines at wide window sizes.
+        self.transcript_document.configure(padx=max(self.ui.space_md, (event.width - self.ui.px(680)) // 2))
+
+    def _tag_transcript_timestamps(self, text, context):
+        self._transcript_timestamp_context = context
+        self._transcript_timestamps = {}
+        # Tcl 8.6 counts non-BMP characters differently from Python. Line-local
+        # ASCII timestamp columns stay exact even after emoji in earlier text.
+        for line_number, line in enumerate(text.split("\n"), 1):
+            match = re.match(r"^(\d{2,}):([0-5]\d):([0-5]\d)(?=[: ])", line)
+            if match is None:
+                continue
+            tag = f"timestamp_{line_number}"
+            start, end = f"{line_number}.0", f"{line_number}.{match.end()}"
+            self.transcript_document.tag_add("timestamp", start, end)
+            self.transcript_document.tag_add(tag, start, end)
+            self._transcript_timestamps[tag] = int(match[1]) * 3600 + int(match[2]) * 60 + int(match[3])
+
+    def _seek_document_timestamp(self, index):
+        context = getattr(self, "_transcript_timestamp_context", None)
+        if (not context or self.closed or not self.detail_ready or not self.transcript_document_ready
+                or context != (self.selected, self.transcript_revision, self.transcript_document_request)):
+            return
+        for tag in self.transcript_document.tag_names(index):
+            if tag in self._transcript_timestamps:
+                self.position.set(str(self._transcript_timestamps[tag]))
+                self.play()
+                break
+
+    def _timestamp_click(self, event):
+        index = self.transcript_document.index(f"@{event.x},{event.y}")
+        self.transcript_document.mark_set("insert", index)
+        self._seek_document_timestamp(index)
+
+    def _timestamp_enter(self, _event=None):
+        self._seek_document_timestamp("insert")
+        return "break"
 
     def _transcript_style_changed(self, _event=None):
         self._sync_transcript_style()
@@ -7179,6 +7261,10 @@ class MeetingWindow:
             self.transcript_document.configure(state="normal")
             self.transcript_document.delete("1.0", "end")
             self.transcript_document.insert("1.0", text)
+            if style == "timestamped":
+                self._tag_transcript_timestamps(text, (session_id, revision, request))
+            else:
+                self._transcript_timestamp_context = None
             self.transcript_document.configure(state="disabled")
             self.copy_transcript_button.configure(
                 state="normal" if text and not self.transcript_document_truncated else "disabled",
@@ -7774,6 +7860,15 @@ class MeetingWindow:
         self.summary.configure(state="normal")
         self.summary.delete("1.0", "end")
         self.summary.insert("1.0", text[:65536] or tr("O resumo aparecerá aqui após o processamento local."))
+        self.summary.tag_configure("heading", font=self.ui.heading(), spacing1=self.ui.space_lg,
+                                   spacing3=self.ui.space_sm)
+        self.summary.tag_configure("bullet", lmargin1=self.ui.space_sm, lmargin2=self.ui.space_lg,
+                                   spacing3=self.ui.space_xs)
+        for number, line in enumerate(text[:65536].splitlines(), 1):
+            if line.startswith("• "):
+                self.summary.tag_add("bullet", f"{number}.0", f"{number}.end")
+            elif line.endswith(":") and line:
+                self.summary.tag_add("heading", f"{number}.0", f"{number}.end")
         self.summary.configure(state="disabled")
         self.summary_text = text
         self._summary_reason = None
@@ -8043,6 +8138,9 @@ class MeetingWindow:
                 shown = meter_value(value)
                 if float(meter.cget("value")) != shown:
                     meter.configure(value=shown)
+                readout = getattr(self, "meter_readouts", {}).get(track)
+                if readout is not None:
+                    readout.configure(text=meter_decibels(value))
             if self.previous_state in ("starting", "recording", "paused", "stopping") and not active:
                 self._recording_finished(self.snapshot)
             if state != self.previous_state and self.on_recording_state_changed:

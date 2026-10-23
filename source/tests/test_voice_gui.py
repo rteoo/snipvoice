@@ -77,6 +77,16 @@ def _ancestors(widget):
 
 
 class DictationPresentationTests(unittest.TestCase):
+    def test_manager_title_tracks_capture_state_without_changing_identity(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.manager_window, app.refresh_tray_menu = mock.Mock(), mock.Mock()
+        for state, caption in (("starting", "Iniciando"), ("recording", "Gravando"),
+                               ("paused", "Pausado"), ("stopping", "Salvando"), ("idle", None)):
+            app._manager_recording_state_changed(state, {})
+            title = app.manager_window.title.call_args.args[0]
+            self.assertEqual(title, tx.APP_DISPLAY_NAME + (" · " + caption if caption else ""))
+        self.assertEqual(app.refresh_tray_menu.call_count, 5)
+
     def test_model_comparison_projects_the_actual_selectable_catalog_contract(self):
         from voice_catalog import selectable_catalog, format_size
         source = ast.parse(textwrap.dedent(inspect.getsource(tx.Snipvoice._build_voice_settings_controls)))
@@ -1015,7 +1025,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             return title, labels, primary_visible, has_secondary_buttons
 
         title, labels, primary_visible, has_secondary_buttons = self._on_gui(inspect)
-        self.assertEqual(title, "Mais opções ▾")
+        self.assertEqual(title, "Mais opções" if ui_theme.theme().icon_family else "Mais opções ▾")
         self.assertEqual(len(labels), 4)
         self.assertTrue(primary_visible)
         self.assertFalse(has_secondary_buttons)
@@ -1043,7 +1053,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             expected = {
                 "Salvar",
                 "Histórico de voz…",
-                "Mais opções ▾",
+                "Mais opções" if ui_theme.theme().icon_family else "Mais opções ▾",
             }
             self.assertTrue(expected.issubset(actions), actions)
             result = frame.winfo_height(), {

@@ -97,7 +97,7 @@ class MeetingChat(tk.Frame):
         suggestions.pack(anchor="w", fill="x")
         for suggestion in SUGGESTIONS:
             button = self._button(suggestions, tr(suggestion), lambda value=tr(suggestion): self._use_suggestion(value))
-            button.pack(anchor="w", pady=2)
+            button.pack(anchor="w", pady=self.theme.space_xs)
 
         # A notice sits between the conversation and the composer, out of the way
         # of both; it takes no height until a page has something to say.
@@ -120,7 +120,7 @@ class MeetingChat(tk.Frame):
             top, text=tr("Enter envia · Shift+Enter quebra linha"), bg=theme.card,
             fg=theme.text_muted, font=theme.font(8), anchor="w",
         )
-        self._keyboard_hint.grid(row=1, column=0, sticky="w", pady=(1, theme.space_xs))
+        self._keyboard_hint.grid(row=1, column=0, sticky="w", pady=(self.theme.space_xs, theme.space_xs))
         self.composer = tk.Text(
             top, height=3, wrap="word", undo=True, font=theme.font(),
             **theme.text_colors(), **theme.entry_chrome(),
@@ -197,9 +197,12 @@ class MeetingChat(tk.Frame):
         for message, inset in self._message_widgets:
             try:
                 if message.winfo_exists():
-                    message.configure(width=max(
-                        140, width - inset - self.theme.space_sm * 2 - self.theme.space_xs,
-                    ))
+                    if isinstance(message, tk.Text):
+                        self._answer_height(message)
+                    else:
+                        message.configure(width=max(
+                            140, width - inset - self.theme.space_sm * 2 - self.theme.space_xs,
+                        ))
             except tk.TclError:
                 continue
 
@@ -208,6 +211,20 @@ class MeetingChat(tk.Frame):
         if width <= 1:
             return 520
         return max(140, width - self.theme.space_lg * 2 - self.theme.space_sm * 2 - self.theme.space_xs)
+
+    @staticmethod
+    def _answer_height(message):
+        # Text width is in characters, unlike Message's pixel width. Pack owns
+        # the available width; display-line counting owns the wrapped height.
+        lines = message.count("1.0", "end-1c", "displaylines")
+        height = max(1, (int(lines[0]) if lines else 0) + 1)
+        if int(message.cget("height")) != height:
+            message.configure(height=height)
+
+    @staticmethod
+    def _select_answer(message):
+        message.tag_add("sel", "1.0", "end-1c")
+        return "break"
 
     def _composer_changed(self, event):
         width = max(180, event.width - self.theme.space_sm * 2)
@@ -342,7 +359,7 @@ class MeetingChat(tk.Frame):
 
         answer_box = tk.Frame(outer, bg=self.theme.surface)
         answer_box.pack(fill="x", pady=(self.theme.space_sm, 0))
-        tk.Label(answer_box, text="Snipvoice", bg=self.theme.surface,
+        tk.Label(answer_box, text="SnipVoice", bg=self.theme.surface,
                  fg=self.theme.text_muted, font=self.theme.font(8), anchor="w").pack(anchor="w")
         if turn.get("status") == "error":
             retry = ((tr("Tentar novamente"), lambda: self.on_retry(turn_id))
@@ -355,11 +372,21 @@ class MeetingChat(tk.Frame):
             self._bind_history_scroll_tree(outer)
             return
         answer_text = turn.get("answer") or (tr("Pensando…") if turn.get("status") == "pending" else "")
-        message = tk.Message(
-            answer_box, text=str(answer_text), bg=self.theme.card, fg=self.theme.text,
-            font=self.theme.font(), justify="left", anchor="nw", width=520,
-            padx=self.theme.space_sm, pady=self.theme.space_sm,
+        message = tk.Text(
+            answer_box, bg=self.theme.card, fg=self.theme.text,
+            font=self.theme.body(), wrap="word", width=1, height=1,
+            padx=self.theme.space_sm, pady=self.theme.space_sm, relief="flat", bd=0,
+            selectbackground=self.theme.select_bg, selectforeground=self.theme.select_fg,
+            highlightthickness=1, highlightbackground=self.theme.border,
+            highlightcolor=self.theme.focus_ring, takefocus=True,
         )
+        message.insert("1.0", str(answer_text))
+        message.configure(state="disabled")
+        ui_theme.focus_ring(message, self.theme)
+        message.bind("<Control-a>", lambda _event, widget=message: self._select_answer(widget))
+        if self.theme.system == "darwin":
+            message.bind("<Command-a>", lambda _event, widget=message: self._select_answer(widget))
+        message.bind("<Configure>", lambda _event, widget=message: self._answer_height(widget))
         message.pack(fill="x")
         self._message_widgets.append((message, 0))
         uncertainty = str(turn.get("uncertainty") or "").strip()
@@ -372,18 +399,18 @@ class MeetingChat(tk.Frame):
                 fg=getattr(self.theme, UNCERTAINTY_TONES.get(level, "text_muted")),
                 font=self.theme.caption(), justify="left", anchor="w", width=self._message_width(),
             )
-            uncertainty_message.pack(fill="x", pady=(2, 0))
+            uncertainty_message.pack(fill="x", pady=(self.theme.space_xs, 0))
             self._message_widgets.append((uncertainty_message, 0))
         sources = tk.Frame(answer_box, bg=self.theme.surface)
         sources.pack(fill="x", pady=(self.theme.space_xs, 0))
         for index, citation in enumerate(turn.get("citations") or (), 1):
             self._button(sources, tr("Fonte {index}", index=index), lambda value=citation: self.on_source(turn_id, value)).pack(
-                anchor="w", pady=1,
+                anchor="w", pady=self.theme.space_xs,
             )
         actions = tk.Frame(answer_box, bg=self.theme.surface)
         actions.pack(fill="x", pady=(self.theme.space_xs, 0))
         copy = self._button(actions, tr("Copiar"), lambda: self.on_copy(turn_id))
-        copy.pack(side="left", pady=1)
+        copy.pack(side="left", pady=self.theme.space_xs)
         saving = bool(turn.get("saving"))
         saved = bool(turn.get("saved"))
         save = self._button(actions, tr("Salvando…") if saving else (tr("Salvo") if saved else tr("Salvar")),
@@ -393,7 +420,7 @@ class MeetingChat(tk.Frame):
         copy.configure(state="normal" if complete else "disabled")
         save.configure(state=("disabled" if self._busy or saving or saved or not complete or not self._can_save
                               else "normal"))
-        save.pack(side="left", padx=(self.theme.space_xs, 0), pady=1)
+        save.pack(side="left", padx=(self.theme.space_xs, 0), pady=self.theme.space_xs)
         self._answer_controls.append((status, copy, save, saving, saved))
         self._bind_history_scroll_tree(outer)
 

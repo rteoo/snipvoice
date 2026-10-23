@@ -23,7 +23,7 @@ from meeting_gui import (
     format_silence, format_time, hotkey_display, lost_sources, meter_value,
     open_meeting_window, playback_sources, recording_tone, retention_plan_projection,
     ManagerViewState, manager_poll_interval,
-    source_health, validated_settings, _append_detail_once,
+    source_health, validated_settings, _append_detail_once, meter_decibels,
     _processing_issue, _stage_status,
 )
 from meeting_index import INDEX_STATES
@@ -371,6 +371,7 @@ class Text:
     def __init__(self, text=""):
         self.text = text
         self.state = "normal"
+        self.tags = {}
 
     def get(self, *_args):
         return self.text
@@ -387,8 +388,91 @@ class Text:
     def edit_modified(self, *_args):
         return False
 
+    def tag_add(self, tag, start, end):
+        self.tags.setdefault(tag, []).append((start, end))
+
+    def tag_configure(self, *_args, **_kwargs):
+        pass
+
 
 class MeetingGuiLogicTests(unittest.TestCase):
+    def test_meter_decibels_are_actual_peak_dbfs_not_meter_normalization(self):
+        for peak, expected in ((1, "0.0 dBFS"), (0.1, "-20.0 dBFS"), (0.001, "-60.0 dBFS"),
+                               (0.00001, "-100.0 dBFS"), (2, "0.0 dBFS")):
+            self.assertEqual(meter_decibels(peak), expected)
+        for peak in (0, -1, None, "invalid", float("nan"), float("inf")):
+            self.assertEqual(meter_decibels(peak), "sem sinal")
+
+    def test_inline_timestamps_preserve_exact_text_and_use_line_local_indices_after_emoji(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.transcript_document = Text("00:00:02 Microfone: 😀 synthetic\n00:01:03 Sistema: next")
+        text = view.transcript_document.get()
+        view._tag_transcript_timestamps(text, ("one", "r1", 4))
+        self.assertEqual(view.transcript_document.get(), text)
+        self.assertEqual(view.transcript_document.tags["timestamp"], [("1.0", "1.8"), ("2.0", "2.8")])
+        self.assertEqual(view._transcript_timestamps, {"timestamp_1": 2, "timestamp_2": 63})
+        view.transcript_document.tag_names = lambda _index: ("timestamp", "timestamp_2")
+        view.closed, view.detail_ready, view.transcript_document_ready = False, True, True
+        view.selected, view.transcript_revision, view.transcript_document_request = "one", "r1", 4
+        view.position, view.snapshot, view._action = Variable(), {"state": "idle"}, mock.Mock()
+        view._seek_document_timestamp("2.0")
+        view._action.assert_called_once_with("seek_playback", "one", "final", start=63.0, urgent=True)
+        for field, stale in (("selected", "other"), ("transcript_revision", "r2"),
+                             ("transcript_document_request", 5), ("closed", True)):
+            old = getattr(view, field)
+            setattr(view, field, stale)
+            view._action.reset_mock()
+            view._seek_document_timestamp("2.0")
+            view._action.assert_not_called()
+            setattr(view, field, old)
+
+    def test_primary_text_stays_visible_in_both_styles_and_audio_navigation_is_opt_in(self):
+        view = MeetingWindow.__new__(MeetingWindow)
+        view.ui = ui_theme.build_theme("dark", system="windows")
+        view.transcript_document_frame, view.timed_transcript = mock.Mock(), mock.Mock()
+        view.transcript_processing_actions, view.transcript_audio_toggle = mock.Mock(), mock.Mock()
+        view.transcript_style = Variable("Com horários")
+        view.transcript_audio_expanded = False
+        view._sync_transcript_style()
+        view.transcript_document_frame.pack.assert_called_once()
+        view.timed_transcript.pack_forget.assert_called_once()
+        view._toggle_transcript_audio()
+        self.assertTrue(view.transcript_audio_expanded)
+        view.timed_transcript.pack.assert_called_once()
+        view.transcript_style.set("Texto completo")
+        view._sync_transcript_style()
+        self.assertTrue(view.transcript_audio_expanded)
+
+    def test_audio_page_beyond_truncated_primary_preview_keeps_bounded_seek_and_copy_contract(self):
+        view = new_view()
+        view.closed, view.selected, view.detail_ready = False, "one", True
+        view.transcript_revision, view.transcript_request = "r1", 0
+        view.transcript_document = Text("00:00:00 Microfone: limited preview")
+        primary = view.transcript_document.get()
+        view.transcript_document_ready, view.transcript_document_truncated = True, True
+        view.transcript_offset, view.transcript_has_more = 0, True
+        view.transcript, view.bridge = mock.Mock(), mock.Mock()
+        view.transcript.get_children.return_value = []
+        view.segments, view.segment_text, view.position = {}, Text(), Variable()
+        view.transcript_timing = Variable()
+        view.snapshot, view._action, view._submit = {"state": "idle"}, mock.Mock(), mock.Mock()
+        view._read_transcript_page = mock.Mock(return_value={"offset": TRANSCRIPT_PAGE_SIZE,
+            "has_previous": True, "has_more": True,
+            "segments": [{"id": "later", "start": 600, "text": "Beyond preview"}]})
+        view.change_transcript_page(1)
+        operation, callback = view._submit.call_args.args[1:]
+        callback(operation(), None)
+        self.assertEqual(view.transcript_offset, TRANSCRIPT_PAGE_SIZE)
+        view.transcript.selection.return_value = ("later",)
+        view._play_transcript_selected()
+        view._action.assert_called_once_with("seek_playback", "one", "final", start=600.0, urgent=True)
+        self.assertEqual(view.segment_text.get(), "Beyond preview")
+        self.assertEqual(view.transcript_document.get(), primary)
+        view._submit.reset_mock()
+        view.copy_transcript()
+        view._submit.assert_not_called()
+        self.assertEqual(view.transcript_document.get(), primary)
+
     def test_live_search_cancels_previous_timer_and_invalidates_old_reads(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.window = mock.Mock()
@@ -1885,6 +1969,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
     def make_edit_view(self):
         view = new_view()
+        view.ui = ui_theme.build_theme("dark", system="windows")
         view.selected, view.detail_ready = "one", True
         view.sessions = mock.Mock()
         view.sessions.selection.return_value = ("one",)
@@ -2143,6 +2228,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
 
     def test_summary_display_is_readable_and_read_only(self):
         view = MeetingWindow.__new__(MeetingWindow)
+        view.ui = ui_theme.build_theme("dark", system="windows")
         view.summary = Text()
         view.summary_status = Variable()
         view.summary_model_installed = {"local": True}
@@ -3088,6 +3174,50 @@ class ManagerLifecycleLogicTests(unittest.TestCase):
 
 
 class MeetingWindowSmokeTests(unittest.TestCase):
+    def test_inline_timestamp_reading_measure_and_typography_on_actual_text(self):
+        view, notebook = self._library_view("1600x1000")
+        notebook.select(view.library_tab)
+        view._show_library_detail(True)
+        view.detail_sections.select("transcript")
+        view.selected, view.detail_ready, view.transcript_revision = "synthetic", True, "r1"
+        preview = "00:00:02 Microfone: 😀 " + "readable words " * 120 + "\n00:01:03 Sistema: next"
+        view.controller.get_transcript_preview.return_value = {"text": preview, "truncated": False}
+        view.transcript_style.set("Com horários")
+        view._transcript_style_changed()
+        self._drain(view)
+        document = view.transcript_document
+        self.assertTrue(document.winfo_ismapped())
+        self.assertFalse(view.timed_transcript.winfo_ismapped())
+        self.assertEqual(document.get("1.0", "end-1c"), preview)
+        self.assertEqual(tuple(map(str, document.tag_ranges("timestamp"))), ("1.0", "1.8", "2.0", "2.8"))
+        body_line = ui_theme.tkfont.Font(root=self.root, font=document.cget("font")).metrics("linespace")
+        self.assertAlmostEqual(int(document.cget("spacing2")), body_line / 2, delta=0.5)
+        measure = document.winfo_width() - 2 * int(document.cget("padx"))
+        self.assertLessEqual(measure, view.ui.px(680) + 1)
+        view._action = mock.Mock()
+        document.focus_force()
+        document.mark_set("insert", "2.0")
+        document.event_generate("<Return>")
+        self.root.update()
+        view._action.assert_called_once_with("seek_playback", "synthetic", "final", start=63.0, urgent=True)
+        view._toggle_transcript_audio()
+        self.root.update()
+        self.assertTrue(view.timed_transcript.winfo_ismapped())
+        self.assertEqual(document.get("1.0", "end-1c"), preview)
+
+    def _assert_action_surface(self, button, ui, painted):
+        if ui.system == "darwin":
+            # Aqua owns its bezel. Compare with an actual native control while
+            # retaining the surrounding written-action/state/geometry checks.
+            native = tk.Button(button.master)
+            try:
+                self.assertEqual(button.cget("bg"), native.cget("bg"))
+                self.assertNotIsInstance(button, ui_theme._ThemedButton)
+            finally:
+                native.destroy()
+        else:
+            self.assertEqual(button.cget("bg"), painted)
+
     @classmethod
     def setUpClass(cls):
         try:
@@ -4496,7 +4626,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertEqual(tuple(tree.item("1", "values"))[2:], ("Expirada", "1,3 GB"))
         self.assertEqual(str(tree.column("size", "anchor")), "e")
         self.assertEqual(tree.selection(), ("0",))
-        self.assertEqual(view.trash_restore_button.cget("bg"), view.ui.accent)
+        self._assert_action_surface(view.trash_restore_button, view.ui, view.ui.accent)
         self.assertEqual(str(view.trash_purge_button.cget("state")), "normal")
         self.assertEqual(str(view.trash_empty_button.cget("state")), "normal")
         self.assertEqual(view.trash_status.get(), "2 gravações na lixeira · 1 expirada")
@@ -4575,7 +4705,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertEqual(str(button.cget("state")), "disabled")
         confirmation.typed.set(" excluir ")
         self.assertEqual(str(button.cget("state")), "normal")
-        self.assertEqual(button.cget("bg"), view.ui.danger_bg)
+        self._assert_action_surface(button, view.ui, view.ui.danger_bg)
         confirmation.typed.set("EXCLUIR")
         button.invoke()
         self.assertTrue(confirmation.confirmed)
@@ -4716,14 +4846,14 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self._poll_once(view, free)
         self.assertEqual(shown(), {"start": (True, "normal"), "pause": (False, "disabled"),
                                    "stop": (False, "disabled")})
-        self.assertEqual(view.start_button.cget("bg"), view.ui.accent)
+        self._assert_action_surface(view.start_button, view.ui, view.ui.accent)
         start_x = view.start_button.winfo_rootx()
         # While recording, Parar e salvar takes the primary's place, with Pausar beside it.
         self._poll_once(view, self._recording_snapshot())
         self.assertEqual(shown(), {"start": (False, "disabled"), "pause": (True, "normal"),
                                    "stop": (True, "normal")})
-        self.assertEqual((view.stop_button.cget("text"), view.stop_button.cget("bg")),
-                         ("Parar e salvar", view.ui.accent))
+        self.assertEqual(view.stop_button.cget("text"), "Parar e salvar")
+        self._assert_action_surface(view.stop_button, view.ui, view.ui.accent)
         self.assertEqual(view.stop_button.winfo_rootx(), start_x)
         self.assertEqual(view.pause_button.cget("text"), "Pausar")
         self.assertNotEqual(view.pause_button.cget("bg"), view.ui.accent)
@@ -4743,7 +4873,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertNotEqual(view.start_button.cget("bg"), view.ui.accent)
         self._poll_once(view, free)
         self.assertEqual(shown()["start"], (True, "normal"))
-        self.assertEqual(view.start_button.cget("bg"), view.ui.accent)
+        self._assert_action_surface(view.start_button, view.ui, view.ui.accent)
 
     def test_the_shortcut_is_named_beside_the_transport_when_one_is_set(self):
         import dataclasses

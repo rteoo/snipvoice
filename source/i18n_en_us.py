@@ -1,6 +1,12 @@
 """English (US) interface catalog: pt-BR source literal -> translation."""
 
 EN_US = {
+    'Chat': 'Chat',
+    'Mais opções': 'More options',
+    'Markdown…': 'Markdown…',
+    'Trechos para ouvir': 'Audio navigation',
+    'sem sinal': 'no signal',
+    'Salvando': 'Saving',
     # Meeting readiness and post-stop progress
     'Abrir Ditado': 'Open Dictation',
     'Atenção nesta página: {count}': 'Attention on this page: {count}',
@@ -97,7 +103,7 @@ EN_US = {
     'Português (Brasil)': 'Portuguese (Brazil)',
     'Inglês (Estados Unidos)': 'English (United States)',
     'Baixar {purpose} ({size})?\n\nLicença: {license}\n{attribution}\n\nO arquivo fica no cache local de modelos. A entrada por voz não será ativada automaticamente.': "Download {purpose} ({size})?\n\nLicense: {license}\n{attribution}\n\nThe file stays in the local model cache. Voice input won't be turned on automatically.",
-    'Histórico de Voz': 'Voice History',
+    'Histórico de voz': 'Voice history',
     'A gravação aguarda a recuperação local do SnipVoice.': "Recording is waiting for SnipVoice's local recovery.",
     'Entrada por voz indisponível. Verifique o runtime de transcrição.': 'Voice input unavailable. Check the transcription runtime.',
     'Indisponível': 'Unavailable',
@@ -137,7 +143,6 @@ EN_US = {
     'A entrada por voz será desligada e só o modelo deste perfil será apagado.': "Voice input will be turned off and only this profile's model will be deleted.",
     'Histórico de voz…': 'Voice history…',
     'Atalho de gravação indisponível. Revise os atalhos nas configurações.': 'Recording shortcut unavailable. Check the shortcuts in Settings.',
-    'Gravações e ditado': 'Recordings and dictation',
     '100% local': '100% local',
     'sem upload automático': 'no automatic upload',
     'Não foi possível abrir as configurações de inicialização do Windows.': "Couldn't open the Windows startup settings.",

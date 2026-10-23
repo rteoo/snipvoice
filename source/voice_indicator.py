@@ -252,7 +252,7 @@ class VoiceStatusIndicator:
         container = tk.Frame(
             window,
             bg=ui.overlay_bg,
-            padx=14,
+            padx=ui.space_lg,
             pady=8,
             highlightbackground=ui.overlay_border,
             highlightthickness=1,
@@ -310,7 +310,7 @@ class VoiceStatusIndicator:
             font=ui.caption(),
             anchor="w",
         )
-        self.subtitle_label.pack(fill=tk.X, anchor="w", pady=(1, 0))
+        self.subtitle_label.pack(fill=tk.X, anchor="w", pady=(ui.space_xs, 0))
 
         if current_os() == "windows":
             try:
@@ -333,6 +333,10 @@ class VoiceStatusIndicator:
                 self._native_hwnd = None
 
     def _start_animation(self):
+        if not ui_theme.client_area_animation_enabled():
+            self._stop_animation()
+            self._draw_waveform(_WAVE_HEIGHTS[0])
+            return
         if self._animation_after_id is None and self.window is not None:
             self._animation_after_id = self.window.after(110, self._animate_waveform)
 
@@ -354,6 +358,10 @@ class VoiceStatusIndicator:
         heights = _WAVE_HEIGHTS[self._animation_frame]
         if self._state != "recording":
             heights = tuple(max(5, value // 2) for value in heights)
+        self._draw_waveform(heights)
+        self._start_animation()
+
+    def _draw_waveform(self, heights):
         for index, (item, height_value) in enumerate(zip(self.waveform_bars, heights)):
             x_position = 6 + index * 9
             self.waveform.coords(
@@ -363,7 +371,6 @@ class VoiceStatusIndicator:
                 x_position,
                 15 + height_value / 2,
             )
-        self._start_animation()
 
     def _show_without_activation(self):
         """Reveal without moving keyboard focus away from the dictation target."""

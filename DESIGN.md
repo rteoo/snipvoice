@@ -171,7 +171,7 @@ Spacing follows the 4/8/12/16/24 portion of the system scale.
 | Mica window base | Opaque `#292929`/`#e9e8e7` base | Tk cannot render materials; opaque fallback. |
 | Focus ring with an offset | 2px ring touching the control; Win32 push buttons also draw their dotted focus rectangle inside it | Tk has no outline offset. Win32 never draws a push button's highlight ring, so the ring is the button's default ring, which Win32 always pairs with its own focus rectangle. The dark ring on a copper fill is 1.35:1 against the fill but ≥5.59:1 against every surface around it. |
 | 0.45 disabled opacity | `disabled_fg` blend | Tk has no opacity. |
-| Fluent icons in navigation | Text-only navigation | Not adopted yet. |
+| Fluent icons in navigation | Segoe Fluent Icons, then Segoe MDL2 Assets; readable Unicode fallback | Written navigation labels remain in the body face. Icon faces are resolved from installed fonts. |
 | Copper selection pill in lists | Selection plane only | Not adopted yet. A Treeview can carry the pill as an image in its tree column (`#0`); until a list adopts it, the plane alone marks selection. In Light the plane is 1.25:1 against white content (a DS 2.7.1 gap). |
 | Copper selection pill in combobox popdowns | Selection plane only | The popdown is a Tk listbox, which cannot draw a marker or an image. |
 | State tone on one list cell | The whole row takes the state's tone; Concluída rows stay in text color | Only Tk 9 can tone one cell (`tag cell`), and the release bundles ship Python 3.12 with Tk 8.6. On Tk 8.6.12 and 9.0.4 a selected row draws `select_fg` over any tag (probed), which keeps dark danger off the selection plane (4.02:1). |
@@ -511,6 +511,52 @@ Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execu�
 These changes require the source/native checks below before being treated as
 verified platform behavior; they do not certify a packaged build.
 
+### Visual polish and accessibility
+
+- The transcript uses one selectable, wrapped Text surface for both full text
+  and timed presentation. Timestamp styling never rewrites the formatted preview
+  or changes Copy/Export. Clicking a timestamp or pressing Enter there uses the
+  existing guarded seek path. A collapsed **Trechos para ouvir** disclosure keeps
+  the bounded segment pages available for audio navigation beyond a truncated
+  preview; those pages do not replace the primary document. Its open state is
+  retained as a Python value through manager rebuilding.
+- Wide transcript panes center a maximum 680px reading measure. Half the actual
+  body font's line height separates wrapped display lines; paragraph gaps use
+  the spacing scale. Summary headings use the heading role, and bullets use a
+  hanging indent without changing the copied summary text.
+- Signal labels show actual peak dBFS (`20 log10(peak)`), or **sem sinal** for
+  absent/invalid signal. This is a digital peak reading, not acoustic loudness.
+- Answers use readonly selectable Text, with body text, word wrapping and height
+  derived from wrapped display lines. Text width is measured in characters;
+  its container owns pixel width. Ctrl+A selects the focused answer, and Tk's
+  readonly copy binding remains available. The existing 2px focus treatment and
+  history scrolling apply to answers too.
+- The manager title follows starting, recording, paused and saving states.
+  Sidebar identity is **SnipVoice**, with the version in a muted caption.
+  Settings stays at the bottom of navigation. Icons use semantic microphone,
+  folder and settings mappings; disclosure icons use their own icon face rather
+  than appending a private-use character to body text.
+- Windows contrast themes override the resolved palette with current Win32
+  system colors converted to hex; the saved Light/Dark/System preference stays
+  intact. Activation checks contrast changes even with an explicit preference.
+  Reduced client-area animation gives the Tk HUD static bars and no animation
+  timer. The native macOS HUD and Aqua button painting remain platform-owned.
+- Layout gaps follow 4/8/12/16/24. The source guard distinguishes gaps from
+  geometry: zero/one-pixel edges, 2px focus, 3px selection markers, 32px density,
+  the 680px reading measure and half-line typography are semantic dimensions.
+  Calculated button padding preserves its 32px target; it is not a new gap token.
+- Model IDs wrap at separators before splitting long components; hover/focus
+  still discloses the exact identifier. The icon SVG changes palette only,
+  preserving contours, placement, gradients and alpha. Derivative generation
+  retains the PNG/ICNS canvas; Windows ICO alone normalizes the exterior alpha
+  margin to its existing frame-fill contract.
+- `Chat` and `Markdown…` pass through translation, and **Histórico de voz** uses
+  sentence case. There is no capitalized `Bytes` UI callsite to replace; existing
+  lower-case byte inventory labels already use translation.
+
+Source and mocked API checks do not establish actual Windows contrast-theme,
+reduced-motion, Narrator, Aqua, display-scaling or packaged-build behavior.
+
 Each gate is passed, failed, or not tested, with its evidence. A browser or
 scratch-harness screenshot cannot pass a packaged-build gate.
 
@@ -519,14 +565,14 @@ scratch-harness screenshot cannot pass a packaged-build gate.
 | Palette and contrast | Passed | `tests/test_ui_theme.py` pins both palettes and checks 4.5:1 text and 3:1 boundaries, focus, marks and chart roles. |
 | Dark and Light appearance | Passed (source build) | Real manager built from source with synthetic data, both appearances, Gravação, Biblioteca detail, Ditado and every Configurações section. |
 | Live System appearance changes | Implemented; runtime verification pending | Manager activation re-probes System appearance and uses the guarded rebuild path. |
-| Windows contrast themes | Not tested | Palette does not yet yield to high-contrast system colors. |
+| Windows contrast themes | Implemented; real OS theme verification pending | Mocked SPI/COLORREF checks cover hex resolution and saved-preference preservation. |
 | Minimum window 1040 × 700 and default 1120 × 820 | Passed (source build, 100% scale) | No control narrower or shorter than requested at either size; the recording page fits without scrolling at the minimum (`tests/test_voice_gui.py`). The library with a selected recording and its InfoBar clips nothing at 1040×700, 1120×820 and 1440×900 in both appearances (scratch harness on the source build). With a lost source the recording page keeps meters, warning and transport in view at 1040×700 (`tests/test_voice_gui.py`); a Library message bar fits at the minimum width (`tests/test_meeting_gui.py`). |
 | Compact 32px density | Passed on Windows source baseline; cross-platform sizing changes pending verification | The button factory measures native requests to enforce the minimum. Existing Rename and action-row geometry assertions remain required on every CI platform. |
 | Visible keyboard focus | Passed (source build) for buttons, menu buttons, comboboxes, entries, text fields, list boxes, lists, the slider and navigation | Before/after captures in both appearances, including the chat composer, the summary focus field and the citation list; `tests/test_ui_theme.py` checks that text fields and list boxes keep their size through focus. Checkboxes keep Win32's dotted rectangle. |
 | Full keyboard path, tab order | Not tested | |
 | Display scaling 125/150/200%, mixed DPI | Not tested | The source declares no DPI awareness; fonts follow Tk's scaling factor. |
 | Narrator / UI Automation | Not tested | |
-| Reduced motion | Failed | The HUD bars animate regardless of the system animation setting. |
+| Reduced motion | Implemented; real OS preference verification pending | Mocked client-area animation preference verifies static Tk HUD bars with no timer. |
 | macOS Aqua controls and HUD | Not tested | Requires a Mac. |
 | Packaged app smoke (Windows, macOS) | Not tested | |
 

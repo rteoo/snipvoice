@@ -135,6 +135,109 @@ def contrast(a, b):
     return (high + 0.05) / (low + 0.05)
 
 
+class AccessibilityPresentationTests(unittest.TestCase):
+    def test_disclosure_keeps_body_label_separate_and_icon_click_uses_the_existing_command(self):
+        ui = ui_theme.build_theme("dark", system="windows", families={"Segoe Fluent Icons"})
+        options = {"bg": ui.card, "fg": ui.text, "padx": 8, "font": ui.body()}
+        widget = types.SimpleNamespace(cget=lambda key: options[key],
+            configure=lambda **values: options.update(values), invoke=mock.Mock(),
+            winfo_class=lambda: "Button")
+        glyph = mock.Mock()
+        with mock.patch("ui_theme.tk.Label", return_value=glyph) as label:
+            ui_theme.disclosure(widget, "Synthetic details", False, ui)
+            self.assertEqual((options["text"], options["font"]), ("Synthetic details", ui.body()))
+            self.assertEqual(label.call_args.kwargs["font"], ui.icon_font())
+            self.assertFalse(label.call_args.kwargs["takefocus"])
+            glyph.bind.call_args.args[1](None)
+            widget.invoke.assert_called_once_with()
+            inset = options["padx"]
+            ui_theme.disclosure(widget, "Synthetic details", True, ui)
+            label.assert_called_once()
+            self.assertEqual(options["padx"], inset)
+            glyph.configure.assert_called_with(text=ui.icon("up"))
+
+    def test_semantic_icons_choose_fluent_then_mdl2_then_readable_unicode(self):
+        for families, expected in (({"Segoe Fluent Icons", "Segoe MDL2 Assets"}, "Segoe Fluent Icons"),
+                                   ({"Segoe MDL2 Assets"}, "Segoe MDL2 Assets"), (set(), None)):
+            ui = ui_theme.build_theme("dark", system="windows", families=families)
+            self.assertEqual(ui.icon_family, expected)
+            self.assertEqual(ui.icon("settings"), "\ue713" if expected else "⚙")
+            self.assertEqual(ui.icon("record"), "\ue8f1" if expected else "●")
+            self.assertEqual(ui.icon("down"), "\ue70d" if expected else "▾")
+            if expected:
+                self.assertEqual(ui.icon_font()[0], expected)
+                self.assertNotEqual(ui.body()[0], expected)
+        self.assertIsNone(ui_theme.build_theme("light", system="darwin",
+                                               families={"Segoe Fluent Icons"}).icon_family)
+
+    def test_high_contrast_resolves_rgb_and_keeps_each_saved_preference(self):
+        colors = {"background": "#000000", "text": "#ffffff", "selection": "#ffff00",
+                  "selected_text": "#000000", "disabled": "#808080", "link": "#00ffff"}
+        for preference in ("system", "light", "dark"):
+            ui = ui_theme.build_theme("light", system="windows", preference=preference,
+                                      high_contrast=colors)
+            self.assertEqual(ui.preference, preference)
+            self.assertTrue(ui.high_contrast)
+            self.assertEqual(ui.surface, "#000000")
+            self.assertEqual(ui.entry_colors()["fg"], "#ffffff")
+            self.assertEqual(ui.nav_button_colors(ui.surface, selected=True)["fg"], "#000000")
+            for token in WINDOWS_LIGHT_COLORS:
+                self.assertRegex(getattr(ui, token), r"^#[0-9a-fA-F]{6}$")
+                ui_theme.rgb(getattr(ui, token))
+
+    def test_windows_spi_structure_and_colorref_are_resolved_without_tk(self):
+        calls = []
+        def spi(action, size, pointer, flags):
+            calls.append(action)
+            self.assertEqual(flags, 0)
+            if action == 0x0042:
+                self.assertEqual(size, ui_theme.ctypes.sizeof(pointer._obj))
+                pointer._obj.dwFlags = 1
+            else:
+                self.assertEqual(action, 0x1042)
+                pointer._obj.value = 0
+            return 1
+        api = types.SimpleNamespace(SystemParametersInfoW=spi, GetSysColor=lambda _index: 0x00332211)
+        with mock.patch("ui_theme.current_os", return_value="windows"), \
+                mock.patch.object(ui_theme.ctypes, "windll", types.SimpleNamespace(user32=api), create=True):
+            self.assertEqual(set(ui_theme.windows_high_contrast().values()), {"#112233"})
+            self.assertFalse(ui_theme.client_area_animation_enabled())
+        self.assertEqual(calls, [0x0042, 0x1042])
+
+    def test_unsupported_or_disabled_spi_keeps_normal_presentation(self):
+        api = mock.Mock()
+        api.SystemParametersInfoW.return_value = 0
+        with mock.patch("ui_theme.current_os", return_value="windows"), \
+                mock.patch.object(ui_theme.ctypes, "windll", types.SimpleNamespace(user32=api), create=True):
+            self.assertIsNone(ui_theme.windows_high_contrast())
+            self.assertTrue(ui_theme.client_area_animation_enabled())
+
+    def test_contrast_activation_and_palette_changes_reprobe_even_with_explicit_appearance(self):
+        colors = {"background": "#000000", "text": "#ffffff", "selection": "#ffff00",
+                  "selected_text": "#000000", "disabled": "#808080", "link": "#00ffff"}
+        normal = ui_theme.build_theme("dark", system="windows", preference="dark")
+        contrast = ui_theme.build_theme("dark", system="windows", preference="dark", high_contrast=colors)
+        with mock.patch("ui_theme.windows_high_contrast", return_value=colors):
+            self.assertTrue(ui_theme.system_appearance_changed(None, normal))
+            self.assertFalse(ui_theme.system_appearance_changed(None, contrast))
+        with mock.patch("ui_theme.windows_high_contrast", return_value=dict(colors, background="#202020")):
+            self.assertTrue(ui_theme.system_appearance_changed(None, contrast))
+        with mock.patch("ui_theme.windows_high_contrast", return_value=None):
+            self.assertTrue(ui_theme.system_appearance_changed(None, contrast))
+        self.assertEqual(contrast.preference, "dark")
+        with mock.patch("ui_theme.current_os", return_value="linux"):
+            self.assertIsNone(ui_theme.windows_high_contrast())
+            self.assertTrue(ui_theme.client_area_animation_enabled())
+
+    def test_model_identifier_wrap_preserves_components_and_avoids_orphans(self):
+        for value in ("Synthetic/Qwen3.5-0.8B-GGUF", "abcdefghijklm", "short-model"):
+            wrapped = ui_theme.wrap_model_identifier(value, 12, len)
+            self.assertEqual(wrapped.replace("\n", ""), value)
+            self.assertTrue(all(2 <= len(line) <= 12 for line in wrapped.splitlines()))
+        self.assertTrue(any(line.endswith("GGUF") for line in
+                            ui_theme.wrap_model_identifier("Synthetic/Qwen3.5-0.8B-GGUF", 12, len).splitlines()))
+
+
 class WindowsPaletteTests(unittest.TestCase):
     """Windows must keep the DS 2.7.1 Windows-family palette stable."""
 
@@ -1223,12 +1326,16 @@ class ThemedControlTests(unittest.TestCase):
                 texts = [w for w in self._descendants(bar) if isinstance(w, tk.Text)]
                 self.assertEqual(len(texts), 1)
                 self.assertFalse(texts[0].winfo_ismapped())
-                buttons["Detalhes ▾"].invoke()
+                details_key = "Detalhes" if theme.icon_family else "Detalhes ▾"
+                buttons[details_key].invoke()
                 self.root.update()
                 self.assertTrue(texts[0].winfo_ismapped())
                 self.assertEqual(texts[0].get("1.0", "end-1c"), "Detalhes técnicos: runtime unavailable")
                 self.assertEqual(str(texts[0].cget("state")), "disabled")
-                self.assertEqual(buttons["Detalhes ▾"].cget("text"), "Detalhes ▴")
+                self.assertEqual(buttons[details_key].cget("text"),
+                                 "Detalhes" if theme.icon_family else "Detalhes ▴")
+                if theme.icon_family:
+                    self.assertEqual(buttons[details_key]._disclosure_glyph.cget("text"), theme.icon("up"))
                 copy = next(w for w in self._descendants(bar)
                             if isinstance(w, tk.Button) and w.cget("text") == "Copiar")
                 # The bar never touches the clipboard itself; the caller's copy does,
@@ -1243,7 +1350,7 @@ class ThemedControlTests(unittest.TestCase):
                 self.assertEqual(copy.cget("text"), "Copiado")
                 labels = [w.cget("text") for w in self._descendants(bar) if isinstance(w, tk.Label)]
                 self.assertNotIn("Selecione o texto e pressione Ctrl+C", labels)
-                buttons["Detalhes ▾"].invoke()
+                buttons[details_key].invoke()
                 self.root.update()
                 self.assertFalse(texts[0].winfo_ismapped())
 
@@ -1251,7 +1358,7 @@ class ThemedControlTests(unittest.TestCase):
         bar = ui_theme.info_bar(self.card, self.theme, "danger", "Título", "Corpo.", details="Texto técnico")
         self.addCleanup(bar.destroy)
         buttons = [w.cget("text") for w in self._descendants(bar) if isinstance(w, tk.Button)]
-        self.assertEqual(buttons, ["Detalhes ▾"])
+        self.assertEqual(buttons, ["Detalhes" if self.theme.icon_family else "Detalhes ▾"])
 
     def test_info_bar_without_action_or_details_has_no_button_row(self):
         bar = ui_theme.info_bar(self.card, self.theme, "warning", "Título", "Corpo.")
@@ -1315,7 +1422,7 @@ class ThemedControlTests(unittest.TestCase):
         self.assertLess(bar.winfo_rooty(), content.winfo_rooty())
         texts = [w.cget("text") for w in self._descendants(bar) if isinstance(w, (tk.Label, tk.Button))]
         for expected in ("Não foi possível carregar a biblioteca", "Erro às 14:02", "Tentar novamente",
-                         "Detalhes ▾"):
+                         "Detalhes" if self.theme.icon_family else "Detalhes ▾"):
             self.assertIn(expected, texts)
         # One message at a time: a routine outcome is a quiet line, not a second bar.
         bar.receipt("Título salvo.", moment)
@@ -1375,6 +1482,38 @@ class GuiSourceTests(unittest.TestCase):
 
     SOURCES = ("snipvoice.pyw", "meeting_gui.py", "meeting_chat.py", "meeting_waveform.py",
                "voice_indicator.py")
+
+    def test_layout_spacing_stays_on_scale_with_only_named_geometry_exceptions(self):
+        # These are calculated geometry, not layout gaps. Assert their exact
+        # constants so an unrelated off-scale padding cannot hide here later.
+        exceptions = {("meeting_gui.py", "_transcript_measure"): {2, 680},
+                      ("ui_theme.py", "button"): {1, 2}}
+        seen, offenders = {}, []
+        root = os.path.join(os.path.dirname(__file__), "..")
+        for name in ("snipvoice.pyw", "meeting_gui.py", "meeting_chat.py", "voice_indicator.py", "ui_theme.py"):
+            with open(os.path.join(root, name), encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            class Scan(ast.NodeVisitor):
+                stack = []
+                def visit_FunctionDef(self, node):
+                    self.stack.append(node.name)
+                    self.generic_visit(node)
+                    self.stack.pop()
+                def visit_keyword(self, node):
+                    if node.arg not in ("padx", "pady", "ipadx", "ipady"):
+                        return
+                    values = {part.value for part in ast.walk(node.value)
+                              if isinstance(part, ast.Constant) and type(part.value) is int
+                              and part.value not in (0, 4, 8, 12, 16, 24)}
+                    if values:
+                        key = (name, self.stack[-1])
+                        if key in exceptions:
+                            seen.setdefault(key, set()).update(values)
+                        else:
+                            offenders.append((name, node.lineno, node.arg, values))
+            Scan().visit(tree)
+        self.assertEqual(offenders, [])
+        self.assertEqual(seen, exceptions)
 
     def test_secondary_windows_use_prepare_dialog_with_explicit_primary_and_hud_exemptions(self):
         exemptions = {("snipvoice.pyw", "_show_manager_window"), ("meeting_gui.py", "__init__"),

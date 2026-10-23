@@ -516,7 +516,7 @@ class Snipvoice:
             logo_label.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, ui.space_sm))
         tk.Label(
             identity,
-            text=APP_DISPLAY_NAME,
+            text="SnipVoice",
             font=ui.font(12, "bold"),
             bg=ui.surface_alt,
             fg=ui.text_strong,
@@ -524,14 +524,14 @@ class Snipvoice:
         ).grid(row=0, column=1, sticky="w")
         tk.Label(
             identity,
-            text=tr("Gravações e ditado"),
-            font=ui.font(9),
+            text=APP_DISPLAY_NAME.removeprefix("SnipVoice "),
+            font=ui.caption(),
             bg=ui.surface_alt,
             fg=ui.text_muted,
             anchor="w",
-        ).grid(row=1, column=1, sticky="w", pady=(2, 0))
+        ).grid(row=1, column=1, sticky="w", pady=(ui.space_xs, 0))
         nav = tk.Frame(sidebar, bg=ui.surface_alt)
-        nav.pack(fill=tk.X)
+        nav.pack(fill=tk.BOTH, expand=True)
         privacy = tk.Frame(sidebar, bg=ui.surface_alt)
         privacy.pack(side=tk.BOTTOM, fill=tk.X, padx=(ui.space_sm, 0))
         tk.Label(
@@ -549,7 +549,7 @@ class Snipvoice:
             bg=ui.surface_alt,
             fg=ui.text_muted,
             anchor="w",
-        ).pack(fill=tk.X, pady=(1, 0))
+        ).pack(fill=tk.X, pady=(ui.space_xs, 0))
 
         notebook = ttk.Notebook(window, style="Pages.TNotebook")
         self._manager_notebook = notebook
@@ -560,7 +560,7 @@ class Snipvoice:
             lambda: dict(self.settings), self._persist_voice_settings,
             on_settings_changed=lambda: self.task_runner.start(
                 self._rebuild_meeting_monitor, name="meeting-hotkey"),
-            on_recording_state_changed=lambda _state, _snapshot: self.refresh_tray_menu(),
+            on_recording_state_changed=self._manager_recording_state_changed,
             on_appearance_changed=lambda preference: self._reopen_manager_for_appearance(
                 root, preference,
             ),
@@ -654,12 +654,16 @@ class Snipvoice:
         """One sidebar button per notebook page, in tab order, tracking selection."""
         bg = nav.cget("background")
         items = {}
-        for tab_id in notebook.tabs():
+        for index, tab_id in enumerate(notebook.tabs()):
             item = tk.Frame(nav, bg=bg)
-            item.pack(fill=tk.X, pady=1)
+            item.pack(side=tk.BOTTOM if index == 3 else tk.TOP, fill=tk.X, pady=ui.space_xs)
             # Windows selection indicator: a 3x16 pill on the selection plane.
             marker = tk.Frame(item, bg=bg, width=3, height=16)
             marker.pack(side=tk.LEFT)
+            icon = tk.Label(item, text=ui.icon(("record", "library", "dictation", "settings")[index]),
+                            font=ui.icon_font(), fg=ui.text_muted, bg=bg, takefocus=False)
+            icon.pack(side=tk.LEFT, padx=ui.space_sm)
+            icon.bind("<Button-1>", lambda _event, target=tab_id: (on_select or notebook.select)(target))
             button = tk.Button(
                 item, text=notebook.tab(tab_id, "text"), font=ui.body(), anchor="w",
                 command=lambda target=tab_id: (on_select or notebook.select)(target),
@@ -667,11 +671,11 @@ class Snipvoice:
             )
             ui_theme.focus_ring(button, ui)
             button.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            items[str(tab_id)] = (item, button, marker)
+            items[str(tab_id)] = (item, button, marker, icon)
 
         def highlight(_event=None):
             current = str(notebook.select())
-            for tab_id, (item, button, marker) in items.items():
+            for tab_id, (item, button, marker, icon) in items.items():
                 selected = tab_id == current
                 colors = ui.nav_button_colors(bg, selected=selected)
                 plane = colors.get("bg", bg)
@@ -679,10 +683,19 @@ class Snipvoice:
                 button.configure(text=notebook.tab(tab_id, "text"),
                                  font=ui.body_strong() if selected else ui.body(), **colors)
                 marker.configure(bg=ui.accent_mark if selected else plane)
+                icon.configure(bg=plane, fg=ui.select_fg if selected else ui.text_muted)
 
         notebook.bind("<<NotebookTabChanged>>", highlight, add="+")
         notebook.bind("<<ManagerStatusChanged>>", highlight, add="+")
         highlight()
+
+    def _manager_recording_state_changed(self, state, _snapshot):
+        self.refresh_tray_menu()
+        window = self.manager_window
+        if window is not None and window.winfo_exists():
+            labels = {"starting": tr("Iniciando"), "recording": tr("Gravando"),
+                      "paused": tr("Pausado"), "stopping": tr("Salvando")}
+            window.title(APP_DISPLAY_NAME + (" · " + labels[state] if state in labels else ""))
 
     def _reopen_manager_for_appearance(self, root, preference):
         """Publish the persisted preference only at current rebuild admission."""
@@ -1391,7 +1404,7 @@ class Snipvoice:
             font=ui.font(11, "bold"),
             bg=ui.surface,
             fg=ui.text,
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, ui.space_md))
 
         notice_text = tk.Text(
             container,
@@ -1400,7 +1413,7 @@ class Snipvoice:
             relief=tk.FLAT,
             highlightthickness=1,
             highlightbackground=ui.border,
-            padx=10,
+            padx=ui.space_md,
             pady=8,
             **ui.text_colors(),
         )
@@ -1447,7 +1460,7 @@ class Snipvoice:
             font=ui.font(9),
             wraplength=560,
             justify="left",
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", pady=(0, ui.space_md))
         list_frame = tk.Frame(container, bg=ui.surface)
         list_frame.pack(fill=tk.BOTH, expand=True)
         listbox = tk.Listbox(
@@ -1513,13 +1526,13 @@ class Snipvoice:
                 redraw()
 
         actions = tk.Frame(container, bg=ui.surface)
-        actions.pack(fill=tk.X, pady=(10, 0))
+        actions.pack(fill=tk.X, pady=(ui.space_md, 0))
         for label, command in (
             (tr("Adicionar"), add_entry),
             (tr("Editar"), edit_selected),
             (tr("Remover"), remove_entry),
         ):
-            ui_theme.button(actions, label, command, resolved=ui).pack(side=tk.LEFT, padx=(0, 6))
+            ui_theme.button(actions, label, command, resolved=ui).pack(side=tk.LEFT, padx=(0, ui.space_sm))
 
         def save_and_close():
             checked = validate_replacements(replacements)
@@ -1543,7 +1556,7 @@ class Snipvoice:
         ui_theme.button(actions, tr("Salvar"), save_and_close, "primary",
                         resolved=ui).pack(side=tk.RIGHT)
         ui_theme.button(actions, tr("Cancelar"), dialog.destroy,
-                        resolved=ui).pack(side=tk.RIGHT, padx=(0, 6))
+                        resolved=ui).pack(side=tk.RIGHT, padx=(0, ui.space_sm))
         dialog.bind("<Escape>", lambda _event: dialog.destroy())
         redraw()
         center_on_screen(dialog)
@@ -2300,6 +2313,7 @@ class Snipvoice:
             buttons, text=tr("Mais opções ▾"), direction="below", font=ui.body(),
             **ui.button_colors(), **ui.button_chrome(),
         )
+        ui_theme.disclosure(more_button, tr("Mais opções"), resolved=ui)
         ui_theme.focus_ring(more_button, ui)
         menu_colors = {}
         if ui.system != "darwin":
@@ -2635,12 +2649,12 @@ class Snipvoice:
         ui = ui_theme.theme()
         history_window = tk.Toplevel(root)
         ui_theme.prepare_dialog(history_window, root, resolved=ui, set_icon=self._set_window_icon)
-        history_window.title(tr("Histórico de Voz"))
+        history_window.title(tr("Histórico de voz"))
         history_window.geometry("760x400")
         history_window.minsize(620, 300)
         history_window.configure(bg=ui.surface)
         history_window.transient(root)
-        outer = tk.Frame(history_window, bg=ui.surface, padx=14, pady=14)
+        outer = tk.Frame(history_window, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         outer.pack(fill=tk.BOTH, expand=True)
         close_row = tk.Frame(outer, bg=ui.surface)
         close_row.pack(side=tk.BOTTOM, fill=tk.X, pady=(ui.space_sm, 0))

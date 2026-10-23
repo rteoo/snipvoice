@@ -87,6 +87,51 @@ _SYMBOL_FAMILIES = {
     "linux": _LINUX_FAMILY,
 }
 
+# Fluent/MDL2 share these semantic codepoints. Other platforms keep readable
+# Unicode symbols rather than private-use characters from an unrelated font.
+_ICONS = {
+    "record": ("\ue8f1", "●"), "library": ("\ue8b7", "▤"),
+    "dictation": ("\ue8f1", "🎙"), "settings": ("\ue713", "⚙"),
+    "down": ("\ue70d", "▾"), "up": ("\ue70e", "▴"),
+}
+
+
+def icon_family(system=None, families=None):
+    if (system or current_os()) == "windows":
+        available = set(families or ())
+        for face in ("Segoe Fluent Icons", "Segoe MDL2 Assets"):
+            if face in available:
+                return face
+    return None
+
+
+def windows_high_contrast():
+    """Resolve Win32 colors to RGB literals; never persist this OS override."""
+    if current_os() != "windows":
+        return None
+    class HighContrast(ctypes.Structure):
+        _fields_ = [("cbSize", ctypes.c_uint), ("dwFlags", ctypes.c_uint),
+                    ("lpszDefaultScheme", ctypes.c_wchar_p)]
+    state = HighContrast()
+    state.cbSize = ctypes.sizeof(state)
+    user32 = ctypes.windll.user32
+    if not user32.SystemParametersInfoW(0x0042, state.cbSize, ctypes.byref(state), 0) or not state.dwFlags & 1:
+        return None
+    def color(index):
+        value = user32.GetSysColor(index)
+        return f"#{value & 255:02x}{(value >> 8) & 255:02x}{(value >> 16) & 255:02x}"
+    return {"background": color(5), "text": color(8), "selection": color(13),
+            "selected_text": color(14), "disabled": color(17), "link": color(26)}
+
+
+def client_area_animation_enabled():
+    if current_os() != "windows":
+        return True
+    enabled = ctypes.c_int(1)
+    if not ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+        return True
+    return bool(enabled.value)
+
 BUTTON_VARIANTS = ("neutral", "primary", "quiet", "danger")
 
 
@@ -96,7 +141,7 @@ class Theme:
     __slots__ = (
         "kind", "system", "preference", "family", "display_family", "strong_family",
         "display_strong_family", "emoji_family", "mono_family", "symbol_family",
-        "size_delta", "px_scale",
+        "size_delta", "px_scale", "icon_family", "high_contrast",
         "surface", "surface_alt", "surface_alt_active", "surface_hover",
         "card", "field", "field_hover",
         "control", "control_active", "control_border", "field_border",
@@ -125,6 +170,8 @@ class Theme:
         self.emoji_family = emoji_family
         self.mono_family = mono_family
         self.symbol_family = symbol_family
+        self.icon_family = None
+        self.high_contrast = False
         self.size_delta = size_delta
         self.px_scale = px_scale
         for name, value in colors.items():
@@ -163,6 +210,12 @@ class Theme:
 
     def mono(self):
         return self.mono_font(9)
+
+    def icon(self, name):
+        return _ICONS[name][0 if self.icon_family else 1]
+
+    def icon_font(self):
+        return (self.icon_family, self._pixels("body")) if self.icon_family else self.body()
 
     def emoji_font(self, size=BODY_FONT_SIZE, weight=None):
         return _spec(self.emoji_family, size + self.size_delta, weight)
@@ -203,7 +256,7 @@ class Theme:
         selection color. Opaque dark themes need explicit fields and selection
         colors because the OS otherwise leaves these classic Tk widgets light.
         """
-        if self.system != "darwin" and not self.is_dark:
+        if self.system != "darwin" and not self.is_dark and not self.high_contrast:
             return {}
         return {
             "bg": self.field,
@@ -308,7 +361,7 @@ class Theme:
         plane = self.select_bg if selected else bg
         return {
             "bg": plane,
-            "fg": self.text_native,
+            "fg": self.select_fg if selected else self.text_native,
             "activebackground": self.surface_hover,
             "activeforeground": self.text_native,
             "highlightbackground": plane,
@@ -1083,6 +1136,29 @@ class _ThemedButton(tk.Button):
             # Win32 draws the idle edge in -highlightcolor (see focus_ring).
             colors["highlightcolor"] = colors["highlightbackground"]
         tk.Misc.configure(self, **colors)
+        glyph = getattr(self, "_disclosure_glyph", None)
+        if glyph is not None:
+            glyph.configure(bg=colors["bg"], fg=colors["fg"])
+
+
+def disclosure(widget, label, expanded=False, resolved=None):
+    """Keep the written command in the body face and its icon in the icon face."""
+    ui = resolved or theme()
+    if not ui.icon_family:
+        widget.configure(text=f"{label} {ui.icon('up' if expanded else 'down')}")
+        return widget
+    widget.configure(text=label)
+    glyph = getattr(widget, "_disclosure_glyph", None)
+    if glyph is None:
+        glyph = tk.Label(widget, font=ui.icon_font(), bg=widget.cget("bg"), fg=widget.cget("fg"),
+                         bd=0, padx=0, pady=0, takefocus=False)
+        widget._disclosure_glyph = glyph
+        glyph.place(relx=1, rely=0.5, x=-ui.space_xs, anchor="e")
+        glyph.bind("<Button-1>", lambda _event: widget.event_generate("<Button-1>")
+                   if widget.winfo_class() == "Menubutton" else widget.invoke())
+        widget.configure(padx=int(widget.cget("padx")) + ui.space_sm)
+    glyph.configure(text=ui.icon("up" if expanded else "down"))
+    return widget
 
 
 def button(parent, text, command, variant="neutral", *, resolved=None, **options):
@@ -1106,6 +1182,8 @@ def button(parent, text, command, variant="neutral", *, resolved=None, **options
     missing = max(0, ui.px(32) - widget.winfo_reqheight())
     if missing:
         widget.configure(pady=int(widget.cget("pady")) + (missing + 1) // 2)
+    if text.endswith((" ▾", " ▴")):
+        disclosure(widget, text[:-2], text.endswith("▴"), ui)
     return focus_ring(widget, ui)
 
 
@@ -1291,6 +1369,38 @@ def model_table(parent, resolved=None):
     return table
 
 
+def wrap_model_identifier(value, width, measure):
+    """Wrap model IDs at their separators before splitting a long component."""
+    value = str(value)
+    if measure(value) <= width:
+        return value
+    parts, start = [], 0
+    for index, char in enumerate(value):
+        if char in "/_-":
+            parts.append(value[start:index + 1])
+            start = index + 1
+    if start < len(value):
+        parts.append(value[start:])
+    lines, line = [], ""
+    for part in parts:
+        if line and measure(line + part) > width:
+            lines.append(line)
+            line = ""
+        while len(part) > 1 and measure(part) > width:
+            end = 1
+            while end < len(part) and measure(part[:end + 1]) <= width:
+                end += 1
+            # Do not strand the final character of a long component.
+            if len(part) - end == 1 and end > 1:
+                end -= 1
+            lines.append(part[:end])
+            part = part[end:]
+        line += part
+    if line:
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def model_table_row(table, row, values, resolved=None):
     ui = resolved or theme()
     for column, value in enumerate(values):
@@ -1298,7 +1408,15 @@ def model_table_row(table, row, values, resolved=None):
                          anchor="e" if column == 2 else "w", justify="left",
                          width=8 if column == 2 else 1, wraplength=120)
         label.grid(row=row, column=column, sticky="nsew", padx=ui.space_xs, pady=ui.space_sm)
-        label.bind("<Configure>", lambda event, widget=label: widget.configure(wraplength=max(32, event.width)))
+        if column == 0:
+            face = tkfont.Font(root=table, font=ui.body())
+            label.bind("<Configure>", lambda event, widget=label, text=str(value), font=face:
+                       widget.configure(text=wrap_model_identifier(text, max(32, event.width), font.measure),
+                                        wraplength=max(32, event.width)))
+            tooltip(label, str(value))
+        else:
+            label.bind("<Configure>", lambda event, widget=label:
+                       widget.configure(wraplength=max(32, event.width)))
     status = tk.Label(table, bg=ui.card, fg=ui.text_muted, font=ui.body(), anchor="w",
                       width=1, wraplength=100, justify="left")
     status.grid(row=row, column=4, sticky="nsew", padx=ui.space_xs)
@@ -1396,10 +1514,10 @@ def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None
         def toggle():
             if panel.winfo_manager():
                 panel.grid_remove()
-                toggle_button.configure(text=f"{tr('Detalhes')} ▾")
+                disclosure(toggle_button, tr("Detalhes"), False, ui)
             else:
                 panel.grid(row=3, column=1, columnspan=2, sticky="ew", pady=(ui.space_sm, 0))
-                toggle_button.configure(text=f"{tr('Detalhes')} ▴")
+                disclosure(toggle_button, tr("Detalhes"), True, ui)
 
         toggle_button = button(actions, f"{tr('Detalhes')} ▾", toggle, "quiet", resolved=ui)
         toggle_button.pack(side="left", padx=(0, ui.space_sm))
@@ -1548,6 +1666,13 @@ def _probe_kind(widget, system):
 
 
 def system_appearance_changed(widget, resolved):
+    if resolved.system == "windows":
+        contrast = windows_high_contrast()
+        if bool(contrast) != resolved.high_contrast:
+            return True
+        if contrast and (resolved.surface, resolved.text, resolved.select_bg, resolved.select_fg) != (
+                contrast["background"], contrast["text"], contrast["selection"], contrast["selected_text"]):
+            return True
     return resolved.preference == "system" and _probe_kind(widget, resolved.system) != resolved.kind
 
 
@@ -1559,7 +1684,7 @@ def _probe_default_size(widget):
 
 
 def build_theme(kind, system=None, default_size=None, preference="system",
-                families=None, px_scale=1.0):
+                families=None, px_scale=1.0, high_contrast=None):
     """Assemble a :class:`Theme` from resolved platform and appearance state.
 
     macOS system mode keeps Aqua's dynamic color names. A fixed light/dark
@@ -1573,7 +1698,24 @@ def build_theme(kind, system=None, default_size=None, preference="system",
     if system == "darwin" and preference != "system":
         colors = dict(_DARK if kind == "dark" else _LIGHT)
         colors.update(_MAC_NATIVE)
-    return Theme(
+    if system == "windows" and high_contrast:
+        colors = dict(colors)
+        for token in colors:
+            if token in ("select_bg", "accent", "accent_active", "accent_mark", "focus_ring"):
+                colors[token] = high_contrast["selection"]
+            elif token in ("select_fg", "text_on_accent"):
+                colors[token] = high_contrast["selected_text"]
+            elif token == "disabled_fg":
+                colors[token] = high_contrast["disabled"]
+            elif token == "link":
+                colors[token] = high_contrast["link"]
+            elif token.endswith("_bg") or token in (
+                    "surface", "surface_alt", "surface_alt_active", "surface_hover", "card",
+                    "field", "field_hover", "control", "control_active"):
+                colors[token] = high_contrast["background"]
+            else:
+                colors[token] = high_contrast["text"]
+    resolved = Theme(
         kind=kind,
         system=system,
         preference=preference,
@@ -1585,6 +1727,9 @@ def build_theme(kind, system=None, default_size=None, preference="system",
         colors=colors,
         px_scale=px_scale,
     )
+    resolved.icon_family = icon_family(system, families)
+    resolved.high_contrast = bool(system == "windows" and high_contrast)
+    return resolved
 
 
 _current = None
@@ -1619,6 +1764,7 @@ def bind(widget=None, system=None, preference="system"):
         preference=preference,
         families=families,
         px_scale=px_scale,
+        high_contrast=windows_high_contrast() if system == "windows" else None,
     )
     if widget is not None and system == "windows":
         _apply_default_fonts(widget, _current)
