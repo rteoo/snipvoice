@@ -32,6 +32,8 @@ surface steps and one-pixel lines; Tk cannot render Mica or acrylic.
 | Page (`surface`) | `#232323` | `#f6f5f4` |
 | Content, fields, controls (`card`, `field`, `control`) | `#1c1c1e` | `#ffffff` |
 | Selection, hover, pressed (`select_bg`, `surface_hover`, `control_active`) | `#484848` | `#e8e6e3` |
+| Selected navigation item (`nav_select_bg`) | `#484848` | `#dedcd8` (deviation, see below) |
+| Scrollbar thumb (`scroll_thumb`) | `#7C7B79` | `#7b8088` |
 | Decorative lines (`border`, `divider`) | `#454545` | `#d8d8d8` |
 | Control boundary (`field_border`, `control_border`) | `#999ca3` | `#7b8088` |
 | Text (`text`) | `#F2EFE9` | `#202630` |
@@ -85,6 +87,10 @@ bold is synthesized only where no semibold face exists.
 | Heading | 18px | semibold | `heading()` | 11, 12 |
 | Title | 28px | semibold | `title()` | 14 |
 | Literal code | 14px | regular | `mono()` (Cascadia Mono, else Consolas) | — |
+
+Monospace is for literal machine text only (technical details). Readings such
+as the signal level and transcript timestamps use the body face, whose Segoe UI
+figures are tabular, so values do not jitter as they change.
 
 `TkDefaultFont` and `TkTextFont` follow the body role, so unstyled comboboxes
 and labels match. macOS and Linux keep the legacy point scale shifted to the
@@ -161,6 +167,29 @@ them to the named roles.
   `accent_active` is the pressed role. Tk has no hover state for these
   buttons; the primary stays `accent` under the pointer.
 
+- Every destination opens with its title in the Title role (`ui_theme.PageHeader`)
+  on the page plane, with page actions at its right: Gravação carries
+  **Configurar gravação**, Ditado its on/off switch. Biblioteca's search field
+  and its Importar/Mais actions sit on the page plane, not in a card.
+- The navigation shows one line per destination. A page's state ("Desligado",
+  "● Gravando · 12:03", "Atenção nesta página: 2") is a caption under the label,
+  aligned with its first character, in secondary text. Icons resolve through the
+  icon face: Gravação is Record (U+E7C8), Biblioteca Library (U+E8F1), Ditado
+  Microphone (U+E720), Configurações Settings (U+E713). The sidebar reserves
+  the widest semibold label, so selecting a page never widens it.
+- Scrollbars are thin (10px), flat thumbs in the trough with no arrow buttons or
+  grip lines; the thumb brightens to secondary text under the pointer. List
+  scrollbars built with `ui_theme.scroll_slot` hide while their view fits and
+  keep their width, so a short list shows no full-length thumb.
+- An immediate on/off preference is a ToggleSwitch (`ui_theme.toggle_switch`):
+  a `tk.Checkbutton` drawn with switch images, so Space, the variable and Win32's
+  focus rectangle behave as a checkbox. Off: control-boundary outline and a
+  secondary-text knob. On: copper inside the 3:1 marker edge and a dark knob.
+  Aqua keeps its native checkbox.
+- Settings save bars say nothing while a form is clean after loading; after a
+  save they read "Configuração salva · 14:02". The startup device read ends on
+  the source-test hint; only a later **Atualizar dispositivos** writes its receipt.
+
 Spacing follows the 4/8/12/16/24 portion of the system scale.
 
 ### Tk deviations from the Windows family
@@ -177,6 +206,8 @@ Spacing follows the 4/8/12/16/24 portion of the system scale.
 | State tone on one list cell | The whole row takes the state's tone; Concluída rows stay in text color | Only Tk 9 can tone one cell (`tag cell`), and the release bundles ship Python 3.12 with Tk 8.6. On Tk 8.6.12 and 9.0.4 a selected row draws `select_fg` over any tag (probed), which keeps dark danger off the selection plane (4.02:1). |
 | Hover on filled and neutral buttons | No hover face on Windows | Win32 Tk paints a button's active colors only while it is pressed. |
 | Checkbox focus ring | Win32's dotted focus rectangle | Tk checkboxes draw no highlight ring on Windows. |
+| Selection plane on Light navigation | `nav_select_bg` `#dedcd8` instead of `#e8e6e3` | The family plane is 1.02:1 on the `#e9e8e7` navigation base, so only the marker showed the current page. `#dedcd8` is a visible step (1.12:1) that keeps secondary text at 4.59:1 and the marker at 4.14:1. Lists keep the family plane. |
+| ToggleSwitch control | Checkbutton with drawn switch images | Tk has no switch; the images are supersampled from the theme roles at the current scale. |
 
 ### Contrast (computed by `tests/test_ui_theme.py`)
 
@@ -204,8 +235,11 @@ On navigation / page / content / selection:
   card: a quiet line when local models are ready, otherwise compact rows for
   pending or unknown inventory, missing models, current processing, recent-page
   failures, dictation off and startup recovery. Each actionable row has one
-  command. It does not enlarge the right-hand transport. Waveform lanes hide
-  while idle and return for preview or capture. A combined lost-source warning
+  command. It does not enlarge the right-hand transport. The setup and monitor
+  panes share the page height. The monitor leads with the recorder's state and
+  its transport, then the hint line and the meters; the waveform comes last and
+  takes the spare height. Waveform lanes hide while idle and return for preview
+  or capture. A combined lost-source warning
   labels the longest interruption; captions retain each source's own duration.
 - **Biblioteca:** search and select a recording, then read the full transcript.
   Search is labelled and runs after 250 ms without typing; Enter runs it now,
@@ -266,7 +300,10 @@ On navigation / page / content / selection:
   per view and guarded delivery after teardown; byte-progress ticks trigger no
   new history scans or tray-menu rebuilds. Download byte callbacks emit at most
   four times per second; lifecycle states always emit immediately.
-  The configuration scrolls above a fixed save/discard bar. Dirty fields survive
+  The page title carries the activation switch, and the written readiness sits
+  under it. Recent dictations (five rows, so the list itself never scrolls) and
+  the configuration share one scroll region above a fixed save/discard bar; the
+  list headings read left-aligned like Biblioteca's. Dirty fields survive
   status updates; a clean form follows externally changed settings. Save becomes
   clean only after the controller accepts and persists the options. Saving
   retains the current enabled intent; the header toggle owns activation.
@@ -321,8 +358,8 @@ On navigation / page / content / selection:
   meter and in the state line ("Gravando · 00:45:54 · Áudio do sistema: sem
   áudio"); the dot turns warning. An error the recorder reports with no source
   lost stays as a dismissable bar until it is dismissed or ends. At 1040×700 the
-  meters, the warning and the transport stay in view; only the hint line under the
-  recorder may move below the fold.
+  warning, the transport and the meters stay in view; the waveform under them
+  takes whatever height is left.
 - **Cancel exists only while there is something to cancel.** The semantic-index,
   index-repair, cross-recording, summary and model-download Cancel controls, and
   the processing one, are drawn only while their job runs, inside a reserved
@@ -533,9 +570,9 @@ verified platform behavior; they do not certify a packaged build.
   history scrolling apply to answers too.
 - The manager title follows starting, recording, paused and saving states.
   Sidebar identity is **SnipVoice**, with the version in a muted caption.
-  Settings stays at the bottom of navigation. Icons use semantic microphone,
-  folder and settings mappings; disclosure icons use their own icon face rather
-  than appending a private-use character to body text.
+  Settings stays at the bottom of navigation. Icons use semantic record, library,
+  microphone and settings mappings (see *Controls*); disclosure icons use their
+  own icon face rather than appending a private-use character to body text.
 - Windows contrast themes override the resolved palette with current Win32
   system colors converted to hex; the saved Light/Dark/System preference stays
   intact. Activation checks contrast changes even with an explicit preference.
@@ -546,10 +583,15 @@ verified platform behavior; they do not certify a packaged build.
   the 680px reading measure and half-line typography are semantic dimensions.
   Calculated button padding preserves its 32px target; it is not a new gap token.
 - Model IDs wrap at separators before splitting long components; hover/focus
-  still discloses the exact identifier. The icon SVG changes palette only,
-  preserving contours, placement, gradients and alpha. Derivative generation
-  retains the PNG/ICNS canvas; Windows ICO alone normalizes the exterior alpha
-  margin to its existing frame-fill contract.
+  still discloses the exact identifier.
+- The app icon is Ink & Copper and matte: a navy tile (`#263C56` to `#152235`)
+  with a `#8CA8CF` rim that keeps its edge on dark taskbars, navy-300 waveform
+  bars, a flat `#F2EFE9` microphone and one copper recording dot, with no sheen
+  or glow. `snipvoice-icon-small.svg` drops the waveform and thickens the
+  strokes for 16-24 px slots. The PNG and ICNS keep the 1024 canvas margin
+  (the small mark at 16/32 px); the ICO is full-bleed with 16, 20, 24 (small
+  mark), 32, 40, 48, 64 and 256 px frames, so 125% and 150% scaling get a
+  drawn frame instead of a resampled one.
 - `Chat` and `Markdown…` pass through translation, and **Histórico de voz** uses
   sentence case. There is no capitalized `Bytes` UI callsite to replace; existing
   lower-case byte inventory labels already use translation.
