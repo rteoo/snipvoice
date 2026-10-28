@@ -508,7 +508,7 @@ class ManagerLifecycleTests(unittest.TestCase):
                          visible=[{"profile": "balanced", "size_bytes": 100, "license_id": "MIT", "attribution": "Synthetic"}],
                          format_size=str, validate_hotkey_conflicts=mock.Mock(), language=language,
                          activation_mode=activation, form_values=values, update_dirty=mock.Mock(),
-                         buttons=mock.Mock(), save_status=mock.Mock(), ui=mock.Mock())
+                         buttons=mock.Mock(), save_status=mock.Mock(), ui=mock.Mock(), time=time)
         source = ast.parse(textwrap.dedent(inspect.getsource(tx.Snipvoice._build_voice_settings_controls)))
         function = next(node for node in ast.walk(source) if isinstance(node, ast.FunctionDef)
                         and node.name == "apply_voice_settings")

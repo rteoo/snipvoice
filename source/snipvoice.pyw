@@ -89,7 +89,7 @@ import pystray
 from PIL import Image
 import tkinter as tk
 import weakref
-from tkinter import messagebox, ttk
+from tkinter import font as tkfont, messagebox, ttk
 
 import app_paths
 import data_relocation
@@ -660,28 +660,56 @@ class Snipvoice:
             # Windows selection indicator: a 3x16 pill on the selection plane.
             marker = tk.Frame(item, bg=bg, width=3, height=16)
             marker.pack(side=tk.LEFT)
-            icon = tk.Label(item, text=ui.icon(("record", "library", "dictation", "settings")[index]),
+            # A page's state ("Desligado", "● Gravando · 12:03") is a caption
+            # under its one-line label, never a second centered button line.
+            column = tk.Frame(item, bg=bg)
+            column.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            row = tk.Frame(column, bg=bg)
+            row.pack(fill=tk.X)
+            select = lambda _event=None, target=tab_id: (on_select or notebook.select)(target)
+            icon = tk.Label(row, text=ui.icon(("record", "library", "dictation", "settings")[index]),
                             font=ui.icon_font(), fg=ui.text_muted, bg=bg, takefocus=False)
             icon.pack(side=tk.LEFT, padx=ui.space_sm)
-            icon.bind("<Button-1>", lambda _event, target=tab_id: (on_select or notebook.select)(target))
+            icon.bind("<Button-1>", select)
             button = tk.Button(
-                item, text=notebook.tab(tab_id, "text"), font=ui.body(), anchor="w",
-                command=lambda target=tab_id: (on_select or notebook.select)(target),
+                row, text=notebook.tab(tab_id, "text").split("\n", 1)[0], font=ui.body(),
+                anchor="w", command=select,
                 **ui.nav_button_colors(bg), **ui.button_chrome(compact=True, ring=False),
             )
             ui_theme.focus_ring(button, ui)
             button.pack(side=tk.LEFT, fill=tk.X, expand=True)
-            items[str(tab_id)] = (item, button, marker, icon)
+            # Inset the caption to the label's first character.
+            inset = (icon.winfo_reqwidth() + 2 * ui.space_sm
+                     + button.winfo_pixels(button.cget("padx")) + button.winfo_pixels(button.cget("bd")))
+            caption = tk.Label(column, font=ui.caption(), anchor="w", justify="left", bg=bg,
+                               fg=ui.text_muted, padx=0, takefocus=False)
+            caption.bind("<Button-1>", select)
+            items[str(tab_id)] = (item, button, marker, icon, (column, row), caption, inset)
+        # The selected label turns semibold; reserve the widest semibold label
+        # so selecting a page never widens the sidebar and shifts every page.
+        strong = tkfont.Font(root=nav, font=ui.body_strong())
+        widest = max(inset + strong.measure(button.cget("text"))
+                     + button.winfo_pixels(button.cget("padx")) + button.winfo_pixels(button.cget("bd"))
+                     for _item, button, *_rest, inset in items.values())
+        tk.Frame(nav, bg=bg, width=3 + widest, height=0).pack(side=tk.TOP)
 
         def highlight(_event=None):
             current = str(notebook.select())
-            for tab_id, (item, button, marker, icon) in items.items():
+            for tab_id, (item, button, marker, icon, frames, caption, inset) in items.items():
                 selected = tab_id == current
                 colors = ui.nav_button_colors(bg, selected=selected)
                 plane = colors.get("bg", bg)
+                label, _newline, state = notebook.tab(tab_id, "text").partition("\n")
                 item.configure(bg=plane)
-                button.configure(text=notebook.tab(tab_id, "text"),
-                                 font=ui.body_strong() if selected else ui.body(), **colors)
+                for frame in frames:
+                    frame.configure(bg=plane)
+                button.configure(text=label, font=ui.body_strong() if selected else ui.body(),
+                                 **colors)
+                caption.configure(text=state, bg=plane)
+                if state and not caption.winfo_manager():
+                    caption.pack(fill=tk.X, padx=(inset, ui.space_sm), pady=(0, ui.space_xs))
+                elif not state and caption.winfo_manager():
+                    caption.pack_forget()
                 marker.configure(bg=ui.accent_mark if selected else plane)
                 icon.configure(bg=plane, fg=ui.select_fg if selected else ui.text_muted)
 
@@ -2119,7 +2147,7 @@ class Snipvoice:
             save_button.configure(state=tk.DISABLED if form["saving"] or not dirty else tk.NORMAL)
             discard_button.configure(state=tk.NORMAL if dirty and not form["saving"] else tk.DISABLED)
             save_status.configure(text=tr("Salvando…") if form["saving"] else
-                                  tr("Alterações não salvas") if dirty else tr("Configuração salva"),
+                                  tr("Alterações não salvas") if dirty else ui_theme.saved_receipt(form),
                                   fg=ui.text_muted)
 
         def refresh_form(force=False):
@@ -2238,6 +2266,7 @@ class Snipvoice:
                         form["saving"] = False
                         if succeeded:
                             form["baseline"] = saved_values
+                            form["saved_at"] = time.time()
                         update_dirty()
                         if not succeeded:
                             save_status.configure(text=tr("Não foi possível salvar. Tente novamente."), fg=ui.danger)
@@ -2369,7 +2398,7 @@ class Snipvoice:
         main = tk.Frame(parent, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
         main.pack(fill=tk.BOTH, expand=True)
         footer = tk.Frame(main, bg=ui.surface)
-        footer.pack(side=tk.BOTTOM, fill=tk.X)
+        footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(ui.space_sm, 0))
 
         enabled = bool(self.voice is not None and self.voice.is_enabled())
         status_text, status_tone = voice_status_presentation(self.voice)
@@ -2399,49 +2428,41 @@ class Snipvoice:
             if not was_enabled:
                 refresh()
 
-        status_card = tk.Frame(
-            main,
-            padx=ui.space_lg,
-            pady=ui.space_md,
-            **ui.card_options(),
-        )
-        status_card.pack(fill=tk.X, pady=(0, ui.space_md))
-        checkbox = tk.Checkbutton(
-            status_card,
-            text=tr("Ativar entrada por voz"),
-            command=on_toggle,
-            font=ui.font(10, "bold"),
-            **ui.checkbutton_colors(ui.card),
-        )
-        checkbox.pack(side=tk.RIGHT, anchor="n")
+        # The page title carries the on/off switch, as a Windows settings page
+        # does; the controller's written readiness follows on its own line.
+        header = ui_theme.PageHeader(main, ui, tr("Ditado"))
+        header.pack(fill=tk.X)
+        checkbox = ui_theme.toggle_switch(header.actions, ui, tr("Ativar entrada por voz"),
+                                          on_toggle, bg=ui.surface)
+        checkbox.pack(side=tk.RIGHT)
         if enabled:
             checkbox.select()
         else:
             checkbox.deselect()
 
         status_label = tk.Label(
-            status_card,
+            main,
             text=status_text,
             font=ui.font(9),
-            bg=ui.card,
+            bg=ui.surface,
             fg=getattr(ui, status_tone),
             wraplength=640,
             justify="left",
+            anchor="w",
         )
-        status_label.pack(anchor="w", pady=(ui.space_xs, 0))
+        status_label.pack(fill=tk.X, pady=(ui.space_xs, ui.space_lg))
 
-        recent = tk.Frame(main, bg=ui.surface)
-        recent.pack(fill=tk.X, pady=(0, ui.space_md))
-        self._build_voice_history_rows(recent, root, limit=5, height=3)
-        tk.Label(main, text=tr("Configuração do ditado"), bg=ui.surface,
-                 fg=ui.text_strong, font=ui.heading()).pack(anchor="w", pady=(0, ui.space_sm))
+        # One scroll region for the whole page above the save bar: recent
+        # dictations and the configuration move together, never as a scroll
+        # area nested inside the page.
         config_host = tk.Frame(main, bg=ui.surface)
         config_host.pack(fill=tk.BOTH, expand=True)
         config_canvas = tk.Canvas(config_host, bg=ui.surface, bd=0, highlightthickness=0,
                                   takefocus=False, height=180)
-        config_scroll = ttk.Scrollbar(config_host, orient=tk.VERTICAL, command=config_canvas.yview)
-        config_canvas.configure(yscrollcommand=config_scroll.set)
-        config_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        config_slot, _config_scroll, config_set = ui_theme.scroll_slot(
+            config_host, ui, config_canvas.yview, bg=ui.surface)
+        config_canvas.configure(yscrollcommand=config_set)
+        config_slot.pack(side=tk.RIGHT, fill=tk.Y, padx=(ui.space_sm, 0))
         config_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         config = tk.Frame(config_canvas, bg=ui.surface)
         config_item = config_canvas.create_window((0, 0), window=config, anchor="nw")
@@ -2449,6 +2470,12 @@ class Snipvoice:
             scrollregion=config_canvas.bbox("all")))
         config_canvas.bind("<Configure>", lambda event: config_canvas.itemconfigure(
             config_item, width=event.width))
+
+        recent = tk.Frame(config, bg=ui.surface)
+        recent.pack(fill=tk.X, pady=(0, ui.space_lg))
+        self._build_voice_history_rows(recent, root, limit=5, height=5)
+        tk.Label(config, text=tr("Configuração do ditado"), bg=ui.surface,
+                 fg=ui.text_strong, font=ui.heading()).pack(anchor="w", pady=(0, ui.space_sm))
 
         refresh_form = self._build_voice_settings_controls(
             config,
@@ -2502,16 +2529,16 @@ class Snipvoice:
                             selectmode="browse", style="Manager.Treeview")
         for column, label, width in (("time", tr("Data"), 145), ("status", tr("Estado"), 110),
                                      ("transcript", tr("Transcrição / erro"), 340)):
-            tree.heading(column, text=label)
+            tree.heading(column, text=label, anchor="w")
             tree.column(column, width=width, minwidth=80, stretch=column == "transcript")
         if limit != 5:
-            tree.heading("provider", text=tr("Provedor"))
+            tree.heading("provider", text=tr("Provedor"), anchor="w")
             tree.column("provider", width=85, minwidth=60, stretch=False)
         for tone in ("text", "text_muted", "info", "warning", "danger"):
             tree.tag_configure(tone, foreground=getattr(ui, tone))
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        slot, _scrollbar, scroll_set = ui_theme.scroll_slot(frame, ui, tree.yview, bg=ui.card)
+        tree.configure(yscrollcommand=scroll_set)
+        slot.pack(side=tk.RIGHT, fill=tk.Y)
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         state = {"pending": False, "again": False, "key": None, "rows": {}, "alive": True}
         voice = self.voice

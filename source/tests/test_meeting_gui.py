@@ -179,8 +179,9 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
         view.profile.set("compact")
         view._section_loaded("recording")
         self.assertEqual(view._settings_drafts["recording"]["baseline"]["profile"], "compact")
+        # A form that only loaded reports nothing; the receipt waits for a save.
         view._settings_drafts["recording"]["status"].configure.assert_called_with(
-            text=ui_theme.tr("Configuração salva"), fg=view.ui.text_muted)
+            text="", fg=view.ui.text_muted)
 
     def test_live_recording_draft_validation_never_stats_the_destination(self):
         view = self.make_view()

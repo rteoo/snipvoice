@@ -125,6 +125,9 @@ SOURCE_PROSE = {"microphone": N_("do microfone"), "system": N_("do sistema")}
 LOST_SOURCE_GRACE = 3.0
 MAX_MESSAGE_TEXT = 320
 MAX_MESSAGE_DETAILS = 4096
+# The recording monitor's last grid row: the waveform, under the state,
+# transport and meters, takes the pane's spare height while it shows.
+WAVEFORM_ROW = 10
 SOURCE_TEST_HINT = N_("Teste as fontes antes de começar. Fale ou reproduza áudio nas fontes escolhidas.")
 RECORDING_HINT = N_("Trocar um dispositivo vale na próxima gravação.")
 
@@ -1992,9 +1995,16 @@ class MeetingWindow:
         notebook.add(self.recording_tab, text=tr("Gravação"))
         notebook.add(self.library_tab, text=tr("Biblioteca"))
         notebook.add(self.settings_tab, text=tr("Configurações"))
-        # No per-page headers: the manager's navigation already names the page,
-        # and every row they used came out of the recording, list, or model area.
         page_pad = self.ui.space_lg
+        # Each destination opens with its title, as in the family layout; page
+        # actions sit at its right instead of inside a content card.
+        self.page_headers = {}
+        for key, tab, title in (("recording", self.recording_tab, tr("Gravação")),
+                                ("library", self.library_tab, tr("Biblioteca")),
+                                ("settings", self.settings_tab, tr("Configurações"))):
+            header = ui_theme.PageHeader(tab, self.ui, title)
+            header.pack(side="top", fill="x", padx=page_pad, pady=(page_pad, 0))
+            self.page_headers[key] = header
         recording_view, recording_canvas, _holder, recording = self._scroll_area(
             self.recording_tab, fill_height=True,
         )
@@ -2191,7 +2201,8 @@ class MeetingWindow:
         recording.columnconfigure(0, weight=1, uniform="recording")
         recording.columnconfigure(1, weight=1, uniform="recording")
         recording.rowconfigure(0, weight=1)
-        activity_view, self.readiness_canvas, _left_holder, activity_content = self._scroll_area(recording)
+        activity_view, self.readiness_canvas, _left_holder, activity_content = self._scroll_area(
+            recording, fill_height=True)
         activity_view.grid(row=0, column=0, sticky="nsew", padx=(0, self.ui.space_md))
         activity = self._card(activity_content, pady=card_pady)
         activity.pack(fill="both", expand=True)
@@ -2199,16 +2210,14 @@ class MeetingWindow:
         monitor = self._card(recording, pady=card_pady)
         monitor.grid(row=0, column=1, sticky="nsew")
         monitor.columnconfigure(1, weight=1)
-        monitor.rowconfigure(0, weight=1)
+        # The waveform row takes the spare height while it shows.
+        monitor.rowconfigure(WAVEFORM_ROW, weight=1)
         self.recording_monitor = monitor
-        self._label(
-            activity, tr("Gravação"), bg=self.ui.card, fg=self.ui.text_strong,
-            font=self.ui.font(11, "bold"),
-        ).grid(row=0, column=0, sticky="w", pady=(0, self.ui.space_sm))
         self.recording_options_button = self._button(
-            activity, tr("Configurar gravação"), self.show_recording_settings,
+            self.page_headers["recording"].actions, tr("Configurar gravação"),
+            self.show_recording_settings,
         )
-        self.recording_options_button.grid(row=0, column=1, sticky="e", pady=(0, self.ui.space_sm))
+        self.recording_options_button.pack(side="right")
         activity.columnconfigure(1, weight=1)
         # Readiness lives above setup in its own scrollable card. Even a full
         # inventory/recovery warning stack cannot push the right-hand Stop away.
@@ -2277,8 +2286,8 @@ class MeetingWindow:
             state_labels={"idle": N_("Pronto"), "checking": N_("Testando"),
                           "recording": N_("Gravando"), "paused": N_("Pausado")},
         )
-        self.waveform.grid(row=0, column=0, columnspan=2, sticky="nsew",
-                           pady=(0, recording_gap))
+        self.waveform.grid(row=WAVEFORM_ROW, column=0, columnspan=2, sticky="nsew",
+                           pady=(self.ui.space_md, 0))
         self.meters = {}
         self.meter_readouts = {}
         self.source_captions = {}
@@ -2286,22 +2295,24 @@ class MeetingWindow:
                   ("system", tr("Nível do sistema")))
         caption_height = tkfont.Font(root=self.window, font=self.ui.caption()).metrics("linespace") + 2
         for index, (track, label) in enumerate(meters):
-            row = 1 + 2 * index
+            row = 6 + 2 * index
             self._label(monitor, label, anchor="w", bg=self.ui.card).grid(
                 row=row, column=0, sticky="w", padx=(0, self.ui.space_lg),
-                pady=(self.ui.space_xs if compact_recording else self.ui.space_sm, 0),
+                pady=(self.ui.space_xs if compact_recording or index else self.ui.space_lg, 0),
             )
             # The same series colors as the waveform lanes above.
             meter_row = tk.Frame(monitor, bg=self.ui.card)
-            meter_row.grid(row=row, column=1, sticky="ew", pady=(self.ui.space_xs, 0))
+            meter_row.grid(row=row, column=1, sticky="ew",
+                           pady=(self.ui.space_xs if compact_recording or index else self.ui.space_lg, 0))
             meter = ttk.Progressbar(
                 meter_row, maximum=1.0,
                 style="Horizontal.TProgressbar" if track == "microphone"
                 else "Secondary.Horizontal.TProgressbar",
             )
             meter.pack(side="left", fill="x", expand=True)
+            # A reading, not code: the body face, whose figures are tabular.
             readout = self._label(meter_row, tr("sem sinal"), anchor="e", bg=self.ui.card,
-                                  fg=self.ui.text_muted, font=self.ui.mono(), width=12)
+                                  fg=self.ui.text_muted, font=self.ui.body(), width=12)
             readout.pack(side="right", padx=(self.ui.space_sm, 0))
             self.meter_readouts[track] = readout
             self.meters[track] = meter
@@ -2312,25 +2323,25 @@ class MeetingWindow:
             caption.grid(row=row + 1, column=1, sticky="ew")
             monitor.rowconfigure(row + 1, minsize=caption_height)
             self.source_captions[track] = caption
-        # The recorder's written state, then its transport, sit under the signal
-        # they start: check that both sources move, then press Start without
-        # leaving the meters. A lost source raises its warning right above.
+        # The pane leads with the recorder's written state and its one primary
+        # action, then the signal they govern. A lost source raises its warning
+        # right above the state.
         self.recording_trouble = ui_theme.MessageBar(monitor, self.ui, copy=self._copy_issue_details)
-        self.recording_trouble.attach(grid=True, row=5, column=0, columnspan=2, sticky="ew",
-                                      pady=(self.ui.space_md, 0))
+        self.recording_trouble.attach(grid=True, row=0, column=0, columnspan=2, sticky="ew",
+                                      pady=(0, self.ui.space_md))
         self.record_status = tk.StringVar(self.window, tr("Pronto") + " · 00:00:00")
         self.record_chip = ui_theme.StatusChip(monitor, self.ui, bg=self.ui.card,
                                                font=self.ui.heading())
         self.record_chip.set(self.record_status.get(), "success")
-        self.record_chip.grid(row=6, column=0, columnspan=2, sticky="ew",
-                              pady=(self.ui.space_md, self.ui.space_sm))
+        self.record_chip.grid(row=1, column=0, columnspan=2, sticky="ew",
+                              pady=(0, self.ui.space_sm))
         self.audio_export_progress = ttk.Progressbar(monitor, maximum=100, mode="determinate")
-        self.audio_export_progress.grid(row=7, column=0, columnspan=2, sticky="ew",
+        self.audio_export_progress.grid(row=2, column=0, columnspan=2, sticky="ew",
                                         pady=(0, self.ui.space_sm))
         self.audio_export_progress.grid_remove()
         # One primary at a time: Start while idle, Stop while capturing.
         transport = tk.Frame(monitor, bg=self.ui.card)
-        transport.grid(row=8, column=0, columnspan=2, sticky="w")
+        transport.grid(row=3, column=0, columnspan=2, sticky="w")
         self.start_button = self._button(transport, tr("Iniciar gravação"), self.start, accent=True)
         self.pause_button = self._button(transport, tr("Pausar"), self.pause_resume)
         self.stop_button = self._button(transport, tr("Parar e salvar"), self.stop, accent=True)
@@ -2343,7 +2354,7 @@ class MeetingWindow:
         # Shown only while something holds Start: it names the holder and,
         # for processing, offers the override with its consequence.
         self.start_blocked_row = tk.Frame(monitor, bg=self.ui.card)
-        self.start_blocked_row.grid(row=9, column=0, columnspan=2, sticky="ew",
+        self.start_blocked_row.grid(row=4, column=0, columnspan=2, sticky="ew",
                                     pady=(self.ui.space_sm, 0))
         self.start_blocked_row.columnconfigure(0, weight=1)
         self.start_blocked_reason = tk.StringVar(self.window, "")
@@ -2359,7 +2370,7 @@ class MeetingWindow:
         self.start_blocked_row.grid_remove()
         self.preview_status = tk.StringVar(self.window, tr(SOURCE_TEST_HINT))
         status_row = tk.Frame(monitor, bg=self.ui.card)
-        status_row.grid(row=10, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
+        status_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(self.ui.space_sm, 0))
         self._wrap_label(status_row, "", textvariable=self.preview_status, anchor="w",
                          justify="left", bg=self.ui.card, fg=self.ui.text_muted).pack(
                              side="left", fill="x", expand=True)
@@ -2614,16 +2625,17 @@ class MeetingWindow:
 
         # Search and library actions sit above the list they act on, so the
         # selected recording gets the pane's full height. The cross-meeting
-        # question and maintenance tools open on demand above both panes.
-        toolbar = self._card(left, pady=self.ui.space_sm, padx=self.ui.space_sm)
-        toolbar.pack(fill="x", pady=(0, self.ui.space_sm))
+        # question and maintenance tools open on demand above both panes. Like
+        # the family reference it sits on the page plane, not in a box.
+        toolbar = tk.Frame(left, bg=self.ui.surface)
+        toolbar.pack(fill="x", pady=(0, self.ui.space_md))
         self.library_toolbar = toolbar
-        search_row = tk.Frame(toolbar, bg=self.ui.card)
+        search_row = tk.Frame(toolbar, bg=self.ui.surface)
         search_row.pack(fill="x")
         self.query = tk.StringVar(self.window)
         self._library_search_after = None
-        self._label(toolbar, tr("Buscar na biblioteca (Ctrl+F)"), bg=self.ui.card,
-                    anchor="w").pack(fill="x", before=search_row)
+        self._label(toolbar, tr("Buscar na biblioteca (Ctrl+F)"), bg=self.ui.surface,
+                    anchor="w").pack(fill="x", before=search_row, pady=(0, self.ui.space_xs))
         search = self._entry(search_row, self.query, 12)
         self.search_entry = search
         search.pack(side="left", fill="x", expand=True)
@@ -2631,7 +2643,7 @@ class MeetingWindow:
         search.bind("<Escape>", lambda _event: self._clear_library_search())
         self._placeholder(search, self.query, tr("Buscar gravações e transcrições"))
         self.query.trace_add("write", self._queue_library_search)
-        action_row = tk.Frame(toolbar, bg=self.ui.card)
+        action_row = tk.Frame(toolbar, bg=self.ui.surface)
         action_row.pack(fill="x", pady=(self.ui.space_sm, 0))
         self.tools_toggle = self._button(action_row, tr("Mais"), self._show_library_menu)
         self.tools_toggle.pack(side="right", padx=(self.ui.space_sm, 0))
@@ -2878,7 +2890,7 @@ class MeetingWindow:
         self.transcript_document.bind("<Control-a>", self._select_transcript_text)
         self.transcript_document.bind("<Configure>", self._transcript_measure)
         self.transcript_document.tag_configure("timestamp", foreground=self.ui.text_muted,
-                                               font=self.ui.mono(), underline=True)
+                                               font=self.ui.body(), underline=True)
         self.transcript_document.bind("<Button-1>", self._timestamp_click, add="+")
         self.transcript_document.bind("<Return>", self._timestamp_enter, add="+")
         self.transcript_audio_toggle = self._button(
@@ -3362,7 +3374,7 @@ class MeetingWindow:
         draft["discard"].configure(state="normal" if dirty and not draft["saving"] else "disabled")
         draft["status"].configure(text=(tr("Carregando…") if draft["baseline"] is None else
                                          "⚠ " + error if error else tr("Salvando…") if draft["saving"]
-                                         else tr("Alterações não salvas") if dirty else tr("Configuração salva")),
+                                         else tr("Alterações não salvas") if dirty else ui_theme.saved_receipt(draft)),
                                   fg=self.ui.danger if error else self.ui.text_muted)
 
     def _section_loaded(self, section):
@@ -3412,6 +3424,7 @@ class MeetingWindow:
         after, draft["after"] = draft["after"], None
         if succeeded:
             draft["baseline"] = copy.deepcopy(values)
+            draft["saved_at"] = time.time()
         self._sync_settings_bar(section)
         if succeeded and after and self._draft_values(section) == values:
             after()
@@ -5138,10 +5151,14 @@ class MeetingWindow:
                        tr("A lista anterior continua em uso. Conecte o dispositivo e atualize de novo."),
                        error=error)
             return
+        # The startup read is no outcome the user asked for: it ends on the
+        # standing hint, and only a later refresh earns the receipt.
+        first_load = not getattr(self, "devices_loaded", False)
         self.devices = list(islice(devices or [], 256))
         self.devices_loaded = True
         self._render_devices()
-        self.preview_status.set(tr("Dispositivos atualizados. Teste as fontes antes de gravar."))
+        self.preview_status.set(tr(SOURCE_TEST_HINT) if first_load
+                                else tr("Dispositivos atualizados. Teste as fontes antes de gravar."))
 
     def _render_devices(self):
         for track in ("microphone", "system"):
@@ -8117,7 +8134,7 @@ class MeetingWindow:
                     self.waveform.grid()
                 else:
                     self.waveform.grid_remove()
-                self.recording_monitor.rowconfigure(0, weight=int(show_waveform))
+                self.recording_monitor.rowconfigure(WAVEFORM_ROW, weight=int(show_waveform))
             points = tuple((track, tuple(values)) for track, values in
                            self.snapshot.get("waveforms", {}).items() if track in ("microphone", "system"))
             if waveform_visible and points != self._waveform_key:

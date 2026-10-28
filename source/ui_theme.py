@@ -31,6 +31,7 @@ repaint themselves, the derived grays do not.
 """
 
 import ctypes
+import datetime
 import tkinter as tk
 from tkinter import font as tkfont
 from tkinter import ttk
@@ -90,8 +91,8 @@ _SYMBOL_FAMILIES = {
 # Fluent/MDL2 share these semantic codepoints. Other platforms keep readable
 # Unicode symbols rather than private-use characters from an unrelated font.
 _ICONS = {
-    "record": ("\ue8f1", "●"), "library": ("\ue8b7", "▤"),
-    "dictation": ("\ue8f1", "🎙"), "settings": ("\ue713", "⚙"),
+    "record": ("\ue7c8", "●"), "library": ("\ue8f1", "▤"),
+    "dictation": ("\ue720", "🎙"), "settings": ("\ue713", "⚙"),
     "down": ("\ue70d", "▾"), "up": ("\ue70e", "▴"),
 }
 
@@ -153,7 +154,7 @@ class Theme:
         "chart_primary", "chart_secondary", "chart_neutral",
         "overlay_bg", "overlay_border", "overlay_text", "overlay_muted",
         "overlay_live", "overlay_busy", "overlay_ok", "overlay_trouble",
-        "select_bg", "select_fg", "text_native", "tab_unselected_fg",
+        "select_bg", "select_fg", "nav_select_bg", "scroll_thumb", "text_native", "tab_unselected_fg",
         "space_xs", "space_sm", "space_md", "space_lg", "space_xl",
         "tree_row_height",
     )
@@ -358,7 +359,7 @@ class Theme:
         """
         if self.system == "darwin":
             return {}
-        plane = self.select_bg if selected else bg
+        plane = self.nav_select_bg if selected else bg
         return {
             "bg": plane,
             "fg": self.select_fg if selected else self.text_native,
@@ -587,6 +588,12 @@ _LIGHT = {
     "chart_neutral": "#7B8492",
     "select_bg": "#e8e6e3",
     "select_fg": "#202630",
+    # The family's selection plane is 1.02:1 on the light navigation base, so
+    # only the marker showed the current page. This step keeps secondary text
+    # at 4.5:1 and the marker at 3:1 (a recorded DESIGN.md deviation).
+    "nav_select_bg": "#dedcd8",
+    # A quiet thumb that still holds 3:1 on the page and content planes.
+    "scroll_thumb": "#7b8088",
     # Foreground for widgets the pre-change GUI left uncolored. Resolved to
     # each platform's own default so filling it in changes nothing there.
     "text_native": "#202630",
@@ -633,6 +640,8 @@ _DARK = {
     "chart_neutral": "#788697",
     "select_bg": "#484848",
     "select_fg": "#F2EFE9",
+    "nav_select_bg": "#484848",
+    "scroll_thumb": "#7C7B79",
     "text_native": "#F2EFE9",
     "tab_unselected_fg": "#bcbcbc",
     **_OVERLAY,
@@ -996,21 +1005,31 @@ def configure_manager_styles(style, resolved=None):
     )
     style.configure("Device.TCombobox", font=ui.body())
     for orientation in ("Vertical", "Horizontal"):
+        # Windows-style thin scrollbar: a flat thumb in the trough, no arrow
+        # buttons and no grip lines; it brightens under the pointer.
+        if ui.system != "darwin":
+            style.layout(f"{orientation}.TScrollbar", [
+                (f"{orientation}.Scrollbar.trough", {"sticky": "ns" if orientation == "Vertical" else "ew",
+                                                     "children": [(f"{orientation}.Scrollbar.thumb",
+                                                                   {"expand": "1", "sticky": "nswe"})]}),
+            ])
         style.configure(
             f"{orientation}.TScrollbar",
-            background=ui.field_border,
+            background=ui.scroll_thumb,
             troughcolor=ui.surface,
             bordercolor=ui.surface,
             arrowcolor=ui.surface,
-            lightcolor=ui.field_border,
-            darkcolor=ui.field_border,
+            lightcolor=ui.scroll_thumb,
+            darkcolor=ui.scroll_thumb,
+            arrowsize=ui.px(10),
+            gripsize=0,
         )
         # Clam maps a near-white face onto idle states (e.g. an empty list's
         # full-length thumb), overriding the configured background.
         style.map(
             f"{orientation}.TScrollbar",
             background=[("pressed", ui.text_muted), ("active", ui.text_muted),
-                        ("!active", ui.field_border)],
+                        ("!active", ui.scroll_thumb)],
         )
     for name in ("Manager.Treeview", "Meeting.Treeview"):
         # A 2px field edge in the row color: invisible at rest, the focus
@@ -1440,6 +1459,18 @@ def local_time_text(moment):
     return moment.strftime("%H:%M")
 
 
+def saved_receipt(form):
+    """A settings form's clean-state line: the last save's receipt, or nothing.
+
+    A form that only loaded has nothing to report; "Configuração salva" on
+    open would claim a save that never happened.
+    """
+    saved = form.get("saved_at")
+    if saved is None:
+        return ""
+    return tr("Configuração salva") + " · " + local_time_text(datetime.datetime.fromtimestamp(saved))
+
+
 def info_bar(parent, ui, tone, title, body, action=None, details=None, copy=None,
              when=None, dismiss=None):
     """A Windows-family InfoBar: tone pair, glyph, title, body, one action, Detalhes.
@@ -1586,6 +1617,113 @@ class MessageBar(tk.Frame):
             (self.grid_remove if self._placer == "grid" else self.pack_forget)()
 
 
+class PageHeader(tk.Frame):
+    """A destination's title in the Title role, with its page actions at the right.
+
+    The family layout names every page above its content; the navigation
+    alone leaves the content without an anchor. Build actions into ``actions``.
+    """
+
+    def __init__(self, parent, ui, title):
+        bg = _surface_of(parent)
+        super().__init__(parent, bg=bg)
+        self.title = tk.Label(self, text=title, font=ui.title(), bg=bg, fg=ui.text_strong,
+                              anchor="w")
+        self.title.pack(side="left")
+        self.actions = tk.Frame(self, bg=bg)
+        self.actions.pack(side="right")
+
+
+def _switch_image(master, ui, on, bg):
+    """A ToggleSwitch track as a PhotoImage, antialiased by 4x4 supersampling.
+
+    Off: a control-boundary outline and a secondary-text knob at the left. On:
+    the copper fill inside its 3:1 marker edge and a dark knob at the right.
+    """
+    width, height, samples = ui.px(40), ui.px(20), 4
+    # Tk has no gap between a compound image and its text; the image carries it.
+    gap = ui.space_sm
+    stroke, radius = max(1, ui.px(1)), height / 2
+    knob = height * 0.3
+
+    def rgb(color):
+        return tuple(value // 257 for value in master.winfo_rgb(color))
+
+    def pill(x, y, inset):
+        r = radius - inset
+        cx = min(max(x, radius), width - radius)
+        return (x - cx) ** 2 + (y - radius) ** 2 <= r * r
+
+    knob_x = width - radius if on else radius
+    layers = ((rgb(ui.accent_mark if on else ui.field_border), lambda x, y: pill(x, y, 0)),
+              (rgb(ui.accent if on else bg), lambda x, y: pill(x, y, stroke)),
+              (rgb(ui.text_on_accent if on else ui.text_muted),
+               lambda x, y: (x - knob_x) ** 2 + (y - radius) ** 2 <= knob * knob))
+    base = rgb(bg)
+    rows = []
+    for py in range(height):
+        row = []
+        for px in range(width + gap):
+            color = base
+            for fill, inside in layers:
+                hits = sum(inside(px + (sx + 0.5) / samples, py + (sy + 0.5) / samples)
+                           for sx in range(samples) for sy in range(samples))
+                if hits:
+                    a = hits / samples ** 2
+                    color = tuple(round(f * a + c * (1 - a)) for f, c in zip(fill, color))
+            row.append("#%02x%02x%02x" % color)
+        rows.append("{" + " ".join(row) + "}")
+    image = tk.PhotoImage(master=master, width=width + gap, height=height)
+    image.put(" ".join(rows))
+    return image
+
+
+def toggle_switch(parent, ui, text, command, *, bg, font=None):
+    """A Windows ToggleSwitch for an immediate on/off preference.
+
+    It is a ``tk.Checkbutton`` drawn with switch images, so the variable,
+    ``select``/``deselect``/``invoke``, Space and Win32's focus rectangle all
+    behave as a checkbox does. Aqua keeps its native checkbox.
+    """
+    if ui.system == "darwin":
+        return tk.Checkbutton(parent, text=text, command=command, font=font or ui.body())
+    off, on = _switch_image(parent, ui, False, bg), _switch_image(parent, ui, True, bg)
+    switch = tk.Checkbutton(
+        parent, text=text, command=command, font=font or ui.body(), image=off, selectimage=on,
+        compound="left", indicatoron=False, relief="flat", offrelief="flat", overrelief="flat",
+        bd=0, padx=0, pady=ui.space_xs, cursor="hand2", selectcolor=bg,
+        bg=bg, activebackground=bg, fg=ui.text_native, activeforeground=ui.text_native,
+        disabledforeground=ui.disabled_fg, highlightthickness=0,
+    )
+    # Tk needs a Python reference, or the images are collected and go blank.
+    switch._switch_images = (off, on)
+    return switch
+
+
+def scroll_slot(parent, ui, command, *, bg):
+    """A vertical scrollbar that shows only while its view overflows.
+
+    Returns ``(slot, scrollbar, set)``: pack or grid ``slot`` and hand ``set``
+    to the view's ``yscrollcommand``. The slot keeps the scrollbar's width while
+    it hides, so hiding it never rewraps the view and oscillates; an empty or
+    short list no longer shows a full-length thumb.
+    """
+    slot = tk.Frame(parent, bg=bg)
+    scrollbar = ttk.Scrollbar(slot, orient="vertical", command=command)
+    slot.configure(width=scrollbar.winfo_reqwidth())
+    slot.pack_propagate(False)
+
+    def set_view(first, last):
+        overflow = float(first) > 0 or float(last) < 1
+        if overflow and not scrollbar.winfo_manager():
+            scrollbar.pack(fill="y", expand=True)
+        elif not overflow and scrollbar.winfo_manager():
+            scrollbar.pack_forget()
+        scrollbar.set(first, last)
+
+    return slot, scrollbar, set_view
+
+
 class StatusChip(tk.Frame):
     """A tone dot beside one written state ("● Gravando · 00:45:54").
 
@@ -1701,7 +1839,7 @@ def build_theme(kind, system=None, default_size=None, preference="system",
     if system == "windows" and high_contrast:
         colors = dict(colors)
         for token in colors:
-            if token in ("select_bg", "accent", "accent_active", "accent_mark", "focus_ring"):
+            if token in ("select_bg", "nav_select_bg", "accent", "accent_active", "accent_mark", "focus_ring"):
                 colors[token] = high_contrast["selection"]
             elif token in ("select_fg", "text_on_accent"):
                 colors[token] = high_contrast["selected_text"]
