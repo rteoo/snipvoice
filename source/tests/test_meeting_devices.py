@@ -85,6 +85,12 @@ class DeviceChoiceTests(unittest.TestCase):
         view._render_devices.assert_called_once()
         view.device_refresh_button.configure.assert_called_with(text="Atualizar dispositivos", state="normal")
         self.assertIsNone(said(view, "recording"))
+        # The startup read is not a user outcome: it ends on the standing hint,
+        # and only a later refresh writes the receipt.
+        self.assertEqual(view.preview_status.set.call_args.args[0], SOURCE_TEST_HINT)
+        view._devices_loaded(DEVICES, None)
+        self.assertEqual(view.preview_status.set.call_args.args[0],
+                         "Dispositivos atualizados. Teste as fontes antes de gravar.")
         view._devices_loaded(None, "synthetic failure")
         self.assertEqual(view.devices, DEVICES)
         # The failure is written on the Recording page; the line under the

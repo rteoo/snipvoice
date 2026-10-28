@@ -60,6 +60,8 @@ WINDOWS_LIGHT_COLORS = {
     "chart_neutral": "#7B8492",
     "select_bg": "#e8e6e3",
     "select_fg": "#202630",
+    "nav_select_bg": "#dedcd8",
+    "scroll_thumb": "#7b8088",
     "text_native": "#202630",
     "tab_unselected_fg": "#606060",
 }
@@ -102,6 +104,8 @@ WINDOWS_DARK_COLORS = {
     "chart_neutral": "#788697",
     "select_bg": "#484848",
     "select_fg": "#F2EFE9",
+    "nav_select_bg": "#484848",
+    "scroll_thumb": "#7C7B79",
     "text_native": "#F2EFE9",
     "tab_unselected_fg": "#bcbcbc",
 }
@@ -162,7 +166,7 @@ class AccessibilityPresentationTests(unittest.TestCase):
             ui = ui_theme.build_theme("dark", system="windows", families=families)
             self.assertEqual(ui.icon_family, expected)
             self.assertEqual(ui.icon("settings"), "\ue713" if expected else "⚙")
-            self.assertEqual(ui.icon("record"), "\ue8f1" if expected else "●")
+            self.assertEqual(ui.icon("record"), "\ue7c8" if expected else "●")
             self.assertEqual(ui.icon("down"), "\ue70d" if expected else "▾")
             if expected:
                 self.assertEqual(ui.icon_font()[0], expected)
@@ -298,13 +302,20 @@ class ContrastTests(unittest.TestCase):
     def test_control_boundaries_focus_and_marks_hold_3_to_1(self):
         for colors in self._themes():
             for role in ("field_border", "control_border", "focus_ring", "accent_mark",
-                         "chart_primary", "chart_secondary", "chart_neutral"):
+                         "chart_primary", "chart_secondary", "chart_neutral", "scroll_thumb"):
                 for surface in ("surface_alt", "surface", "card"):
                     self.assertGreaterEqual(
                         contrast(colors[role], colors[surface]), 3.0, (role, surface))
-            # The nav marker and focus ring also sit on the selection plane.
+            # The nav marker and focus ring also sit on the selection planes.
             for role in ("accent_mark", "focus_ring"):
-                self.assertGreaterEqual(contrast(colors[role], colors["select_bg"]), 3.0, role)
+                for plane in ("select_bg", "nav_select_bg"):
+                    self.assertGreaterEqual(contrast(colors[role], colors[plane]), 3.0, (role, plane))
+            # The selected page's label and its state caption, and a plane the
+            # eye can find without the marker.
+            self.assertGreaterEqual(contrast(colors["select_fg"], colors["nav_select_bg"]), 4.5)
+            self.assertGreaterEqual(contrast(colors["text_muted"], colors["nav_select_bg"]), 4.5)
+            if colors["nav_select_bg"] != colors["select_bg"]:
+                self.assertGreaterEqual(contrast(colors["nav_select_bg"], colors["surface_alt"]), 1.1)
 
     def test_list_state_words_read_on_rows_and_selected_rows_use_the_selection_text(self):
         # A toned row draws its tag color on the content plane; a selected row
@@ -759,9 +770,11 @@ class WidgetOptionTests(unittest.TestCase):
         theme = ui_theme.build_theme("dark", system="windows")
         selected = theme.nav_button_colors(theme.surface_alt, selected=True)
         idle = theme.nav_button_colors(theme.surface_alt)
-        self.assertEqual(selected["bg"], theme.select_bg)
-        self.assertEqual(selected["highlightbackground"], theme.select_bg)
+        self.assertEqual(selected["bg"], theme.nav_select_bg)
+        self.assertEqual(selected["highlightbackground"], theme.nav_select_bg)
         self.assertEqual(selected["fg"], theme.text_native)
+        light = ui_theme.build_theme("light", system="windows")
+        self.assertEqual(light.nav_button_colors(light.surface_alt, selected=True)["bg"], "#dedcd8")
         self.assertNotIn(theme.accent, selected.values())
         self.assertEqual(idle["bg"], theme.surface_alt)
         self.assertEqual(idle["fg"], theme.text_native)
@@ -1146,8 +1159,12 @@ class TtkThemeSelectionTests(unittest.TestCase):
         theme = ui_theme.build_theme("dark", system="windows")
         ui_theme.configure_manager_styles(style, theme)
         self.assertEqual(style.configured["Sash"]["background"], theme.surface)
-        self.assertIn(("!active", theme.field_border),
+        self.assertIn(("!active", theme.scroll_thumb),
                       style.mapped["Vertical.TScrollbar"]["background"])
+        self.assertEqual(style.configured["Vertical.TScrollbar"]["gripsize"], 0)
+        # No arrow buttons: the layout is the trough and its thumb only.
+        layout = style.layouts["Vertical.TScrollbar"]
+        self.assertEqual([name for name, _options in layout], ["Vertical.Scrollbar.trough"])
         self.assertEqual(style.mapped["Manager.TNotebook.Tab"]["lightcolor"],
                          [("selected", theme.card)])
 
