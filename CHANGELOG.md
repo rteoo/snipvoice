@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0-beta.1 - 2026-10-29
+
+- Open a new manager window on Windows, rebuilt in Tauri on the Teô design system, with the same pages as before: Gravação, Biblioteca, Ditado and Configurações. Set `SNIPVOICE_MANAGER=tk` to use the classic window; it also opens automatically if the new one cannot start on this computer.
+- Library: summary versions with section review and report export, custom summary formats, chat about a recording, file exports, final-audio playback with clickable timestamped transcript lines, and the trash with restore and permanent delete.
+- Gravação gains a readiness strip naming what is missing (models, recovery, a running job, recordings needing attention) with a direct action for each.
+- Configurações: recording defaults, privacy and retention, model downloads with live progress, semantic search, and moving the data or models folder.
+- Ditado: model and language, shortcuts captured by pressing them (global shortcuts pause while you do), hold or hands-free mode, and editors for voice commands and transcript corrections.
+- The Windows package bundles the new window with its third-party notices and checks that it starts before the release is built. macOS keeps the classic window in this beta.
+- No Microsoft Store package for this beta; the Windows installer and portable ZIP are available.
+
 ## 1.3.0 - 2026-10-22
 
 - Adopt the operations-first Teô design system across the manager, dialogs, and floating controls, with clear readiness, progress, failure, and recovery states.

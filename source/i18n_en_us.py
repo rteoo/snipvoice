@@ -1945,7 +1945,8 @@ EN_US = {
     'Não foi possível salvar a aparência. Tente de novo.': 'The appearance could not be saved. Try again.',
     'Gravação não encontrada.': 'Recording not found.',
     'Não foi possível salvar o título. Tente de novo.': 'The title could not be saved. Try again.',
-    'Não foi possível abrir a janela do SnipVoice.': "The SnipVoice window couldn't open.",
+    'A nova janela não abriu neste computador; usando a janela clássica.':
+        "The new window couldn't open on this computer; using the classic window.",
     'Destinos': 'Destinations',
     'Não foi possível abrir o SnipVoice. Feche esta janela e abra de novo pela bandeja.': "SnipVoice couldn't open. Close this window and open it again from the tray.",
     'Buscar em títulos e transcrições': 'Search titles and transcripts',

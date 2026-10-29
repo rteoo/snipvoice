@@ -425,6 +425,59 @@ class ManagerHostTests(unittest.TestCase):
         self.host.show("library")
         self.assertEqual(len(self.processes), 2)
 
+    def test_a_window_that_never_greets_falls_back_instead_of_closing(self):
+        unusable = threading.Event()
+        closed = threading.Event()
+        processes = []
+
+        def popen(_args, **_kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        host = ManagerHost(make_api(), "manager.exe", on_closed=closed.set, on_unusable=unusable.set, popen=popen)
+        try:
+            host.show()
+            processes[0].exit()
+            self.assertTrue(unusable.wait(WAIT))
+            self.assertFalse(closed.is_set())
+        finally:
+            host.shutdown()
+            for process in processes:
+                process.close()
+
+    def test_a_window_that_greeted_then_closes_is_an_ordinary_close(self):
+        unusable = threading.Event()
+        closed = threading.Event()
+        processes = []
+
+        def popen(_args, **_kwargs):
+            processes.append(FakeProcess())
+            return processes[-1]
+
+        host = ManagerHost(make_api(), "manager.exe", on_closed=closed.set, on_unusable=unusable.set, popen=popen)
+        try:
+            host.show()
+            process = processes[0]
+            hello = {"jsonrpc": "2.0", "id": 1, "method": "app.hello", "params": {}}
+            process.child_writer.write(json.dumps(hello).encode() + bytes([10]))
+            reply = self._next_reply(process, 1)
+            self.assertEqual(reply["result"]["protocol"], manager_bridge.PROTOCOL_VERSION)
+            process.exit()
+            self.assertTrue(closed.wait(WAIT))
+            self.assertFalse(unusable.is_set())
+        finally:
+            host.shutdown()
+            for process in processes:
+                process.close()
+
+    def _next_reply(self, process, request_id):
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline:
+            message = process.read_message()
+            if message.get("id") == request_id:
+                return message
+        raise AssertionError(f"no reply to request {request_id}")
+
     def test_a_window_that_cannot_start_says_so(self):
         failed = []
 
@@ -458,11 +511,13 @@ class ExecutableLookupTests(unittest.TestCase):
             else:
                 os.environ[manager_bridge.MANAGER_EXE_ENV] = previous
 
-    def test_tauri_manager_is_opt_in(self):
+    def test_tauri_manager_is_the_default_and_tk_opts_out(self):
         previous = os.environ.pop(manager_bridge.MANAGER_KIND_ENV, None)
         try:
+            self.assertTrue(manager_bridge.tauri_manager_requested())
+            os.environ[manager_bridge.MANAGER_KIND_ENV] = " Tk "
             self.assertFalse(manager_bridge.tauri_manager_requested())
-            os.environ[manager_bridge.MANAGER_KIND_ENV] = "Tauri"
+            os.environ[manager_bridge.MANAGER_KIND_ENV] = "tauri"
             self.assertTrue(manager_bridge.tauri_manager_requested())
         finally:
             os.environ.pop(manager_bridge.MANAGER_KIND_ENV, None)

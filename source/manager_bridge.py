@@ -668,20 +668,24 @@ def manager_executable(resource_dir, repo_root=None):
 
 
 def tauri_manager_requested():
-    """Opt-in until the new window reaches parity with the Tk manager."""
-    return os.environ.get(MANAGER_KIND_ENV, "").strip().lower() == "tauri"
+    """The Tauri window is the default; ``SNIPVOICE_MANAGER=tk`` keeps the Tk manager for now."""
+    return os.environ.get(MANAGER_KIND_ENV, "").strip().lower() != "tk"
 
 
 class ManagerHost:
     """Spawn, focus and stop the manager window; push state while it lives."""
 
     def __init__(self, api, executable, *, logger=None, on_closed=None, on_spawn_failed=None,
-                 popen=subprocess.Popen):
+                 on_unusable=None, popen=subprocess.Popen):
         self.api = api
         self.executable = executable
         self.logger = logger
         self.on_spawn_failed = on_spawn_failed
         self.on_closed = on_closed
+        # A window that exits before greeting the engine cannot render here
+        # (e.g. no WebView2 runtime); the engine then falls back to Tk.
+        self.on_unusable = on_unusable
+        self._greeted = False
         self._popen = popen
         self._lock = threading.Lock()
         self._process = None
@@ -754,7 +758,16 @@ class ManagerHost:
             stderr=subprocess.DEVNULL, creationflags=flags, bufsize=0,
         )
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="manager-rpc")
-        endpoint = RpcEndpoint(process.stdout, process.stdin, self.api.methods(), executor=executor,
+        methods = self.api.methods()
+        hello = methods["app.hello"]
+
+        def greeted(params):
+            self._greeted = True
+            return hello(params)
+
+        methods["app.hello"] = greeted
+        self._greeted = False
+        endpoint = RpcEndpoint(process.stdout, process.stdin, methods, executor=executor,
                                on_close=lambda: self._closed(endpoint), logger=self.logger)
         self._process, self._endpoint, self._executor = process, endpoint, executor
         self._last_recording = None
@@ -771,10 +784,16 @@ class ManagerHost:
             self._endpoint = None
             executor, self._executor = self._executor, None
             quitting = self._quitting
+            greeted = self._greeted
         self._wake.set()
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
-        if self.on_closed is not None and not quitting:
+        if quitting:
+            return
+        if not greeted and self.on_unusable is not None:
+            self._warn("manager window closed before reaching the engine; falling back to the Tk manager")
+            self.on_unusable()
+        elif self.on_closed is not None:
             self.on_closed()
 
     def _push_loop(self, endpoint):

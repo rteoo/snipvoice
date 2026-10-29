@@ -1,6 +1,6 @@
 """Snipvoice - local push-to-talk dictation for Windows and macOS.
-Version: 1.3.0
-Channel: stable
+Version: 1.4.0
+Channel: beta
 
 Recording is explicit and local. Audio and transcripts are kept in recoverable
 history; model downloads are the only transcription-related network operation.
@@ -119,9 +119,9 @@ from meeting_library import MeetingLibrary
 from meeting_support import CAPTURE_STATES, MeetingController, start_blocker
 from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
-APP_VERSION = "1.3.0"
-RELEASE_CHANNEL = "stable"
-BETA_NUMBER = 0
+APP_VERSION = "1.4.0"
+RELEASE_CHANNEL = "beta"
+BETA_NUMBER = 1
 APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
 # ceiling: a six-hour pass is cheap for hundreds of recordings; lower it only
 # if users expect removal within hours of the deadline.
@@ -547,7 +547,7 @@ class Snipvoice:
             os.path.dirname(os.path.abspath(__file__)))
         executable = manager_executable(get_runtime_resource_dir(), checkout)
         if executable is None:
-            self.logger.warning("SNIPVOICE_MANAGER=tauri, but no manager executable exists; using the Tk manager")
+            self.logger.warning("No manager window executable exists; using the Tk manager")
             self._manager_host = False
             return None
         api = ManagerApi(
@@ -596,10 +596,16 @@ class Snipvoice:
         ]
         self._manager_host = ManagerHost(
             api, executable, logger=self.logger, on_closed=self._tauri_manager_closed,
-            on_spawn_failed=lambda: self.notify_error(tr("Não foi possível abrir a janela do SnipVoice."),
-                                                      key="manager-spawn"),
+            on_spawn_failed=self._tauri_manager_unusable, on_unusable=self._tauri_manager_unusable,
         )
         return self._manager_host
+
+    def _tauri_manager_unusable(self):
+        """The window cannot start or render here (e.g. no WebView2): use Tk for this session."""
+        self._manager_host = False
+        self.notify_error(tr("A nova janela não abriu neste computador; usando a janela clássica."),
+                          key="manager-unusable")
+        self.gui.submit(self._show_manager_window)
 
     def _choose_manager_path(self, kind, title, filename, filetypes):
         """A native save or open dialog on the Tk thread for the Tauri window; "" when cancelled."""
