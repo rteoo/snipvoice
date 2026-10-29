@@ -35,6 +35,8 @@ async function main(): Promise<void> {
   const bridge = new Bridge(await transport());
   await bridge.start();
   const hello = await bridge.call<Hello>("app.hello");
+  // The packaged probe only needs proof that the page reached the engine.
+  if (hello.headless) return;
   setCatalog(hello.language, hello.catalog);
   applyAppearance(hello.appearance);
   document.title = hello.displayName;

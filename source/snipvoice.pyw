@@ -53,6 +53,15 @@ def run_sqlite_runtime_probe_if_requested(argv=None):
     raise SystemExit(probe_main())
 
 
+def run_manager_window_probe_if_requested(argv=None):
+    """Start the bundled manager window hidden and wait for it to reach the bridge."""
+    arguments = sys.argv[1:] if argv is None else argv
+    if "--manager-window-probe" not in arguments:
+        return False
+    from manager_window_probe import main as probe_main
+    raise SystemExit(probe_main())
+
+
 def run_meeting_audio_probe_if_requested(argv=None):
     """Run the model-free MP3 capture/storage diagnostic before app startup."""
     arguments = sys.argv[1:] if argv is None else argv
@@ -75,6 +84,7 @@ run_voice_runtime_probe_if_requested()
 run_summary_runtime_probe_if_requested()
 run_sqlite_runtime_probe_if_requested()
 run_meeting_audio_probe_if_requested()
+run_manager_window_probe_if_requested()
 
 if "--meeting-capture-probe" in sys.argv[1:]:
     from meeting_audio import NativeCapture
