@@ -293,3 +293,8 @@ table.models td.num { padding-right: 4px; }
   .library-list { border-right: 0; border-bottom: 1px solid var(--native-line); }
   .library-list .col-date { display: none; }
 }
+
+dialog.editor-dialog { width: min(680px, calc(100% - 32px)); }
+dialog.editor-dialog .table-scroll { max-height: 32vh; margin: var(--native-space-3) 0; border: 1px solid var(--native-line); border-radius: var(--native-control-radius); }
+dialog.editor-dialog .btn-row { margin-top: var(--native-space-2); }
+pre.licenses { max-height: 50vh; overflow: auto; white-space: pre-wrap; font: var(--native-type-caption)/1.5 var(--native-font-mono); }

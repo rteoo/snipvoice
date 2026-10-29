@@ -248,3 +248,29 @@ export interface LocationView {
 }
 
 export type MovePlan = { target: null } | { target: string; title: string; question: string };
+
+export interface DictationValues {
+  profile: string;
+  language: string;
+  hotkey: string;
+  commandHotkey: string;
+  activationMode: "hold" | "toggle";
+}
+
+export interface DictationSettingsView {
+  profiles: (Choice & { installed: boolean })[];
+  languages: Record<string, Choice[]>;
+  values: DictationValues;
+  commands: number;
+  corrections: number;
+}
+
+export interface VoiceCommand {
+  phrase: string;
+  text: string;
+}
+
+export interface Correction {
+  source: string;
+  replacement: string;
+}

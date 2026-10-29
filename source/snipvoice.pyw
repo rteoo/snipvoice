@@ -523,6 +523,7 @@ class Snipvoice:
             return self._manager_host or None
         from manager_bridge import ManagerApi, ManagerHost, manager_executable, tauri_manager_requested
         import summary_models
+        from manager_dictation import DictationActions
         from manager_library import LibraryActions
         from manager_settings import SettingsActions
 
@@ -562,6 +563,12 @@ class Snipvoice:
                 notify=lambda method, params: self._manager_host and self._manager_host.notify(method, params),
                 data_location=self.data_location, models_location=self.models_location,
                 relocate_data=self.request_data_relocation, relocate_models=self.request_models_relocation,
+            ),
+            DictationActions(
+                voice=self.voice, settings_getter=lambda: dict(self.settings),
+                persist_settings=self._persist_voice_settings, commands_getter=lambda: dict(self.snippets),
+                save_commands=self._save_commands, reload_commands=self._load_commands,
+                on_changed=self.refresh_tray_menu,
             ),
         ]
         self._manager_host = ManagerHost(
