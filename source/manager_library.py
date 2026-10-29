@@ -102,6 +102,8 @@ class LibraryActions:
             "library.exportText": self.export_text,
             "library.exportAudio": self.export_audio,
             "library.prepareAudio": self.prepare_audio,
+            "library.play": self.play,
+            "library.stopPlayback": self.stop_playback,
             "library.importAudio": self.import_audio,
             "library.trashPreview": self.trash_preview,
             "library.trash": self.trash,
@@ -555,6 +557,24 @@ class LibraryActions:
         if not accepted:
             raise RpcFailure(tr("Há uma captura ou outro processamento em andamento. Tente de novo depois."))
         return {"accepted": True}
+
+    def play(self, params):
+        """Play the final audio from ``start`` seconds; progress arrives with recording.state."""
+        session_id = _session_id(params)
+        start = params.get("start", 0)
+        if not isinstance(start, (int, float)) or isinstance(start, bool) or not 0 <= start < 1e7:
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        if self.meetings.snapshot().get("state") in {"starting", "recording", "paused", "stopping"}:
+            raise RpcFailure(tr("Finalize a captura antes de reproduzir uma gravação."))
+        accepted = self._engine_call(lambda: self.meetings.seek_playback(session_id, "final", start=float(start)),
+                                     tr("Tente de novo. O áudio final continua salvo."))
+        if not accepted:
+            raise RpcFailure(tr("A reprodução não está disponível durante outra operação."))
+        return {"accepted": True}
+
+    def stop_playback(self, _params):
+        self._engine_call(self.meetings.stop_playback, tr("Não foi possível concluir a ação."))
+        return {"stopped": True}
 
     def import_audio(self, _params):
         settings = self._settings()

@@ -44,6 +44,9 @@ export class MockTransport implements Transport {
   ];
   private jobs = new Map<string, () => void>();
   private semantic = false;
+  private playing: { id: string; start: number; at: number } | null = null;
+  private playbackGeneration = 1;
+  private playTimer: number | undefined;
   private dictation = { profile: "balanced", language: "pt-BR", hotkey: "ctrl+alt+space", commandHotkey: "ctrl+alt+shift+space", activationMode: "hold" };
   private commands = [{ phrase: "meu email", text: "nome@example.com" }, { phrase: "assinatura", text: "Atenciosamente,\nEquipe" }];
   private corrections = [{ source: "snip voice", replacement: "SnipVoice" }];
@@ -163,14 +166,14 @@ export class MockTransport implements Transport {
       case "library.get": {
         const item = SESSIONS.find((session) => session.id === params.id);
         if (!item) throw new Error("Gravação não encontrada.");
-        return { ...item, revision: item.status === "Falhou" ? null : "r1" };
+        return { ...item, revision: item.status === "Falhou" ? null : "r1", durationSeconds: 720, playable: item.status !== "Falhou" };
       }
       case "library.transcript":
         if (params.revision === null) return { text: "", truncated: false, empty: true };
         return {
           text:
             params.style === "timestamped"
-              ? "[00:00:04] Bom dia a todos, vamos começar.\n[00:00:11] Primeiro item: o cronograma da entrega.\n[00:01:02] Fechamos a revisão na sexta."
+              ? "00:00:04 Microfone: Bom dia a todos, vamos começar.\n00:00:11 Sistema: Primeiro item: o cronograma da entrega.\n00:01:02 Microfone: Fechamos a revisão na sexta."
               : "Bom dia a todos, vamos começar. Primeiro item: o cronograma da entrega.\n\nFechamos a revisão na sexta.",
           truncated: false,
           empty: false,
@@ -332,6 +335,23 @@ export class MockTransport implements Transport {
         return { cancelled: true };
       case "search.repair":
         return { status: "started" };
+      case "recording.readiness":
+        return { rows: [
+          { key: "summary", tone: "warning", text: "Sem modelo de resumo instalado.", action: "Ver modelos" },
+          { key: "attention", tone: "warning", text: "Gravações com problemas nesta página: 1", action: "Ver" },
+        ], attentionId: "s3" };
+      case "library.play":
+        this.playing = { id: String(params.id), start: Number(params.start), at: Date.now() };
+        this.playbackGeneration++;
+        window.clearInterval(this.playTimer);
+        this.playTimer = window.setInterval(() => this.push("recording.state", this.recordingView()), 200);
+        return { accepted: true };
+      case "library.stopPlayback":
+        this.playing = null;
+        this.playbackGeneration++;
+        window.clearInterval(this.playTimer);
+        this.push("recording.state", this.recordingView());
+        return { stopped: true };
       case "dictation.removeModel":
         return params.confirmed === true ? { status: "removed" } : { status: "confirm", title: "Remover modelo", message: "A entrada por voz será desligada e só o modelo deste perfil será apagado." };
       default:
@@ -386,6 +406,7 @@ export class MockTransport implements Transport {
       lost: [],
       export: null,
       hotkey: "Ctrl+Alt+R",
+      playback: { active: this.playing !== null, sessionId: this.playing?.id ?? null, position: this.playing ? this.playing.start + (Date.now() - this.playing.at) / 1000 : 0, failed: false, generation: this.playbackGeneration },
     };
   }
 

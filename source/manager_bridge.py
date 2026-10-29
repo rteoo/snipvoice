@@ -8,6 +8,7 @@ keyboard or Tk thread; state reaches the window as pushed notifications.
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -235,6 +236,20 @@ def _flag(device, name):
     return value if isinstance(value, bool) else None
 
 
+def _seconds(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if math.isfinite(seconds) and seconds > 0 else 0.0
+
+
+def _final_audio_exists(metadata):
+    final = metadata.get("final_audio")
+    path = final.get("path") if isinstance(final, dict) else None
+    return bool(isinstance(path, str) and os.path.isfile(path))
+
+
 def _endpoint_payload(value):
     """The engine's EndpointSelection payload from the window's choice."""
     if not isinstance(value, dict):
@@ -378,6 +393,7 @@ class ManagerApi:
             if track in silent_since and now - silent_since[track] >= LOST_SOURCE_GRACE
         ]
         export = snapshot.get("audio_export") or {}
+        playback = snapshot.get("playback") if isinstance(snapshot.get("playback"), dict) else {}
         return {
             "state": state,
             "status": format_recording_status(snapshot, start_held=bool(hold)),
@@ -403,6 +419,13 @@ class ManagerApi:
                         "stage": export.get("stage"), "sessionId": export.get("session_id")}
                        if export.get("stage") in {"preparing", "encoding", "finalizing"} else None),
             "hotkey": hotkey_display(self.settings_getter().get("meeting_hotkey", "")),
+            "playback": {
+                "active": bool(playback.get("active")),
+                "sessionId": playback.get("session_id"),
+                "position": _seconds(playback.get("position", playback.get("start", 0))),
+                "failed": bool(playback.get("error")),
+                "generation": playback.get("generation") if isinstance(playback.get("generation"), int) else 0,
+            },
         }
 
     def _sources_for(self, snapshot):
@@ -599,7 +622,10 @@ class ManagerApi:
             "tone": tone,
             "date": format_local_timestamp(metadata.get("created_at")),
             "duration": format_time(metadata.get("duration")),
+            "durationSeconds": _seconds(metadata.get("duration")),
             "revision": active_transcript_revision(metadata),
+            # Only the saved final audio plays, as in the Tk player.
+            "playable": _final_audio_exists(metadata),
         }
 
     def library_transcript(self, params):

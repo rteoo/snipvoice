@@ -299,3 +299,15 @@ dialog.editor-dialog { width: min(680px, calc(100% - 32px)); }
 dialog.editor-dialog .table-scroll { max-height: 32vh; margin: var(--native-space-3) 0; border: 1px solid var(--native-line); border-radius: var(--native-control-radius); }
 dialog.editor-dialog .btn-row { margin-top: var(--native-space-2); }
 pre.licenses { max-height: 50vh; overflow: auto; white-space: pre-wrap; font: var(--native-type-caption)/1.5 var(--native-font-mono); }
+
+/* Player and readiness */
+.player { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--native-space-2) var(--native-space-3); }
+.player[hidden] { display: none; }
+.player input[type="range"] { width: 100%; accent-color: var(--color-accent-mark); }
+.player .status, .player p[role="status"] { grid-column: 1 / -1; }
+.transcript.timed { white-space: normal; }
+.transcript.timed p { white-space: pre-wrap; margin: 0 0 4px; }
+.timed-line { cursor: pointer; border-radius: 2px; }
+.timed-line:hover { background: var(--native-selection); }
+.readiness-row { display: flex; align-items: center; justify-content: space-between; gap: var(--native-space-2); }
+.readiness-row p { margin: 0; }

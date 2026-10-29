@@ -47,6 +47,19 @@ export interface RecordingView {
   lost: { track: "microphone" | "system"; label: string; silentFor: number }[];
   export: { percent: number | null; label: string; stage: string; sessionId: string | null } | null;
   hotkey: string;
+  playback: { active: boolean; sessionId: string | null; position: number; failed: boolean; generation: number };
+}
+
+export interface ReadinessRow {
+  key: "startup" | "inventory" | "transcription" | "summary" | "job" | "attention" | "dictation" | "healthy";
+  tone: Tone;
+  text: string;
+  action: string;
+}
+
+export interface Readiness {
+  rows: ReadinessRow[];
+  attentionId: string | null;
 }
 
 export interface Device {
@@ -113,7 +126,9 @@ export interface SessionDetail {
   tone: Tone;
   date: string;
   duration: string;
+  durationSeconds: number;
   revision: string | number | null;
+  playable: boolean;
 }
 
 export interface Transcript {

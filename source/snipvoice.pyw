@@ -526,6 +526,7 @@ class Snipvoice:
         from manager_dictation import DictationActions
         import embedding_models
         from manager_library import LibraryActions
+        from manager_readiness import ReadinessActions
         from manager_search import SearchActions
         from manager_settings import SettingsActions
 
@@ -575,6 +576,12 @@ class Snipvoice:
             SearchActions(
                 meetings=self.meetings, embedding_models=embedding_models, logger=self.logger,
                 notify=lambda method, params: self._manager_host and self._manager_host.notify(method, params),
+            ),
+            ReadinessActions(
+                meetings=self.meetings, voice=self.voice, summary_models=summary_models,
+                settings_getter=lambda: dict(self.settings), startup_status=api.startup_status,
+                voice_status=lambda: {"enabled": bool(self.voice.is_enabled()), "state": self.voice.state,
+                                      "status": self.voice.status_label()},
             ),
         ]
         self._manager_host = ManagerHost(

@@ -3,10 +3,11 @@
 import { allowEngineForeground, type Bridge } from "../bridge";
 import { button, h, ICONS, icon, replace } from "../dom";
 import { tr } from "../i18n";
-import type { LibraryItem, LibraryPage, SessionDetail, SummaryView, Transcript, TrashPreview } from "../types";
+import type { LibraryItem, LibraryPage, RecordingView, SessionDetail, SummaryView, Transcript, TrashPreview } from "../types";
 import { confirmDialog, copyText, MessageSlot, pageHeader, toneText } from "../ui";
 import { ChatPanel } from "./chat";
 import { FilesPanel } from "./files";
+import { lineStart, Player } from "./player";
 import { SummaryPanel } from "./summary";
 import { openTrash } from "./trash";
 
@@ -32,6 +33,7 @@ export class LibraryView {
   private readonly summary: SummaryPanel;
   private readonly chat: ChatPanel;
   private readonly files: FilesPanel;
+  private readonly player: Player;
   private listToken = 0;
   private detailToken = 0;
   private searchTimer: number | undefined;
@@ -48,6 +50,8 @@ export class LibraryView {
     this.summary = new SummaryPanel(bridge, this.messages, enginePid);
     this.chat = new ChatPanel(bridge, this.messages);
     this.files = new FilesPanel(bridge, this.messages, enginePid, () => void this.deleteSelected());
+    this.player = new Player(bridge, this.messages);
+    bridge.on<RecordingView>("recording.state", (view) => this.player.update(view.playback));
     this.search.placeholder = tr("Buscar em títulos e transcrições");
     this.search.addEventListener("input", () => {
       window.clearTimeout(this.searchTimer);
@@ -357,12 +361,38 @@ export class LibraryView {
       ? h("p", { class: "caption", text: tr("Carregando transcrição…") })
       : transcript.empty
         ? h("p", { class: "empty", text: tr("Esta gravação ainda não tem transcrição.") })
-        : h("article", { class: "transcript selectable", text: transcript.text, attrs: { tabindex: 0 } });
+        : this.style === "timestamped" && this.detail?.playable
+          ? this.timedTranscript(transcript.text)
+          : h("article", { class: "transcript selectable", text: transcript.text, attrs: { tabindex: 0 } });
+    if (this.detail) this.player.show(this.detail);
     return [
+      this.player.element,
       h("div", { class: "detail-commands" }, styles, copy),
       transcript?.truncated ? h("p", { class: "caption text-warning", text: tr("Transcrição extensa: prévia limitada.") }) : null,
       body,
     ];
+  }
+
+  /** Timestamped lines that play from their time on click or Enter, as Tk's transcript rows do. */
+  private timedTranscript(text: string): HTMLElement {
+    const article = h("article", { class: "transcript selectable timed", attrs: { "aria-label": tr("Transcrição") } });
+    for (const line of text.split(/\r?\n/)) {
+      const start = lineStart(line);
+      if (start === null) {
+        article.append(h("p", { text: line }));
+        continue;
+      }
+      const row = h("p", { class: "timed-line", text: line, attrs: { tabindex: 0, title: tr("Ouvir a partir deste trecho") } });
+      row.addEventListener("click", () => {
+        // A click that selects text is reading, not a request to play.
+        if (!window.getSelection()?.toString()) void this.player.playFrom(start);
+      });
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void this.player.playFrom(start);
+      });
+      article.append(row);
+    }
+    return article;
   }
 
   private async importAudio(): Promise<void> {
