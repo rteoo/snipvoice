@@ -79,7 +79,7 @@ export function toneText(tone: Tone): string {
 }
 
 /** A bounded decision. Resolves true for the primary action; Esc and Cancel resolve false. */
-export function confirmDialog(options: { title: string; body: string; confirm: string; selectable?: boolean; danger?: boolean }): Promise<boolean> {
+export function confirmDialog(options: { title: string; body: string; confirm: string; selectable?: boolean; danger?: boolean; details?: string }): Promise<boolean> {
   return new Promise((resolve) => {
     const opener = document.activeElement as HTMLElement | null;
     const dialog = h("dialog", { attrs: { "aria-labelledby": "dialog-title" } });
@@ -95,6 +95,7 @@ export function confirmDialog(options: { title: string; body: string; confirm: s
     dialog.append(
       h("h2", { text: options.title, attrs: { id: "dialog-title" } }),
       body,
+      ...(options.details ? [h("details", {}, h("summary", { text: tr("Detalhes") }), h("pre", { class: "selectable", text: options.details }))] : []),
       h(
         "div",
         { class: "dialog-actions" },
@@ -109,6 +110,52 @@ export function confirmDialog(options: { title: string; body: string; confirm: s
     });
     document.body.append(dialog);
     dialog.showModal();
-    confirm.focus();
+    // A destructive choice starts on Cancel, as the Tk trash dialog does.
+    (options.danger ? dialog.querySelector<HTMLButtonElement>(".dialog-actions button:not(.danger)") ?? confirm : confirm).focus();
+  });
+}
+
+/** A permanent deletion: the confirm button unlocks only after the word is typed. */
+export function typedConfirmDialog(options: { question: string; facts: string }): Promise<boolean> {
+  return new Promise((resolve) => {
+    const opener = document.activeElement as HTMLElement | null;
+    const word = tr("EXCLUIR");
+    const dialog = h("dialog", { attrs: { "aria-labelledby": "dialog-title" } });
+    const finish = (value: boolean) => {
+      dialog.close();
+      dialog.remove();
+      opener?.focus();
+      resolve(value);
+    };
+    const input = h("input", { attrs: { type: "text", autocomplete: "off" } });
+    const confirm = button(tr("Excluir definitivamente"), () => finish(true), "danger");
+    confirm.disabled = true;
+    input.addEventListener("input", () => {
+      confirm.disabled = input.value.trim().toLocaleLowerCase() !== word.toLocaleLowerCase();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !confirm.disabled) finish(true);
+    });
+    dialog.append(
+      h("h2", { text: tr("Excluir definitivamente"), attrs: { id: "dialog-title" } }),
+      h("p", { text: options.question }),
+      h("p", { class: "caption", text: options.facts }),
+      h(
+        "div",
+        { class: "infobar danger", attrs: { role: "note" } },
+        h("span", { class: "glyph", text: "⚠", attrs: { "aria-hidden": "true" } }),
+        h("div", { class: "stack-sm" }, h("strong", { text: tr("Isso não pode ser desfeito.") }),
+          h("p", { text: tr("Os arquivos são apagados do app para sempre. Isso não garante apagamento forense do disco.") })),
+      ),
+      h("label", { class: "field" }, h("span", { text: tr("Digite {word} para confirmar.", { word }) }), input),
+      h("div", { class: "dialog-actions" }, button(tr("Cancelar"), () => finish(false)), confirm),
+    );
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      finish(false);
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
   });
 }

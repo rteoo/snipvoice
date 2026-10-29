@@ -1981,4 +1981,17 @@ EN_US = {
     'Nenhum ditado ainda.': 'No dictations yet.',
     'Não foi possível tentar novamente': "Couldn't try again",
     'Aguarde o ditado atual terminar e tente de novo.': 'Wait for the current dictation to finish, then try again.',
+    'Não foi possível exportar a transcrição': "Couldn't export the transcript",
+    'Não foi possível baixar o áudio final': "Couldn't download the final audio",
+    'Finalize a captura antes de excluir esta gravação.': 'Finish the capture before deleting this recording.',
+    '1 fonte na transcrição': '1 source in the transcript',
+    '{count} fontes na transcrição': '{count} sources in the transcript',
+    'Não foi possível copiar a resposta': "Couldn't copy the answer",
+    'Transcrição exportada como {name}.': 'Transcript exported as {name}.',
+    'Áudio final salvo como {name}.': 'Final audio saved as {name}.',
+    'Vai para a lixeira, de onde ainda pode ser restaurada.': 'It goes to the trash, where it can still be restored.',
+    'Seções da gravação': 'Recording sections',
+    'Áudio importado. A transcrição começa sozinha quando houver um modelo instalado.':
+        'Audio imported. Transcription starts on its own when a model is installed.',
+    'Carregando resumo…': 'Loading summary…',
 }

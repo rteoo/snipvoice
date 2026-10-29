@@ -19,8 +19,30 @@ const SESSIONS = Array.from({ length: 7 }, (_, index) => ({
   duration: `00:${String(12 + index * 7).padStart(2, "0")}:0${index}`,
 }));
 
+class Cancelled extends Error {}
+
+const SUMMARY = [
+  "Visão geral:",
+  "A equipe revisou o cronograma da entrega e fechou a revisão para sexta.",
+  "Decisões:",
+  "• Manter a data de entrega.",
+  "• Revisar a proposta antes do envio.",
+  "Próximos passos:",
+  "• Ana envia o resumo ao time até amanhã.",
+].join("\n");
+const PROFILES = [
+  { id: "meeting_notes", name: "Notas de reunião", description: "Visão geral, decisões e próximos passos.", disabled: false },
+  { id: "interview", name: "Entrevista", description: "Perguntas, respostas e sinais relevantes.", disabled: false },
+  { id: "one_on_one", name: "1:1", description: "Acompanhamento, bloqueios e combinados.", disabled: false },
+];
+
 export class MockTransport implements Transport {
   private receive: (line: string) => void = () => {};
+  private readonly summaries = new Map<string, string>([["s1", SUMMARY]]);
+  private readonly trashed: { id: string; name: string; moved: string; expires: string; size: string; expired: boolean }[] = [
+    { id: "old1", name: "…a1b2c3d4", moved: "02/10 09:00", expires: "Expirada", size: "18 MB", expired: true },
+  ];
+  private jobs = new Map<string, () => void>();
   private recording: "idle" | "recording" | "paused" = "idle";
   private started = 0;
   private voiceEnabled = true;
@@ -34,11 +56,16 @@ export class MockTransport implements Transport {
   async send(line: string): Promise<void> {
     const message = JSON.parse(line) as { id: number; method: string; params: Params };
     window.setTimeout(() => {
-      try {
-        this.reply(message.id, this.handle(message.method, message.params));
-      } catch (error) {
-        this.receive(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: String(error) } }));
-      }
+      Promise.resolve()
+        .then(() => this.handle(message.method, message.params))
+        .then(
+          (result) => this.reply(message.id, result),
+          (error: unknown) => {
+            const code = error instanceof Cancelled ? -32001 : -32000;
+            const text = error instanceof Error ? error.message : String(error);
+            this.receive(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code, message: text } }));
+          },
+        );
     }, 60);
   }
 
@@ -62,6 +89,7 @@ export class MockTransport implements Transport {
           catalog: {},
           appearance: "dark",
           startup: { ready: true, message: "" },
+          enginePid: 0,
         };
       case "app.setAppearance":
         return { appearance: params.appearance };
@@ -128,9 +156,73 @@ export class MockTransport implements Transport {
         };
       case "library.rename":
         return { title: params.title };
+      case "library.summary": {
+        const text = this.summaries.get(String(params.id)) ?? "";
+        return { text, name: text ? "Notas de reunião" : "", profiles: PROFILES, profileId: "meeting_notes", modelReady: true, canSaveAnswers: true, hint: text ? "Resumo salvo. Escolha um formato para gerar outra versão." : "O resumo será gerado automaticamente com os modelos instalados." };
+      }
+      case "library.generateSummary":
+        return this.job("summary", 1800, () => {
+          this.summaries.set(String(params.id), SUMMARY);
+          return this.handle("library.summary", params);
+        });
+      case "library.ask":
+        return this.job("ask", 1200, () => ({ answerId: `a${Date.now()}`, answer: `Sobre "${String(params.question)}": a equipe decidiu manter a data e revisar a proposta antes do envio.`, sources: 2, uncertainty: "Incerteza baixa", uncertaintyTone: "muted" }));
+      case "library.saveAnswer":
+        return { saved: true };
+      case "library.cancelJob": {
+        const cancel = this.jobs.get(String(params.kind));
+        cancel?.();
+        return { cancelled: Boolean(cancel) };
+      }
+      case "library.files":
+        return params.id === "s3" ? { final: null, canPrepare: true } : { final: { format: "MP3", size: "24,1 MB" }, canPrepare: false };
+      case "library.exportText":
+      case "library.exportAudio":
+        return { saved: true, name: params.format === "text" ? "transcricao.txt" : params.format === "markdown" ? "transcricao.md" : "gravacao.mp3" };
+      case "library.prepareAudio":
+        return { accepted: true };
+      case "library.importAudio":
+        return { id: null };
+      case "library.trashPreview":
+        return {
+          eligible: true,
+          token: "t1",
+          question: [
+            `Mover “${SESSIONS.find((item) => item.id === params.id)?.title ?? ""}” para a lixeira?`,
+            "",
+            "Duração: 00:12:00 · Tamanho: 24,1 MB",
+            "Você poderá restaurar esta gravação por 30 dias. Cópias exportadas ficam preservadas.",
+          ].join("\n"),
+          details: ["Operação: lixeira · elegível", "Inventário: 3 alvo(s) · 25270000 bytes"].join("\n"),
+        };
+      case "library.trash":
+      case "library.restore":
+        return { id: params.id ?? "s1" };
+      case "trash.list": {
+        const expired = this.trashed.filter((item) => item.expired).length;
+        return { items: this.trashed, summary: this.trashed.length ? `${this.trashed.length} gravação na lixeira · ${expired} expirada` : "A lixeira está vazia", expired };
+      }
+      case "trash.purge":
+      case "trash.emptyExpired":
+        this.trashed.splice(0, this.trashed.length);
+        return { emptied: true };
       default:
         throw new Error(`unknown method ${method}`);
     }
+  }
+
+  private job(kind: string, ms: number, done: () => unknown): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        this.jobs.delete(kind);
+        resolve(done());
+      }, ms);
+      this.jobs.set(kind, () => {
+        window.clearTimeout(timer);
+        this.jobs.delete(kind);
+        reject(new Cancelled("Resposta cancelada."));
+      });
+    });
   }
 
   private recordingView(): unknown {

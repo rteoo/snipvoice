@@ -89,7 +89,7 @@ import pystray
 from PIL import Image
 import tkinter as tk
 import weakref
-from tkinter import font as tkfont, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import app_paths
 import data_relocation
@@ -522,6 +522,8 @@ class Snipvoice:
         if self._manager_host is not None:
             return self._manager_host or None
         from manager_bridge import ManagerApi, ManagerHost, manager_executable, tauri_manager_requested
+        from manager_library import LibraryActions
+        from summary_models import summary_model_is_installed
 
         if not tauri_manager_requested():
             self._manager_host = False
@@ -544,12 +546,27 @@ class Snipvoice:
             on_language_changed=self._manager_language_changed,
             display_name=APP_DISPLAY_NAME, version=APP_VERSION,
         )
+        api.library = LibraryActions(
+            meetings=self.meetings, meeting_settings=api.saved_meeting_settings,
+            summary_model_installed=summary_model_is_installed, choose_path=self._choose_manager_path,
+            startup_status=api.startup_status,
+        )
         self._manager_host = ManagerHost(
             api, executable, logger=self.logger, on_closed=self._tauri_manager_closed,
             on_spawn_failed=lambda: self.notify_error(tr("Não foi possível abrir a janela do SnipVoice."),
                                                       key="manager-spawn"),
         )
         return self._manager_host
+
+    def _choose_manager_path(self, kind, title, filename, filetypes):
+        """A native save or open dialog on the Tk thread for the Tauri window; "" when cancelled."""
+        def ask(root):
+            options = {"parent": root, "title": title, "filetypes": filetypes}
+            if kind == "save":
+                return filedialog.asksaveasfilename(initialfile=filename,
+                                                    defaultextension=os.path.splitext(filename)[1], **options)
+            return filedialog.askopenfilename(**options)
+        return self.gui.call(ask) or ""
 
     def _tauri_manager_closed(self):
         if self._quitting.is_set() or self._tray_close_notified or self.icon is None:

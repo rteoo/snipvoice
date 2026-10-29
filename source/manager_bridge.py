@@ -260,12 +260,13 @@ class ManagerApi:
     ``startup_status() -> (ready, message)``, ``voice_presentation() ->
     (text, tone)``, ``history_status(status) -> (label, tone)``,
     ``set_voice_enabled(enabled, confirmed) -> dict`` and
-    ``on_language_changed(code)``.
+    ``on_language_changed(code)``. ``library`` (``manager_library.LibraryActions``)
+    adds the summary, chat, file and trash methods.
     """
 
     def __init__(self, *, meetings, voice, settings_getter, persist_settings, startup_status,
                  voice_presentation, history_status, set_voice_enabled, on_language_changed,
-                 display_name, version):
+                 display_name, version, library=None):
         self.meetings = meetings
         self.voice = voice
         self.settings_getter = settings_getter
@@ -277,6 +278,7 @@ class ManagerApi:
         self.on_language_changed = on_language_changed
         self.display_name = display_name
         self.version = version
+        self.library = library
         self._devices = []
         self._devices_lock = threading.Lock()
         # The snapshot does not carry the running recording's sources.
@@ -284,6 +286,7 @@ class ManagerApi:
 
     def methods(self):
         return {
+            **(self.library.methods() if self.library is not None else {}),
             "app.hello": self.hello,
             "app.setLanguage": self.set_language,
             "app.setAppearance": self.set_appearance,
@@ -321,6 +324,8 @@ class ManagerApi:
             "catalog": EN_US if language == "en-US" else {},
             "appearance": settings.get("appearance") if settings.get("appearance") in {"dark", "light", "system"} else "dark",
             "startup": {"ready": bool(ready), "message": tr(message) if message else ""},
+            # The window lets this process take the foreground for its file dialogs.
+            "enginePid": os.getpid(),
         }
 
     def set_language(self, params):
@@ -419,16 +424,26 @@ class ManagerApi:
             for device in devices if device.get("kind") in {"microphone", "system"}
         ]}
 
-    def _recording_settings(self, params):
-        """``MeetingSettings`` from the saved settings plus this recording's sources."""
-        sources = params.get("sources")
-        if not isinstance(sources, dict):
-            raise RpcFailure(tr("Confira as fontes e tente de novo."), code=INVALID_PARAMS)
+    def _settings_data(self):
         data = dict(self.settings_getter())
         if data.get("meeting_profile", FOLLOW_DICTATION) == FOLLOW_DICTATION:
             # The dictation model can change while the window is open.
             data["voice_profile"] = dictation_profile(data)
         data.update(meeting_auto_transcribe=True, meeting_auto_summary=True)
+        return data
+
+    def saved_meeting_settings(self):
+        """``MeetingSettings`` exactly as saved; raises ValueError when they are invalid."""
+        data = self._settings_data()
+        return validated_settings(data, data.get("voice_hotkey", DEFAULT_DICTATION_HOTKEY),
+                                  data.get("voice_command_hotkey", DEFAULT_COMMAND_HOTKEY))
+
+    def _recording_settings(self, params):
+        """``MeetingSettings`` from the saved settings plus this recording's sources."""
+        sources = params.get("sources")
+        if not isinstance(sources, dict):
+            raise RpcFailure(tr("Confira as fontes e tente de novo."), code=INVALID_PARAMS)
+        data = self._settings_data()
         for track, key in (("microphone", "meeting_input_enabled"), ("system", "meeting_output_enabled")):
             choice = sources.get(track)
             if not isinstance(choice, dict):
