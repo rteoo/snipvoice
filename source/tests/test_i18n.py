@@ -1,5 +1,7 @@
 import ast
+import json
 import os
+import re
 import string
 import sys
 import unittest
@@ -35,6 +37,27 @@ def _marked_calls():
                 continue
             yield (os.path.basename(path), node.lineno, name, node.args[0],
                    {k.arg for k in node.keywords})
+
+
+WINDOW_DIR = os.path.join(SOURCE_DIR, "..", "desktop", "src")
+_WINDOW_CALL = re.compile(r'\btr\(\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _window_literals():
+    """Yield (where, text) for tr("...") in the Tauri window, which shares this catalog.
+
+    The browser-preview engine (mock.ts) holds sample data, not interface text.
+    """
+    for folder, _dirs, files in os.walk(WINDOW_DIR):
+        for name in sorted(files):
+            if not name.endswith(".ts") or name == "mock.ts":
+                continue
+            path = os.path.join(folder, name)
+            with open(path, encoding="utf-8") as handle:
+                for number, line in enumerate(handle, 1):
+                    for match in _WINDOW_CALL.finditer(line):
+                        yield (f"{os.path.relpath(path, WINDOW_DIR)}:{number}",
+                               json.loads(f'"{match.group(1)}"'))
 
 
 def _literal(node):
@@ -79,8 +102,17 @@ class CatalogCoverageTests(unittest.TestCase):
                 problems.append(f"{where}: placeholders do not match keywords")
         self.assertEqual(problems, [])
 
+    def test_manager_window_literals_have_english_entries(self):
+        if not os.path.isdir(WINDOW_DIR):
+            self.skipTest("desktop sources are not part of this checkout")
+        literals = list(_window_literals())
+        self.assertGreater(len(literals), 0)
+        self.assertEqual([f"{where}: missing en-US entry for {text!r}"
+                          for where, text in literals if text not in EN_US], [])
+
     def test_catalog_has_no_stale_entries(self):
         used = {_literal(arg) for _, _, _, arg, _ in _marked_calls()}
+        used |= {text for _, text in _window_literals()}
         self.assertEqual(sorted(set(EN_US) - used), [])
 
     def test_translations_keep_placeholders_and_format_specs(self):

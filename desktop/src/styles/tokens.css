@@ -1,0 +1,97 @@
+/* Teô Personal Design System 2.7.1, Windows family (Ink & Copper on the shared
+   native neutral surfaces). Role names follow the canonical --color-* and
+   --native-* APIs; values match DESIGN.md's adoption table. Dark is the
+   default; [data-theme=light] is explicit, and "system" resolves in theme.ts. */
+:root {
+  color-scheme: dark;
+  --native-font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --native-font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --native-font-mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  --native-type-caption: 12px;
+  --native-type-body: 14px;
+  --native-type-heading: 18px;
+  --native-type-title: 28px;
+  --native-control-height: 32px;
+  --native-row-height: 32px;
+  --native-control-radius: 4px;
+  --native-panel-radius: 8px;
+  --native-icon-grid: 20px;
+  --native-space-1: 4px;
+  --native-space-2: 8px;
+  --native-space-3: 12px;
+  --native-space-4: 16px;
+  --native-space-6: 24px;
+  --native-space-8: 32px;
+  --native-motion-fast: 120ms;
+
+  --native-nav: #292929;
+  --native-bg: #292929;
+  --native-panel: #232323;
+  --native-content: #1c1c1e;
+  --native-selection: #484848;
+  --native-line: #454545;
+  --native-field-border: #999ca3;
+  --native-muted: #bcbcbc;
+  --native-disabled: #7c7b79;
+  --native-scroll-thumb: #7c7b79;
+
+  --color-text-primary: #f2efe9;
+  --color-text-muted: var(--native-muted);
+  --color-link: #edb47c;
+  --color-accent-mark: #e6a05a;
+  --color-action-primary-bg: #e6a05a;
+  --color-action-primary-hover: #edb47c;
+  --color-action-primary-active: #ce8845;
+  --color-action-primary-text: #15100a;
+  --color-focus-ring: #f0c293;
+  --color-success-fg: #73e0a1;
+  --color-success-bg: #13271d;
+  --color-warning-fg: #ffd27a;
+  --color-warning-bg: #342a17;
+  --color-danger-fg: #ff8a85;
+  --color-danger-bg: #351718;
+  --color-info-fg: #adc1dc;
+  --color-info-bg: #202e40;
+  --color-chart-primary: #e6a05a;
+  --color-chart-secondary: #8ca8cf;
+  --color-chart-neutral: #788697;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --native-nav: #e9e8e7;
+  --native-bg: #e9e8e7;
+  --native-panel: #f6f5f4;
+  --native-content: #ffffff;
+  --native-selection: #e8e6e3;
+  --native-line: #d8d8d8;
+  --native-field-border: #7b8088;
+  --native-muted: #606060;
+  --native-disabled: #9b9da2;
+  --native-scroll-thumb: #7b8088;
+
+  --color-text-primary: #202630;
+  --color-link: #a0520a;
+  --color-accent-mark: #a0520a;
+  --color-action-primary-hover: #d99551;
+  --color-action-primary-active: #be7836;
+  --color-focus-ring: #263c56;
+  --color-success-fg: #16643b;
+  --color-success-bg: #e6f6ec;
+  --color-warning-fg: #7a4a00;
+  --color-warning-bg: #fff1d6;
+  --color-danger-fg: #9b2c2c;
+  --color-danger-bg: #fce8e8;
+  --color-info-fg: #263c56;
+  --color-info-bg: #e8eef5;
+  --color-chart-primary: #a0520a;
+  --color-chart-secondary: #263c56;
+  --color-chart-neutral: #7b8492;
+}
+
+/* The light navigation plane is 1.02:1 on its base; DESIGN.md records #dedcd8. */
+:root[data-theme="light"] .nav { --native-selection: #dedcd8; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --native-motion-fast: 0ms; }
+}

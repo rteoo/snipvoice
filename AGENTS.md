@@ -23,6 +23,12 @@ Read the active runtime's global operator contract and SOUL.md before work.
 - `commands.json` contains private literal commands. Never copy live libraries,
   recordings, models, settings, logs, or predecessor Git backups into the repo.
 - Use `ui_theme` for GUI colors/fonts; native overlays never steal focus.
+- `desktop/` is the Tauri 2 + TypeScript manager window replacing the Tk
+  manager, opt-in with `SNIPVOICE_MANAGER=tauri` until it reaches parity.
+  The engine keeps tray, hotkeys, HUD, capture and inference; `manager_bridge`
+  spawns the window and serves JSON-RPC lines on its stdin/stdout (nothing else
+  may write the window's stdout). Window strings are `tr("pt-BR")` keys in
+  `i18n_en_us.py`; colors come from `desktop/src/styles/tokens.css`.
 - `source/docs/extraction.md` defines current boundaries. Inherited research
   is historical and does not certify packaged operation or live transcription.
 
@@ -33,6 +39,8 @@ From root: `python -m ruff check source` requires the pinned development tool.
 The extraction host verified these rules with an existing Ruff 0.16.4 binary;
 the development manifest and CI retain the predecessor's Ruff 0.16.3 pin.
 Temporary test artifacts belong in `source/tests/tmp` (gitignored).
+From `desktop`: `npm run build` (type check + bundle); `npm run dev` previews
+the window in a browser against a mock engine; `npm run tauri build` needs Rust.
 Existing source dependencies are in `requirements.txt`; pinned capture/runtime
 dependencies are in `requirements-voice.txt`. Do not install or alter them implicitly.
 Windows/macOS build scripts are inherited and adapted, but physical package

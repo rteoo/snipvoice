@@ -12,3 +12,6 @@ source/tests/tmp/
 .venv/
 source/native/bin/
 *.DS_Store
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
