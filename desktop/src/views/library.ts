@@ -45,7 +45,7 @@ export class LibraryView {
     private readonly bridge: Bridge,
     private readonly enginePid: number,
   ) {
-    this.summary = new SummaryPanel(bridge, this.messages);
+    this.summary = new SummaryPanel(bridge, this.messages, enginePid);
     this.chat = new ChatPanel(bridge, this.messages);
     this.files = new FilesPanel(bridge, this.messages, enginePid, () => void this.deleteSelected());
     this.search.placeholder = tr("Buscar em títulos e transcrições");

@@ -57,6 +57,26 @@ class FakeLibrary:
     def qa_mode(self):
         return self.qa
 
+    def review_report(self, session_id, report_id, sections, expected_generation=0):
+        self.calls.append(("review_report", report_id, sections, expected_generation))
+        body = self.report_bodies[report_id]
+        body["reviewed_artifact"] = {"sections": dict(sections), "generation": expected_generation + 1}
+
+    def export_report(self, session_id, report_id, path, format="markdown"):
+        self.calls.append(("export_report", report_id, path, format))
+
+    def save_report_profile(self, profile):
+        self.calls.append(("save_report_profile", profile))
+
+    def enable_report_profile(self, profile_id):
+        self.calls.append(("enable", profile_id))
+
+    def disable_report_profile(self, profile_id):
+        self.calls.append(("disable", profile_id))
+
+    def delete_report_profile(self, profile_id):
+        self.calls.append(("delete", profile_id))
+
     def generate_report(self, session_id, model, *, profile=None, revision=None, focus=None, cancel_event=None):
         self.calls.append(("generate_report", session_id, model, profile["id"], revision, focus))
         self.generate_started.set()
@@ -329,6 +349,61 @@ class TrashTests(unittest.TestCase):
         actions.purge({"id": "s1"})
         actions.empty_expired({})
         self.assertEqual(library.calls, [("purge_session", "s1", True), ("empty_trash", True)])
+
+
+class VersionAndFormatTests(unittest.TestCase):
+    def setUp(self):
+        self.actions, self.library, self.dialogs = make_actions(path=os.path.join(os.sep, "out", "report.json"))
+        self.library.reports = [{"id": "rep1", "kind": "report", "profile_id": "interview", "created_at": "2026-10-01T10:00:00Z"},
+                                {"id": "qa1", "kind": "qa", "created_at": "2026-10-02T10:00:00Z"}]
+        self.library.report_bodies["rep1"] = {"profile_id": "interview",
+                                              "generated": {"summary": "Gerado", "detailed_notes": []}}
+
+    def test_versions_list_newest_first_and_name_saved_answers(self):
+        items = self.actions.versions({"id": "s1"})["items"]
+        self.assertEqual([item["id"] for item in items], ["qa1", "rep1"])
+        self.assertTrue(items[0]["answer"])
+        self.assertIn("Entrevista", items[1]["label"])
+
+    def test_a_review_carries_the_generation_it_read(self):
+        version = self.actions.version({"id": "s1", "reportId": "rep1"})
+        self.assertTrue(version["reviewable"])
+        self.assertEqual([section["name"] for section in version["sections"]], ["summary", "detailed_notes"])
+        reviewed = self.actions.review_section({"id": "s1", "reportId": "rep1", "section": "summary",
+                                                "text": "Revisado", "generation": version["generation"]})
+        self.assertEqual(self.library.calls[-1], ("review_report", "rep1", {"summary": "Revisado"}, 0))
+        self.assertIn("Revisado", reviewed["text"])
+
+    def test_the_legacy_summary_and_huge_reviews_are_refused(self):
+        for params in ({"reportId": "legacy-summary", "text": "x"}, {"reportId": "rep1", "text": "x" * 70000}):
+            with self.subTest(report=params["reportId"]), self.assertRaises(RpcFailure):
+                self.actions.review_section({"id": "s1", "section": "summary", "generation": 0, **params})
+
+    def test_the_export_format_follows_the_chosen_extension(self):
+        self.assertEqual(self.actions.export_report({"id": "s1", "reportId": "rep1"}), {"saved": True, "name": "report.json"})
+        self.assertEqual(self.library.calls[-1][3], "json")
+
+    def test_formats_are_created_duplicated_and_edited_with_limits(self):
+        with self.assertRaises(RpcFailure):
+            self.actions.save_profile({"mode": "create", "name": " ", "instructions": ""})
+        with self.assertRaises(RpcFailure):
+            self.actions.save_profile({"mode": "edit", "baseId": "interview", "name": "X", "instructions": ""})
+        created = self.actions.save_profile({"mode": "create", "name": "Meu Formato!", "instructions": "Curto."})
+        self.assertEqual(created["profileId"], "meu-formato")
+        duplicate = self.actions.save_profile({"mode": "duplicate", "baseId": "custom", "name": "Meu formato", "instructions": ""})
+        saved = self.library.calls[-1][1]
+        self.assertEqual(duplicate["profileId"], "meu-formato")
+        self.assertFalse(saved["disabled"])
+        self.assertNotIn("version", saved)
+
+    def test_only_custom_formats_toggle_or_delete(self):
+        with self.assertRaises(RpcFailure):
+            self.actions.set_profile_enabled({"profileId": "interview", "enabled": False})
+        self.actions.set_profile_enabled({"profileId": "custom", "enabled": True})
+        self.assertEqual(self.library.calls[-1], ("enable", "custom"))
+        self.assertEqual(self.actions.delete_profile({"profileId": "custom"})["status"], "confirm")
+        self.actions.delete_profile({"profileId": "custom", "confirmed": True})
+        self.assertEqual(self.library.calls[-1], ("delete", "custom"))
 
 
 class ManagerApiCompositionTests(unittest.TestCase):

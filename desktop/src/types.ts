@@ -127,6 +127,9 @@ export interface SummaryProfile {
   name: string;
   description: string;
   disabled: boolean;
+  custom: boolean;
+  baseName: string;
+  instructions: string;
 }
 
 export interface SummaryView {
@@ -273,4 +276,30 @@ export interface VoiceCommand {
 export interface Correction {
   source: string;
   replacement: string;
+}
+
+export interface SearchState {
+  enabled: boolean;
+  installed: boolean;
+  model: { name: string; size: string; license: string };
+  semantic: string;
+  status: string;
+  index: string;
+  download: { done: number; total: number | null } | null;
+  repair: { done: number; total: number | null } | null;
+}
+
+export interface VersionItem {
+  id: string;
+  label: string;
+  answer: boolean;
+  reviewed: boolean;
+}
+
+export interface VersionView {
+  id: string;
+  text: string;
+  sections: { name: string; text: string }[];
+  reviewable: boolean;
+  generation: number;
 }

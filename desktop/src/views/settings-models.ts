@@ -5,6 +5,7 @@ import { tr } from "../i18n";
 import type { Confirmable, LocationView, ModelsView, SummaryProgress, VoiceView } from "../types";
 import { confirmDialog, type MessageSlot } from "../ui";
 import { LocationCard } from "./location";
+import { SearchCard } from "./search-card";
 
 interface Finished {
   id: string;
@@ -20,6 +21,7 @@ export class ModelsSettings {
   private voiceProgress: { profile: string | null; done: number; total: number } | null = null;
   private summaryStatus = "";
   private readonly location: LocationCard;
+  private readonly search: SearchCard;
   private token = 0;
 
   constructor(
@@ -28,6 +30,7 @@ export class ModelsSettings {
     enginePid: number,
   ) {
     this.location = new LocationCard(bridge, messages, "models", enginePid);
+    this.search = new SearchCard(bridge, messages);
     bridge.on<VoiceView>("voice.state", (view) => {
       const was = this.voiceProgress?.profile ?? null;
       this.voiceProgress = view.download;
@@ -48,6 +51,7 @@ export class ModelsSettings {
 
   async load(location?: LocationView): Promise<void> {
     if (location) this.location.show(location);
+    void this.search.load();
     const token = ++this.token;
     try {
       const view = await this.bridge.call<ModelsView>("settings.models");
@@ -62,7 +66,7 @@ export class ModelsSettings {
   private render(): void {
     const view = this.view;
     if (!view) {
-      replace(this.element, h("p", { class: "caption", text: tr("Carregando…") }), this.location.element);
+      replace(this.element, h("p", { class: "caption", text: tr("Carregando…") }), this.search.element, this.location.element);
       return;
     }
     const voiceRows = view.voice.map((model) => {
@@ -109,6 +113,7 @@ export class ModelsSettings {
         running ? h("progress", { attrs: { max: running.total || 1, value: running.done, "aria-label": running.status } }) : null,
         h("p", { class: "caption", attrs: { role: "status" }, text: running?.status ?? this.summaryStatus }),
       ),
+      this.search.element,
       this.location.element,
     );
   }

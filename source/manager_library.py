@@ -9,7 +9,9 @@ translated text; it becomes the error message with local paths redacted.
 """
 
 import collections
+import json
 import os
+import re
 import secrets
 import threading
 
@@ -19,6 +21,7 @@ from meeting_chat import UNCERTAINTY_LABELS, UNCERTAINTY_TONES
 from meeting_files import _redact_absolute_paths
 from meeting_gui import (
     MAX_ANSWER_CHARS,
+    MAX_REPORT_REVIEW_CHARS,
     MAX_TRASH_ITEMS,
     REPORT_HISTORY_LIMIT,
     RETENTION_POLICY_LABELS,
@@ -30,6 +33,7 @@ from meeting_gui import (
 )
 from meeting_intelligence import builtin_profile_description, builtin_profiles
 from meeting_text import (
+    format_detailed_notes,
     format_expiry,
     format_local_timestamp,
     format_storage_size,
@@ -45,7 +49,9 @@ MAX_CHAT_HISTORY = 24
 # Answers stay here until saved; a window keeps at most a few conversations.
 MAX_KEPT_ANSWERS = 64
 MAX_KEPT_PLANS = 8
-PRIMARY_PROFILES = ("meeting_notes", "interview", "one_on_one", "sales", "customer_feedback")
+MAX_PROFILE_NAME = 128
+MAX_PROFILE_INSTRUCTIONS = 2000
+PRIMARY_PROFILES =("meeting_notes", "interview", "one_on_one", "sales", "customer_feedback")
 AUDIO_PATTERNS = "*.wav *.mp3 *.aac *.m4a *.flac *.ogg *.opus"
 
 
@@ -82,6 +88,13 @@ class LibraryActions:
         return {
             "library.summary": self.summary,
             "library.generateSummary": self.generate_summary,
+            "library.versions": self.versions,
+            "library.version": self.version,
+            "library.reviewSection": self.review_section,
+            "library.exportReport": self.export_report,
+            "library.saveProfile": self.save_profile,
+            "library.setProfileEnabled": self.set_profile_enabled,
+            "library.deleteProfile": self.delete_profile,
             "library.ask": self.ask,
             "library.saveAnswer": self.save_answer,
             "library.cancelJob": self.cancel_job,
@@ -172,6 +185,10 @@ class LibraryActions:
             "name": name,
             "description": description or tr("Use seu formato personalizado e ajuste o foco se precisar."),
             "disabled": bool(profile.get("disabled")),
+            "custom": not profile.get("builtin"),
+            # The edit form starts from the stored name and instructions.
+            "baseName": str(profile.get("name") or "")[:MAX_PROFILE_NAME],
+            "instructions": str(profile.get("instructions") or "")[:MAX_PROFILE_INSTRUCTIONS],
         }
 
     def _latest_summary(self, session_id, profiles):
@@ -253,6 +270,154 @@ class LibraryActions:
 
         self._run_job("summary", work, tr("Não foi possível gerar o resumo"), tr("O resumo foi cancelado"))
         return self.summary({"id": session_id})
+
+    # -- Versions and formats ------------------------------------------
+
+    def versions(self, params):
+        """Saved summary versions and saved answers, newest first, as the Tk Versões list names them."""
+        session_id = _session_id(params)
+        profiles = self._profiles(self._language(self._settings()))
+        rows = self._engine_call(lambda: self.meetings.list_reports(session_id, limit=REPORT_HISTORY_LIMIT) or [],
+                                 tr("Não foi possível carregar as versões do resumo"))
+        items = []
+        for item in rows:
+            metadata = MeetingWindow._report_history_metadata(item)
+            if metadata is None:
+                continue
+            qa = metadata.get("kind") == "qa"
+            profile = next((entry.get("name") for entry in profiles if entry.get("id") == metadata.get("profile_id")),
+                           tr("Resposta salva") if qa else tr("Resumo"))
+            items.append({
+                "id": metadata["id"],
+                "label": f"{tr('Pergunta') if qa else tr('Relatório')} · {profile} · "
+                         f"{format_local_timestamp(metadata.get('created_at'))}",
+                "answer": qa,
+                "reviewed": bool(metadata.get("reviewed")),
+            })
+        return {"items": list(reversed(items))}
+
+    def version(self, params):
+        """One saved version: its readable text and each section as the review editor shows it."""
+        session_id = _session_id(params)
+        report_id = _text(params, "reportId", limit=128, required=True)
+        report = self._engine_call(lambda: self.meetings.get_report(session_id, report_id),
+                                   tr("Não foi possível abrir este relatório"))
+        if not isinstance(report, dict):
+            raise RpcFailure(tr("Não foi possível abrir este relatório"))
+        merged = dict(report.get("generated") or {})
+        reviewed = report.get("reviewed_artifact")
+        if isinstance(reviewed, dict) and isinstance(reviewed.get("sections"), dict):
+            merged.update(reviewed["sections"])
+        sections = []
+        for name, value in list(merged.items())[:64]:
+            if name == "detailed_notes":
+                text = format_detailed_notes(value)
+            else:
+                text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+            sections.append({"name": str(name), "text": str(text)[:MAX_REPORT_REVIEW_CHARS]})
+        return {
+            "id": report_id,
+            "text": format_summary(merged)[:65536],
+            "sections": sections,
+            # A legacy summary has no sections to review; a new report must be generated.
+            "reviewable": report_id != "legacy-summary" and bool(sections),
+            "generation": reviewed.get("generation", 0) if isinstance(reviewed, dict) else 0,
+        }
+
+    def review_section(self, params):
+        session_id = _session_id(params)
+        report_id = _text(params, "reportId", limit=128, required=True)
+        section = _text(params, "section", limit=128, required=True)
+        text = params.get("text")
+        generation = params.get("generation")
+        if not isinstance(text, str) or not isinstance(generation, int) or isinstance(generation, bool):
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        if report_id == "legacy-summary":
+            raise RpcFailure(tr("O resumo legado não aceita revisão por seção; gere um relatório novo."))
+        if len(text) > MAX_REPORT_REVIEW_CHARS:
+            raise RpcFailure(tr("Esta revisão é longa demais para salvar. Exporte a seção completa."))
+        self._engine_call(lambda: self.meetings.review_report(session_id, report_id, {section: text},
+                                                              expected_generation=generation),
+                          tr("O relatório gerado continua intacto. Tente salvar de novo."))
+        return self.version({"id": session_id, "reportId": report_id})
+
+    def export_report(self, params):
+        session_id = _session_id(params)
+        report_id = _text(params, "reportId", limit=128, required=True)
+        path = self.choose_path("save", tr("Exportar relatório"),
+                                safe_filename_stem(self._title(session_id)) + ".md",
+                                (("Markdown", "*.md"), (tr("Texto"), "*.txt"), ("JSON", "*.json")))
+        if not path:
+            return {"saved": False}
+        suffix = os.path.splitext(path)[1].casefold()
+        fmt = "json" if suffix == ".json" else "text" if suffix == ".txt" else "markdown"
+        self._engine_call(lambda: self.meetings.export_report(session_id, report_id, path, format=fmt),
+                          tr("Nenhum arquivo foi gravado. Tente de novo ou escolha outra pasta."))
+        return {"saved": True, "name": os.path.basename(path)}
+
+    def _new_profile_id(self, name, profiles):
+        stem = re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower()).strip("-")[:64] or "formato"
+        existing = {item.get("id") for item in profiles}
+        identifier, suffix = stem, 2
+        while identifier in existing:
+            identifier, suffix = f"{stem}-{suffix}", suffix + 1
+        return identifier
+
+    def save_profile(self, params):
+        """Create, duplicate or edit a custom format, with the Tk form's limits."""
+        mode = params.get("mode")
+        if mode not in {"create", "duplicate", "edit"}:
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        name, instructions = params.get("name"), params.get("instructions")
+        if not isinstance(name, str) or not name.strip() or len(name) > MAX_PROFILE_NAME:
+            raise RpcFailure(tr("Nome: use de 1 a 128 caracteres."), code=INVALID_PARAMS)
+        if not isinstance(instructions, str) or len(instructions) > MAX_PROFILE_INSTRUCTIONS:
+            raise RpcFailure(tr("Instruções: use até 2.000 caracteres."), code=INVALID_PARAMS)
+        language = self._language(self._settings())
+        profiles = self._profiles(language)
+        base = next((item for item in profiles if item.get("id") == params.get("baseId")), None)
+        if mode != "create" and base is None:
+            raise RpcFailure(tr("Selecione um perfil para duplicar."))
+        if mode == "edit" and base.get("builtin"):
+            raise RpcFailure(tr("Perfis internos não podem ser editados; duplique um para personalizar."))
+        if mode == "create":
+            profile = {"id": self._new_profile_id(name, profiles), "name": name.strip(), "instructions": instructions,
+                       "sections": list((base or {}).get("sections", ["summary"])), "language": language}
+        else:
+            profile = dict(base, name=name.strip(), instructions=instructions)
+            for key in ("version", "profile_hash", "builtin"):
+                profile.pop(key, None)
+            if mode == "duplicate":
+                profile.update(id=self._new_profile_id(name, profiles), disabled=False)
+        self._engine_call(lambda: self.meetings.save_report_profile(profile),
+                          tr("O perfil de relatório não foi alterado. Tente salvar de novo."))
+        return {"profileId": profile["id"]}
+
+    def _custom_profile(self, params):
+        profile_id = _text(params, "profileId", limit=128, required=True)
+        profile = next((item for item in self._profiles(self._language(self._settings()))
+                        if item.get("id") == profile_id), None)
+        if profile is None or profile.get("builtin"):
+            raise RpcFailure(tr("Selecione um perfil personalizado."))
+        return profile_id
+
+    def set_profile_enabled(self, params):
+        profile_id = self._custom_profile(params)
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        call = self.meetings.enable_report_profile if enabled else self.meetings.disable_report_profile
+        self._engine_call(lambda: call(profile_id),
+                          tr("O perfil de relatório não foi alterado. Tente salvar de novo."))
+        return {"profileId": profile_id, "enabled": enabled}
+
+    def delete_profile(self, params):
+        profile_id = self._custom_profile(params)
+        if params.get("confirmed") is not True:
+            return {"status": "confirm", "title": tr("Excluir perfil"), "message": tr("Excluir este perfil personalizado?")}
+        self._engine_call(lambda: self.meetings.delete_report_profile(profile_id),
+                          tr("O perfil de relatório não foi alterado. Tente salvar de novo."))
+        return {"status": "removed"}
 
     # -- Chat -----------------------------------------------------------
 
