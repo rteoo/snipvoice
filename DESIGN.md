@@ -13,7 +13,7 @@ which release gates have evidence.
 | Design system | Teô Personal Design System 2.7.1, Windows native family |
 | Ownership | `source/ui_theme.py` owns every color, font, metric and control face. Screen builders ask it for tokens, type roles and themed controls; literal colors and font families in the GUI modules fail `tests/test_ui_theme.py`. |
 | Primary workflow | Record a meeting (Gravação), find and read it (Biblioteca), dictate anywhere with the hotkey (Ditado). Settings stay secondary. |
-| Stack | Tk/ttk on the process's single `GuiThread` root. No WinUI, no new toolkit: capture, tray and macOS integration depend on this architecture. |
+| Stack | Tk/ttk on the process's single `GuiThread` root for the tray-owned HUD and, by default, the manager. The manager is being rebuilt as a Tauri 2 + TypeScript window (`desktop/`, opt-in with `SNIPVOICE_MANAGER=tauri`) that renders the Windows family in CSS; capture, tray, hotkeys and overlays stay in the engine. |
 | Platforms | Windows 10/11 (primary; this adoption was checked on Windows 11 at 100% scale), macOS (Aqua, not verified in this adoption), Linux (literal palette, unsupported GUI). |
 | Appearance | **Dark by default.** Explicit Light and System stay available; an unset or unreadable stored value resolves to Dark. A stored `system` or `light` is kept. |
 | Density | **Compact**: 32px minimum for controls and rows (buttons, menu buttons, entries and comboboxes measure 33px; list rows 32px). Every `ui_theme.button` is Compact, so an action row never mixes heights. |
@@ -208,6 +208,17 @@ Spacing follows the 4/8/12/16/24 portion of the system scale.
 | Checkbox focus ring | Win32's dotted focus rectangle | Tk checkboxes draw no highlight ring on Windows. |
 | Selection plane on Light navigation | `nav_select_bg` `#dedcd8` instead of `#e8e6e3` | The family plane is 1.02:1 on the `#e9e8e7` navigation base, so only the marker showed the current page. `#dedcd8` is a visible step (1.12:1) that keeps secondary text at 4.59:1 and the marker at 4.14:1. Lists keep the family plane. |
 | ToggleSwitch control | Checkbutton with drawn switch images | Tk has no switch; the images are supersampled from the theme roles at the current scale. |
+
+### Tauri window (`desktop/`)
+
+The web view renders the family as specified, so none of the Tk deviations
+above apply there: 4px control corners, hover faces, a 2px focus ring with an
+offset, and Mica's opaque fallback (`#292929`/`#e9e8e7`) as the window base.
+Roles keep the canonical `--color-*`/`--native-*` names in
+`desktop/src/styles/tokens.css`, with the values in the tables above. Text uses
+Segoe UI Variable Text/Display, falling back to Segoe UI; no font is bundled.
+Known gaps until parity: navigation icons are drawn 20px stroke glyphs, not
+Segoe Fluent Icons, and the Light navigation plane keeps the `#dedcd8` deviation.
 
 ### Contrast (computed by `tests/test_ui_theme.py`)
 

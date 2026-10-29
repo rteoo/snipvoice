@@ -219,6 +219,20 @@ def voice_status_presentation(voice):
     return f"{label}\n{detail}", tone
 
 
+def voice_model_download_message(entry):
+    from voice_catalog import format_size
+
+    return tr(
+        "Baixar o modelo {model} ({size})?\n\n"
+        "{purpose}\n\n"
+        "Licença: {license}\n"
+        "{attribution}\n\n"
+        "O arquivo fica num cache local, não na pasta de snippets.",
+        model=entry["id"], size=format_size(entry["size_bytes"]), purpose=tr(entry["purpose"]),
+        license=entry["license_id"], attribution=entry["attribution"],
+    )
+
+
 def acquire_single_instance_mutex():
     """Keep Snipvoice copies exclusive while allowing Sniptype to coexist."""
     kernel32 = ctypes.windll.kernel32
@@ -265,6 +279,7 @@ class Snipvoice:
         )
         self.icon = None
         self.manager_window = None
+        self._manager_host = None
         self._manager_resume_after = None
         self._manager_notebook = None
         self._manager_voice_tab = None
@@ -317,6 +332,10 @@ class Snipvoice:
         self.gui.submit(self._show_meetings)
 
     def _show_meetings(self, root):
+        host = self._tauri_manager()
+        if host is not None:
+            host.show("recording" if self.meetings.snapshot().get("state") in CAPTURE_STATES else None)
+            return
         self._show_manager_window(root)
         if self.meetings.snapshot().get("state") not in CAPTURE_STATES:
             return
@@ -376,6 +395,13 @@ class Snipvoice:
         epoch, editing = self.voice.hotkey_edit_state()
         if editing or hotkey_epoch is not None and hotkey_epoch != epoch:
             return
+        host = self._tauri_manager()
+        if host is not None:
+            if self.meetings.snapshot().get("state", "idle") in CAPTURE_STATES:
+                self.task_runner.start(self.meetings.stop, name="meeting-stop")
+            else:
+                self._request_tauri_start(host, "hotkey")
+            return
         view = self._manager_meeting_view
         if view is None or getattr(view, "closed", False):
             self._show_manager_window(root)
@@ -402,9 +428,19 @@ class Snipvoice:
         if not self._meeting_startup_ready:
             self.notify_error(tr("A gravação aguarda a recuperação local do SnipVoice."), key="meeting-startup")
             return
+        host = self._tauri_manager()
+        if host is not None:
+            self._request_tauri_start(host, "tray")
+            return
         self._show_manager_window(root)
         if self._manager_meeting_view is not None:
             self._manager_meeting_view.request_start("tray")
+
+    @staticmethod
+    def _request_tauri_start(host, origin):
+        """The window owns the source choice and the consent dialog, as the Tk manager does."""
+        host.show("recording")
+        host.notify("recording.requestStart", {"origin": origin})
 
     def request_meeting_stop(self, icon=None, item=None):
         """Tray stop action; the controller stop request stays worker-owned."""
@@ -477,7 +513,75 @@ class Snipvoice:
         else:
             self.gui.submit(self._confirm_and_enable_voice)
 
+    def _tauri_manager(self):
+        """The Tauri manager host when opted in and built; None keeps the Tk manager."""
+        if self._manager_host is not None:
+            return self._manager_host or None
+        from manager_bridge import ManagerApi, ManagerHost, manager_executable, tauri_manager_requested
+
+        if not tauri_manager_requested():
+            self._manager_host = False
+            return None
+        checkout = None if getattr(sys, "frozen", False) else os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))
+        executable = manager_executable(get_runtime_resource_dir(), checkout)
+        if executable is None:
+            self.logger.warning("SNIPVOICE_MANAGER=tauri, but no manager executable exists; using the Tk manager")
+            self._manager_host = False
+            return None
+        api = ManagerApi(
+            meetings=self.meetings, voice=self.voice,
+            settings_getter=lambda: dict(self.settings),
+            persist_settings=self._persist_voice_settings,
+            startup_status=lambda: (self._meeting_startup_ready, self._meeting_startup_status),
+            voice_presentation=lambda: voice_status_presentation(self.voice),
+            history_status=voice_history_status,
+            set_voice_enabled=self._manager_set_voice_enabled,
+            on_language_changed=self._manager_language_changed,
+            display_name=APP_DISPLAY_NAME, version=APP_VERSION,
+        )
+        self._manager_host = ManagerHost(
+            api, executable, logger=self.logger, on_closed=self._tauri_manager_closed,
+            on_spawn_failed=lambda: self.notify_error(tr("Não foi possível abrir a janela do SnipVoice."),
+                                                      key="manager-spawn"),
+        )
+        return self._manager_host
+
+    def _tauri_manager_closed(self):
+        if self._quitting.is_set() or self._tray_close_notified or self.icon is None:
+            return
+        try:
+            self.icon.notify(tr("SnipVoice continua na bandeja; gravação e processamento continuam"), "SnipVoice")
+        except Exception:
+            self.logger.warning("Could not show the close-to-tray notice")
+        else:
+            self._tray_close_notified = True
+
+    def _manager_language_changed(self, language):
+        self.settings["language"] = i18n.set_language(language)
+        self.refresh_tray_menu()
+
+    def _manager_set_voice_enabled(self, enabled, confirmed):
+        """Bridge worker: the Ditado switch, with the Tk path's model-download consent."""
+        from voice_catalog import catalog_entry
+
+        if not enabled:
+            self.task_runner.start(self._disable_voice, name="voice-disable")
+            return {"status": "accepted"}
+        if self._voice_microphone_blocked():
+            return {"status": "blocked"}
+        entry = catalog_entry(self.voice.settings.profile)
+        if entry is not None and not self.voice.model_installed() and not confirmed:
+            return {"status": "confirm", "title": tr("Entrada por voz"),
+                    "message": voice_model_download_message(entry)}
+        self.gui.submit(self._start_voice_enable)
+        return {"status": "accepted"}
+
     def _show_manager_window(self, root):
+        host = self._tauri_manager()
+        if host is not None:
+            host.show()
+            return
         if self.manager_window is not None and self.manager_window.winfo_exists():
             self.manager_window.deiconify()
             self.manager_window.lift()
@@ -1084,6 +1188,8 @@ class Snipvoice:
             if self._meeting_monitor is not None:
                 self._meeting_monitor.stop()
                 self._meeting_monitor = None
+        if self._manager_host:
+            self._manager_host.shutdown()
         self.meetings.shutdown()
         self.voice.shutdown()
         self.gui.submit(self._shutdown_gui_owner)
@@ -1231,6 +1337,8 @@ class Snipvoice:
         self._voice_tray_state = tray_state
         if changed and snapshot["state"] not in {"recording", "transcribing", "routing"}:
             self.refresh_tray_menu()
+        if self._manager_host:
+            self._manager_host.voice_changed()
 
 
     def _render_voice_status(self, root, snapshot):
@@ -1251,8 +1359,12 @@ class Snipvoice:
     def _render_recording_indicator(self, root, snapshot):
         if self.voice_status_indicator is None:
             self.voice_status_indicator = VoiceStatusIndicator(root, on_open=self._queue_indicator_target)
-        window = self.manager_window
-        hidden = window is None or window.state() in {"withdrawn", "iconic"}
+        host = self._manager_host
+        if host:
+            hidden = not host.running
+        else:
+            window = self.manager_window
+            hidden = window is None or window.state() in {"withdrawn", "iconic"}
         if hidden:
             self.voice_status_indicator.update_meeting(snapshot)
         else:
@@ -1264,6 +1376,12 @@ class Snipvoice:
 
     def _open_indicator_target(self, session_id=None):
         # Called only by a deliberate pointer click on the GUI-owned HUD.
+        host = self._tauri_manager()
+        if host is not None:
+            host.show("library" if session_id else "recording")
+            if session_id:
+                host.notify("library.open", {"id": session_id})
+            return
         self._show_manager_window(self.gui.root)
         view = self._manager_meeting_view
         if session_id and view is not None:
@@ -1333,32 +1451,31 @@ class Snipvoice:
 
 
     def _confirm_and_enable_voice(self, _root=None):
-        from voice_catalog import catalog_entry, format_size
+        from voice_catalog import catalog_entry
 
-        if macos_permissions.check_microphone() == macos_permissions.DENIED:
-            self.notify_error(
-                tr("O macOS bloqueou o microfone. Conceda Microfone em Privacidade "
-                   "e reinicie o SnipVoice."),
-                key="voice-mic",
-            )
-            macos_permissions.open_settings_pane(macos_permissions.MICROPHONE)
+        if self._voice_microphone_blocked():
             self._refresh_manager_voice_tab()
             return
         entry = catalog_entry(self.voice.settings.profile)
         if entry is not None and not self.voice.model_installed():
-            size = format_size(entry["size_bytes"])
-            message = tr(
-                "Baixar o modelo {model} ({size})?\n\n"
-                "{purpose}\n\n"
-                "Licença: {license}\n"
-                "{attribution}\n\n"
-                "O arquivo fica num cache local, não na pasta de snippets.",
-                model=entry["id"], size=size, purpose=tr(entry["purpose"]),
-                license=entry["license_id"], attribution=entry["attribution"],
-            )
-            if not messagebox.askyesno(tr("Entrada por voz"), message):
+            if not messagebox.askyesno(tr("Entrada por voz"), voice_model_download_message(entry)):
                 self._refresh_manager_voice_tab()
                 return
+        self._start_voice_enable()
+
+    def _voice_microphone_blocked(self):
+        if macos_permissions.check_microphone() != macos_permissions.DENIED:
+            return False
+        self.notify_error(
+            tr("O macOS bloqueou o microfone. Conceda Microfone em Privacidade "
+               "e reinicie o SnipVoice."),
+            key="voice-mic",
+        )
+        macos_permissions.open_settings_pane(macos_permissions.MICROPHONE)
+        return True
+
+    def _start_voice_enable(self, _root=None):
+        """GUI thread: enable dictation on the task runner once its model is accepted."""
         if getattr(self, "_voice_enable_pending", False):
             return
         self._voice_enable_pending = True
@@ -1399,6 +1516,10 @@ class Snipvoice:
 
     def _show_voice_settings(self, root):
         """Open the manager on the voice tab. Tray shortcut; no extra dialog."""
+        host = self._tauri_manager()
+        if host is not None:
+            host.show("voice")
+            return
         self._show_manager_window(root)
         notebook = self._manager_notebook
         tab = self._manager_voice_tab
