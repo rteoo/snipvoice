@@ -43,6 +43,23 @@ export class MockTransport implements Transport {
     { id: "old1", name: "…a1b2c3d4", moved: "02/10 09:00", expires: "Expirada", size: "18 MB", expired: true },
   ];
   private jobs = new Map<string, () => void>();
+  private recordingSettings = {
+    profiles: [
+      { id: "dictation", label: "Igual ao ditado" },
+      { id: "balanced", label: "Equilibrado · Parakeet" },
+      { id: "compact", label: "Preciso · Qwen 0.6B" },
+    ],
+    languages: {
+      dictation: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }, { id: "en-US", label: "Inglês (Estados Unidos)" }],
+      balanced: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }, { id: "en-US", label: "Inglês (Estados Unidos)" }],
+      compact: [{ id: "auto", label: "Automático" }],
+    } as Record<string, { id: string; label: string }[]>,
+    summaryModels: [{ id: "gemma", label: "Equilibrado", installed: false }],
+    values: { profile: "dictation", language: "pt-BR", hotkey: "", summaryModel: "gemma", destination: "", voiceBoost: true },
+    destinationLabel: "Pasta local padrão (recordings)",
+    microphoneEnabled: true,
+  };
+  private privacy = { generation: 3, noticeEnabled: true, noticeLanguage: "pt-BR", qaMode: "explicit_save", autoTrash: false, autoTrashDays: "90", trashDays: "30" };
   private recording: "idle" | "recording" | "paused" = "idle";
   private started = 0;
   private voiceEnabled = true;
@@ -206,6 +223,44 @@ export class MockTransport implements Transport {
       case "trash.emptyExpired":
         this.trashed.splice(0, this.trashed.length);
         return { emptied: true };
+      case "settings.recording":
+        return this.recordingSettings;
+      case "settings.saveRecording":
+        this.recordingSettings = { ...this.recordingSettings, values: params.values as typeof this.recordingSettings.values };
+        return this.recordingSettings;
+      case "settings.chooseDestination":
+        return { path: "", label: "" };
+      case "settings.privacy":
+        return this.privacy;
+      case "settings.savePrivacy":
+        this.privacy = { ...(params as unknown as typeof this.privacy), generation: this.privacy.generation + 1 };
+        return this.privacy;
+      case "settings.models":
+        return {
+          voice: [
+            { id: "balanced", name: "nvidia/parakeet-tdt-0.6b-v3", purpose: "Equilibrado", size: "640 MB", license: "CC-BY-4.0", installed: true, downloading: false },
+            { id: "accuracy", name: "Qwen/Qwen3-ASR-1.7B", purpose: "Muito preciso", size: "2.10 GB", license: "Apache-2.0", installed: false, downloading: false },
+          ],
+          summary: [{ id: "gemma", name: "Gemma 4 E4B", label: "Equilibrado", size: "4.20 GB", license: "Gemma", installed: false, downloading: false }],
+          summaryProgress: null,
+        };
+      case "settings.downloadVoiceModel":
+      case "settings.downloadSummaryModel":
+      case "settings.deleteSummaryModel":
+        if (params.confirmed !== true) return { status: "confirm", title: "Baixar modelo local", message: "Baixar este modelo?\nLicença: Apache-2.0" };
+        return { status: "started" };
+      case "settings.cancelVoiceModel":
+      case "settings.cancelSummaryModel":
+        return { cancelled: true };
+      case "settings.locations":
+        return {
+          data: { path: "C:\\Users\\voce\\.snipvoice", locked: false, atDefault: true },
+          models: { path: "C:\\Users\\voce\\.snipvoice\\models", locked: false, atDefault: true },
+        };
+      case "settings.planMove":
+        return { target: null };
+      case "settings.move":
+        return { moving: true };
       default:
         throw new Error(`unknown method ${method}`);
     }

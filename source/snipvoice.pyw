@@ -522,8 +522,9 @@ class Snipvoice:
         if self._manager_host is not None:
             return self._manager_host or None
         from manager_bridge import ManagerApi, ManagerHost, manager_executable, tauri_manager_requested
+        import summary_models
         from manager_library import LibraryActions
-        from summary_models import summary_model_is_installed
+        from manager_settings import SettingsActions
 
         if not tauri_manager_requested():
             self._manager_host = False
@@ -546,11 +547,23 @@ class Snipvoice:
             on_language_changed=self._manager_language_changed,
             display_name=APP_DISPLAY_NAME, version=APP_VERSION,
         )
-        api.library = LibraryActions(
-            meetings=self.meetings, meeting_settings=api.saved_meeting_settings,
-            summary_model_installed=summary_model_is_installed, choose_path=self._choose_manager_path,
-            startup_status=api.startup_status,
-        )
+        api.extensions = [
+            LibraryActions(
+                meetings=self.meetings, meeting_settings=api.saved_meeting_settings,
+                summary_model_installed=summary_models.summary_model_is_installed,
+                choose_path=self._choose_manager_path, startup_status=api.startup_status,
+            ),
+            SettingsActions(
+                meetings=self.meetings, voice=self.voice, settings_getter=lambda: dict(self.settings),
+                persist_settings=self._persist_voice_settings,
+                on_settings_changed=lambda: self.task_runner.start(
+                    self._rebuild_meeting_monitor, name="meeting-hotkey"),
+                summary_models=summary_models, choose_directory=self._choose_manager_directory,
+                notify=lambda method, params: self._manager_host and self._manager_host.notify(method, params),
+                data_location=self.data_location, models_location=self.models_location,
+                relocate_data=self.request_data_relocation, relocate_models=self.request_models_relocation,
+            ),
+        ]
         self._manager_host = ManagerHost(
             api, executable, logger=self.logger, on_closed=self._tauri_manager_closed,
             on_spawn_failed=lambda: self.notify_error(tr("Não foi possível abrir a janela do SnipVoice."),
@@ -566,6 +579,15 @@ class Snipvoice:
                 return filedialog.asksaveasfilename(initialfile=filename,
                                                     defaultextension=os.path.splitext(filename)[1], **options)
             return filedialog.askopenfilename(**options)
+        return self.gui.call(ask) or ""
+
+    def _choose_manager_directory(self, title, initial):
+        """A native folder picker on the Tk thread for the Tauri window; "" when cancelled."""
+        def ask(root):
+            options = {"parent": root, "title": title, "mustexist": True}
+            if initial:
+                options["initialdir"] = initial
+            return filedialog.askdirectory(**options)
         return self.gui.call(ask) or ""
 
     def _tauri_manager_closed(self):

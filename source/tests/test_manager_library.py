@@ -338,7 +338,7 @@ class ManagerApiCompositionTests(unittest.TestCase):
             meetings=None, voice=None, settings_getter=dict, persist_settings=lambda _p: True,
             startup_status=lambda: (True, ""), voice_presentation=lambda: ("", None),
             history_status=lambda _s: ("", None), set_voice_enabled=lambda *_a: {}, on_language_changed=lambda _c: None,
-            display_name="SnipVoice", version="1.3.0", library=actions,
+            display_name="SnipVoice", version="1.3.0", extensions=[actions],
         )
         methods = api.methods()
         self.assertIs(methods["library.summary"].__self__, actions)

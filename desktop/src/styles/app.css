@@ -84,7 +84,7 @@ input:disabled, select:disabled, textarea:disabled { color: var(--native-disable
 .switch input:disabled::after { background: var(--native-disabled); }
 
 /* Segmented selection (peer options). */
-.segmented { display: inline-flex; flex-wrap: wrap; gap: 2px; padding: 2px; border-radius: var(--native-control-radius); background: var(--native-selection); }
+.segmented { display: inline-flex; justify-self: start; flex-wrap: wrap; gap: 2px; padding: 2px; border-radius: var(--native-control-radius); background: var(--native-selection); }
 .segmented button { min-height: 28px; padding: 2px 12px; border: 0; border-radius: 3px; background: transparent; }
 .segmented button[aria-pressed="true"] { background: var(--native-content); box-shadow: inset 0 -2px var(--color-accent-mark); }
 
@@ -261,7 +261,26 @@ dialog.trash-dialog .table-scroll { max-height: 40vh; margin: var(--native-space
 dialog .infobar { margin: var(--native-space-3) 0; }
 dialog .field { margin-top: var(--native-space-2); }
 
-.settings { max-width: 640px; }
+.settings > .stack { max-width: 680px; }
+.settings-head { padding: 0 24px 12px; }
+.path-row { display: flex; gap: var(--native-space-2); align-items: center; min-width: 0; }
+.path-row input { flex: 1; min-width: 0; }
+.check { display: inline-flex; align-items: center; gap: var(--native-space-2); min-height: var(--native-control-height); }
+.check input { width: 16px; height: 16px; margin: 0; accent-color: var(--color-accent-mark); }
+.check-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--native-space-2); }
+.check-row select { width: auto; }
+input.days { width: 72px; text-align: right; }
+.save-bar {
+  position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--native-space-2);
+  padding: 12px 0; background: var(--native-panel); border-top: 1px solid var(--native-line);
+}
+.save-bar .caption { margin-right: auto; }
+table.models th:nth-child(2), table.models td:nth-child(2) { width: 120px; }
+table.models th:nth-child(3), table.models td:nth-child(3) { width: 90px; }
+table.models th:nth-child(4), table.models td:nth-child(4) { width: 110px; }
+table.models th:nth-child(5), table.models td:nth-child(5) { width: 120px; }
+table.models th:nth-child(6), table.models td:nth-child(6) { width: 112px; }
+table.models td.num { padding-right: 4px; }
 .history th:first-child { width: 120px; }
 .history th:nth-child(2) { width: 110px; }
 
