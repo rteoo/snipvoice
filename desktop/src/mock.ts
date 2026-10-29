@@ -31,9 +31,9 @@ const SUMMARY = [
   "• Ana envia o resumo ao time até amanhã.",
 ].join("\n");
 const PROFILES = [
-  { id: "meeting_notes", name: "Notas de reunião", description: "Visão geral, decisões e próximos passos.", disabled: false },
-  { id: "interview", name: "Entrevista", description: "Perguntas, respostas e sinais relevantes.", disabled: false },
-  { id: "one_on_one", name: "1:1", description: "Acompanhamento, bloqueios e combinados.", disabled: false },
+  { id: "meeting_notes", name: "Notas de reunião", description: "Visão geral, decisões e próximos passos.", disabled: false, custom: false, baseName: "Notas de reunião", instructions: "" },
+  { id: "interview", name: "Entrevista", description: "Perguntas, respostas e sinais relevantes.", disabled: false, custom: false, baseName: "Entrevista", instructions: "" },
+  { id: "one_on_one", name: "1:1", description: "Acompanhamento, bloqueios e combinados.", disabled: false, custom: false, baseName: "1:1", instructions: "" },
 ];
 
 export class MockTransport implements Transport {
@@ -43,6 +43,7 @@ export class MockTransport implements Transport {
     { id: "old1", name: "…a1b2c3d4", moved: "02/10 09:00", expires: "Expirada", size: "18 MB", expired: true },
   ];
   private jobs = new Map<string, () => void>();
+  private semantic = false;
   private dictation = { profile: "balanced", language: "pt-BR", hotkey: "ctrl+alt+space", commandHotkey: "ctrl+alt+shift+space", activationMode: "hold" };
   private commands = [{ phrase: "meu email", text: "nome@example.com" }, { phrase: "assinatura", text: "Atenciosamente,\nEquipe" }];
   private corrections = [{ source: "snip voice", replacement: "SnipVoice" }];
@@ -299,6 +300,38 @@ export class MockTransport implements Transport {
         return { items: this.corrections };
       case "dictation.licenses":
         return { lines: ["transcribe.cpp — MIT", "sounddevice / PortAudio — MIT", "nvidia/parakeet-tdt-0.6b-v3 — CC-BY-4.0."] };
+      case "library.versions":
+        return { items: [
+          { id: "rep2", label: "Relatório · Notas de reunião · Hoje 14:30", answer: false, reviewed: true },
+          { id: "qa1", label: "Pergunta · Resposta salva · Hoje 14:20", answer: true, reviewed: false },
+          { id: "rep1", label: "Relatório · Entrevista · Ontem 10:00", answer: false, reviewed: false },
+        ] };
+      case "library.version":
+        return { id: params.reportId, text: SUMMARY, sections: [{ name: "summary", text: "A equipe revisou o cronograma." }, { name: "decisions", text: JSON.stringify(["Manter a data"], null, 2) }], reviewable: true, generation: 1 };
+      case "library.reviewSection":
+        return { id: params.reportId, text: SUMMARY, sections: [{ name: String(params.section), text: String(params.text) }], reviewable: true, generation: 2 };
+      case "library.exportReport":
+        return { saved: true, name: "relatorio.md" };
+      case "library.saveProfile":
+        return { profileId: "meu-formato" };
+      case "library.setProfileEnabled":
+        return { profileId: params.profileId, enabled: params.enabled };
+      case "library.deleteProfile":
+        return params.confirmed === true ? { status: "removed" } : { status: "confirm", title: "Excluir perfil", message: "Excluir este perfil personalizado?" };
+      case "search.state":
+        return { enabled: this.semantic, installed: false, model: { name: "EmbeddingGemma 2 (text, BF16)", size: "0.52 GB", license: "Apache-2.0" }, semantic: this.semantic ? "unavailable" : "disabled", status: this.semantic ? "Busca semântica: indisponível" : "Busca por palavras ativa.", index: "Índice de busca: pronto", download: null, repair: null };
+      case "search.setSemantic":
+        this.semantic = params.enabled === true;
+        return this.handle("search.state", {});
+      case "search.downloadModel":
+        return params.confirmed === true ? { status: "started" } : { status: "confirm", title: "Baixar modelo local", message: "Baixar EmbeddingGemma 2 (0.52 GB)?" };
+      case "search.reindex":
+        return this.handle("search.state", {});
+      case "search.cancel":
+      case "search.cancelRepair":
+        return { cancelled: true };
+      case "search.repair":
+        return { status: "started" };
       case "dictation.removeModel":
         return params.confirmed === true ? { status: "removed" } : { status: "confirm", title: "Remover modelo", message: "A entrada por voz será desligada e só o modelo deste perfil será apagado." };
       default:

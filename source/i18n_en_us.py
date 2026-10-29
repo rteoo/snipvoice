@@ -2021,4 +2021,12 @@ EN_US = {
     'Modelo removido. A entrada por voz foi desligada.': 'Model removed. Voice input was turned off.',
     'A entrada por voz está indisponível nesta instalação.': 'Voice input is unavailable in this installation.',
     'Aguarde a gravação terminar antes de remover o modelo.': 'Wait for the recording to finish before removing the model.',
+    'Índice de busca reconstruído.': 'Search index rebuilt.',
+    'Criar…': 'Create…',
+    'Duplicar…': 'Duplicate…',
+    'Editar…': 'Edit…',
+    'Excluir…': 'Delete…',
+    'revisada': 'reviewed',
+    'Exportar relatório…': 'Export report…',
+    'Selecione um perfil personalizado.': 'Select a custom format.',
 }
