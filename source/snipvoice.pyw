@@ -257,6 +257,10 @@ def get_runtime_resource_dir():
 class Snipvoice:
     """Standalone voice tray app; the only global listener observes voice chords."""
 
+    # False selects the Tk manager; __init__ resets it to None so a running app
+    # resolves the Tauri opt-in lazily. Instances built without __init__ never spawn.
+    _manager_host = False
+
     def __init__(self, startup_notices=()):
         self.data_dir, data_dir_warning = app_paths.resolve_data_dir()
         configure_logging(os.path.join(self.data_dir, "logs"))

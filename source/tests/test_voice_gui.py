@@ -60,7 +60,10 @@ def _make_app(base_dir):
     with mock.patch.dict(os.environ, {"SNIPVOICE_HOME": base_dir}), \
             mock.patch.object(tx, "configure_logging"), \
             mock.patch.object(tx, "Controller"):
-        return tx.Snipvoice()
+        app = tx.Snipvoice()
+    # These tests exercise the Tk manager even when the shell opts into Tauri.
+    app._manager_host = False
+    return app
 
 
 def _descendants(widget):
