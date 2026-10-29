@@ -260,13 +260,13 @@ class ManagerApi:
     ``startup_status() -> (ready, message)``, ``voice_presentation() ->
     (text, tone)``, ``history_status(status) -> (label, tone)``,
     ``set_voice_enabled(enabled, confirmed) -> dict`` and
-    ``on_language_changed(code)``. ``library`` (``manager_library.LibraryActions``)
-    adds the summary, chat, file and trash methods.
+    ``on_language_changed(code)``. ``extensions`` add their ``methods()``:
+    ``manager_library.LibraryActions`` and ``manager_settings.SettingsActions``.
     """
 
     def __init__(self, *, meetings, voice, settings_getter, persist_settings, startup_status,
                  voice_presentation, history_status, set_voice_enabled, on_language_changed,
-                 display_name, version, library=None):
+                 display_name, version, extensions=()):
         self.meetings = meetings
         self.voice = voice
         self.settings_getter = settings_getter
@@ -278,7 +278,7 @@ class ManagerApi:
         self.on_language_changed = on_language_changed
         self.display_name = display_name
         self.version = version
-        self.library = library
+        self.extensions = list(extensions)
         self._devices = []
         self._devices_lock = threading.Lock()
         # The snapshot does not carry the running recording's sources.
@@ -286,7 +286,7 @@ class ManagerApi:
 
     def methods(self):
         return {
-            **(self.library.methods() if self.library is not None else {}),
+            **{name: handler for extension in self.extensions for name, handler in extension.methods().items()},
             "app.hello": self.hello,
             "app.setLanguage": self.set_language,
             "app.setAppearance": self.set_appearance,
@@ -526,7 +526,8 @@ class ManagerApi:
             "status": status,
             "detail": detail,
             "tone": TONES.get(tone, "muted"),
-            "download": ({"done": snapshot.get("download_done") or 0, "total": total}
+            "download": ({"done": snapshot.get("download_done") or 0, "total": total,
+                          "profile": snapshot.get("download_profile") if snapshot.get("download_active") else None}
                          if snapshot.get("download_active") or (snapshot.get("state") == "loading" and total) else None),
         }
 

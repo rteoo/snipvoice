@@ -1994,4 +1994,16 @@ EN_US = {
     'Áudio importado. A transcrição começa sozinha quando houver um modelo instalado.':
         'Audio imported. Transcription starts on its own when a model is installed.',
     'Carregando resumo…': 'Loading summary…',
+    'Mover e reiniciar': 'Move and restart',
+    'Movendo e reiniciando o SnipVoice…': 'Moving and restarting SnipVoice…',
+    'Não foi possível baixar o modelo.': "Couldn't download the model.",
+    'Não foi possível carregar os modelos': "Couldn't load the models",
+    'Uso': 'Use',
+    'Idioma do aviso': 'Notice language',
+    'Seções das configurações': 'Settings sections',
+    'Não foi possível carregar as pastas': "Couldn't load the folders",
+    'Salve ou descarte Gravação e Privacidade antes de trocar o idioma; a janela é reconstruída.':
+        'Save or discard Recording and Privacy before changing the language; the window is rebuilt.',
+    'Aguarde o download atual terminar e tente de novo.': 'Wait for the current download to finish, then try again.',
+    'Não foi possível remover o modelo.': "Couldn't remove the model.",
 }

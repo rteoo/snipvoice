@@ -74,7 +74,7 @@ export interface VoiceView {
   status: string;
   detail: string;
   tone: Tone;
-  download: { done: number; total: number } | null;
+  download: { done: number; total: number; profile: string | null } | null;
 }
 
 export type VoiceToggleResult =
@@ -172,3 +172,79 @@ export interface TrashList {
   summary: string;
   expired: number;
 }
+
+export interface Choice {
+  id: string;
+  label: string;
+}
+
+export interface RecordingValues {
+  profile: string;
+  language: string;
+  hotkey: string;
+  summaryModel: string;
+  destination: string;
+  voiceBoost: boolean;
+}
+
+export interface RecordingSettingsView {
+  profiles: Choice[];
+  languages: Record<string, Choice[]>;
+  summaryModels: (Choice & { installed: boolean })[];
+  values: RecordingValues;
+  destinationLabel: string;
+  microphoneEnabled: boolean;
+}
+
+export interface PrivacyView {
+  generation: number;
+  noticeEnabled: boolean;
+  noticeLanguage: "pt-BR" | "en-US";
+  qaMode: "memory_only" | "explicit_save";
+  autoTrash: boolean;
+  autoTrashDays: string;
+  trashDays: string;
+}
+
+export interface VoiceModelRow {
+  id: string;
+  name: string;
+  purpose: string;
+  size: string;
+  license: string;
+  installed: boolean;
+  downloading: boolean;
+}
+
+export interface SummaryModelRow {
+  id: string;
+  name: string;
+  label: string;
+  size: string;
+  license: string;
+  installed: boolean;
+  downloading: boolean;
+}
+
+export interface SummaryProgress {
+  id: string;
+  done: number;
+  total: number;
+  status: string;
+}
+
+export interface ModelsView {
+  voice: VoiceModelRow[];
+  summary: SummaryModelRow[];
+  summaryProgress: SummaryProgress | null;
+}
+
+export type Confirmable = { status: "confirm"; title: string; message: string } | { status: "started" | "removed"; message?: string };
+
+export interface LocationView {
+  path: string;
+  locked: boolean;
+  atDefault: boolean;
+}
+
+export type MovePlan = { target: null } | { target: string; title: string; question: string };
