@@ -10,8 +10,6 @@ Cloud post-processing is intentionally absent. Capture stays local.
 from i18n import N_
 
 PROFILE_BALANCED = "balanced"
-PROFILE_COMPACT = "compact"
-PROFILE_ACCURACY = "accuracy"
 PROFILE_STREAMING = "streaming"
 PROFILE_WHISPER_SMALL = "whisper-small"
 PROFILE_WHISPER_TURBO = "whisper-turbo"
@@ -19,13 +17,15 @@ PROFILE_WHISPER_LARGE = "whisper-large-v3"
 
 PROFILES = (
     PROFILE_BALANCED,
-    PROFILE_COMPACT,
-    PROFILE_ACCURACY,
     PROFILE_STREAMING,
     PROFILE_WHISPER_SMALL,
     PROFILE_WHISPER_TURBO,
     PROFILE_WHISPER_LARGE,
 )
+
+# Profiles removed from the catalog (Qwen3-ASR 0.6B and 1.7B). Settings that
+# still name one resolve to the defaults instead of failing validation.
+RETIRED_PROFILES = frozenset({"compact", "accuracy"})
 
 LANGUAGE_AUTO = "auto"
 LANGUAGE_PT_BR = "pt-BR"
@@ -63,77 +63,6 @@ _PARAKEET_Q8 = {
     ),
     "source_url": "https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3",
     "purpose": N_("Equilibrado · Parakeet (padrão): ditado após soltar o atalho."),
-    "user_selectable": True,
-}
-
-_QWEN_06_Q8 = {
-    "id": "qwen3-asr-0.6b-q8",
-    "profile": PROFILE_COMPACT,
-    "filename": "Qwen3-ASR-0.6B-Q8_0.gguf",
-    "url": (
-        "https://huggingface.co/handy-computer/Qwen3-ASR-0.6B-gguf/resolve/"
-        "e4e16599b900eb0cb36e524514756bb92eb092b7/"
-        "Qwen3-ASR-0.6B-Q8_0.gguf"
-    ),
-    "sha256": "f081b2d5e23bd669d92cc331d722a8a0681943b8e6f34b48996fd5c319b5acd8",
-    "size_bytes": 850423456,
-    "upstream_model": "Qwen/Qwen3-ASR-0.6B",
-    "upstream_commit": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
-    "quant_source": "handy-computer/Qwen3-ASR-0.6B-gguf",
-    "runtime": RUNTIME_TRANSCRIBE_CPP,
-    "quantization": "Q8_0",
-    "format": "gguf",
-    "streaming": False,
-    "language_hint": "unsupported",
-    "min_memory_bytes": 3 * 1024 * 1024 * 1024,
-    "recommended_memory_bytes": 4 * 1024 * 1024 * 1024,
-    "license_id": "Apache-2.0",
-    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
-    "attribution": (
-        "Qwen3-ASR-0.6B by Alibaba, quantized to Q8_0 by handy-computer "
-        "for transcribe.cpp. Language hints are not supported; decoding is "
-        "auto-detect only."
-    ),
-    "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
-    "purpose": (
-        N_("Preciso · Qwen 0.6B: menor e mais rápido que o Qwen 1.7B; usa "
-           "detecção automática de idioma.")
-    ),
-    "user_selectable": True,
-}
-
-_QWEN_Q8 = {
-    "id": "qwen3-asr-1.7b-q8",
-    "profile": PROFILE_ACCURACY,
-    "filename": "Qwen3-ASR-1.7B-Q8_0.gguf",
-    "url": (
-        "https://huggingface.co/handy-computer/Qwen3-ASR-1.7B-gguf/"
-        "resolve/main/Qwen3-ASR-1.7B-Q8_0.gguf"
-    ),
-    "sha256": "9a0d81792dfea2d5f278b8a63deb3ea6e02139ce42c2301f32ea19c4f77526b7",
-    "size_bytes": 2185030624,
-    "upstream_model": "Qwen/Qwen3-ASR-1.7B",
-    "upstream_commit": "7278e1e70fe206f11671096ffdd38061171dd6e5",
-    "quant_source": "handy-computer/Qwen3-ASR-1.7B-gguf",
-    "runtime": RUNTIME_TRANSCRIBE_CPP,
-    "quantization": "Q8_0",
-    "format": "gguf",
-    "streaming": False,
-    "language_hint": "unsupported",
-    "min_memory_bytes": 6 * 1024 * 1024 * 1024,
-    "recommended_memory_bytes": 8 * 1024 * 1024 * 1024,
-    "license_id": "Apache-2.0",
-    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
-    "attribution": (
-        "Qwen3-ASR-1.7B by Alibaba, quantized to Q8_0 by handy-computer "
-        "for transcribe.cpp. Language hints are not supported; decoding is "
-        "auto-detect only."
-    ),
-    "source_url": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
-    "purpose": (
-        N_("Muito preciso · Qwen 1.7B (opcional): modelo maior, mais lento e com "
-           "maior uso de memória; nunca é selecionado automaticamente.")
-    ),
     "user_selectable": True,
 }
 
@@ -283,8 +212,6 @@ MODEL_CATALOG = (
     _WHISPER_SMALL_Q8,
     _PARAKEET_Q8,
     _WHISPER_TURBO_Q8,
-    _QWEN_06_Q8,
-    _QWEN_Q8,
     _WHISPER_LARGE_Q8,
     _NEMOTRON_Q8,
 )
@@ -330,10 +257,10 @@ def is_known_language(language):
 def available_languages(profile):
     """Return language choices the selected model can actually honor.
 
-    Qwen's transcribe.cpp adapter has no language-hint parameter. Keeping the
-    constraint in the catalog gives both settings normalization and the GUI a
-    single source of truth, instead of displaying choices that are silently
-    discarded later.
+    A model whose transcribe.cpp adapter takes no language hint is marked
+    ``language_hint: unsupported``. Keeping the constraint in the catalog gives
+    both settings normalization and the GUI a single source of truth, instead
+    of displaying choices that are silently discarded later.
     """
     entry = catalog_entry(profile)
     if entry and entry.get("language_hint") == "unsupported":
@@ -370,9 +297,9 @@ def third_party_notices():
 def default_language_for_profile(profile, requested=LANGUAGE_AUTO):
     """Resolve the language stored in settings against profile constraints.
 
-    Qwen cannot take a language hint in transcribe.cpp, so accuracy always
-    decodes with auto-detect. Nemotron's published English auto-detect WER is
-    weaker, so streaming defaults to ``pt-BR`` when the user left Auto.
+    A model that cannot take a language hint always decodes with auto-detect.
+    Nemotron's published English auto-detect WER is weaker, so streaming
+    defaults to ``pt-BR`` when the user left Auto.
     """
     if requested not in LANGUAGES or not is_language_available(profile, requested):
         requested = LANGUAGE_AUTO

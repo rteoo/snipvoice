@@ -9,28 +9,6 @@ DEFAULT_SUMMARY_MODEL = "qwen3.5-2b-q4"
 # Snipvoice evaluation (docs/summary-model-selection.md, "Display order").
 SUMMARY_CATALOG = (
     {
-        "id": "qwen3.5-0.8b-q4",
-        "profile": "qwen3.5-0.8b-q4",
-        "name": "Qwen3.5 0.8B",
-        "label": N_("Leve · Qwen3.5 0.8B"),
-        "description": N_("Economia máxima · para hardware limitado, com menor qualidade"),
-        "filename": "Qwen3.5-0.8B-Q4_K_M.gguf",
-        "url": (
-            "https://huggingface.co/lmstudio-community/Qwen3.5-0.8B-GGUF/resolve/"
-            "7925ccdc665d4efdb1034791e6b553e11128e6f8/Qwen3.5-0.8B-Q4_K_M.gguf"
-        ),
-        "sha256": "f5b14da98939b60bbe1019a964eba656407e1e0b64f1fe3003ff6d650e93bfec",
-        "size_bytes": 527_502_816,
-        "parameters": "0.8B",
-        "context_length": 4096,
-        "license_id": "Apache-2.0",
-        "license_url": "https://huggingface.co/Qwen/Qwen3.5-0.8B/blob/main/LICENSE",
-        "upstream_model": "Qwen/Qwen3.5-0.8B",
-        "quant_source": "lmstudio-community/Qwen3.5-0.8B-GGUF",
-        "requires_acceptance": False,
-        "disable_thinking": False,
-    },
-    {
         "id": DEFAULT_SUMMARY_MODEL,
         "profile": DEFAULT_SUMMARY_MODEL,
         "name": "Qwen3.5 2B",
@@ -74,36 +52,6 @@ SUMMARY_CATALOG = (
         "upstream_model": "google/gemma-4-E2B-it",
         "quant_source": "google/gemma-4-E2B-it-qat-q4_0-gguf",
         "requires_acceptance": False,
-        "disable_thinking": False,
-    },
-    {
-        "id": "lfm2.5-2.6b-q4",
-        "profile": "lfm2.5-2.6b-q4",
-        "name": "LiquidAI LFM2.5-2.6B",
-        "label": N_("Avançado · LFM2.5 2.6B"),
-        "description": N_("Alternativa eficiente · modelo oficial para português e uso local"),
-        "filename": "LFM2.5-2.6B-Q4_K_M.gguf",
-        "url": (
-            "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/"
-            "84022ce711b28455e8c4fc364ce68c00cf995875/LFM2.5-2.6B-Q4_K_M.gguf"
-        ),
-        "sha256": "02a8b7e17487d326e46d68ce0ba24211e1b80a14c4cd0597fa73c1cd697f52ed",
-        "size_bytes": 1_674_455_040,
-        "parameters": "2.6B",
-        "context_length": 4096,
-        "license_id": "LFM Open License v1.0",
-        "license_url": (
-            "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/blob/"
-            "84022ce711b28455e8c4fc364ce68c00cf995875/LICENSE"
-        ),
-        "license_notice": (
-            N_("Esta licença não é MIT nem Apache-2.0. O uso comercial por pessoa jurídica "
-               "com receita anual de US$ 10 milhões ou mais não é licenciado. Cópias "
-               "redistribuídas devem incluir a licença.")
-        ),
-        "upstream_model": "LiquidAI/LFM2.5-2.6B",
-        "quant_source": "LiquidAI/LFM2.5-2.6B-GGUF",
-        "requires_acceptance": True,
         "disable_thinking": False,
     },
     {

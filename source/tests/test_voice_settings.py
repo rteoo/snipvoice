@@ -112,15 +112,15 @@ class VoiceSettingsTests(unittest.TestCase):
         self.assertEqual(validate_replacements({"": "x"}), {})
         self.assertEqual(validate_replacements({"x": 3}), {})
 
-    def test_accuracy_profile_is_selectable_and_forces_auto_language(self):
+    def test_a_retired_profile_falls_back_to_the_default_and_keeps_the_language(self):
         notes = []
         settings = resolve_voice_settings(
             {"voice_profile": "accuracy", "voice_language": "pt-BR"},
             warnings=notes,
         )
-        self.assertEqual(settings.profile, "accuracy")
-        self.assertEqual(settings.language, "auto")
-        self.assertEqual(notes, [])
+        self.assertEqual(settings.profile, "balanced")
+        self.assertEqual(settings.language, "pt-BR")
+        self.assertEqual(len(notes), 1)
 
     def test_hidden_profiles_fall_back_to_balanced(self):
         notes = []

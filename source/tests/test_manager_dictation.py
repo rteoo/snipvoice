@@ -8,6 +8,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 SOURCE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, SOURCE_DIR)
@@ -18,7 +19,14 @@ from manager_dictation import DictationActions
 from voice_catalog import available_languages, selectable_catalog
 from voice_commands import CommandConflictError
 
-ONE_LANGUAGE = next(entry["profile"] for entry in selectable_catalog() if len(available_languages(entry["profile"])) == 1)
+# No catalog model lacks language hints today; the tests stand one in.
+ONE_LANGUAGE = "whisper-turbo"
+
+
+def one_language(profile):
+    return ("auto",) if profile == ONE_LANGUAGE else available_languages(profile)
+
+
 MANY_LANGUAGES = next(entry["profile"] for entry in selectable_catalog() if len(available_languages(entry["profile"])) > 1)
 
 
@@ -82,12 +90,14 @@ class DictationTestCase(unittest.TestCase):
 
 
 class FormTests(DictationTestCase):
+    @mock.patch("manager_dictation.available_languages", one_language)
     def test_the_form_reads_the_controller(self):
         view = self.actions.settings({})
         self.assertEqual(view["values"]["hotkey"], "ctrl+alt+space")
         self.assertEqual((view["commands"], view["corrections"]), (2, 1))
         self.assertEqual([item["id"] for item in view["languages"][ONE_LANGUAGE]], ["auto"])
 
+    @mock.patch("manager_dictation.available_languages", one_language)
     def test_bad_shortcuts_are_refused_before_anything_is_applied(self):
         cases = [
             {"hotkey": "space"},

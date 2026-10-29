@@ -30,6 +30,7 @@ from meeting_index import INDEX_STATES
 import meeting_text
 from meeting_text import format_local_timestamp
 from meeting_settings import EndpointSelection, resolve_meeting_settings
+from summary_catalog import summary_catalog_entry
 import ui_theme
 
 
@@ -130,7 +131,7 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
     def test_recording_save_and_discard_do_not_persist_or_reset_capture_choices(self):
         view = self.make_view()
         baseline = dict(view._settings_drafts["recording"]["baseline"])
-        view.profile.set("accuracy")
+        view.profile.set("whisper-large-v3")
         view.voice_boost.set(True)
         view.save_settings()
         operation, callback = view._submit.call_args.args[1:3]
@@ -138,7 +139,7 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
         payload = view.persist_settings.call_args.args[0]
         self.assertEqual(set(payload), {"meeting_profile", "meeting_language", "meeting_hotkey",
                                        "meeting_summary_model", "meeting_destination", "meeting_voice_boost"})
-        self.assertEqual(payload["meeting_profile"], "accuracy")
+        self.assertEqual(payload["meeting_profile"], "whisper-large-v3")
         self.assertEqual((view.input_enabled.get(), view.output_enabled.get()), (False, True))
         view._settings_drafts["recording"]["baseline"] = baseline
         view.discard_settings_section("recording")
@@ -149,12 +150,12 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
     def test_restore_overlays_async_settings_load_with_original_baseline(self):
         view = self.make_view()
         original = dict(view._settings_drafts["recording"]["baseline"])
-        working = dict(original, profile="accuracy", hotkey="ctrl+shift+f8")
+        working = dict(original, profile="whisper-large-v3", hotkey="ctrl+shift+f8")
         view._settings_drafts["recording"]["baseline"] = None
         view._restored_settings_drafts = {"recording": {"values": working, "baseline": original}}
         view.options, view.devices = {}, []
         view._render_devices, view.refresh_report_profiles = mock.Mock(), mock.Mock()
-        view._settings_loaded({"meeting_profile": "compact"}, None)
+        view._settings_loaded({"meeting_profile": "whisper-turbo"}, None)
         self.assertEqual(view._draft_values("recording"), working)
         self.assertEqual(view._settings_drafts["recording"]["baseline"], original)
         view._settings_drafts["recording"]["save"].configure.assert_called_with(state="normal")
@@ -176,9 +177,9 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
         saved = view.capture_settings_drafts()
         self.assertNotIn("recording", saved)
         view._restored_settings_drafts = saved
-        view.profile.set("compact")
+        view.profile.set("whisper-turbo")
         view._section_loaded("recording")
-        self.assertEqual(view._settings_drafts["recording"]["baseline"]["profile"], "compact")
+        self.assertEqual(view._settings_drafts["recording"]["baseline"]["profile"], "whisper-turbo")
         # A form that only loaded reports nothing; the receipt waits for a save.
         view._settings_drafts["recording"]["status"].configure.assert_called_with(
             text="", fg=view.ui.text_muted)
@@ -831,8 +832,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.raw_settings = {"voice_profile": "balanced"}
         view.settings_getter = lambda: {"voice_profile": "whisper-small"}
         self.assertEqual(view._effective_profile(), "whisper-small")
-        view.profile = Variable("accuracy")
-        self.assertEqual(view._effective_profile(), "accuracy")
+        view.profile = Variable("whisper-large-v3")
+        self.assertEqual(view._effective_profile(), "whisper-large-v3")
 
     def test_final_audio_capabilities_are_the_only_playback_contract(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1582,8 +1583,10 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertEqual(validated_settings({"meeting_hotkey": "ctrl+alt+r"}).hotkey, "ctrl+alt+r")
 
     def test_model_language_constraints_are_visible(self):
-        with self.assertRaisesRegex(ValueError, "automática"):
-            validated_settings({"meeting_profile": "compact", "meeting_language": "pt-BR"})
+        # No catalog model lacks language hints today; the guard stays wired for one that does.
+        with mock.patch("meeting_gui.available_languages", return_value=("auto",)):
+            with self.assertRaisesRegex(ValueError, "automática"):
+                validated_settings({"meeting_profile": "whisper-turbo", "meeting_language": "pt-BR"})
 
     def test_time_handles_gaps_and_invalid_values(self):
         self.assertEqual(format_time(3661.25), "01:01:01")
@@ -1902,25 +1905,29 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIsNotNone(download.call_args.kwargs["cancel_event"])
         self.assertTrue(callable(download.call_args.kwargs["progress"]))
 
-    def test_liquidai_first_download_requires_nonstandard_license_acceptance(self):
+    def test_a_gated_license_requires_acceptance_before_the_first_download(self):
+        # No shipped model is gated today; a synthetic one keeps the guard covered.
+        gated = {**summary_catalog_entry("qwen3.5-2b-q4"), "id": "gated-q4", "name": "Gated 2B",
+                 "license_id": "Synthetic License 1.0", "license_url": "https://example.com/license",
+                 "requires_acceptance": True, "license_notice": "Uso comercial restrito."}
         view = MeetingWindow.__new__(MeetingWindow)
         view.window = mock.Mock()
         view.summary_model_installed = {}
-        view.summary_model_buttons = {"lfm2.5-2.6b-q4": mock.Mock()}
+        view.summary_model_buttons = {"gated-q4": mock.Mock()}
         view.summary_model_status = Variable()
         view.summary_progress_lock = threading.Lock()
         view.summary_progress = None
         view._submit = mock.Mock(return_value=True)
 
-        with mock.patch("meeting_gui.messagebox.askyesno", return_value=False) as confirm:
-            view.toggle_summary_model("lfm2.5-2.6b-q4")
+        with mock.patch("meeting_gui.summary_catalog_entry", return_value=gated), \
+                mock.patch("meeting_gui.messagebox.askyesno", return_value=False) as confirm:
+            view.toggle_summary_model("gated-q4")
 
         self.assertEqual("Licença do modelo", confirm.call_args.args[0])
         prompt = confirm.call_args.args[1]
-        self.assertIn("LFM Open License v1.0", prompt)
-        self.assertIn("não é MIT nem Apache-2.0", prompt)
-        self.assertIn("US$ 10 milhões", prompt)
-        self.assertIn("Termos completos: https://", prompt)
+        self.assertIn("Synthetic License 1.0", prompt)
+        self.assertIn("Uso comercial restrito.", prompt)
+        self.assertIn("Termos completos: https://example.com/license", prompt)
         view._submit.assert_not_called()
 
     def test_initial_saved_manual_selection_overrides_constructor_defaults(self):

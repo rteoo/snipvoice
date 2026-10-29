@@ -83,8 +83,8 @@ export class SearchCard {
         h(
           "table",
           { class: "list models" },
-          h("thead", {}, h("tr", {}, ...[tr("Modelo"), tr("Uso"), tr("Tamanho"), tr("Licença"), tr("Estado"), ""].map((label) => h("th", { text: label, attrs: { scope: "col" } })))),
-          h("tbody", {}, h("tr", {}, h("td", { text: state.model.name, attrs: { title: state.model.name } }), h("td", { text: tr("Busca semântica") }), h("td", { text: state.model.size }), h("td", { text: state.model.license }), h("td", { class: "caption", text: modelState }), h("td", { class: "num" }, modelAction))),
+          h("thead", {}, h("tr", {}, ...[tr("Modelo"), tr("Tamanho"), tr("Licença"), tr("Estado"), ""].map((label) => h("th", { text: label, attrs: { scope: "col" } })))),
+          h("tbody", {}, h("tr", {}, h("td", { class: "model", attrs: { title: state.model.name } }, h("span", { class: "model-name", text: tr("Busca semântica") }), h("span", { class: "caption", text: state.model.name })), h("td", { text: state.model.size }), h("td", { text: state.model.license }), h("td", { class: "caption", text: modelState }), h("td", { class: "num" }, modelAction))),
         ),
       ),
       h("div", { class: "btn-row" }, reindex, cancelIndex),

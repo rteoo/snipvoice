@@ -208,7 +208,7 @@ class LibraryActions:
                 name = next((item.get("name") for item in profiles if item.get("id") == report.get("profile_id")),
                             tr("Resumo"))
                 return format_summary(merged), name
-        metadata = self.meetings.get_session(session_id) or {}
+        metadata = self.meetings.get_session(session_id, include_events=False) or {}
         return format_summary(metadata.get("summary") or metadata.get("reviewed_summary")), ""
 
     def summary(self, params):

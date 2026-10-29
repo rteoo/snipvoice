@@ -258,6 +258,7 @@ class SettingsActions:
             active = bool(snapshot.get("download_active") and snapshot.get("download_profile") == entry["profile"])
             voice.append({
                 "id": entry["profile"],
+                "label": profile_display_label(entry["profile"]),
                 "name": entry["upstream_model"],
                 "purpose": tr(entry["purpose"]),
                 "size": format_size(entry["size_bytes"]),
@@ -271,6 +272,7 @@ class SettingsActions:
             running = self._summary_download
         summary = [{
             "id": entry["id"], "name": entry["name"], "label": tr(entry["label"]),
+            "description": tr(entry["description"]),
             "size": format_model_size(entry["size_bytes"]), "license": entry["license_id"],
             "installed": installed.get(entry["id"], False),
             "downloading": bool(running and running["id"] == entry["id"]),

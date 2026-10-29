@@ -43,10 +43,13 @@ class MeetingSettingsTests(unittest.TestCase):
     def test_previous_builtin_catalog_ids_migrate_to_current_families(self):
         expected = {
             "qwen3-1.7b-q4": "qwen3.5-2b-q4",
-            "granite-3.3-2b-q4": "lfm2.5-2.6b-q4",
-            "granite-4.0-1b-q4": "lfm2.5-2.6b-q4",
-            "granite-4.2-3b-q4": "lfm2.5-2.6b-q4",
+            "granite-3.3-2b-q4": "qwen3.5-2b-q4",
+            "granite-4.0-1b-q4": "qwen3.5-2b-q4",
+            "granite-4.2-3b-q4": "qwen3.5-2b-q4",
             "gemma-3-1b-q4": "gemma-4-e2b-q4",
+            # Removed from the catalog in 1.4.0.
+            "qwen3.5-0.8b-q4": "qwen3.5-2b-q4",
+            "lfm2.5-2.6b-q4": "qwen3.5-2b-q4",
         }
         for old, new in expected.items():
             with self.subTest(old=old):
@@ -63,9 +66,9 @@ class MeetingSettingsTests(unittest.TestCase):
         self.assertTrue(settings.voice_boost)
 
     def test_recordings_follow_the_dictation_model_by_default(self):
-        settings = resolve_meeting_settings({"voice_profile": "compact"})
+        settings = resolve_meeting_settings({"voice_profile": "whisper-turbo"})
         self.assertTrue(settings.follows_dictation)
-        self.assertEqual(settings.profile, "compact")
+        self.assertEqual(settings.profile, "whisper-turbo")
         self.assertEqual(settings.payload()["meeting_profile"], "dictation")
         # The stored marker keeps following when dictation changes model.
         followed = resolve_meeting_settings({**settings.payload(), "voice_profile": "whisper-small"})
@@ -74,10 +77,17 @@ class MeetingSettingsTests(unittest.TestCase):
         self.assertEqual(resolve_meeting_settings({"voice_profile": "streaming"}).profile, "balanced")
 
     def test_an_explicit_recording_model_is_kept(self):
-        settings = resolve_meeting_settings({"meeting_profile": "whisper-large-v3", "voice_profile": "compact"})
+        settings = resolve_meeting_settings({"meeting_profile": "whisper-large-v3", "voice_profile": "whisper-turbo"})
         self.assertFalse(settings.follows_dictation)
         self.assertEqual(settings.profile, "whisper-large-v3")
         self.assertEqual(settings.payload()["meeting_profile"], "whisper-large-v3")
+
+    def test_a_retired_recording_model_falls_back_to_following_dictation(self):
+        for retired in ("compact", "accuracy"):
+            with self.subTest(retired=retired):
+                settings = resolve_meeting_settings({"meeting_profile": retired, "voice_profile": retired})
+                self.assertTrue(settings.follows_dictation)
+                self.assertEqual(settings.profile, "balanced")
 
     def test_microphone_adjustment_preserves_an_explicit_opt_out(self):
         settings = resolve_meeting_settings({"meeting_voice_boost": False})

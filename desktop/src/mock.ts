@@ -1,6 +1,7 @@
 // A synthetic engine for `npm run dev` in a plain browser. It answers the same
 // methods as source/manager_bridge.py with made-up data and stores nothing.
 import type { Transport } from "./bridge";
+import type { SessionState } from "./types";
 
 type Params = Record<string, unknown>;
 
@@ -13,8 +14,9 @@ const DEVICES = [
 const SESSIONS = Array.from({ length: 7 }, (_, index) => ({
   id: `s${index + 1}`,
   title: ["Weekly planning", "Customer interview — onboarding", "1:1 check-in", "Design review", "Sales call", "Retro", "Team sync"][index] ?? "",
-  status: index === 2 ? "Falhou" : index === 4 ? "Parcial" : "Concluída",
-  tone: index === 2 ? "danger" : index === 4 ? "warning" : "default",
+  state: (index === 2 ? "failed" : index === 4 ? "partial" : index === 5 ? "processing" : "completed") as SessionState,
+  status: index === 2 ? "Falhou" : index === 4 ? "Parcial" : index === 5 ? "Processando" : "Concluída",
+  tone: index === 2 ? "danger" : index === 4 ? "warning" : index === 5 ? "busy" : "default",
   date: index === 0 ? "Hoje 14:02" : index === 1 ? "Ontem 09:10" : `${20 - index}/10 10:${10 + index}`,
   duration: `00:${String(12 + index * 7).padStart(2, "0")}:0${index}`,
 }));
@@ -54,15 +56,15 @@ export class MockTransport implements Transport {
     profiles: [
       { id: "dictation", label: "Igual ao ditado" },
       { id: "balanced", label: "Equilibrado · Parakeet" },
-      { id: "compact", label: "Preciso · Qwen 0.6B" },
+      { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large" },
     ],
     languages: {
       dictation: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }, { id: "en-US", label: "Inglês (Estados Unidos)" }],
       balanced: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }, { id: "en-US", label: "Inglês (Estados Unidos)" }],
-      compact: [{ id: "auto", label: "Automático" }],
+      "whisper-large-v3": [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }, { id: "en-US", label: "Inglês (Estados Unidos)" }],
     } as Record<string, { id: string; label: string }[]>,
-    summaryModels: [{ id: "gemma", label: "Equilibrado", installed: false }],
-    values: { profile: "dictation", language: "pt-BR", hotkey: "", summaryModel: "gemma", destination: "", voiceBoost: true },
+    summaryModels: [{ id: "qwen3.5-2b-q4", label: "Equilibrado · Qwen3.5 2B", installed: true }, { id: "gemma-4-e4b-q4", label: "Máxima qualidade · Gemma 4 E4B", installed: false }],
+    values: { profile: "dictation", language: "pt-BR", hotkey: "", summaryModel: "qwen3.5-2b-q4", destination: "", voiceBoost: true },
     destinationLabel: "Pasta local padrão (recordings)",
     microphoneEnabled: true,
   };
@@ -245,10 +247,17 @@ export class MockTransport implements Transport {
       case "settings.models":
         return {
           voice: [
-            { id: "balanced", name: "nvidia/parakeet-tdt-0.6b-v3", purpose: "Equilibrado", size: "640 MB", license: "CC-BY-4.0", installed: true, downloading: false },
-            { id: "accuracy", name: "Qwen/Qwen3-ASR-1.7B", purpose: "Muito preciso", size: "2.10 GB", license: "Apache-2.0", installed: false, downloading: false },
+            { id: "whisper-small", label: "Leve · Whisper Small", name: "openai/whisper-small", purpose: "Leve · Whisper Small: download menor e pouca memória.", size: "257 MB", license: "Apache-2.0", installed: false, downloading: false },
+            { id: "balanced", label: "Equilibrado · Parakeet", name: "nvidia/parakeet-tdt-0.6b-v3", purpose: "Equilibrado · Parakeet (padrão): ditado após soltar o atalho.", size: "705 MB", license: "CC-BY-4.0", installed: true, downloading: false },
+            { id: "whisper-turbo", label: "Intermediário · Whisper Turbo", name: "openai/whisper-large-v3-turbo", purpose: "Intermediário · Whisper Turbo (opcional): multilíngue e preciso, porém bem mais lento na CPU.", size: "845 MB", license: "MIT", installed: false, downloading: false },
+            { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large", name: "openai/whisper-large-v3", purpose: "Máxima precisão · Whisper Large (opcional): o mais preciso em português, porém mais lento que o tempo real na CPU.", size: "1.55 GB", license: "Apache-2.0", installed: false, downloading: false },
           ],
-          summary: [{ id: "gemma", name: "Gemma 4 E4B", label: "Equilibrado", size: "4.20 GB", license: "Gemma", installed: false, downloading: false }],
+          summary: [
+            { id: "qwen3.5-2b-q4", name: "Qwen3.5 2B", label: "Equilibrado · Qwen3.5 2B", description: "Recomendado · melhor equilíbrio para português, inglês e uso local", size: "1.3 GB", license: "Apache-2.0", installed: true, downloading: false },
+            { id: "gemma-4-e2b-q4", name: "Gemma 4 E2B", label: "Intermediário · Gemma 4 E2B", description: "2B efetivos / 5B totais · modelo oficial do Google, download maior", size: "3.3 GB", license: "Apache-2.0", installed: false, downloading: false },
+            { id: "qwen3.5-4b-q4", name: "Qwen3.5 4B", label: "Alta qualidade · Qwen3.5 4B", description: "Mais qualidade · maior uso de memória e processamento", size: "2.7 GB", license: "Apache-2.0", installed: false, downloading: false },
+            { id: "gemma-4-e4b-q4", name: "Gemma 4 E4B", label: "Máxima qualidade · Gemma 4 E4B", description: "4,5B efetivos / 8B totais · mais qualidade e maior uso de memória", size: "5.2 GB", license: "Apache-2.0", installed: false, downloading: false },
+          ],
           summaryProgress: null,
         };
       case "settings.downloadVoiceModel":
@@ -270,10 +279,10 @@ export class MockTransport implements Transport {
         return { moving: true };
       case "dictation.settings":
         return {
-          profiles: [{ id: "balanced", label: "Equilibrado · Parakeet", installed: true }, { id: "compact", label: "Preciso · Qwen 0.6B", installed: false }],
+          profiles: [{ id: "balanced", label: "Equilibrado · Parakeet", installed: true }, { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large", installed: false }],
           languages: {
             balanced: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }],
-            compact: [{ id: "auto", label: "Automático" }],
+            "whisper-large-v3": [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }],
           },
           values: { ...this.dictation },
           commands: this.commands.length,
@@ -281,7 +290,7 @@ export class MockTransport implements Transport {
         };
       case "dictation.save": {
         const values = params.values as typeof this.dictation;
-        if (values.profile === "compact" && params.confirmed !== true) return { status: "confirm", title: "Baixar modelo de voz", message: "Isso vai baixar 1.20 GB (Apache-2.0)." };
+        if (values.profile === "whisper-large-v3" && params.confirmed !== true) return { status: "confirm", title: "Baixar modelo de voz", message: "Isso vai baixar 1.55 GB (Apache-2.0)." };
         this.dictation = { ...values };
         return { status: "saved", settings: this.handle("dictation.settings", {}) };
       }

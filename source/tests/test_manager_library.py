@@ -41,8 +41,10 @@ class FakeLibrary:
         self.generate_started = threading.Event()
         self.block_generate = False
         self.refusal = None
+        self.event_reads = []
 
-    def get_session(self, session_id):
+    def get_session(self, session_id, include_events=True):
+        self.event_reads.append(include_events)
         return self.sessions.get(session_id)
 
     def list_report_profiles(self, language=None):
@@ -173,6 +175,13 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(view["name"], "Entrevista")
         self.assertEqual([item["id"] for item in view["profiles"]], ["meeting_notes", "interview", "custom"])
         self.assertEqual(view["profileId"], "meeting_notes")
+
+    def test_without_reports_the_session_summary_is_read_without_its_event_log(self):
+        actions, library, _dialogs = make_actions()
+        library.sessions["s1"]["summary"] = {"summary": "Resumo da sessão"}
+        view = actions.summary({"id": "s1"})
+        self.assertIn("Resumo da sessão", view["text"])
+        self.assertEqual(library.event_reads, [False])
         self.assertEqual(view["profiles"][2]["name"], "Meu formato · v2")
         self.assertTrue(view["profiles"][2]["disabled"])
         self.assertTrue(view["modelReady"])

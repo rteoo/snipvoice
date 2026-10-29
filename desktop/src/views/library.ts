@@ -1,7 +1,7 @@
 // Biblioteca: search and select a recording, then read, summarize, ask about,
 // export or delete it.
 import { allowEngineForeground, type Bridge } from "../bridge";
-import { button, h, ICONS, icon, replace } from "../dom";
+import { button, h, ICONS, icon, replace, STATE_ICONS, stateIcon } from "../dom";
 import { tr } from "../i18n";
 import type { LibraryItem, LibraryPage, RecordingView, SessionDetail, SummaryView, Transcript, TrashPreview } from "../types";
 import { confirmDialog, copyText, MessageSlot, pageHeader, toneText } from "../ui";
@@ -102,10 +102,8 @@ export class LibraryView {
                 h(
                   "tr",
                   {},
-                  h("th", { class: "col-state", text: tr("Estado"), attrs: { scope: "col" } }),
+                  h("th", { class: "col-state", attrs: { scope: "col" } }, h("span", { class: "sr-only", text: tr("Estado") })),
                   h("th", { text: tr("Gravação"), attrs: { scope: "col" } }),
-                  h("th", { class: "col-date", text: tr("Data"), attrs: { scope: "col" } }),
-                  h("th", { class: "col-duration num", text: tr("Duração"), attrs: { scope: "col" } }),
                 ),
               ),
               this.tbody,
@@ -170,10 +168,13 @@ export class LibraryView {
       const row = h(
         "tr",
         { attrs: { tabindex: 0, "aria-selected": item.id === this.selected ? "true" : "false", "data-id": item.id } },
-        h("td", { class: `col-state ${toneText(item.tone)}`, text: item.status }),
-        h("td", { text: item.title, attrs: { title: item.title } }),
-        h("td", { class: "col-date", text: item.date }),
-        h("td", { class: "col-duration num", text: item.duration }),
+        h("td", { class: "col-state" }, stateIcon(item.state, item.status)),
+        h(
+          "td",
+          { class: "session", attrs: { title: item.title } },
+          h("span", { class: "session-title", text: item.title }),
+          h("span", { class: "caption", text: `${item.date} · ${item.duration}` }),
+        ),
       );
       row.addEventListener("click", () => void this.open(item.id));
       row.addEventListener("keydown", (event) => {
@@ -200,7 +201,7 @@ export class LibraryView {
               {},
               h(
                 "td",
-                { class: "empty", attrs: { colspan: 4 } },
+                { class: "empty", attrs: { colspan: 2 } },
                 h("p", { text: query ? tr("Nada encontrado para essa busca.") : tr("Nenhuma gravação ainda.") }),
                 query ? button(tr("Limpar busca"), () => ((this.search.value = ""), void this.refresh(true)), "quiet") : null,
               ),
@@ -221,14 +222,16 @@ export class LibraryView {
   private async loadDetail(id: string): Promise<void> {
     const token = ++this.detailToken;
     this.messages.clear();
+    this.transcript = null;
+    this.summaryView = null;
+    // The summary needs only the id, so it loads while the session does.
+    const summary = this.loadSummary(token, id);
     try {
       const detail = await this.bridge.call<SessionDetail>("library.get", { id });
       if (token !== this.detailToken) return;
       this.detail = detail;
-      this.transcript = null;
-      this.summaryView = null;
       this.renderDetail();
-      await Promise.all([this.loadTranscript(token), this.loadSummary(token)]);
+      await Promise.all([this.loadTranscript(token), summary]);
     } catch (error) {
       if (token !== this.detailToken) return;
       this.detail = null;
@@ -249,21 +252,20 @@ export class LibraryView {
       this.transcript = null;
       this.messages.fail(tr("Não foi possível ler a transcrição"), "", { error });
     }
-    this.renderDetail();
+    if (this.section === "transcript") this.renderSection();
   }
 
-  private async loadSummary(token = this.detailToken): Promise<void> {
-    const detail = this.detail;
-    if (!detail) return;
+  private async loadSummary(token: number, id: string): Promise<void> {
     try {
-      const view = await this.bridge.call<SummaryView>("library.summary", { id: detail.id });
+      const view = await this.bridge.call<SummaryView>("library.summary", { id });
       if (token !== this.detailToken) return;
       this.summaryView = view;
     } catch (error) {
       if (token !== this.detailToken) return;
       this.messages.fail(tr("Não foi possível carregar as versões do resumo"), "", { error });
     }
-    this.renderSection();
+    // Only these sections read the summary; redrawing the others is wasted work.
+    if (this.detail?.id === id && (this.section === "summary" || this.section === "chat")) this.renderSection();
   }
 
   private renderDetail(): void {
@@ -300,7 +302,7 @@ export class LibraryView {
         "div",
         { class: "detail-header" },
         h("div", { class: "title-row" }, title, rename),
-        h("p", { class: "caption" }, h("span", { class: toneText(detail.tone), text: detail.status }), ` · ${detail.date} · ${detail.duration}`),
+        h("p", { class: "caption detail-meta" }, h("span", { class: "state-icon", attrs: { "data-state": detail.state } }, icon(STATE_ICONS[detail.state] ?? STATE_ICONS.unknown)), h("span", { class: toneText(detail.tone), text: detail.status }), ` · ${detail.date} · ${detail.duration}`),
       ),
       tabs,
       h("div", { class: "section-panel", attrs: { id: "section-panel", role: "tabpanel", "aria-labelledby": `tab-${this.section}` } }),

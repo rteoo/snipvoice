@@ -80,7 +80,7 @@ export class ModelsSettings {
           ? null
           : button(tr("Baixar"), () => void this.confirmed("settings.downloadVoiceModel", model.id));
       if (action && !active) action.disabled = this.voiceProgress?.profile != null;
-      return this.row(model.name, model.purpose, model.size, model.license, state, action);
+      return this.row(model.label, model.name, model.purpose, model.size, model.license, state, action);
     });
     const running = view.summaryProgress;
     const summaryRows = view.summary.map((model) => {
@@ -93,7 +93,7 @@ export class ModelsSettings {
           ? button(tr("Remover"), () => void this.confirmed("settings.deleteSummaryModel", model.id), "quiet")
           : button(tr("Baixar"), () => void this.confirmed("settings.downloadSummaryModel", model.id));
       action.disabled = !active && running !== null;
-      return this.row(model.name, model.label, model.size, model.license, state, action);
+      return this.row(model.label, model.description, model.label, model.size, model.license, state, action);
     });
     replace(
       this.element,
@@ -125,14 +125,16 @@ export class ModelsSettings {
       h(
         "table",
         { class: "list models" },
-        h("thead", {}, h("tr", {}, ...[tr("Modelo"), tr("Uso"), tr("Tamanho"), tr("Licença"), tr("Estado"), ""].map((label) => h("th", { text: label, attrs: { scope: "col" } })))),
+        h("thead", {}, h("tr", {}, ...[tr("Modelo"), tr("Tamanho"), tr("Licença"), tr("Estado"), ""].map((label) => h("th", { text: label, attrs: { scope: "col" } })))),
         h("tbody", {}, ...rows),
       ),
     );
   }
 
-  private row(name: string, purpose: string, size: string, license: string, state: string, action: HTMLElement | null): HTMLElement {
-    return h("tr", {}, h("td", { text: name, attrs: { title: name } }), h("td", { text: purpose, attrs: { title: purpose } }), h("td", { text: size }), h("td", { text: license }), h("td", { class: "caption", text: state }), h("td", { class: "num" }, action));
+  /** The model cell wraps instead of truncating: a name cut short cannot be told apart. */
+  private row(label: string, detail: string, tooltip: string, size: string, license: string, state: string, action: HTMLElement | null): HTMLElement {
+    const model = h("td", { class: "model", attrs: { title: tooltip } }, h("span", { class: "model-name", text: label }), h("span", { class: "caption", text: detail }));
+    return h("tr", {}, model, h("td", { text: size }), h("td", { text: license }), h("td", { class: "caption", text: state }), h("td", { class: "num" }, action));
   }
 
   private async confirmed(method: string, id: string): Promise<void> {

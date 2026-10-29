@@ -1,5 +1,7 @@
 // Minimal DOM construction. Text is always set as textContent; no view builds
 // markup from strings.
+import type { SessionState } from "./types";
+
 type Child = Node | string | null | undefined | false;
 type Props = {
   class?: string;
@@ -64,3 +66,22 @@ export const ICONS = {
   ],
   search: ["M8.5 3.5a5 5 0 1 0 0 10a5 5 0 1 0 0-10Z", "M12.25 12.25l4.25 4.25"],
 } as const;
+
+const CIRCLE = "M10 2.75a7.25 7.25 0 1 0 0 14.5a7.25 7.25 0 1 0 0-14.5Z";
+
+/** One glyph per recording state, so a list row reads at a glance. */
+export const STATE_ICONS: Record<SessionState, readonly string[]> = {
+  completed: [CIRCLE, "M6.75 10.25l2.25 2.25l4.25-4.5"],
+  partial: [CIRCLE, "M10 2.75v14.5"],
+  interrupted: [CIRCLE, "M10 6.25v4.5", "M10 13.75h.01"],
+  failed: [CIRCLE, "M7.5 7.5l5 5", "M12.5 7.5l-5 5"],
+  cancelled: [CIRCLE, "M4.9 15.1L15.1 4.9"],
+  recording: [CIRCLE, "M10 7a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z"],
+  processing: [CIRCLE, "M10 6v4.25l2.75 1.75"],
+  unknown: [CIRCLE, "M8 8.25a2 2 0 1 1 2.6 1.9c-.35.12-.6.45-.6.85v.5", "M10 13.75h.01"],
+};
+
+/** The state glyph with its written label for screen readers and a hover tooltip. */
+export function stateIcon(state: SessionState, label: string): HTMLElement {
+  return h("span", { class: "state-icon", attrs: { "data-state": state, title: label } }, icon(STATE_ICONS[state] ?? STATE_ICONS.unknown), h("span", { class: "sr-only", text: label }));
+}
