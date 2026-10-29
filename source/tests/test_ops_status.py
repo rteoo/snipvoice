@@ -216,10 +216,10 @@ class ReadOnlyInventoryTests(unittest.TestCase):
 
     def test_io_failure_is_unknown_and_selection_still_uses_a_verified_fallback(self):
         controller = MeetingController.__new__(MeetingController)
-        controller.voice = types.SimpleNamespace(cache_dir="synthetic", settings=types.SimpleNamespace(profile="accuracy"))
+        controller.voice = types.SimpleNamespace(cache_dir="synthetic", settings=types.SimpleNamespace(profile="whisper-large-v3"))
         def installed(entry, _cache, **options):
             self.assertFalse(options["refresh_manifest"])
-            if entry["profile"] == "accuracy":
+            if entry["profile"] == "whisper-large-v3":
                 raise PermissionError("synthetic unreadable preferred model")
             return entry["profile"] == "balanced"
         with mock.patch("voice_models.model_is_installed", side_effect=installed):

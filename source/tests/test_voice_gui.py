@@ -107,16 +107,16 @@ class DictationPresentationTests(unittest.TestCase):
 
     def test_download_bytes_belong_only_to_the_explicit_or_current_runtime_profile(self):
         snapshot = {"state": "loading", "download_active": True,
-                    "download_profile": "compact", "download_done": 25, "download_total": 200}
-        self.assertTrue(tx.voice_profile_downloading(snapshot, "compact", "accuracy"))
-        self.assertFalse(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+                    "download_profile": "whisper-turbo", "download_done": 25, "download_total": 200}
+        self.assertTrue(tx.voice_profile_downloading(snapshot, "whisper-turbo", "whisper-large-v3"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
         snapshot.update(download_active=False, download_profile=None, download_done=0, download_total=0)
-        self.assertFalse(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
         snapshot.update(download_done=50, download_total=100)
-        self.assertTrue(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
-        self.assertFalse(tx.voice_profile_downloading(snapshot, "compact", "accuracy"))
+        self.assertTrue(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-turbo", "whisper-large-v3"))
         snapshot["state"] = "idle"
-        self.assertFalse(tx.voice_profile_downloading(snapshot, "accuracy", "accuracy"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
 
     def test_header_uses_controller_health_instead_of_enabled_setting(self):
         voice = mock.Mock()
@@ -760,7 +760,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             frame = tk.Frame(owner)
             try:
                 self.app._build_voice_settings_controls(frame, owner)
-                self.app._manager_voice_tk_vars[0].set("accuracy")
+                self.app._manager_voice_tk_vars[0].set("whisper-large-v3")
                 state = self.app._manager_voice_form["capture"]()
                 self.assertNotEqual(state["values"], state["baseline"])
                 owner.destroy()
@@ -993,7 +993,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(height, 300)
         self.assertEqual(state, tk.DISABLED)
         self.assertIn("transcribe.cpp — MIT", notices)
-        self.assertIn("Qwen/Qwen3-ASR-0.6B", notices)
+        self.assertIn("openai/whisper-large-v3", notices)
         self.assertEqual(scrollbar_count, 1)
 
     def test_voice_secondary_tools_are_available_in_menu(self):
@@ -1108,7 +1108,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             self.assertGreaterEqual(len(combos), 2)
             selected, language, _hotkey, _command, _activation = self.app._manager_voice_tk_vars
             before_state = (selected.get(), language.get())
-            voice.settings.profile = "accuracy"
+            voice.settings.profile = "whisper-large-v3"
             voice.settings.language = "auto"
             self.app._manager_voice_refresher()
             after_display = tuple(combo.get() for combo in combos)
@@ -1117,8 +1117,8 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         before_state, after_display, after_state = self._on_gui(build_and_refresh)
         self.assertEqual(before_state, ("balanced", "pt-BR"))
-        self.assertEqual(after_state, ("accuracy", "auto"))
-        self.assertIn("Muito preciso · Qwen 1.7B", after_display)
+        self.assertEqual(after_state, ("whisper-large-v3", "auto"))
+        self.assertIn("Máxima precisão · Whisper Large", after_display)
         self.assertTrue(any("Automático" in text for text in after_display), after_display)
 
     def test_voice_status_ticks_preserve_dirty_fields_and_discard_reloads_settings(self):
@@ -1131,7 +1131,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             frame.pack(fill=tk.BOTH, expand=True)
             self.app._create_voice_tab(frame, owner)
             selected, language, hotkey, command, mode = self.app._manager_voice_tk_vars
-            selected.set("accuracy")
+            selected.set("whisper-large-v3")
             language.set("auto")
             hotkey.set("ctrl+shift+f8")
             command.set("ctrl+shift+f9")
@@ -1874,9 +1874,6 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             )
             profile_values = tuple(profile_box["values"])
             language_values = tuple(language_box["values"])
-            profile_box.set("Preciso · Qwen 0.6B")
-            profile_box.event_generate("<<ComboboxSelected>>")
-            compact_language_values = tuple(language_box["values"])
             profile_box.set("Intermediário · Whisper Turbo")
             profile_box.event_generate("<<ComboboxSelected>>")
             whisper_language_values = tuple(language_box["values"])
@@ -1891,14 +1888,13 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 settings_text,
                 profile_values,
                 language_values,
-                compact_language_values,
                 whisper_language_values,
                 whisper_selected,
                 selected.get(),
                 language.get(),
             )
 
-        (settings_text, profile_values, language_values, compact_language_values,
+        (settings_text, profile_values, language_values,
          whisper_language_values, whisper_selected,
          selected, language) = self._on_gui(inspect_manager)
         self.assertIn("Modelos de transcrição", settings_text)
@@ -1909,8 +1905,6 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 "Leve · Whisper Small",
                 "Equilibrado · Parakeet",
                 "Intermediário · Whisper Turbo",
-                "Preciso · Qwen 0.6B",
-                "Muito preciso · Qwen 1.7B",
                 "Máxima precisão · Whisper Large",
             ),
         )
@@ -1918,7 +1912,6 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(whisper_language_values, language_values)
         self.assertIn("Automático", language_values)
         self.assertIn("Português (Brasil)", language_values)
-        self.assertEqual(compact_language_values, ("Automático",))
         self.assertEqual(selected, "balanced")
         self.assertEqual(language, "pt-BR")
 

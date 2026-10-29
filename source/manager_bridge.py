@@ -582,12 +582,16 @@ class ManagerApi:
     # -- Library --------------------------------------------------------
 
     def _session_state(self, item, snapshot):
+        """The row's state key (the window's icon), written label and tone."""
         if (snapshot.get("processing_kind") in LIBRARY_PROCESSING_JOBS
                 and snapshot.get("processing_session") == item.get("id")):
-            label, tone = PROCESSING_SESSION_STATE
+            key, (label, tone) = "processing", PROCESSING_SESSION_STATE
+        elif item.get("status") in SESSION_STATES:
+            key = item["status"]
+            label, tone = SESSION_STATES[key]
         else:
-            label, tone = SESSION_STATES.get(item.get("status"), UNKNOWN_SESSION_STATE)
-        return tr(label), TONES.get(tone, "default")
+            key, (label, tone) = "unknown", UNKNOWN_SESSION_STATE
+        return key, tr(label), TONES.get(tone, "default")
 
     def library_list(self, params):
         query = _text(params, "query", limit=500)
@@ -598,10 +602,11 @@ class ManagerApi:
         snapshot = self.meetings.snapshot()
         items = []
         for item in page.get("items", ()):
-            label, tone = self._session_state(item, snapshot)
+            state, label, tone = self._session_state(item, snapshot)
             items.append({
                 "id": item.get("id"),
                 "title": " ".join(str(item.get("title") or "").split()) or tr("Sem título"),
+                "state": state,
                 "status": label,
                 "tone": tone,
                 "date": format_local_timestamp(item.get("created_at")),
@@ -611,13 +616,15 @@ class ManagerApi:
 
     def library_get(self, params):
         session_id = _session_id(params)
-        metadata = self.meetings.get_session(session_id)
+        # The capture event log can dwarf the rest and nothing here reads it.
+        metadata = self.meetings.get_session(session_id, include_events=False)
         if not isinstance(metadata, dict):
             raise RpcFailure(tr("Gravação não encontrada."))
-        label, tone = self._session_state(metadata, self.meetings.snapshot())
+        state, label, tone = self._session_state(metadata, self.meetings.snapshot())
         return {
             "id": session_id,
             "title": " ".join(str(metadata.get("title") or "").split()) or tr("Sem título"),
+            "state": state,
             "status": label,
             "tone": tone,
             "date": format_local_timestamp(metadata.get("created_at")),

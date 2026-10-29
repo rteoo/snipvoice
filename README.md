@@ -141,7 +141,7 @@ launch. The Windows installer uses no administrator rights and installs under
 4. Enable voice input. Hold `ctrl+alt+space`, speak, and release to transcribe, or select handsfree Start / Stop in **Ditado** and press the shortcut once to start and again to stop.
 5. Use **Gravação** to choose microphone/system sources and record a meeting. The **Abrir Gravação…** tray shortcut opens this page in the same window.
 6. Open **Configurações** to follow the system appearance or choose a fixed light or dark theme. Under **Geral > Idioma**, choose **English (US)** to switch the interface to English; the sidebar then reads Recording, Library, Dictation, and Settings.
-7. In the same tab, choose Qwen3.5 0.8B/2B/4B, LiquidAI LFM2.5, or Gemma 4 E2B/E4B, and download the model before generating a summary.
+7. In the same tab, choose Qwen3.5 2B/4B or Gemma 4 E2B/E4B, and download the model before generating a summary.
 
 Escape cancels active dictation. A failed or interrupted utterance remains in
 voice history and can be retried manually without a delayed blind paste.
@@ -242,16 +242,11 @@ Model downloads happen only after an explicit action in voice settings. Meeting
 processing accepts installed catalog models and never downloads one implicitly.
 Recordings remain usable before transcription and preserve earlier revisions.
 
-Structured summaries run inside SnipVoice through llama.cpp. Qwen3.5 0.8B is
-the 503 MiB compute-budget option for constrained hardware, while Qwen3.5 2B
-Q4_K_M remains the recommended default and Qwen3.5 4B favors quality. LiquidAI
-LFM2.5-2.6B is the efficient alternative, and Gemma 4 E2B/E4B are Google's
-current options.
+Structured summaries run inside SnipVoice through llama.cpp. Qwen3.5 2B
+Q4_K_M is the recommended default and Qwen3.5 4B favors quality; Gemma 4
+E2B/E4B are Google's current options.
 Gemma E2B is 3.12 GiB; the higher-capacity E4B is 4.80 GiB and contains about 8B
 total parameters. The **Configurações** tab shows the effective and total counts before download.
-LiquidAI uses the LFM Open License v1.0 rather than MIT or Apache-2.0. Its first
-download shows the license terms and the US$10 million annual-revenue commercial
-use threshold for explicit acceptance.
 Downloads use a fixed catalog, stream to a resumable partial
 file, and become usable only after their exact size and SHA-256 match.
 After a model is installed, summary inference makes no network request. Review

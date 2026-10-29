@@ -1119,8 +1119,8 @@ class MeetingController:
         with self._lock:
             return dict(self._index_rebuild_progress)
 
-    def get_session(self, session_id):
-        metadata = self.library.get_session(session_id)
+    def get_session(self, session_id, include_events=True):
+        metadata = self.library.get_session(session_id, include_events=include_events)
         generation = metadata.get("annotation_generation", 0)
         if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
             with self._lock:

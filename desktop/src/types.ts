@@ -107,9 +107,12 @@ export interface HistoryRow {
   copyable: boolean;
 }
 
+export type SessionState = "completed" | "partial" | "interrupted" | "failed" | "cancelled" | "recording" | "processing" | "unknown";
+
 export interface LibraryItem {
   id: string;
   title: string;
+  state: SessionState;
   status: string;
   tone: Tone;
   date: string;
@@ -124,6 +127,7 @@ export interface LibraryPage {
 export interface SessionDetail {
   id: string;
   title: string;
+  state: SessionState;
   status: string;
   tone: Tone;
   date: string;
@@ -228,6 +232,7 @@ export interface PrivacyView {
 
 export interface VoiceModelRow {
   id: string;
+  label: string;
   name: string;
   purpose: string;
   size: string;
@@ -240,6 +245,7 @@ export interface SummaryModelRow {
   id: string;
   name: string;
   label: string;
+  description: string;
   size: string;
   license: string;
   installed: boolean;

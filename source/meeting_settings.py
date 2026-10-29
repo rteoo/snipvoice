@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 
 from i18n import N_, tr
-from voice_catalog import DEFAULT_PROFILE, LANGUAGE_AUTO, is_selectable_profile, is_known_language
+from voice_catalog import DEFAULT_PROFILE, LANGUAGE_AUTO, RETIRED_PROFILES, is_selectable_profile, is_known_language
 from voice_hotkey import parse_chord
 from summary_catalog import DEFAULT_SUMMARY_MODEL, is_known_summary_model
 
@@ -13,9 +13,11 @@ MAX_DESTINATION_LENGTH = 4096
 _MISSING = object()
 LEGACY_SUMMARY_MODELS = {
     "qwen3-1.7b-q4": DEFAULT_SUMMARY_MODEL,
-    "granite-3.3-2b-q4": "lfm2.5-2.6b-q4",
-    "granite-4.0-1b-q4": "lfm2.5-2.6b-q4",
-    "granite-4.2-3b-q4": "lfm2.5-2.6b-q4",
+    "qwen3.5-0.8b-q4": DEFAULT_SUMMARY_MODEL,
+    "lfm2.5-2.6b-q4": DEFAULT_SUMMARY_MODEL,
+    "granite-3.3-2b-q4": DEFAULT_SUMMARY_MODEL,
+    "granite-4.0-1b-q4": DEFAULT_SUMMARY_MODEL,
+    "granite-4.2-3b-q4": DEFAULT_SUMMARY_MODEL,
     "gemma-3-1b-q4": "gemma-4-e2b-q4",
 }
 
@@ -136,6 +138,8 @@ def resolve_meeting_settings(value):
         raise ValueError(tr("O atalho de gravação é inválido."))
     hotkey = parse_chord(hotkey).spec if hotkey.strip() else ""
     stored_profile = data.get("meeting_profile", FOLLOW_DICTATION)
+    if stored_profile in RETIRED_PROFILES:
+        stored_profile = FOLLOW_DICTATION
     follows_dictation = stored_profile == FOLLOW_DICTATION
     profile = dictation_profile(data) if follows_dictation else stored_profile
     if not is_selectable_profile(profile):

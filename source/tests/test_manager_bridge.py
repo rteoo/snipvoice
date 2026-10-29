@@ -151,6 +151,12 @@ class FakeMeetings:
         self.started = []
         self.revoked = 0
         self.state = {"state": "idle"}
+        self.event_reads = []
+
+    def get_session(self, session_id, include_events=True):
+        self.event_reads.append(include_events)
+        return {"id": session_id, "title": "Sync", "status": "partial", "created_at": None,
+                "duration": 60, "revisions": [{"id": "r1"}]}
 
     def snapshot(self):
         return dict(self.state)
@@ -313,6 +319,14 @@ class ManagerApiTests(unittest.TestCase):
         self.assertEqual((first["title"], first["status"], first["duration"]), ("Weekly sync", "Concluída", "00:02:05"))
         self.assertEqual((second["status"], second["tone"]), ("Processando", "busy"))
         self.assertEqual(second["date"], "Sem data")
+        # The window draws each row's state as an icon keyed by these.
+        self.assertEqual([first["state"], second["state"]], ["completed", "processing"])
+
+    def test_library_detail_skips_the_event_log_and_keys_its_state(self):
+        meetings = FakeMeetings()
+        detail = make_api(meetings).library_get({"id": "s1"})
+        self.assertEqual(meetings.event_reads, [False])
+        self.assertEqual((detail["state"], detail["status"], detail["revision"]), ("partial", "Parcial", "r1"))
 
     def test_language_change_persists_and_returns_the_catalog(self):
         persisted, languages = [], []

@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from trigger_index import compile_trigger_index
 from voice_audio import AudioCapture, CaptureIssue, CaptureResult, VoiceAudioError
-from voice_catalog import LANGUAGE_AUTO, PROFILE_STREAMING
+from voice_catalog import PROFILE_STREAMING
 from voice_dispatch import (
     MODE_COMMAND,
     MODE_DICTATION,
@@ -103,28 +103,28 @@ class DictationProjectionTests(unittest.TestCase):
     def test_cancel_profile_download_only_sets_the_matching_explicit_event(self):
         controller = self._edit_controller()
         controller._model_download_active = True
-        controller._model_download_profile = "compact"
+        controller._model_download_profile = "whisper-turbo"
         controller._model_download_cancel = threading.Event()
         controller._cancel = threading.Event()
         controller._download_done, controller._download_total = 25, 200
         controller._state = STATE_RECORDING
         controller._provider = mock.Mock()
-        self.assertFalse(controller.cancel_profile_download("accuracy"))
+        self.assertFalse(controller.cancel_profile_download("whisper-large-v3"))
         controller._emit_status.assert_not_called()
         self.assertFalse(controller._model_download_cancel.is_set())
-        self.assertTrue(controller.cancel_profile_download("compact"))
+        self.assertTrue(controller.cancel_profile_download("whisper-turbo"))
         controller._emit_status.assert_called_once_with()
         self.assertTrue(controller._model_download_cancel.is_set())
         self.assertFalse(controller._cancel.is_set())
         self.assertEqual((controller._download_done, controller._download_total), (25, 200))
-        self.assertEqual(controller._model_download_profile, "compact")
+        self.assertEqual(controller._model_download_profile, "whisper-turbo")
         self.assertEqual(controller._state, STATE_RECORDING)
         self.assertEqual(controller._session_generation, 0)
         self.assertTrue(controller.settings.enabled)
         controller._provider.assert_not_called()
         controller._provider.unload.assert_not_called()
         controller._model_download_active = False
-        self.assertFalse(controller.cancel_profile_download("compact"))
+        self.assertFalse(controller.cancel_profile_download("whisper-turbo"))
 
     def test_only_progress_callbacks_are_throttled(self):
         controller = VoiceController.__new__(VoiceController)
@@ -524,7 +524,7 @@ class ControllerTests(unittest.TestCase):
             return False
         self.controller._persist_settings = persist
         worker = threading.Thread(target=lambda: result.append(
-            self.controller.apply_options(profile="accuracy", language="en-US")))
+            self.controller.apply_options(profile="whisper-large-v3", language="en-US")))
         worker.start()
         try:
             self.assertTrue(entered.wait(2))
@@ -1922,9 +1922,9 @@ class ControllerTests(unittest.TestCase):
         with mock.patch("voice_support.model_is_installed", return_value=True), \
                 mock.patch("voice_support.installed_model_path", return_value="new.gguf"), \
                 mock.patch.object(self.controller, "_start_monitor"):
-            self.controller.set_profile("accuracy")
+            self.controller.set_profile("whisper-large-v3")
         self.assertEqual(seen, [STATE_LOADING, STATE_IDLE])
-        self.assertEqual(self.controller.settings.profile, "accuracy")
+        self.assertEqual(self.controller.settings.profile, "whisper-large-v3")
 
     def test_profile_switch_emits_final_idle_status_after_rollback(self):
         self._ready()
@@ -1934,7 +1934,7 @@ class ControllerTests(unittest.TestCase):
         with mock.patch("voice_support.model_is_installed", return_value=True), \
                 mock.patch("voice_support.installed_model_path", return_value="old.gguf"), \
                 mock.patch.object(self.controller, "_start_monitor"):
-            self.controller.set_profile("accuracy")
+            self.controller.set_profile("whisper-large-v3")
         self.assertEqual(seen, [STATE_LOADING, STATE_IDLE])
         self.assertEqual(self.controller.settings.profile, "balanced")
 
@@ -1946,7 +1946,7 @@ class ControllerTests(unittest.TestCase):
         with mock.patch("voice_support.model_is_installed", return_value=True), \
                 mock.patch("voice_support.installed_model_path", return_value=None), \
                 mock.patch.object(self.controller, "_start_monitor"):
-            self.controller.set_profile("accuracy")
+            self.controller.set_profile("whisper-large-v3")
         self.assertEqual(seen, [STATE_LOADING, STATE_UNAVAILABLE])
         self.assertEqual(self.controller.settings.profile, "balanced")
 
@@ -2034,10 +2034,10 @@ class ControllerTests(unittest.TestCase):
 
         self.controller._download = fake_download
         with mock.patch("voice_support.model_is_installed", return_value=False):
-            started = self.controller.download_profile("compact")
+            started = self.controller.download_profile("whisper-turbo")
 
         self.assertTrue(started)
-        self.assertEqual(downloaded, ["compact"])
+        self.assertEqual(downloaded, ["whisper-turbo"])
         self.assertFalse(self.controller.is_enabled())
         self.assertFalse(self.backend.is_loaded())
         self.assertTrue(any("baixando" in label for label in seen))
@@ -2047,9 +2047,9 @@ class ControllerTests(unittest.TestCase):
 
     def test_duplicate_explicit_download_is_rejected_while_active(self):
         self.controller._model_download_active = True
-        self.controller._model_download_profile = "compact"
+        self.controller._model_download_profile = "whisper-turbo"
 
-        self.assertFalse(self.controller.download_profile("compact"))
+        self.assertFalse(self.controller.download_profile("whisper-turbo"))
 
     def test_runtime_switch_progress_is_fresh_before_idle_and_active_cached_switches(self):
         self._ready()
@@ -2057,7 +2057,7 @@ class ControllerTests(unittest.TestCase):
         self.controller.task_runner = runner
 
         def prepare(profile, language, progress=None, **kwargs):
-            if profile == "accuracy" and progress:
+            if profile == "whisper-large-v3" and progress:
                 progress(100, 100)
 
         with mock.patch.object(self.controller, "_unload_provider", return_value=True), \
@@ -2066,7 +2066,7 @@ class ControllerTests(unittest.TestCase):
                 mock.patch.object(self.controller._provider, "prepare", side_effect=prepare):
             for active in (False, True):
                 with self.subTest(active=active):
-                    self.assertTrue(self.controller.apply_options(profile="accuracy"))
+                    self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
                     runner.drain()
                     self.assertEqual(self.controller.state, STATE_IDLE)
                     if active:
@@ -2102,10 +2102,10 @@ class ControllerTests(unittest.TestCase):
                 mock.patch.object(self.controller, "_model_loaded"), \
                 mock.patch.object(self.controller._provider, "prepare", side_effect=prepare), \
                 mock.patch.object(self.controller._provider, "download_profile", side_effect=download):
-            self.assertTrue(self.controller.apply_options(profile="accuracy"))
+            self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
             self.controller.task_runner = runner
             try:
-                self.assertTrue(self.controller.download_profile("compact"))
+                self.assertTrue(self.controller.download_profile("whisper-turbo"))
                 self.assertTrue(entered.wait(1))
                 cancel_event = self.controller._model_download_cancel
                 generation = self.controller._session_generation
@@ -2115,7 +2115,7 @@ class ControllerTests(unittest.TestCase):
                 snapshot = self.controller.status_snapshot()
                 self.assertEqual(snapshot["state"], STATE_LOADING)
                 self.assertTrue(snapshot["download_active"])
-                self.assertEqual(snapshot["download_profile"], "compact")
+                self.assertEqual(snapshot["download_profile"], "whisper-turbo")
                 self.assertEqual((snapshot["download_done"], snapshot["download_total"]), (25, 200))
                 self.assertIs(self.controller._model_download_cancel, cancel_event)
                 self.assertFalse(cancel_event.is_set())
@@ -2140,7 +2140,7 @@ class ControllerTests(unittest.TestCase):
                 mock.patch.object(self.controller, "_start_monitor"), \
                 mock.patch.object(self.controller, "_model_loaded"), \
                 mock.patch.object(self.controller._provider, "prepare"):
-            self.assertTrue(self.controller.apply_options(profile="accuracy"))
+            self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
             self.assertEqual(self.controller.state, STATE_LOADING)
             self.assertFalse(self.controller.status_snapshot()["load_failed"])
             runner.drain()
@@ -2175,7 +2175,7 @@ class ControllerTests(unittest.TestCase):
             try:
                 self.controller.enable()
                 self.assertTrue(old_enter.wait(1))
-                self.assertTrue(self.controller.apply_options(profile="accuracy"))
+                self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
                 published.clear()
                 old_release.set()
                 self.assertTrue(new_enter.wait(1))
@@ -2220,7 +2220,7 @@ class ControllerTests(unittest.TestCase):
                 mock.patch.object(self.controller, "_unload_provider", return_value=True), \
                 mock.patch.object(self.controller, "_start_monitor") as start_monitor:
             self.controller.enable()
-            self.assertTrue(self.controller.apply_options(profile="accuracy"))
+            self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
             status.reset_mock()
             old_worker, args = runner.pending.pop(0)
             try:
@@ -2233,7 +2233,7 @@ class ControllerTests(unittest.TestCase):
             finally:
                 runner.drain()
             self.assertEqual(self.controller.state, STATE_IDLE)
-            self.assertEqual(prepare.call_args.args[:2], ("accuracy", self.controller.settings.language))
+            self.assertEqual(prepare.call_args.args[:2], ("whisper-large-v3", self.controller.settings.language))
 
     def test_initial_load_superseded_before_prepare_cannot_borrow_replacement_context(self):
         checked, resume, prepared, finish = (threading.Event() for _ in range(4))
@@ -2260,11 +2260,11 @@ class ControllerTests(unittest.TestCase):
             try:
                 self.controller.enable()
                 self.assertTrue(checked.wait(1))
-                self.assertTrue(self.controller.apply_options(profile="accuracy"))
+                self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
                 resume.set()
                 self.assertTrue(prepared.wait(1))
                 provider_prepare.assert_called_once()
-                self.assertEqual(provider_prepare.call_args.args[0], "accuracy")
+                self.assertEqual(provider_prepare.call_args.args[0], "whisper-large-v3")
                 self.assertEqual(self.controller.state, STATE_LOADING)
                 self.assertEqual(self.controller.status_snapshot()["download_done"], 40)
                 self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
@@ -2363,7 +2363,7 @@ class ControllerTests(unittest.TestCase):
         self.assertGreaterEqual(self.capture.stop_calls, 1)
         self.assertEqual(self.controller.history_entries()[0]["status"], "cancelled")
         self.assertFalse(self.controller.handle_hotkey_press(MODE_DICTATION))
-        self.controller.apply_options(profile="accuracy")
+        self.controller.apply_options(profile="whisper-large-v3")
         self.assertEqual(self.controller.settings.profile, "balanced")
         self.controller.enable()
         self.assertEqual(self.controller.state, STATE_UNAVAILABLE)
@@ -2415,7 +2415,7 @@ class ControllerTests(unittest.TestCase):
         self.controller._persist_settings = persist
         self.backend.load = mock.Mock(side_effect=[Exception("boom"), None])
         with mock.patch("voice_support.installed_model_path", return_value="old.gguf"):
-            self.controller.set_profile("accuracy")
+            self.controller.set_profile("whisper-large-v3")
 
         self.assertEqual(self.controller.settings.profile, "balanced")
         self.assertEqual(payloads[-1]["voice_profile"], "balanced")
@@ -2628,7 +2628,7 @@ class ControllerTests(unittest.TestCase):
             self.assertTrue(entered.wait(1.0))
 
             controller.set_language("en-US")
-            controller.set_profile("accuracy")
+            controller.set_profile("whisper-large-v3")
             release.set()
 
             deadline = time.monotonic() + 2.0
@@ -2759,7 +2759,7 @@ class ControllerTests(unittest.TestCase):
 
         class FailingSwitchBackend(FakeAsrBackend):
             def load(self, model_path, profile, language):
-                if profile == "accuracy":
+                if profile == "whisper-large-v3":
                     entered.set()
                     release.wait(2.0)
                     raise RuntimeError("new model failed")
@@ -2793,7 +2793,7 @@ class ControllerTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(controller.state, STATE_IDLE)
 
-            controller.set_profile("accuracy")
+            controller.set_profile("whisper-large-v3")
             self.assertTrue(entered.wait(1.0))
             controller.disable()
             self.assertEqual(controller.state, STATE_UNAVAILABLE)
@@ -2806,7 +2806,7 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(any(thread.is_alive() for thread in controller.task_runner.threads))
         self.assertEqual(controller.state, STATE_UNAVAILABLE)
         self.assertFalse(controller.settings.enabled)
-        self.assertEqual(controller.settings.profile, "accuracy")
+        self.assertEqual(controller.settings.profile, "whisper-large-v3")
 
     def test_superseded_switch_failure_cannot_restore_an_older_profile(self):
         entered = threading.Event()
@@ -2853,7 +2853,7 @@ class ControllerTests(unittest.TestCase):
 
             controller.set_language("en-US")
             self.assertTrue(entered.wait(1.0))
-            controller.set_profile("accuracy")
+            controller.set_profile("whisper-large-v3")
             release.set()
             deadline = time.monotonic() + 2.0
             while controller.state != STATE_IDLE and time.monotonic() < deadline:
@@ -2861,8 +2861,9 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(controller.state, STATE_IDLE)
         self.assertTrue(controller.settings.enabled)
-        self.assertEqual(controller.settings.profile, "accuracy")
-        self.assertEqual(controller.settings.language, LANGUAGE_AUTO)
+        self.assertEqual(controller.settings.profile, "whisper-large-v3")
+        # The newest model honors the language chosen while the switch ran.
+        self.assertEqual(controller.settings.language, "en-US")
 
     def test_worker_is_tracked_before_runner_returns(self):
         started = threading.Event()

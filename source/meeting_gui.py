@@ -88,8 +88,7 @@ INDEX_STATE_LABELS = {"ready": N_("pronto"), "stale": N_("desatualizado"), "rebu
                       "compatibility": N_("modo de compatibilidade"), "cancelled": N_("cancelado"),
                       "failed": N_("falhou")}
 PROFILE_LABELS = {"whisper-small": N_("Leve · Whisper Small"), "balanced": N_("Equilibrado · Parakeet"),
-                  "whisper-turbo": N_("Intermediário · Whisper Turbo"), "compact": N_("Preciso · Qwen 0.6B"),
-                  "accuracy": N_("Muito preciso · Qwen 1.7B"),
+                  "whisper-turbo": N_("Intermediário · Whisper Turbo"),
                   "whisper-large-v3": N_("Máxima precisão · Whisper Large"),
                   "streaming": N_("Transcrição contínua")}
 LANGUAGE_LABELS = {"auto": N_("Automático"), "pt-BR": N_("Português (Brasil)"),

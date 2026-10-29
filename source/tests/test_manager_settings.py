@@ -23,7 +23,14 @@ from voice_catalog import available_languages, selectable_catalog
 
 WAIT = 5.0
 TMP_ROOT = os.path.join(os.path.dirname(__file__), "tmp")
-ONE_LANGUAGE = next(entry["profile"] for entry in selectable_catalog() if len(available_languages(entry["profile"])) == 1)
+# No catalog model lacks language hints today; the tests stand one in.
+ONE_LANGUAGE = "whisper-turbo"
+
+
+def one_language(profile):
+    return ("auto",) if profile == ONE_LANGUAGE else available_languages(profile)
+
+
 MANY_LANGUAGES = next(entry["profile"] for entry in selectable_catalog() if len(available_languages(entry["profile"])) > 1)
 
 
@@ -143,12 +150,14 @@ class RecordingTests(SettingsTestCase):
         values.update(overrides)
         return values
 
+    @mock.patch("manager_settings.available_languages", one_language)
     def test_each_model_offers_only_the_languages_it_honors(self):
         view = self.actions.recording({})
         self.assertEqual([item["id"] for item in view["languages"][ONE_LANGUAGE]], ["auto"])
         self.assertGreater(len(view["languages"][MANY_LANGUAGES]), 1)
         self.assertEqual(view["profiles"][0]["id"], "dictation")
 
+    @mock.patch("manager_settings.available_languages", one_language)
     def test_an_unhonored_language_is_refused_before_saving(self):
         with self.assertRaises(RpcFailure) as caught:
             self.actions.save_recording({"values": self.values(profile=ONE_LANGUAGE, language="pt-BR")})
@@ -221,6 +230,16 @@ class PrivacyTests(SettingsTestCase):
 
 
 class ModelTests(SettingsTestCase):
+    def test_rows_lead_with_a_readable_name_and_a_detail_line(self):
+        view = self.actions.models({})
+        self.assertEqual([row["id"] for row in view["voice"]],
+                         ["whisper-small", "balanced", "whisper-turbo", "whisper-large-v3"])
+        self.assertEqual(view["voice"][1]["label"], "Equilibrado · Parakeet")
+        self.assertEqual(view["voice"][1]["name"], "nvidia/parakeet-tdt-0.6b-v3")
+        self.assertEqual([row["id"] for row in view["summary"]],
+                         ["qwen3.5-2b-q4", "gemma-4-e2b-q4", "qwen3.5-4b-q4", "gemma-4-e4b-q4"])
+        self.assertTrue(all(row["description"] for row in view["summary"]))
+
     def test_voice_downloads_ask_first_then_start(self):
         profile = selectable_catalog()[0]["profile"]
         first = self.actions.download_voice_model({"id": profile})

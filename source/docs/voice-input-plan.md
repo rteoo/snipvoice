@@ -70,6 +70,10 @@ The product exposes four explicit model profiles:
 3. **Maximum accuracy — optional:** Qwen3-ASR-1.7B Q8.
 4. **Live streaming — optional:** Nemotron 3.5 ASR Streaming 0.6B Q8/INT8.
 
+Version 1.4.0 removed both Qwen3-ASR profiles. The selectable list is Whisper
+Small, Parakeet (default), Whisper Large v3 Turbo, and Whisper Large v3; a
+setting that still names a Qwen profile resolves to the default.
+
 The user selects a profile; the app never changes profiles or downloads a
 larger model automatically. Only one ASR model is resident at a time. The
 default first release remains push-to-talk with completed-utterance decoding;
