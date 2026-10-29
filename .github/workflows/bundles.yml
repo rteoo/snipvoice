@@ -29,6 +29,10 @@ on:
       - "source/llama_runtime.py"
       - "source/sqlite_runtime_probe.py"
       - "source/tests/test_voice_packaging.py"
+      - "desktop/**"
+      - "source/manager_bridge.py"
+      - "source/manager_window_probe.py"
+      - "source/tests/test_manager_packaging.py"
       - "source/snipvoice.ico"
       - "source/snipvoice.icns"
       - "source/snipvoice-icon.png"
@@ -130,6 +134,16 @@ jobs:
 
       - name: Build approved llama.cpp runtime
         run: python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama-wheel --install
+
+      # The manager window builds with the runner image's Node.js and Rust; the
+      # versions are recorded so a toolchain change is visible in the log.
+      - name: Record manager window toolchains
+        shell: pwsh
+        run: |
+          node --version
+          npm --version
+          cargo --version
+          rustc --version
 
       - name: Build application and installer
         shell: cmd

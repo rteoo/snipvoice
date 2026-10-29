@@ -41,6 +41,11 @@ the development manifest and CI retain the predecessor's Ruff 0.16.3 pin.
 Temporary test artifacts belong in `source/tests/tmp` (gitignored).
 From `desktop`: `npm run build` (type check + bundle); `npm run dev` previews
 the window in a browser against a mock engine; `npm run tauri build` needs Rust.
+Windows releases build the window with `desktop\build_manager.bat` (Node and
+Rust from the machine, `npm ci` from the lockfile), bundle it beside the engine,
+and fail unless `Snipvoice.exe --manager-window-probe` reaches it. The same
+step writes its notices with `packaging/manager_notices.py`, which rejects
+licenses outside its allow-list. macOS releases do not ship the window yet.
 Existing source dependencies are in `requirements.txt`; pinned capture/runtime
 dependencies are in `requirements-voice.txt`. Do not install or alter them implicitly.
 Windows/macOS build scripts are inherited and adapted, but physical package

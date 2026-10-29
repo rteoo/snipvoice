@@ -13,6 +13,8 @@ export interface Hello {
   appearance: Appearance;
   startup: { ready: boolean; message: string };
   enginePid: number;
+  /** Set only by the packaged probe: answer and stay hidden. */
+  headless?: boolean;
 }
 
 export interface TrackView {
