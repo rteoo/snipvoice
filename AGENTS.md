@@ -23,8 +23,11 @@ Read the active runtime's global operator contract and SOUL.md before work.
 - `commands.json` contains private literal commands. Never copy live libraries,
   recordings, models, settings, logs, or predecessor Git backups into the repo.
 - Use `ui_theme` for GUI colors/fonts; native overlays never steal focus.
-- `desktop/` is the Tauri 2 + TypeScript manager window replacing the Tk
-  manager, opt-in with `SNIPVOICE_MANAGER=tauri` until it reaches parity.
+- `desktop/` is the Tauri 2 + TypeScript manager window, the default manager
+  since 1.4.0 beta; `SNIPVOICE_MANAGER=tk` keeps the Tk manager, which is also
+  used when no window is bundled (macOS) or the window exits before greeting
+  the engine (e.g. no WebView2). Remove the Tk manager only after a stable
+  release ships the window as default.
   The engine keeps tray, hotkeys, HUD, capture and inference; `manager_bridge`
   spawns the window and serves JSON-RPC lines on its stdin/stdout (nothing else
   may write the window's stdout). Window strings are `tr("pt-BR")` keys in
@@ -45,7 +48,8 @@ Windows releases build the window with `desktop\build_manager.bat` (Node and
 Rust from the machine, `npm ci` from the lockfile), bundle it beside the engine,
 and fail unless `Snipvoice.exe --manager-window-probe` reaches it. The same
 step writes its notices with `packaging/manager_notices.py`, which rejects
-licenses outside its allow-list. macOS releases do not ship the window yet.
+licenses outside its allow-list. macOS releases do not ship the window yet, so
+they keep the Tk manager.
 Existing source dependencies are in `requirements.txt`; pinned capture/runtime
 dependencies are in `requirements-voice.txt`. Do not install or alter them implicitly.
 Windows/macOS build scripts are inherited and adapted, but physical package

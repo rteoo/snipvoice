@@ -13,7 +13,7 @@ which release gates have evidence.
 | Design system | Teô Personal Design System 2.7.1, Windows native family |
 | Ownership | `source/ui_theme.py` owns every color, font, metric and control face. Screen builders ask it for tokens, type roles and themed controls; literal colors and font families in the GUI modules fail `tests/test_ui_theme.py`. |
 | Primary workflow | Record a meeting (Gravação), find and read it (Biblioteca), dictate anywhere with the hotkey (Ditado). Settings stay secondary. |
-| Stack | Tk/ttk on the process's single `GuiThread` root for the tray-owned HUD and, by default, the manager. The manager is being rebuilt as a Tauri 2 + TypeScript window (`desktop/`, opt-in with `SNIPVOICE_MANAGER=tauri`) that renders the Windows family in CSS; capture, tray, hotkeys and overlays stay in the engine. |
+| Stack | Tk/ttk on the process's single `GuiThread` root for the tray-owned HUD. The manager is a Tauri 2 + TypeScript window (`desktop/`) that renders the Windows family in CSS, the default since 1.4.0 beta; the Tk manager remains for `SNIPVOICE_MANAGER=tk`, macOS, and machines where the window cannot render. Capture, tray, hotkeys and overlays stay in the engine. |
 | Platforms | Windows 10/11 (primary; this adoption was checked on Windows 11 at 100% scale), macOS (Aqua, not verified in this adoption), Linux (literal palette, unsupported GUI). |
 | Appearance | **Dark by default.** Explicit Light and System stay available; an unset or unreadable stored value resolves to Dark. A stored `system` or `light` is kept. |
 | Density | **Compact**: 32px minimum for controls and rows (buttons, menu buttons, entries and comboboxes measure 33px; list rows 32px). Every `ui_theme.button` is Compact, so an action row never mixes heights. |
