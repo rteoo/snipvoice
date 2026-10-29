@@ -1,5 +1,5 @@
 # Reproducible Python-side toolchain for the custom PyAV wheel.
-setuptools==84.0.0
+setuptools==84.1.0
 Cython==3.3.0
 wheel==0.48.0
 scikit-build-core==1.1.1

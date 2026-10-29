@@ -459,7 +459,7 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertEqual(
             requirements,
             {
-                "setuptools==84.0.0", "Cython==3.3.0", "wheel==0.48.0",
+                "setuptools==84.1.0", "Cython==3.3.0", "wheel==0.48.0",
                 "scikit-build-core==1.1.1",
                 'delvewheel==1.13.0; sys_platform == "win32"',
                 'delocate==0.13.0; sys_platform == "darwin"',
