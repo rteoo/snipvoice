@@ -43,6 +43,9 @@ export class MockTransport implements Transport {
     { id: "old1", name: "…a1b2c3d4", moved: "02/10 09:00", expires: "Expirada", size: "18 MB", expired: true },
   ];
   private jobs = new Map<string, () => void>();
+  private dictation = { profile: "balanced", language: "pt-BR", hotkey: "ctrl+alt+space", commandHotkey: "ctrl+alt+shift+space", activationMode: "hold" };
+  private commands = [{ phrase: "meu email", text: "nome@example.com" }, { phrase: "assinatura", text: "Atenciosamente,\nEquipe" }];
+  private corrections = [{ source: "snip voice", replacement: "SnipVoice" }];
   private recordingSettings = {
     profiles: [
       { id: "dictation", label: "Igual ao ditado" },
@@ -261,6 +264,43 @@ export class MockTransport implements Transport {
         return { target: null };
       case "settings.move":
         return { moving: true };
+      case "dictation.settings":
+        return {
+          profiles: [{ id: "balanced", label: "Equilibrado · Parakeet", installed: true }, { id: "compact", label: "Preciso · Qwen 0.6B", installed: false }],
+          languages: {
+            balanced: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }],
+            compact: [{ id: "auto", label: "Automático" }],
+          },
+          values: { ...this.dictation },
+          commands: this.commands.length,
+          corrections: this.corrections.length,
+        };
+      case "dictation.save": {
+        const values = params.values as typeof this.dictation;
+        if (values.profile === "compact" && params.confirmed !== true) return { status: "confirm", title: "Baixar modelo de voz", message: "Isso vai baixar 1.20 GB (Apache-2.0)." };
+        this.dictation = { ...values };
+        return { status: "saved", settings: this.handle("dictation.settings", {}) };
+      }
+      case "dictation.beginShortcutEdit":
+        return { ready: true, message: "Atalhos globais pausados. Pressione o novo atalho." };
+      case "dictation.endShortcutEdit":
+        return { ended: true };
+      case "dictation.commands":
+        return { commands: this.commands };
+      case "dictation.saveCommands":
+        this.commands = params.commands as typeof this.commands;
+        return { commands: this.commands };
+      case "dictation.reloadCommands":
+        return { commands: this.commands.length };
+      case "dictation.corrections":
+        return { items: this.corrections };
+      case "dictation.saveCorrections":
+        this.corrections = params.items as typeof this.corrections;
+        return { items: this.corrections };
+      case "dictation.licenses":
+        return { lines: ["transcribe.cpp — MIT", "sounddevice / PortAudio — MIT", "nvidia/parakeet-tdt-0.6b-v3 — CC-BY-4.0."] };
+      case "dictation.removeModel":
+        return params.confirmed === true ? { status: "removed" } : { status: "confirm", title: "Remover modelo", message: "A entrada por voz será desligada e só o modelo deste perfil será apagado." };
       default:
         throw new Error(`unknown method ${method}`);
     }
