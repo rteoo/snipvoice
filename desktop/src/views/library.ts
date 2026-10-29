@@ -101,7 +101,9 @@ export class LibraryView {
 
   async open(id: string): Promise<void> {
     this.selected = id;
-    this.renderRows();
+    // Rows stay in place so the focused row keeps focus while arrows move the selection.
+    this.tbody.querySelectorAll("tr[data-id]").forEach((row) =>
+      row.setAttribute("aria-selected", String(row.getAttribute("data-id") === id)));
     await this.loadDetail(id);
   }
 
@@ -153,7 +155,10 @@ export class LibraryView {
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
           const sibling = event.key === "ArrowDown" ? row.nextElementSibling : row.previousElementSibling;
-          if (sibling instanceof HTMLElement) sibling.focus();
+          if (sibling instanceof HTMLElement && sibling.dataset.id) {
+            sibling.focus();
+            void this.open(sibling.dataset.id);
+          }
         }
       });
       return row;

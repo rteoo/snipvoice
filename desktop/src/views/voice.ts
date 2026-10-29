@@ -134,18 +134,39 @@ export class VoicePage {
               h("td", { class: toneText(row.tone), text: row.status }),
               h("td", { class: "selectable", text: row.preview }),
             );
-            const select = () => {
-              this.selected = row.id;
-              this.renderRows();
-            };
-            tr_.addEventListener("click", select);
+            tr_.addEventListener("click", () => this.select(row.id));
             tr_.addEventListener("keydown", (event) => {
-              if (event.key === "Enter" || event.key === " ") select();
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                this.select(row.id);
+              }
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                const sibling = event.key === "ArrowDown" ? tr_.nextElementSibling : tr_.previousElementSibling;
+                const index = sibling ? [...this.table.children].indexOf(sibling) : -1;
+                const next = this.rows[index];
+                if (sibling instanceof HTMLElement && next) {
+                  sibling.focus();
+                  this.select(next.id);
+                }
+              }
             });
             return tr_;
           })
         : [h("tr", {}, h("td", { class: "empty", text: tr("Nenhum ditado ainda."), attrs: { colspan: 3 } }))]),
     );
+    this.renderActions();
+  }
+
+  // Rows stay in place so keyboard focus survives a selection change.
+  private select(id: string): void {
+    this.selected = id;
+    [...this.table.children].forEach((node, index) =>
+      node.setAttribute("aria-selected", String(this.rows[index]?.id === id)));
+    this.renderActions();
+  }
+
+  private renderActions(): void {
     const row = this.rows.find((item) => item.id === this.selected);
     const retry = button(tr("Tentar novamente"), () => void this.rowAction("voice.retry", row));
     retry.disabled = !row?.retryable;
