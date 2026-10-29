@@ -229,6 +229,38 @@ dialog .dialog-actions { display: flex; justify-content: flex-end; gap: var(--na
 .detail-commands { display: flex; justify-content: space-between; align-items: center; gap: var(--native-space-3); flex-wrap: wrap; }
 .transcript { white-space: pre-wrap; line-height: 1.6; max-width: 72ch; padding: 16px; background: var(--native-content); border: 1px solid var(--native-line); border-radius: var(--native-panel-radius); }
 
+/* Detail sections: a Pivot-style tab row; the copper marker is the selection. */
+.tabs { display: flex; gap: var(--native-space-1); border-bottom: 1px solid var(--native-line); overflow: auto hidden; }
+.tab { position: relative; min-height: var(--native-control-height); padding: 0 12px; border: 0; background: transparent; color: var(--color-text-muted); }
+.tab:hover { color: var(--color-text-primary); }
+.tab[aria-selected="true"] { color: var(--color-text-primary); font-weight: 600; }
+.tab[aria-selected="true"]::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: 0; height: 3px; border-radius: 2px; background: var(--color-accent-mark); }
+.section-panel { display: grid; gap: var(--native-space-3); align-content: start; min-width: 0; }
+.section-body { min-width: 0; }
+
+.summary { max-width: 72ch; line-height: 1.6; padding: 16px; background: var(--native-content); border: 1px solid var(--native-line); border-radius: var(--native-panel-radius); }
+.summary h3 { font-weight: 600; margin: 12px 0 4px; }
+.summary h3:first-child { margin-top: 0; }
+.summary .bullet { padding-left: 16px; text-indent: -10px; }
+.summary .bullet::before { content: "• "; color: var(--color-text-muted); }
+details.card > summary { cursor: default; font-weight: 600; }
+
+.chat { display: grid; gap: var(--native-space-3); }
+.chat-log { display: grid; gap: var(--native-space-3); align-content: start; max-height: 52vh; overflow: auto; }
+.chat-turn { display: grid; gap: 4px; max-width: 72ch; }
+.chat-turn small { color: var(--color-text-muted); font-size: var(--native-type-caption); }
+.chat-turn.answer { padding: 12px 14px; background: var(--native-content); border: 1px solid var(--native-line); border-radius: var(--native-panel-radius); }
+.chat-turn p { white-space: pre-wrap; line-height: 1.55; }
+.chat-composer { display: grid; gap: var(--native-space-2); }
+.chat-composer .btn-row { justify-content: flex-end; }
+
+.danger-zone { border-color: color-mix(in srgb, var(--color-danger-fg) 45%, var(--native-line)); }
+dialog details pre { margin-top: 6px; white-space: pre-wrap; font: var(--native-type-caption)/1.4 var(--native-font-mono); color: var(--color-text-muted); }
+dialog.trash-dialog { width: min(720px, calc(100% - 32px)); }
+dialog.trash-dialog .table-scroll { max-height: 40vh; margin: var(--native-space-3) 0; border: 1px solid var(--native-line); border-radius: var(--native-control-radius); }
+dialog .infobar { margin: var(--native-space-3) 0; }
+dialog .field { margin-top: var(--native-space-2); }
+
 .settings { max-width: 640px; }
 .history th:first-child { width: 120px; }
 .history th:nth-child(2) { width: 110px; }

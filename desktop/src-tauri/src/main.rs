@@ -47,6 +47,29 @@ fn bridge_send(bridge: State<'_, Bridge>, line: String) -> Result<(), String> {
         .map_err(|error| format!("engine pipe closed: {error}"))
 }
 
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn AllowSetForegroundWindow(process_id: u32) -> i32;
+}
+
+/// The engine shows save/open dialogs on its own Tk thread. Windows only
+/// lets the foreground process hand focus on, so the window grants it to the
+/// engine just before asking; otherwise the dialog opens behind this window.
+#[tauri::command]
+fn allow_engine_foreground(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        // SAFETY: a plain Win32 call with a process id; no pointers cross the boundary.
+        pid != 0 && unsafe { AllowSetForegroundWindow(pid) } != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 fn deliver(app: &AppHandle, line: String) {
     let bridge = app.state::<Bridge>();
     let mut inbox = bridge.inbox.lock().expect("bridge inbox poisoned");
@@ -86,7 +109,7 @@ fn main() {
             inbox: Mutex::new(Inbox::default()),
             stdout: Mutex::new(std::io::stdout()),
         })
-        .invoke_handler(tauri::generate_handler![bridge_ready, bridge_send])
+        .invoke_handler(tauri::generate_handler![bridge_ready, bridge_send, allow_engine_foreground])
         .setup(|app| {
             let handle = app.handle().clone();
             std::thread::Builder::new()

@@ -109,3 +109,13 @@ export class TauriTransport implements Transport {
 }
 
 export const inTauri = (): boolean => "__TAURI_INTERNALS__" in window;
+
+/** The engine shows save/open dialogs itself; grant it the foreground first or they open behind this window. */
+export async function allowEngineForeground(pid: number): Promise<void> {
+  if (!inTauri() || !pid) return;
+  try {
+    await invoke<boolean>("allow_engine_foreground", { pid });
+  } catch (error) {
+    console.warn("the engine dialog may open behind this window", error);
+  }
+}

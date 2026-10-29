@@ -1,13 +1,20 @@
-// Biblioteca: search and select a recording, then read its full transcript.
-import type { Bridge } from "../bridge";
+// Biblioteca: search and select a recording, then read, summarize, ask about,
+// export or delete it.
+import { allowEngineForeground, type Bridge } from "../bridge";
 import { button, h, ICONS, icon, replace } from "../dom";
 import { tr } from "../i18n";
-import type { LibraryItem, LibraryPage, SessionDetail, Transcript } from "../types";
-import { copyText, MessageSlot, pageHeader, toneText } from "../ui";
+import type { LibraryItem, LibraryPage, SessionDetail, SummaryView, Transcript, TrashPreview } from "../types";
+import { confirmDialog, copyText, MessageSlot, pageHeader, toneText } from "../ui";
+import { ChatPanel } from "./chat";
+import { FilesPanel } from "./files";
+import { SummaryPanel } from "./summary";
+import { openTrash } from "./trash";
 
 const SEARCH_DELAY_MS = 250;
 const MAX_BACK_STACK = 32;
 type Style = "full_text" | "timestamped";
+type Section = "transcript" | "summary" | "chat" | "files";
+const SECTIONS: Section[] = ["transcript", "summary", "chat", "files"];
 
 export class LibraryView {
   readonly element: HTMLElement;
@@ -20,6 +27,11 @@ export class LibraryView {
   private detail: SessionDetail | null = null;
   private transcript: Transcript | null = null;
   private style: Style = "full_text";
+  private section: Section = "transcript";
+  private summaryView: SummaryView | null = null;
+  private readonly summary: SummaryPanel;
+  private readonly chat: ChatPanel;
+  private readonly files: FilesPanel;
   private listToken = 0;
   private detailToken = 0;
   private searchTimer: number | undefined;
@@ -29,7 +41,13 @@ export class LibraryView {
   private readonly pager = h("div", { class: "btn-row" });
   private readonly detailPane = h("div", { class: "detail-pane" });
 
-  constructor(private readonly bridge: Bridge) {
+  constructor(
+    private readonly bridge: Bridge,
+    private readonly enginePid: number,
+  ) {
+    this.summary = new SummaryPanel(bridge, this.messages);
+    this.chat = new ChatPanel(bridge, this.messages);
+    this.files = new FilesPanel(bridge, this.messages, enginePid, () => void this.deleteSelected());
     this.search.placeholder = tr("Buscar em títulos e transcrições");
     this.search.addEventListener("input", () => {
       window.clearTimeout(this.searchTimer);
@@ -49,7 +67,11 @@ export class LibraryView {
     this.element = h(
       "section",
       { class: "page" },
-      pageHeader(tr("Biblioteca")),
+      pageHeader(
+        tr("Biblioteca"),
+        button(tr("Importar áudio…"), () => void this.importAudio(), "quiet"),
+        button(tr("Lixeira…"), () => openTrash(this.bridge, () => void this.refresh()), "quiet"),
+      ),
       h(
         "div",
         { class: "library-toolbar" },
@@ -200,8 +222,9 @@ export class LibraryView {
       if (token !== this.detailToken) return;
       this.detail = detail;
       this.transcript = null;
+      this.summaryView = null;
       this.renderDetail();
-      await this.loadTranscript(token);
+      await Promise.all([this.loadTranscript(token), this.loadSummary(token)]);
     } catch (error) {
       if (token !== this.detailToken) return;
       this.detail = null;
@@ -225,6 +248,20 @@ export class LibraryView {
     this.renderDetail();
   }
 
+  private async loadSummary(token = this.detailToken): Promise<void> {
+    const detail = this.detail;
+    if (!detail) return;
+    try {
+      const view = await this.bridge.call<SummaryView>("library.summary", { id: detail.id });
+      if (token !== this.detailToken) return;
+      this.summaryView = view;
+    } catch (error) {
+      if (token !== this.detailToken) return;
+      this.messages.fail(tr("Não foi possível carregar as versões do resumo"), "", { error });
+    }
+    this.renderSection();
+  }
+
   private renderDetail(): void {
     const detail = this.detail;
     if (!detail) {
@@ -234,6 +271,69 @@ export class LibraryView {
     const title = h("h2", { class: "selectable", text: detail.title, attrs: { tabindex: -1 } });
     const rename = button(tr("Renomear"), () => this.editTitle(title), "quiet");
     rename.title = "F2";
+    const labels: Record<Section, string> = { transcript: tr("Transcrição"), summary: tr("Resumo"), chat: tr("Chat"), files: tr("Arquivos") };
+    const tabs = h("div", { class: "tabs", attrs: { role: "tablist", "aria-label": tr("Seções da gravação") } });
+    for (const section of SECTIONS) {
+      const tab = h("button", {
+        class: "tab",
+        text: labels[section],
+        attrs: { type: "button", role: "tab", id: `tab-${section}`, "aria-controls": "section-panel", "aria-selected": String(section === this.section), tabindex: section === this.section ? 0 : -1 },
+      });
+      tab.addEventListener("click", () => this.showSection(section));
+      tab.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        const step = event.key === "ArrowRight" ? 1 : SECTIONS.length - 1;
+        const next = SECTIONS[(SECTIONS.indexOf(section) + step) % SECTIONS.length] ?? "transcript";
+        this.showSection(next);
+        tabs.querySelector<HTMLElement>(`#tab-${next}`)?.focus();
+      });
+      tabs.append(tab);
+    }
+    replace(
+      this.detailPane,
+      h(
+        "div",
+        { class: "detail-header" },
+        h("div", { class: "title-row" }, title, rename),
+        h("p", { class: "caption" }, h("span", { class: toneText(detail.tone), text: detail.status }), ` · ${detail.date} · ${detail.duration}`),
+      ),
+      tabs,
+      h("div", { class: "section-panel", attrs: { id: "section-panel", role: "tabpanel", "aria-labelledby": `tab-${this.section}` } }),
+    );
+    this.renderSection();
+  }
+
+  private showSection(section: Section): void {
+    this.section = section;
+    this.detailPane.querySelectorAll<HTMLElement>("[role=tab]").forEach((tab) => {
+      const current = tab.id === `tab-${section}`;
+      tab.setAttribute("aria-selected", String(current));
+      tab.tabIndex = current ? 0 : -1;
+    });
+    this.detailPane.querySelector("[role=tabpanel]")?.setAttribute("aria-labelledby", `tab-${section}`);
+    this.renderSection();
+  }
+
+  private renderSection(): void {
+    const detail = this.detail;
+    const panel = this.detailPane.querySelector<HTMLElement>("[role=tabpanel]");
+    if (!detail || !panel) return;
+    if (this.section === "summary") {
+      this.summary.show(detail.id, this.summaryView);
+      replace(panel, this.summary.element);
+    } else if (this.section === "chat") {
+      this.chat.show(detail.id, this.summaryView?.modelReady ?? false, this.summaryView?.canSaveAnswers ?? false);
+      replace(panel, this.chat.element);
+    } else if (this.section === "files") {
+      void this.files.show(detail.id);
+      replace(panel, this.files.element);
+    } else {
+      replace(panel, ...this.transcriptSection());
+    }
+  }
+
+  private transcriptSection(): (HTMLElement | null)[] {
     const styles = h(
       "div",
       { class: "segmented", attrs: { role: "group", "aria-label": tr("Formato da transcrição") } },
@@ -258,18 +358,67 @@ export class LibraryView {
       : transcript.empty
         ? h("p", { class: "empty", text: tr("Esta gravação ainda não tem transcrição.") })
         : h("article", { class: "transcript selectable", text: transcript.text, attrs: { tabindex: 0 } });
-    replace(
-      this.detailPane,
-      h(
-        "div",
-        { class: "detail-header" },
-        h("div", { class: "title-row" }, title, rename),
-        h("p", { class: "caption" }, h("span", { class: toneText(detail.tone), text: detail.status }), ` · ${detail.date} · ${detail.duration}`),
-      ),
+    return [
       h("div", { class: "detail-commands" }, styles, copy),
       transcript?.truncated ? h("p", { class: "caption text-warning", text: tr("Transcrição extensa: prévia limitada.") }) : null,
       body,
-    );
+    ];
+  }
+
+  private async importAudio(): Promise<void> {
+    try {
+      await allowEngineForeground(this.enginePid);
+      const result = await this.bridge.call<{ id: string | null }>("library.importAudio");
+      if (!result.id) return;
+      this.search.value = "";
+      await this.refresh(true);
+      await this.open(result.id);
+      this.messages.say(tr("Áudio importado. A transcrição começa sozinha quando houver um modelo instalado."));
+    } catch (error) {
+      void this.refresh();
+      this.messages.fail(tr("Não foi possível importar o áudio"), "", { error });
+    }
+  }
+
+  private async deleteSelected(): Promise<void> {
+    const detail = this.detail;
+    if (!detail) return;
+    let preview: TrashPreview;
+    try {
+      preview = await this.bridge.call<TrashPreview>("library.trashPreview", { id: detail.id });
+    } catch (error) {
+      this.messages.fail(tr("A prévia de retenção falhou"), "", { error });
+      return;
+    }
+    if (!preview.eligible) {
+      this.messages.fail(tr("A retenção foi bloqueada"), preview.reasons, { tone: "warning" });
+      return;
+    }
+    const confirmed = await confirmDialog({ title: tr("Mover para a lixeira"), body: preview.question, confirm: tr("Mover para a lixeira"), danger: true, details: preview.details });
+    if (!confirmed) return this.messages.say(tr("Nenhuma exclusão foi aplicada."));
+    try {
+      await this.bridge.call("library.trash", { token: preview.token });
+    } catch (error) {
+      this.messages.fail(tr("A retenção não foi aplicada"), "", { error });
+      return;
+    }
+    this.detailToken++;
+    this.selected = null;
+    this.detail = null;
+    this.renderDetail();
+    void this.refresh();
+    this.messages.fail(tr("Movida para a lixeira"), "", { tone: "success", action: { label: tr("Desfazer"), run: () => void this.undoTrash(detail.id) } });
+  }
+
+  private async undoTrash(id: string): Promise<void> {
+    try {
+      await this.bridge.call("library.restore", { id });
+    } catch (error) {
+      this.messages.fail(tr("Não foi possível restaurar a gravação"), tr("Abra a lixeira para tentar novamente."), { error });
+      return;
+    }
+    await this.refresh();
+    this.messages.say(tr("Gravação restaurada na biblioteca."));
   }
 
   editTitle(title = this.detailPane.querySelector("h2")): void {

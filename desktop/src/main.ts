@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   document.title = hello.displayName;
 
   const recording = new RecordingPage(bridge);
-  const library = new LibraryView(bridge);
+  const library = new LibraryView(bridge, hello.enginePid);
   const voice = new VoicePage(bridge);
   const settings = new SettingsPage(bridge, hello, (language, catalog) => {
     setCatalog(language, catalog);

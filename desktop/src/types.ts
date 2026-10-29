@@ -12,6 +12,7 @@ export interface Hello {
   catalog: Record<string, string>;
   appearance: Appearance;
   startup: { ready: boolean; message: string };
+  enginePid: number;
 }
 
 export interface TrackView {
@@ -119,4 +120,55 @@ export interface Transcript {
   text: string;
   truncated: boolean;
   empty: boolean;
+}
+
+export interface SummaryProfile {
+  id: string;
+  name: string;
+  description: string;
+  disabled: boolean;
+}
+
+export interface SummaryView {
+  text: string;
+  name: string;
+  profiles: SummaryProfile[];
+  profileId: string;
+  modelReady: boolean;
+  canSaveAnswers: boolean;
+  hint: string;
+}
+
+export interface ChatAnswer {
+  answerId: string;
+  answer: string;
+  sources: number;
+  uncertainty: string;
+  uncertaintyTone: Tone;
+}
+
+export interface FilesView {
+  final: { format: string; size: string } | null;
+  canPrepare: boolean;
+}
+
+export type SaveResult = { saved: false } | { saved: true; name: string };
+
+export type TrashPreview =
+  | { eligible: false; reasons: string; details: string }
+  | { eligible: true; token: string; question: string; details: string };
+
+export interface TrashItem {
+  id: string;
+  name: string;
+  moved: string;
+  expires: string;
+  size: string;
+  expired: boolean;
+}
+
+export interface TrashList {
+  items: TrashItem[];
+  summary: string;
+  expired: number;
 }
