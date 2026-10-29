@@ -2029,4 +2029,7 @@ EN_US = {
     'revisada': 'reviewed',
     'Exportar relatório…': 'Export report…',
     'Selecione um perfil personalizado.': 'Select a custom format.',
+    'Ouvir a partir deste trecho': 'Listen from this point',
+    'Posição do áudio': 'Audio position',
+    'Prontidão': 'Readiness',
 }

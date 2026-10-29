@@ -2,8 +2,9 @@
 import type { Bridge } from "../bridge";
 import { button, h, replace } from "../dom";
 import { tr } from "../i18n";
-import type { Device, EndpointSelection, RecordingView, SourceChoice, StartResult, TrackView } from "../types";
+import type { Destination, Device, EndpointSelection, RecordingView, SourceChoice, StartResult, TrackView } from "../types";
 import { confirmDialog, MessageSlot, pageHeader, toneClass, toneText } from "../ui";
+import { ReadinessStrip } from "./readiness";
 
 type Track = "microphone" | "system";
 const TRACKS: Track[] = ["microphone", "system"];
@@ -86,8 +87,13 @@ export class RecordingPage {
   private busy = false;
   private previewRunning = false;
   private startAfterInterrupt = false;
+  readonly readiness: ReadinessStrip;
+
+  /** Set by the shell: where readiness actions lead. */
+  onNavigate: (destination: Destination, detail?: { settings?: "models"; recordingId?: string }) => void = () => {};
 
   constructor(private readonly bridge: Bridge) {
+    this.readiness = new ReadinessStrip(bridge, this.messages, { navigate: (destination, detail) => this.onNavigate(destination, detail) });
     this.title.placeholder = tr("Opcional");
     this.exportProgress.hidden = true;
     this.element = h(
@@ -100,11 +106,16 @@ export class RecordingPage {
         { class: "page-body recording-grid" },
         h(
           "div",
-          { class: "card stack" },
-          h("h2", { text: tr("Fontes") }),
-          h("label", { class: "field", attrs: { for: "recording-title" } }, h("span", { text: tr("Título da gravação") }), this.title),
-          this.sourceRows,
-          h("div", { class: "btn-row" }, button(tr("Atualizar dispositivos"), () => void this.refreshDevices(true)), this.previewButton),
+          { class: "stack" },
+          h(
+            "div",
+            { class: "card stack" },
+            h("h2", { text: tr("Fontes") }),
+            h("label", { class: "field", attrs: { for: "recording-title" } }, h("span", { text: tr("Título da gravação") }), this.title),
+            this.sourceRows,
+            h("div", { class: "btn-row" }, button(tr("Atualizar dispositivos"), () => void this.refreshDevices(true)), this.previewButton),
+          ),
+          this.readiness.element,
         ),
         h(
           "div",
@@ -121,6 +132,8 @@ export class RecordingPage {
     this.element.querySelector("h1")?.setAttribute("id", "recording-heading");
     bridge.on<RecordingView>("recording.state", (view) => this.render(view));
     bridge.on<{ origin: string }>("recording.requestStart", () => void this.start());
+    bridge.on("voice.state", () => this.readiness.refresh());
+    this.readiness.refresh();
     this.renderSources();
     void this.refreshDevices(false);
     void bridge.call<RecordingView>("recording.state").then((view) => this.render(view));
@@ -261,6 +274,8 @@ export class RecordingPage {
 
   private render(view: RecordingView): void {
     const wasCapturing = this.view?.capturing;
+    // A job starting or ending, or a capture changing state, changes what is ready.
+    if (this.view?.processing !== view.processing || this.view?.state !== view.state) this.readiness.refresh();
     this.view = view;
     this.status.className = `status-chip ${toneClass(view.tone)}`;
     this.status.textContent = view.status;

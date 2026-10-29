@@ -87,6 +87,7 @@ async function main(): Promise<void> {
       else navItems[item].removeAttribute("aria-current");
     }
     replace(main_, pages[destination].element);
+    if (destination === "recording") recording.readiness.refresh();
     try {
       sessionStorage.setItem(DESTINATION_KEY, destination);
     } catch {
@@ -97,6 +98,11 @@ async function main(): Promise<void> {
     for (const destination of DESTINATIONS) navStates[destination].textContent = pages[destination].navState ?? "";
   }
   recording.onChange = syncNav;
+  recording.onNavigate = (destination, detail) => {
+    go(destination);
+    if (detail?.settings) settings.show(detail.settings);
+    if (detail?.recordingId) void library.open(detail.recordingId);
+  };
   voice.onChange = syncNav;
 
   bridge.on<{ destination?: Destination }>("window.show", (params) => {
