@@ -10,7 +10,7 @@ from unittest import mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from meeting_store import MeetingStore
-from meeting_transcription import MeetingTranscriber
+from meeting_transcription import MeetingTranscriber, MeetingTranscriptionError, _pcm_to_mono
 
 
 class FakeProvider:
@@ -33,6 +33,32 @@ class FakeProvider:
 
     def unload(self):
         self.unloaded += 1
+
+
+def _reference_mono(payload, channels):
+    """The original per-sample conversion, kept as the exactness oracle."""
+    values = []
+    for offset in range(0, len(payload), 4 * channels):
+        total = 0.0
+        for channel in range(channels):
+            total += struct.unpack_from("<f", payload, offset + channel * 4)[0]
+        values.append(total / channels)
+    return values
+
+
+class PcmToMonoTests(unittest.TestCase):
+    def test_matches_the_per_sample_reference_exactly(self):
+        samples = [((index * 7919) % 2001 - 1000) / 997.0 for index in range(6 * 1201)]
+        samples[:6] = [1e-38, -1e-38, 3.4e38, -3.4e38, 0.1, -0.0]
+        samples[6:12] = [-0.0] * 6  # zero sign follows the 0.0 start value
+        for channels in (1, 2, 6):
+            payload = struct.pack("<%df" % len(samples), *samples)
+            with self.subTest(channels=channels):
+                self.assertEqual(list(_pcm_to_mono(payload, channels)), _reference_mono(payload, channels))
+
+    def test_rejects_partial_frames(self):
+        with self.assertRaises(MeetingTranscriptionError):
+            _pcm_to_mono(bytes(12), 2)
 
 
 class MeetingTranscriptionTests(unittest.TestCase):

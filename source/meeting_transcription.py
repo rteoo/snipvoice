@@ -1,8 +1,12 @@
 """Bounded, local transcription jobs for durable meeting recordings."""
 
+import array
+import itertools
 import math
+import operator
 import os
 import struct
+import sys
 import threading
 
 from i18n import N_, tr
@@ -26,17 +30,28 @@ class MeetingTranscriptionError(RuntimeError):
 
 
 def _pcm_to_mono(payload, channels):
+    """Average little-endian float32 frames into float64 mono samples.
+
+    Channels are summed left to right from zero, exactly as a per-sample
+    loop would, but decoding runs in C: unpacking every sample in Python was
+    most of a meeting transcription's CPU time.
+    """
     if not isinstance(channels, int) or channels < 1:
         raise MeetingTranscriptionError(tr("O formato do canal de áudio é inválido."))
     if len(payload) % (_FLOAT.size * channels):
         raise MeetingTranscriptionError(tr("O bloco de áudio está incompleto."))
-    values = []
-    for offset in range(0, len(payload), _FLOAT.size * channels):
-        total = 0.0
-        for channel in range(channels):
-            total += _FLOAT.unpack_from(payload, offset + channel * _FLOAT.size)[0]
-        values.append(total / channels)
-    return values
+    values = array.array("f")
+    values.frombytes(payload)
+    if sys.byteorder != "little":
+        values.byteswap()
+    if channels == 1:
+        return array.array("d", values)
+    # Not sum(): since Python 3.12 it compensates rounding, which can differ
+    # from the plain left-to-right additions this conversion has always used.
+    total = itertools.repeat(0.0, len(values) // channels)
+    for channel in range(channels):
+        total = map(operator.add, total, values[channel::channels])
+    return array.array("d", map(operator.truediv, total, itertools.repeat(float(channels))))
 
 
 class MeetingTranscriber:
