@@ -1,6 +1,7 @@
 """Isolated llama.cpp runtime for structured meeting summaries."""
 
 import json
+import logging
 import os
 from pathlib import Path
 import queue
@@ -12,6 +13,8 @@ import time
 from i18n import N_, tr
 
 
+LOGGER = logging.getLogger(__name__)
+DEVICE_MODES = ("auto", "cpu")
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_WIRE_BYTES = 8 * MAX_OUTPUT_BYTES
 # ceiling: generation gets at most 2048 tokens, further clamped by llama.cpp to
@@ -33,6 +36,10 @@ PROFILE_SECTIONS = frozenset({
 
 class SummaryOutputLimitError(RuntimeError):
     """A bounded generation ended before a complete report was available."""
+
+
+class _WorkerExited(RuntimeError):
+    """The worker process ended without answering, e.g. a GPU driver fault."""
 
 
 def _profile_response_schema(evidence):
@@ -166,18 +173,49 @@ def _profile_response_schema(evidence):
 
 
 class NativeSummaryRuntime:
-    def __init__(self, model_path, context_length=4096):
+    """Open one model on the best device ggml found on this machine.
+
+    ``device="auto"`` keeps llama.cpp's own placement: every discrete GPU,
+    or the integrated GPU when there is none, and the CPU otherwise. A GPU
+    that cannot hold or run the model falls back to the CPU in-process;
+    ``device="cpu"`` never touches a GPU.
+    """
+
+    def __init__(self, model_path, context_length=4096, device="auto"):
+        if device not in DEVICE_MODES:
+            raise ValueError("Unknown summary device mode")
         try:
-            from llama_cpp import Llama
-        except (ImportError, OSError) as exc:
+            from llama_cpp import Llama, LLAMA_SPLIT_MODE_NONE
+            from llama_runtime import load_backends, offload_devices, use_lazy_grammar
+            # Always register first, CPU mode included: otherwise llama.cpp's
+            # implicit loader scans the working directory for ggml modules.
+            devices = load_backends()
+            gpus = offload_devices(devices) if device == "auto" else []
+        except (ImportError, OSError, RuntimeError) as exc:
             raise RuntimeError(
                 tr("O runtime llama.cpp incluído no SnipVoice não está disponível. Reinstale o aplicativo.")
             ) from exc
-        try:
-            self._llama = Llama(model_path=model_path, n_ctx=context_length,
-                                n_gpu_layers=-1, verbose=False)
-        except Exception as exc:
-            raise RuntimeError(tr("Não foi possível abrir o modelo local de resumo: {error}", error=exc)) from exc
+        self._llama = None
+        self.device = "CPU"
+        if gpus:
+            try:
+                self._llama = Llama(model_path=model_path, n_ctx=context_length,
+                                    n_gpu_layers=-1, verbose=False)
+                self.device = ", ".join(item["description"] or item["name"] for item in gpus)
+            except Exception:
+                LOGGER.warning("Summary model could not open on the GPU; using the CPU.")
+        if self._llama is None:
+            try:
+                # main_gpu=-1 with no split clears llama.cpp's device list, so
+                # not even individual operations are offloaded to a GPU.
+                self._llama = Llama(model_path=model_path, n_ctx=context_length,
+                                    n_gpu_layers=0, split_mode=LLAMA_SPLIT_MODE_NONE,
+                                    main_gpu=-1, verbose=False)
+            except Exception as exc:
+                raise RuntimeError(tr("Não foi possível abrir o modelo local de resumo: {error}", error=exc)) from exc
+        # Reports are grammar-constrained greedy decoding; checking the grammar
+        # per chosen token keeps every token and avoids a full-vocabulary pass.
+        use_lazy_grammar(self._llama)
 
     def generate(self, system_prompt, evidence, cancel_event=None, disable_thinking=False):
         if cancel_event is not None and cancel_event.is_set():
@@ -297,7 +335,7 @@ class _WorkerClient:
                 continue
             if response is None:
                 self.close(force=True)
-                raise RuntimeError(tr("O runtime local de resumo encerrou antes de responder."))
+                raise _WorkerExited(tr("O runtime local de resumo encerrou antes de responder."))
             try:
                 value = json.loads(response)
             except ValueError as exc:
@@ -345,26 +383,63 @@ class _WorkerClient:
 
 
 class SummaryRuntime:
-    """Keep llama.cpp out of the process that loads transcribe.cpp's GGML DLLs."""
+    """Keep llama.cpp out of the process that loads transcribe.cpp's GGML DLLs.
 
-    def __init__(self, model_path, context_length=4096):
-        self._worker = _WorkerClient()
+    The worker uses the best device on this machine. A GPU driver fault can
+    end the worker process itself; the runtime then reopens the model on the
+    CPU and keeps the CPU for the rest of this app session.
+    """
+
+    # Set once a GPU worker has died; shared by every runtime in the process.
+    _gpu_failed = False
+
+    def __init__(self, model_path, context_length=4096, *, spawn_worker=None):
+        self._model_path = os.fspath(model_path)
+        self._context_length = context_length
+        self._spawn_worker = spawn_worker
+        self._worker = None
+        self.device = None
         try:
-            self._worker.request({
-                "type": "open", "model_path": os.fspath(model_path),
-                "context_length": context_length,
+            self._open("cpu" if SummaryRuntime._gpu_failed else "auto")
+        except _WorkerExited:
+            if SummaryRuntime._gpu_failed:
+                raise
+            self._fall_back_to_cpu()
+
+    def _open(self, device):
+        self._mode = device
+        self._worker = _WorkerClient(spawn_worker=self._spawn_worker)
+        try:
+            response = self._worker.request({
+                "type": "open", "model_path": self._model_path,
+                "context_length": self._context_length, "device": device,
             })
         except Exception:
             self._worker.close(force=True)
             raise
+        reported = response.get("device")
+        self.device = reported if isinstance(reported, str) and reported else "CPU"
+        LOGGER.info("Summary model opened on %s.", self.device)
+
+    def _fall_back_to_cpu(self):
+        SummaryRuntime._gpu_failed = True
+        LOGGER.warning("Summary worker ended on the GPU; reopening the model on the CPU.")
+        self._open("cpu")
 
     def generate(self, system_prompt, evidence, cancel_event=None, disable_thinking=False):
         # ceiling: one model request is capped at 60 minutes; extend only after
         # measuring a legitimate longer local generation on supported hardware.
-        response = self._worker.request({
+        request = {
             "type": "generate", "prompt": system_prompt, "evidence": evidence,
             "disable_thinking": disable_thinking,
-        }, cancel_event=cancel_event, timeout=3600)
+        }
+        try:
+            response = self._worker.request(request, cancel_event=cancel_event, timeout=3600)
+        except _WorkerExited:
+            if self._mode == "cpu" or self.device == "CPU":
+                raise
+            self._fall_back_to_cpu()
+            response = self._worker.request(request, cancel_event=cancel_event, timeout=3600)
         text = response.get("text")
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_OUTPUT_BYTES:
             raise RuntimeError(tr("O runtime local de resumo retornou conteúdo inválido."))

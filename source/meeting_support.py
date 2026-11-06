@@ -196,6 +196,40 @@ def _amplitude_envelope(values, channels, points=WAVEFORM_BLOCK_POINTS):
     return peaks
 
 
+def _gap_loses_audio(event, reason):
+    """Whether a journaled gap means captured samples are actually missing.
+
+    WASAPI raises its discontinuity flag for engine timing glitches even when
+    the device position is exactly where the previous packet ended. Those
+    packets are contiguous: the event stays journaled as evidence, but it must
+    not mark the recording partial or alert the user mid-meeting.
+    """
+    if not any(word in reason for word in
+               ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption")):
+        return False
+    if reason == "native_discontinuity":
+        position = event.get("device_position")
+        expected = event.get("expected_device_position")
+        if (isinstance(position, int) and not isinstance(position, bool)
+                and isinstance(expected, int) and not isinstance(expected, bool)
+                and position == expected):
+            return False
+    return True
+
+
+def _native_dropped_seconds(event, reason):
+    """Seconds a native discontinuity skipped, or None when it is unknown."""
+    if reason != "native_discontinuity":
+        return None
+    position = event.get("device_position")
+    expected = event.get("expected_device_position")
+    rate = event.get("sample_rate")
+    if (not all(isinstance(value, int) and not isinstance(value, bool) for value in (position, expected, rate))
+            or rate <= 0 or position <= expected):
+        return None
+    return (position - expected) / rate
+
+
 def _measure_audio(payload, channels):
     """Return a finite peak and bounded waveform from one native audio block."""
     values = array.array("f")
@@ -768,8 +802,7 @@ class MeetingController:
                         if alert:
                             self.notify(self._error)
                     reason = str(event.get("reason", ""))
-                    loss = event["type"] == "gap" and any(word in reason
-                        for word in ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption"))
+                    loss = event["type"] == "gap" and _gap_loses_audio(event, reason)
                     if event["type"] == "source_error" or loss:
                         with self._lock:
                             first_loss = event.get("track", "unknown") not in self._source_errors
@@ -777,10 +810,19 @@ class MeetingController:
                             # A reopen keeps the recording going; its health
                             # events decide whether the user must act.
                             reopening = event["type"] == "gap" and "capture_interruption" in reason
-                            if not reopening:
+                            dropped = _native_dropped_seconds(event, reason)
+                            if not reopening and dropped is not None:
+                                source = tr("microfone") if event.get("track") == "microphone" else tr("sistema")
+                                self._error = tr(
+                                    "O driver de áudio descartou {milliseconds} ms do {source}; a gravação continua.",
+                                    milliseconds=max(1, round(dropped * 1000)), source=source)
+                            elif not reopening:
                                 detail = str(event.get("message") or reason or tr("Uma fonte foi interrompida."))[:1024]
                                 self._error = tr("Verifique a captura de áudio: {detail}", detail=detail)
-                        if first_loss and not reopening:
+                        # A sub-second driver drop is recorded and marks the
+                        # meeting partial, but the user cannot act on it, so
+                        # it does not interrupt the meeting with a toast.
+                        if first_loss and not reopening and (dropped is None or dropped >= 1.0):
                             self.notify(self._error)
         except Exception as exc:
             # Never log native buffers, transcript contents, or helper diagnostics.

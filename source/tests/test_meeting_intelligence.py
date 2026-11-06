@@ -177,6 +177,9 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
             self.store,
             runtime_factory=lambda _path, _context: runtime,
             model_path_resolver=lambda _model: "installed.gguf",
+            # The fixtures are sized so a 4K context forces multi-chunk
+            # reduction; the shipped context would fit them in one call.
+            max_context=4096,
         )
         return intelligence, runtime
 
@@ -296,6 +299,52 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0][:-1], calls[1][:-1])
         self.assertLess(calls[1][-1]["max_items"], calls[0][-1]["max_items"])
+
+    def test_model_sees_short_citation_aliases_and_reports_keep_canonical_ids(self):
+        profile = validate_profile({
+            "id": "focused", "name": "Focused",
+            "instructions": "Use only confirmed facts.", "sections": ["summary", "decisions"],
+        })
+        evidence = [
+            {"id": "final:0.000000:29.994667", "track": "final", "start": 0.0, "end": 29.99,
+             "text": "We agreed to ship on Friday."},
+            {"id": "final:29.994667:59.989333", "track": "final", "start": 29.99, "end": 59.99,
+             "text": "Carol owns the release notes."},
+        ]
+        allowed = {item["id"] for item in evidence}
+
+        def response(_prompt, payload):
+            self.assertEqual(payload[:2], [{"id": "S1", "text": evidence[0]["text"]},
+                                           {"id": "S2", "text": evidence[1]["text"]}])
+            self.assertNotIn("final:", json.dumps(payload))
+            return json.dumps({"summary": "Ship Friday.", "segment_ids": ["S1", "S2"],
+                               "decisions": [{"text": "Ship on Friday.", "segment_ids": ["S1"]}]})
+
+        intelligence, runtime = self._intelligence(response)
+        result = intelligence._generate_report_document(
+            runtime, {}, profile, evidence, allowed, 8192, None, output_limit=4096,
+        )
+        self.assertEqual(result["segment_ids"], [evidence[0]["id"], evidence[1]["id"]])
+        self.assertEqual(result["decisions"][0]["segment_ids"], [evidence[0]["id"]])
+
+    def test_reduction_inputs_are_aliased_and_unknown_aliases_are_rejected(self):
+        profile = validate_profile({
+            "id": "focused", "name": "Focused",
+            "instructions": "Use only confirmed facts.", "sections": ["summary"],
+        })
+        prior = [{"summary": "Ship Friday.", "segment_ids": ["final:0.000000:29.994667"]},
+                 {"summary": "Carol writes notes.", "segment_ids": ["final:29.994667:59.989333"]}]
+        allowed = {"final:0.000000:29.994667", "final:29.994667:59.989333"}
+
+        def response(_prompt, payload):
+            self.assertEqual([item["segment_ids"] for item in payload[:2]], [["S1"], ["S2"]])
+            return json.dumps({"summary": "Ship Friday.", "segment_ids": ["S3"]})
+
+        intelligence, runtime = self._intelligence(response)
+        with self.assertRaises(ValueError):
+            intelligence._generate_report_document(
+                runtime, {}, profile, prior, allowed, 8192, None, output_limit=4096,
+            )
 
     def test_compact_intermediate_report_repair_is_tighter_than_first_attempt(self):
         profile = validate_profile({
@@ -739,10 +788,12 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
         self.store.finish_revision(self.session_id, revision)
 
         def invalid_reduction(_prompt, evidence):
+            # The model sees per-call citation aliases, so this fake decides
+            # from what a model can read: transcript text or a prior report.
             first = evidence[0]
             if "id" in first:
                 identifier = first["id"]
-                owner, deadline = ("Alice", "Friday") if identifier == "s1" else ("Bob", "Monday")
+                owner, deadline = ("Alice", "Friday") if "Alice" in first["text"] else ("Bob", "Monday")
                 return json.dumps({
                     "summary": "A task exists.", "segment_ids": [identifier],
                     "decisions": [], "action_items": [{
@@ -750,9 +801,8 @@ class MeetingIntelligenceGenerationTests(unittest.TestCase):
                         "segment_ids": [identifier],
                     }],
                 })
-            identifier = next((item["id"] for item in evidence if "id" in item),
-                              evidence[0].get("segment_ids", ["s2"])[0])
-            owner, deadline = ("Alice", "Friday") if identifier == "s1" else ("Bob", "Monday")
+            identifier = first["segment_ids"][0]
+            owner, deadline = ("Alice", "Friday") if first["action_items"][0]["owner"] == "Alice" else ("Bob", "Monday")
             return json.dumps({
                 "summary": "A task exists.", "segment_ids": [identifier],
                 "decisions": [], "action_items": [{

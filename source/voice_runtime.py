@@ -4,6 +4,7 @@ The package is optional until a self-contained wheel exists. Tests inject a
 fake backend. Missing native code leaves voice unavailable instead of crashing.
 """
 
+import logging
 import threading
 
 from i18n import tr
@@ -21,6 +22,8 @@ _MODEL_LANGUAGE_CODES = {
     LANGUAGE_EN_US: "en",
 }
 
+
+LOGGER = logging.getLogger(__name__)
 
 class VoiceRuntimeError(Exception):
     """User-visible inference or load failure."""
@@ -170,8 +173,21 @@ class TranscribeCppBackend(AsrBackend):
         model = None
         session = None
         try:
-            model = module.Model(model_path)
-            session = model.session()
+            # transcribe.cpp registers its own package-local backends and
+            # "auto" ranks this machine's devices (discrete GPU first). A GPU
+            # that cannot hold the model, e.g. while a summary model shares
+            # it, falls back to the CPU instead of leaving voice unavailable.
+            try:
+                model = module.Model(model_path)
+                session = model.session()
+            except Exception:
+                self._close_resource(session)
+                self._close_resource(model)
+                model = session = None
+                model = module.Model(model_path, backend="cpu")
+                session = model.session()
+                LOGGER.warning("Voice model could not open on its preferred device; using the CPU.")
+            LOGGER.info("Voice model opened on the %s backend.", getattr(model, "backend", "unknown"))
         except Exception as exc:
             self._close_resource(session)
             self._close_resource(model)

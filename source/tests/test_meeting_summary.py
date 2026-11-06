@@ -9,9 +9,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import meeting_intelligence
 import meeting_summary
 from meeting_store import MeetingStore
-from summary_catalog import DEFAULT_SUMMARY_MODEL
+from summary_catalog import DEFAULT_SUMMARY_MODEL, summary_catalog_entry
 
 
 class MeetingSummaryTests(unittest.TestCase):
@@ -142,7 +143,9 @@ class MeetingSummaryTests(unittest.TestCase):
             result = meeting_summary.summarize_meeting(self.store, self.sid, DEFAULT_SUMMARY_MODEL)
         self.assertGreater(result["chunks_processed"], 1)
         self.assertGreater(runtime.generate.call_count, result["chunks_processed"])
-        self.assertLessEqual(max(payload_sizes), meeting_summary.MAX_CONTEXT - 1536)
+        context = min(meeting_summary.MAX_CONTEXT, summary_catalog_entry(DEFAULT_SUMMARY_MODEL)["context_length"])
+        budget = (context - meeting_intelligence.RESERVED_CONTEXT_TOKENS) * meeting_intelligence.EVIDENCE_BYTES_PER_TOKEN
+        self.assertLessEqual(max(payload_sizes), budget)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import sys
 
 from i18n import N_
 from summary_runtime import (
-    MAX_OUTPUT_BYTES, MAX_WIRE_BYTES, NativeSummaryRuntime, SummaryOutputLimitError,
+    DEVICE_MODES, MAX_OUTPUT_BYTES, MAX_WIRE_BYTES, NativeSummaryRuntime, SummaryOutputLimitError,
 )
 
 
@@ -53,17 +53,18 @@ def serve(input_stream, output_stream):
             if kind == "open" and runtime is None:
                 path = request.get("model_path")
                 context = request.get("context_length")
+                device = request.get("device", "auto")
                 if (not isinstance(path, str) or not 0 < len(path) <= 4096
                         or isinstance(context, bool) or not isinstance(context, int)
-                        or not 1 <= context <= 131072):
+                        or not 1 <= context <= 131072 or device not in DEVICE_MODES):
                     _send(output_stream, {"ok": False, "error": N_("O modelo local de resumo é inválido.")})
                     return
                 try:
-                    runtime = NativeSummaryRuntime(path, context)
+                    runtime = NativeSummaryRuntime(path, context, device)
                 except Exception:
                     _send(output_stream, {"ok": False, "error": N_("Não foi possível abrir o modelo local de resumo.")})
                     return
-                _send(output_stream, {"ok": True})
+                _send(output_stream, {"ok": True, "device": runtime.device[:256]})
                 continue
             if kind == "generate" and runtime is not None:
                 prompt = request.get("prompt")

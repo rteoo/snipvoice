@@ -169,7 +169,10 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertEqual(uploads, 3)
         self.assertEqual(text.count("if: github.event_name != 'pull_request'"), uploads)
         self.assertEqual(text.count("retention-days: 14"), uploads)
-        self.assertEqual(text.count("timeout-minutes: 30"), 2)
+        # The Windows job also compiles the portable llama.cpp backends.
+        self.assertEqual(text.count("timeout-minutes: 60"), 1)
+        self.assertEqual(text.count("timeout-minutes: 30"), 1)
+        self.assertLess(text.index("timeout-minutes: 60"), text.index("macOS ARM64 bundle"))
 
     def test_windows_and_macos_scripts_exclude_the_dead_ml_stack(self):
         expected = (

@@ -685,6 +685,63 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertTrue(Path(store.get(session)["final_audio"]["path"]).is_file())
         self.assertTrue(self.controller.snapshot()["partial"], "Never erase evidence of an actual interruption")
 
+    def _record_with_gaps(self, gaps):
+        pending = [dict(gap, type="gap", track="system", reason="native_discontinuity",
+                        buffer_flags=1, packet_frames=480, sample_rate=48000, timestamp=3.0)
+                   for gap in gaps]
+        original = self.capture.read_event
+        def read_event(timeout):
+            if pending:
+                return dict(pending.pop(0), generation=self.capture.generation), b""
+            return original(timeout)
+        self.capture.read_event = read_event
+        self.controller.notify = Mock()
+        self.assertTrue(self.controller.start(MeetingSettings(sources="system")))
+        self.assertTrue(self.capture.started.wait(2))
+        deadline = time.monotonic() + 2
+        while pending:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.005)
+        self.controller.stop()
+        self.controller._thread.join(10)
+        self.assertFalse(self.controller._thread.is_alive())
+        session = self.controller.snapshot()["session_id"]
+        events = list(MeetingStore(self.temp.name).iter_events(session))
+        self.assertEqual(sum(event.get("reason") == "native_discontinuity" for event in events), len(gaps),
+                         "Discontinuity evidence is always journaled")
+        return [call.args[0] for call in self.controller.notify.call_args_list]
+
+    def test_contiguous_native_discontinuity_is_not_audio_loss(self):
+        messages = self._record_with_gaps([
+            {"device_position": 64233120, "expected_device_position": 64233120},
+        ])
+        self.assertFalse(self.controller.snapshot()["partial"])
+        self.assertFalse(any("Verifique a captura" in message for message in messages))
+
+    def test_short_native_drop_is_recorded_in_words_without_a_toast(self):
+        messages = self._record_with_gaps([
+            {"device_position": 64233120, "expected_device_position": 64233120},
+            {"device_position": 98867040, "expected_device_position": 98865120},
+        ])
+        snapshot = self.controller.snapshot()
+        self.assertTrue(snapshot["partial"])
+        self.assertIn("descartou 40 ms do sistema", snapshot["error"])
+        self.assertNotIn("native_discontinuity", snapshot["error"])
+        self.assertEqual(messages, [])
+
+    def test_long_native_drop_alerts_once(self):
+        messages = self._record_with_gaps([
+            {"device_position": 200000, "expected_device_position": 100000},
+            {"device_position": 400000, "expected_device_position": 300000},
+        ])
+        self.assertTrue(self.controller.snapshot()["partial"])
+        self.assertEqual([message for message in messages if "descartou" in message],
+                         ["O driver de áudio descartou 2083 ms do sistema; a gravação continua."])
+
+    def test_native_discontinuity_without_positions_stays_audio_loss(self):
+        self._record_with_gaps([{"device_position": None, "expected_device_position": None}])
+        self.assertTrue(self.controller.snapshot()["partial"])
+
     def test_disconnected_source_alerts_once_per_outage_and_recording_continues(self):
         def health(state, attempt=1):
             return {"type": "capture_health", "track": "microphone", "state": state,

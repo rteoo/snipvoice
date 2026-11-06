@@ -79,7 +79,9 @@ jobs:
       - name: Build approved llama.cpp runtime
         run: |
           python -m pip install --require-hashes -r packaging/requirements-build.lock
-          python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama-wheel --install
+          # Test lanes build the single built-in backend; the Windows release job
+          # builds and probes the portable CPU-variant/Vulkan runtime.
+          python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama-wheel --install --backends minimal
           python source/summary_runtime_probe.py
 
       - name: Build Windows capture helper

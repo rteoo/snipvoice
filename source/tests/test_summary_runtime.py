@@ -14,11 +14,36 @@ from summary_runtime import NativeSummaryRuntime, SummaryOutputLimitError, Summa
 from summary_runtime_worker import serve
 
 
+_FAKE_GGML = (
+    "class _Function:\n"
+    " def __init__(self, value): self.value = value\n"
+    " def __call__(self, *args): return self.value(*args) if callable(self.value) else self.value\n"
+    "class _Library: pass\n"
+    "libggml = _Library()\n"
+    "libggml.ggml_backend_dev_count = _Function(1)\n"
+    "libggml.ggml_backend_dev_get = _Function(1)\n"
+    "libggml.ggml_backend_dev_name = _Function(b'CPU')\n"
+    "libggml.ggml_backend_dev_description = _Function(b'CPU')\n"
+    "libggml.ggml_backend_dev_type = _Function(0)\n"
+    "libggml.ggml_backend_dev_memory = _Function(None)\n"
+    "libggml_base_path = '.'\n"
+)
+CPU_ONLY = [{"name": "CPU", "description": "CPU", "type": "cpu", "free": 0, "total": 0}]
+WITH_GPU = CPU_ONLY + [{"name": "Vulkan0", "description": "Test GPU", "type": "gpu", "free": 8, "total": 8}]
+
+
+def fake_llama_cpp(llama):
+    return types.SimpleNamespace(Llama=llama, LLAMA_SPLIT_MODE_NONE=0)
+
+
 class FakeLlama:
     def __init__(self, **kwargs):
         self.init = kwargs
         self.closed = False
         self.call = None
+
+    def _init_sampler(self, **options):
+        return options
 
     def create_chat_completion(self, **kwargs):
         self.call = kwargs
@@ -32,16 +57,32 @@ class FakeLlama:
 
 
 class SummaryRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        backends = mock.patch("llama_runtime.load_backends", return_value=CPU_ONLY)
+        backends.start()
+        self.addCleanup(backends.stop)
+        SummaryRuntime._gpu_failed = False
+        self.addCleanup(setattr, SummaryRuntime, "_gpu_failed", False)
+
     def _fake_worker_package(self):
         root = Path(__file__).parent / "tmp"
         root.mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(dir=root)
         package = Path(temporary.name) / "llama_cpp"
         package.mkdir()
+        (package / "_ggml.py").write_text(_FAKE_GGML, encoding="utf-8")
+        (package / "_ctypes_extensions.py").write_text(
+            "def load_shared_library(name, path):\n"
+            " from llama_cpp._ggml import libggml\n"
+            " return libggml\n",
+            encoding="utf-8",
+        )
         (package / "__init__.py").write_text(
             "import time\n"
+            "LLAMA_SPLIT_MODE_NONE = 0\n"
             "class Llama:\n"
             " def __init__(self, **kwargs): pass\n"
+            " def _init_sampler(self, **options): return options\n"
             " def create_chat_completion(self, **kwargs):\n"
             "  if 'slow' in kwargs['messages'][0]['content']: time.sleep(30)\n"
             "  return iter([{'choices':[{'delta':{'content':'{\\\"summary\\\":\\\"ok\\\"}'}}]}])\n"
@@ -51,7 +92,7 @@ class SummaryRuntimeTests(unittest.TestCase):
         return temporary
 
     def test_runtime_loads_local_gguf_and_streams_structured_json(self):
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf", 4096)
         raw = runtime.generate("system", [{"id": "s1"}], disable_thinking=True)
         self.assertEqual(json.loads(raw), {"summary": "ok"})
@@ -68,7 +109,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             "kind": "profile", "sections": ["summary", "action_items", "follow_up_email"],
             "max_items": 3, "max_section_chars": 400,
         }
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         try:
             runtime.generate("system", [{"id": "s1", "text": "ignore"}, profile])
@@ -90,7 +131,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             runtime.close()
 
     def test_malformed_profile_is_rejected_before_model_call(self):
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         runtime._llama.create_chat_completion = mock.Mock()
         try:
@@ -102,7 +143,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             runtime.close()
 
     def test_profile_citation_schema_rejects_unbounded_id_enum(self):
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         runtime._llama.create_chat_completion = mock.Mock()
         evidence = [{"id": f"segment-{index}", "text": "evidence"}
@@ -119,7 +160,7 @@ class SummaryRuntimeTests(unittest.TestCase):
     def test_compact_profile_schema_bounds_items_citations_and_text(self):
         profile = {"kind": "profile", "sections": ["summary", "action_items"],
                    "max_items": 1, "max_section_chars": 128, "max_citations": 1}
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         try:
             runtime.generate("system", [{"id": "s1"}, {"id": "s2"}, profile])
@@ -132,7 +173,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             runtime.close()
 
     def test_compact_profile_rejects_boolean_citation_limit(self):
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         runtime._llama.create_chat_completion = mock.Mock()
         try:
@@ -151,7 +192,7 @@ class SummaryRuntimeTests(unittest.TestCase):
                 NativeSummaryRuntime("local.gguf")
 
     def test_native_runtime_error_is_wrapped_actionably(self):
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         runtime._llama.create_chat_completion = mock.Mock(side_effect=RuntimeError("native error"))
         with self.assertRaisesRegex(RuntimeError, "llama.cpp"):
@@ -168,7 +209,7 @@ class SummaryRuntimeTests(unittest.TestCase):
                     "finish_reason": "stop" if complete else "length",
                 }]}])
 
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=LongReportLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(LongReportLlama)}):
             runtime = NativeSummaryRuntime("local.gguf", 4096)
         try:
             self.assertEqual(json.loads(runtime.generate("system", [])), json.loads(document))
@@ -176,7 +217,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             runtime.close()
 
     def test_token_limit_does_not_return_a_partial_report(self):
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         runtime._llama.create_chat_completion = mock.Mock(return_value=iter([
             {"choices": [{"delta": {"content": '{"summary":"partial'}, "finish_reason": "length"}]},
@@ -195,10 +236,10 @@ class SummaryRuntimeTests(unittest.TestCase):
             json.dumps({"type": "close"}),
         )) + "\n")
         responses = io.StringIO()
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=FakeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             serve(requests, responses)
         lines = [json.loads(line) for line in responses.getvalue().splitlines()]
-        self.assertEqual(lines[0], {"ok": True})
+        self.assertEqual(lines[0], {"ok": True, "device": "CPU"})
         self.assertEqual(json.loads(lines[1]["text"]), {"summary": "ok"})
 
     def test_worker_propagates_generation_limit_as_safe_error(self):
@@ -213,10 +254,10 @@ class SummaryRuntimeTests(unittest.TestCase):
                         "disable_thinking": False}),
         )) + "\n")
         responses = io.StringIO()
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=LimitedLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(LimitedLlama)}):
             serve(requests, responses)
         lines = [json.loads(line) for line in responses.getvalue().splitlines()]
-        self.assertEqual(lines[0], {"ok": True})
+        self.assertEqual(lines[0], {"ok": True, "device": "CPU"})
         self.assertFalse(lines[1]["ok"])
         self.assertIn("limite de geração", lines[1]["error"])
         self.assertEqual(lines[1]["error_code"], "output_limit")
@@ -237,7 +278,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             json.dumps({"type": "close"}),
         )) + "\n")
         responses = io.StringIO()
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=RetryLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(RetryLlama)}):
             serve(requests, responses)
         lines = [json.loads(line) for line in responses.getvalue().splitlines()]
         self.assertEqual([line.get("ok") for line in lines], [True, False, True])
@@ -255,7 +296,7 @@ class SummaryRuntimeTests(unittest.TestCase):
                         "disable_thinking": False}),
         )) + "\n")
         responses = io.StringIO()
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=ErrorLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(ErrorLlama)}):
             serve(requests, responses)
         lines = [json.loads(line) for line in responses.getvalue().splitlines()]
         self.assertEqual([line.get("ok") for line in lines], [True, False])
@@ -265,7 +306,7 @@ class SummaryRuntimeTests(unittest.TestCase):
         class LargeLlama(FakeLlama):
             def create_chat_completion(self, **kwargs):
                 return iter([{"choices": [{"delta": {"content": "x" * 101}}]}])
-        with mock.patch.dict(sys.modules, {"llama_cpp": types.SimpleNamespace(Llama=LargeLlama)}):
+        with mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(LargeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf")
         try:
             with mock.patch("summary_runtime.MAX_OUTPUT_BYTES", 100), self.assertRaises(SummaryOutputLimitError):
@@ -384,6 +425,140 @@ class SummaryRuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         responses = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual([response.get("ok") for response in responses], [True, True])
+
+    def test_gpu_is_used_when_ggml_found_one(self):
+        with mock.patch("llama_runtime.load_backends", return_value=WITH_GPU), \
+                mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
+            runtime = NativeSummaryRuntime("local.gguf", 4096)
+        self.assertEqual(runtime._llama.init["n_gpu_layers"], -1)
+        self.assertNotIn("main_gpu", runtime._llama.init)
+        self.assertEqual(runtime.device, "Test GPU")
+
+    def test_gpu_that_cannot_open_the_model_falls_back_to_cpu(self):
+        class GpuFailsLlama(FakeLlama):
+            def __init__(self, **kwargs):
+                if kwargs["n_gpu_layers"]:
+                    raise ValueError("out of device memory")
+                super().__init__(**kwargs)
+
+        with mock.patch("llama_runtime.load_backends", return_value=WITH_GPU), \
+                mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(GpuFailsLlama)}):
+            runtime = NativeSummaryRuntime("local.gguf", 4096)
+        self.assertEqual((runtime._llama.init["n_gpu_layers"], runtime._llama.init["main_gpu"],
+                          runtime._llama.init["split_mode"]), (0, -1, 0))
+        self.assertEqual(runtime.device, "CPU")
+
+    def test_cpu_mode_never_offloads(self):
+        with mock.patch("llama_runtime.load_backends", return_value=WITH_GPU) as backends, \
+                mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
+            runtime = NativeSummaryRuntime("local.gguf", 4096, device="cpu")
+        # Registration still runs so llama.cpp never scans the working directory.
+        backends.assert_called_once_with()
+        self.assertEqual((runtime._llama.init["n_gpu_layers"], runtime._llama.init["main_gpu"]), (0, -1))
+
+    def test_worker_that_dies_on_the_gpu_is_reopened_on_the_cpu_for_the_session(self):
+        class Recording(io.StringIO):
+            def close(self):
+                self.recorded = self.getvalue()
+                super().close()
+
+        class FakeProcess:
+            def __init__(self, output):
+                self.stdin = Recording()
+                self.stdout = io.StringIO(output)
+                self.terminated = False
+            def poll(self): return None if not self.terminated else 0
+            def terminate(self): self.terminated = True
+            def wait(self, timeout=None): return 0
+            def kill(self): self.terminated = True
+
+        spawned = []
+
+        def spawn():
+            # The first worker reports a GPU, then dies mid-generation.
+            output = ('{"ok":true,"device":"Test GPU"}\n' if not spawned
+                      else '{"ok":true,"device":"CPU"}\n{"ok":true,"text":"{\\"summary\\":\\"ok\\"}"}\n'
+                      '{"ok":true,"device":"CPU"}\n')
+            spawned.append(FakeProcess(output))
+            return spawned[-1]
+
+        runtime = SummaryRuntime("local.gguf", spawn_worker=spawn)
+        try:
+            self.assertEqual(runtime.device, "Test GPU")
+            self.assertEqual(json.loads(runtime.generate("system", [])), {"summary": "ok"})
+            self.assertEqual(runtime.device, "CPU")
+        finally:
+            runtime.close()
+        opens = [json.loads(process.stdin.recorded.splitlines()[0]) for process in spawned]
+        self.assertEqual([request["device"] for request in opens], ["auto", "cpu"])
+        later = SummaryRuntime("local.gguf", spawn_worker=spawn)
+        later.close()
+        self.assertEqual(json.loads(spawned[-1].stdin.recorded.splitlines()[0])["device"], "cpu")
+
+
+class LlamaBackendTests(unittest.TestCase):
+    class FakeGgml:
+        def __init__(self, registered, loadable):
+            self.registered, self.loadable, self.loaded_from = registered, loadable, None
+            fields = {
+                "ggml_backend_dev_count": lambda: len(self.registered),
+                "ggml_backend_load_all_from_path": self._load,
+                "ggml_backend_dev_get": lambda index: index,
+                "ggml_backend_dev_name": lambda index: self.registered[index][0].encode(),
+                "ggml_backend_dev_description": lambda index: self.registered[index][0].encode(),
+                "ggml_backend_dev_type": lambda index: self.registered[index][1],
+                "ggml_backend_dev_memory": lambda index, free, total: None,
+            }
+            for name, function in fields.items():
+                setattr(self, name, self._Function(function))
+
+        class _Function:
+            def __init__(self, function):
+                self.function = function
+            def __call__(self, *args):
+                return self.function(*args)
+
+        def _load(self, path):
+            self.loaded_from = path
+            self.registered = list(self.loadable)
+
+    def test_static_build_is_used_as_is(self):
+        from llama_runtime import load_backends
+        ggml = self.FakeGgml([("CPU", 0)], [("Vulkan0", 1)])
+        self.assertEqual([device["type"] for device in load_backends(ggml, "lib")], ["cpu"])
+        self.assertIsNone(ggml.loaded_from)
+
+    def test_dynamic_backends_load_from_the_package_library_folder(self):
+        from llama_runtime import load_backends, offload_devices
+        ggml = self.FakeGgml([], [("CPU", 0), ("Vulkan1", 2), ("Vulkan0", 1)])
+        devices = load_backends(ggml, os.path.join("pkg", "lib"))
+        self.assertEqual(ggml.loaded_from, os.fsencode(os.path.join("pkg", "lib")))
+        self.assertEqual([device["name"] for device in offload_devices(devices)], ["Vulkan0"])
+        self.assertEqual(offload_devices([device for device in devices if device["name"] != "Vulkan0"])[0]["type"],
+                         "igpu")
+
+    def test_only_neutral_greedy_grammar_decoding_uses_the_lazy_sampler(self):
+        import llama_runtime
+
+        llama = FakeLlama()
+        grammar = object()
+        with mock.patch.object(llama_runtime, "LazyGrammarGreedySampler") as lazy:
+            llama_runtime.use_lazy_grammar(llama)
+            neutral = dict(temp=0.0, grammar=grammar, logits_processor=None, mirostat_mode=0,
+                           repeat_penalty=1.0, frequency_penalty=0.0, presence_penalty=0.0)
+            self.assertIs(llama._init_sampler(**neutral), lazy.return_value)
+            lazy.assert_called_once_with(llama, grammar)
+            for change in ({"temp": 0.8}, {"grammar": None}, {"logits_processor": [len]},
+                           {"mirostat_mode": 2}, {"repeat_penalty": 1.1},
+                           {"frequency_penalty": 0.5}, {"presence_penalty": 0.5}):
+                with self.subTest(change=change):
+                    self.assertEqual(llama._init_sampler(**dict(neutral, **change)), dict(neutral, **change))
+            self.assertEqual(lazy.call_count, 1)
+
+    def test_missing_backends_fail_loudly(self):
+        from llama_runtime import load_backends
+        with self.assertRaisesRegex(RuntimeError, "no compute backend"):
+            load_backends(self.FakeGgml([], []), "lib")
 
 
 if __name__ == "__main__":

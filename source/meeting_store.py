@@ -97,6 +97,9 @@ class MeetingStore:
         self.root_dir = self.root
         self._lock = threading.RLock()
         self._active = {}
+        # Validated folders of sessions that are recording. Each 100 ms block
+        # otherwise re-resolved the folder six times on the capture thread.
+        self._active_dirs = {}
         self._sequence_cache = {}
         self._last_checkpoint = {}
         os.makedirs(self.root, exist_ok=True)
@@ -227,6 +230,7 @@ class MeetingStore:
             metadata["updated_at"] = _utc_timestamp()
             self._checkpoint_session(session_id, metadata)
             self._active.pop(session_id, None)
+            self._active_dirs.pop(session_id, None)
             self._sequence_cache.pop(session_id, None)
             self._last_checkpoint.pop(session_id, None)
             return session_id
@@ -402,21 +406,27 @@ class MeetingStore:
         def _read():
             # Snapshot journal records before yielding so callers can process
             # audio without holding the store lock or retaining a full meeting.
-            for record in self._iter_journal_records(session_id):
-                event = record["event"]
-                if event.get("type") != "audio" or (track and event.get("track") != track):
-                    continue
-                end = event["timestamp"] + (event["frames"] / event["rate"])
-                if end <= start:
-                    continue
-                payload = self._read_segment_record(session_id, record)
-                if payload is None:
-                    # Segments are fsynced before their journal record, so an
-                    # unreadable payload is damage or a transient read error.
-                    if on_missing is not None:
-                        on_missing(copy.deepcopy(event))
-                    continue
-                yield copy.deepcopy(event), payload
+            session_dir = self._session_dir(session_id)
+            handles = {}
+            try:
+                for record in self._iter_journal_records(session_id):
+                    event = record["event"]
+                    if event.get("type") != "audio" or (track and event.get("track") != track):
+                        continue
+                    end = event["timestamp"] + (event["frames"] / event["rate"])
+                    if end <= start:
+                        continue
+                    payload = self._read_segment_record(session_id, record, session_dir, handles)
+                    if payload is None:
+                        # Segments are fsynced before their journal record, so an
+                        # unreadable payload is damage or a transient read error.
+                        if on_missing is not None:
+                            on_missing(copy.deepcopy(event))
+                        continue
+                    yield copy.deepcopy(event), payload
+            finally:
+                for handle in handles.values():
+                    handle.close()
 
         return _read()
 
@@ -759,7 +769,13 @@ class MeetingStore:
             os.fsync(handle.fileno())
             return offset
 
-    def _read_segment_record(self, session_id, record):
+    def _read_segment_record(self, session_id, record, session_dir=None, handles=None):
+        """Read one journaled payload.
+
+        A sequential reader passes its validated ``session_dir`` and a
+        ``handles`` cache: resolving the folder per block cost several
+        ``realpath`` calls each, which dominated long MP3 exports on Windows.
+        """
         relative = record.get("segment")
         if not self._valid_relative_path(relative):
             return None
@@ -770,23 +786,37 @@ class MeetingStore:
             return None
         if offset < 0 or length < 0 or length > MAX_EVENT_BYTES:
             return None
-        path = os.path.abspath(os.path.join(self._session_dir(session_id), relative))
-        if os.path.commonpath((self._session_dir(session_id), path)) != self._session_dir(session_id):
+        if session_dir is None:
+            session_dir = self._session_dir(session_id)
+        path = os.path.abspath(os.path.join(session_dir, relative))
+        if os.path.commonpath((session_dir, path)) != session_dir:
             return None
         try:
-            with open(path, "rb") as handle:
-                handle.seek(offset)
-                chunks = []
-                remaining = length
-                while remaining:
-                    chunk = handle.read(min(remaining, MAX_READ_BYTES))
-                    if not chunk:
-                        return None
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-                return b"".join(chunks)
+            if handles is None:
+                with open(path, "rb") as handle:
+                    return self._read_range(handle, offset, length)
+            handle = handles.get(path)
+            if handle is None:
+                for stale in handles.values():
+                    stale.close()
+                handles.clear()
+                handle = handles[path] = open(path, "rb")
+            return self._read_range(handle, offset, length)
         except OSError:
             return None
+
+    @staticmethod
+    def _read_range(handle, offset, length):
+        handle.seek(offset)
+        chunks = []
+        remaining = length
+        while remaining:
+            chunk = handle.read(min(remaining, MAX_READ_BYTES))
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
 
     def _record_complete(self, session_id, record, sizes=None):
         """Return whether a journaled audio range still has a full prefix."""
@@ -845,11 +875,16 @@ class MeetingStore:
             self._checkpoint_session(session_id, metadata)
 
     def _session_dir(self, session_id):
+        cached = self._active_dirs.get(session_id)
+        if cached is not None and session_id in self._active:
+            return cached
         if not self._valid_id(session_id):
             raise ValueError(tr("Identificador de reunião inválido."))
         result = os.path.join(self.root, str(session_id))
         if os.path.commonpath((os.path.realpath(self.root), os.path.realpath(result))) != os.path.realpath(self.root):
             raise ValueError(tr("A pasta da reunião aponta para fora da biblioteca."))
+        if session_id in self._active:
+            self._active_dirs[session_id] = result
         return result
 
     @staticmethod

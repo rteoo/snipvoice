@@ -226,6 +226,62 @@ class LlamaRuntimeTests(unittest.TestCase):
                 self.assertEqual(int(size), len(value))
         self.assertEqual(llama_runtime.verify_manifest(self.root / "installed/llama_cpp"), manifest)
 
+    def test_portable_backends_are_a_windows_release_default(self):
+        with mock.patch.object(recipe.platform, "system", return_value="Windows"):
+            self.assertEqual(recipe.default_backends(), "portable")
+            arguments = recipe.cmake_args("portable")
+        for flag in ("-DGGML_BACKEND_DL=ON", "-DGGML_CPU_ALL_VARIANTS=ON", "-DGGML_VULKAN=ON",
+                     "-DCMAKE_INSTALL_BINDIR=llama_cpp/lib", "-DGGML_CUDA=OFF"):
+            self.assertIn(flag, arguments.split())
+        self.assertNotIn("GGML_BACKEND_DIR", arguments, "An absolute backend path would be baked into the binary")
+        for system in ("Darwin", "Linux"):
+            with mock.patch.object(recipe.platform, "system", return_value=system):
+                self.assertEqual(recipe.default_backends(), "minimal")
+                with self.assertRaisesRegex(RuntimeError, "Windows releases only"):
+                    recipe.cmake_args("portable")
+        self.assertEqual(recipe.cmake_args("minimal"), recipe.CMAKE_ARGS)
+
+    def test_windows_rejects_a_work_dir_deeper_than_the_msbuild_path_budget(self):
+        work = self.root / ("w" * recipe.WINDOWS_WORK_DIR_LIMIT)
+        argv = ["llama_runtime.py", "--work-dir", str(work), "--wheel-dir", str(self.root / "out")]
+        with mock.patch.object(recipe.sys, "argv", argv), \
+             mock.patch.object(recipe.platform, "system", return_value="Windows"), \
+             mock.patch.object(recipe, "build_environment") as environment:
+            with self.assertRaisesRegex(RuntimeError, "MSBuild path limit"):
+                recipe.main()
+            environment.assert_not_called()
+        self.assertFalse(work.exists(), "The guard runs before creating any directory")
+
+    def test_portable_build_requires_an_existing_vulkan_sdk(self):
+        with mock.patch.dict(recipe.os.environ, {"PATH": "synthetic-path"}, clear=True), \
+             mock.patch.object(recipe.platform, "system", return_value="Windows"), \
+             mock.patch.object(recipe.subprocess, "check_output") as output:
+            with self.assertRaisesRegex(RuntimeError, "Vulkan SDK"):
+                recipe.build_environment("portable")
+            output.assert_not_called()
+
+    def _portable_wheel(self, names):
+        wheel = self.root / "portable.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            for name in names:
+                archive.writestr("llama_cpp/lib/" + name, b"synthetic native library")
+            archive.writestr("llama_cpp_python-0.3.36.dist-info/RECORD", b"")
+        license_path = self.root / "LICENSE"
+        license_path.write_text("Synthetic license fixture", encoding="ascii")
+        return wheel, license_path
+
+    def test_portable_wheel_must_ship_vulkan_and_cpu_variants(self):
+        complete = ["llama.dll", "ggml.dll", "ggml-base.dll", "ggml-vulkan.dll",
+                    "ggml-cpu-x64.dll", "ggml-cpu-haswell.dll"]
+        with mock.patch.object(recipe.platform, "system", return_value="Windows"):
+            manifest = recipe.seal_wheel(*self._portable_wheel(complete), "portable")
+            self.assertEqual(manifest["backends"], "portable")
+            self.assertIn("lib/ggml-vulkan.dll", manifest["libraries"])
+            for missing in ("ggml-vulkan.dll", "ggml-cpu-haswell.dll"):
+                with self.subTest(missing=missing), self.assertRaisesRegex(RuntimeError, "missing its Vulkan"):
+                    recipe.seal_wheel(*self._portable_wheel([name for name in complete if name != missing]),
+                                      "portable")
+
     def test_wheel_without_native_library_is_rejected(self):
         wheel = self.root / "invalid.whl"
         with zipfile.ZipFile(wheel, "w") as archive:

@@ -22,7 +22,7 @@ SUMMARY_CATALOG = (
         "sha256": "0bfe35afc9f05b7fac3fa04925e051ac7939a42a8a17ea11afc99701bea826cc",
         "size_bytes": 1_270_808_032,
         "parameters": "2B",
-        "context_length": 4096,
+        "context_length": 16384,
         "license_id": "Apache-2.0",
         "license_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/LICENSE",
         "upstream_model": "Qwen/Qwen3.5-2B",
@@ -44,7 +44,7 @@ SUMMARY_CATALOG = (
         "sha256": "fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634",
         "size_bytes": 3_349_516_256,
         "parameters": "E2B / 5B",
-        "context_length": 4096,
+        "context_length": 16384,
         "license_id": "Apache-2.0",
         "license_url": (
             "https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-gguf/blob/main/LICENSE"
@@ -68,7 +68,7 @@ SUMMARY_CATALOG = (
         "sha256": "25082a7dd3776cc3c741c6347d3bd04523f05796607b3fbc32fa3a25dfa1418c",
         "size_bytes": 2_707_513_696,
         "parameters": "4B",
-        "context_length": 4096,
+        "context_length": 16384,
         "license_id": "Apache-2.0",
         "license_url": "https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/LICENSE",
         "upstream_model": "Qwen/Qwen3.5-4B",
@@ -90,7 +90,7 @@ SUMMARY_CATALOG = (
         "sha256": "676c35070db6dbe52f93e9c864ee0fba4eddea94b9c875d9cb10daff453fbaee",
         "size_bytes": 5_154_941_280,
         "parameters": "E4B / 8B",
-        "context_length": 4096,
+        "context_length": 16384,
         "license_id": "Apache-2.0",
         "license_url": (
             "https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf/blob/main/LICENSE"

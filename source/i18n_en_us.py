@@ -1388,6 +1388,7 @@ EN_US = {
     'Não foi possível finalizar os metadados; a recuperação ocorrerá ao reabrir.': "Couldn't finalize the metadata; recovery will run when reopened.",
     'Uma fonte foi interrompida.': 'A source was interrupted.',
     'Verifique a captura de áudio: {detail}': 'Check audio capture: {detail}',
+    'O driver de áudio descartou {milliseconds} ms do {source}; a gravação continua.': 'The audio driver dropped {milliseconds} ms of {source} audio; recording continues.',
     'Verifique a gravação': 'Check the recording',
     'Cabeçalho do capturador inválido.': 'Invalid capturer header.',
     'Evento do capturador inválido.': 'Invalid capturer event.',

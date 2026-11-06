@@ -7,6 +7,7 @@ position across callback-sized chunks and flush the delayed tail exactly once.
 startup remains usable when the optional voice dependency is absent.
 """
 
+import array
 import math
 
 from i18n import tr
@@ -104,8 +105,14 @@ class StreamingResampler:
 def _as_float_list(values):
     if values is None:
         return []
+    if isinstance(values, array.array) and values.typecode in "fd":
+        # Meeting transcription converts minutes of audio per chunk; the
+        # per-element loop below dominated its CPU time.
+        return values.tolist()
     if hasattr(values, "reshape"):
         values = values.reshape(-1)
     elif hasattr(values, "flatten"):
         values = values.flatten()
+    if getattr(getattr(values, "dtype", None), "kind", None) == "f" and hasattr(values, "tolist"):
+        return values.tolist()
     return [float(value) for value in values]

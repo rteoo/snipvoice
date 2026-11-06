@@ -27,7 +27,18 @@ from summary_runtime import SummaryOutputLimitError, SummaryRuntime
 LOGGER = logging.getLogger(__name__)
 
 
-MAX_CONTEXT = 4096
+MAX_CONTEXT = 16384
+# ceiling: 64 transcript segments (~32 min of 30 s chunks) per model call keeps
+# the citation enum small; the byte budget is normally the tighter bound.
+MAX_CHUNK_SEGMENTS = 64
+# Model contexts are measured in tokens; every evidence and output budget
+# below is UTF-8 bytes of serialized JSON. The reserve covers the system
+# prompt, chat template and the bounded generation (2,048 tokens).
+RESERVED_CONTEXT_TOKENS = 2560
+# ceiling: 2 bytes per token is a conservative floor for pt-BR/en transcript
+# JSON (measured ~2.3 with Qwen3.5); numeric segment IDs tokenize nearly per
+# digit. Raise it only after measuring real meetings with the model tokenizer.
+EVIDENCE_BYTES_PER_TOKEN = 2.0
 MAX_PROFILE_SCHEMA_VERSION = 1
 MAX_PROFILE_ID_CHARS = 80
 MAX_PROFILE_NAME_CHARS = 128
@@ -384,6 +395,61 @@ BUILTIN_PROFILES = tuple(builtin_profiles())
 _BUILTIN_BY_ID = {item["id"]: item for item in BUILTIN_PROFILES}
 
 
+def _alias_citations(payload):
+    """Give the model short citation IDs and only the transcript text.
+
+    Canonical IDs such as ``final:119.978667:149.973333`` cost about 24 tokens
+    each, and a report repeats them for every cited item: more than half of a
+    local report's output went to IDs, pushing CPU generations past their
+    token bound. Returns the model payload and the alias->canonical map.
+    """
+    aliases = {}
+
+    def alias(identifier):
+        if identifier not in aliases:
+            aliases[identifier] = "S%d" % (len(aliases) + 1)
+        return aliases[identifier]
+
+    def rewrite(value):
+        if isinstance(value, list):
+            return [rewrite(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        result = {}
+        for key, item in value.items():
+            if key == "segment_ids" and isinstance(item, list):
+                result[key] = [alias(entry) if isinstance(entry, str) else entry for entry in item]
+            else:
+                result[key] = rewrite(item)
+        return result
+
+    model_payload = []
+    for item in payload:
+        if (isinstance(item, dict) and "kind" not in item
+                and isinstance(item.get("id"), str) and isinstance(item.get("text"), str)):
+            model_payload.append({"id": alias(item["id"]), "text": item["text"]})
+        else:
+            model_payload.append(rewrite(item))
+    return model_payload, {short: identifier for identifier, short in aliases.items()}
+
+
+def _restore_citations(document, originals):
+    """Map model citations back to canonical IDs before validation.
+
+    Unknown values pass through unchanged so validation still rejects them.
+    """
+    if isinstance(document, list):
+        return [_restore_citations(item, originals) for item in document]
+    if not isinstance(document, dict):
+        return document
+    return {
+        key: ([originals.get(entry, entry) if isinstance(entry, str) else entry for entry in value]
+              if key in {"segment_ids", "citations"} and isinstance(value, list)
+              else _restore_citations(value, originals))
+        for key, value in document.items()
+    }
+
+
 class MeetingIntelligence:
     """Deep seam for local reports and non-persistent meeting questions."""
 
@@ -651,7 +717,7 @@ class MeetingIntelligence:
                 if len(json.dumps([item], ensure_ascii=False).encode("utf-8")) > budget:
                     raise ValueError(tr("Um segmento excede o contexto do modelo local."))
                 candidate = pending + [item]
-                if (len(candidate) > 16
+                if (len(candidate) > MAX_CHUNK_SEGMENTS
                         or len(json.dumps(candidate, ensure_ascii=False).encode("utf-8")) > budget):
                     if not pending:
                         raise ValueError(tr("Um segmento excede o contexto do modelo local."))
@@ -724,7 +790,7 @@ class MeetingIntelligence:
         if model_file is None:
             raise ValueError(tr("Baixe o modelo selecionado na aba Resumo antes de gerar o resumo."))
         context = min(self.max_context, entry.get("context_length", self.max_context))
-        budget = context - 1536
+        budget = int((context - RESERVED_CONTEXT_TOKENS) * EVIDENCE_BYTES_PER_TOKEN)
         if budget < 512:
             raise ValueError(tr("O contexto do modelo local é pequeno demais para gerar um resultado seguro."))
         return entry, model_file, context, budget
@@ -1023,9 +1089,10 @@ class MeetingIntelligence:
                     "keep only the most important supported points, preserve valid citation IDs, "
                     "emit the exact schema, and never omit required sections."
                 )
-            raw = runtime.generate(prompt, payload, cancel_event=cancel_event,
+            model_payload, originals = _alias_citations(payload)
+            raw = runtime.generate(prompt, model_payload, cancel_event=cancel_event,
                                    disable_thinking=entry.get("disable_thinking", False))
-            document = self._json_response(raw, N_("relatório"))
+            document = _restore_citations(self._json_response(raw, N_("relatório")), originals)
             return self._validate_report(document, attempt_profile, allowed, evidence, budget,
                                          source_text_by_id, limit)
         try:

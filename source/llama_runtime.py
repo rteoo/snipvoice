@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path, PurePosixPath
 import sys
 
@@ -85,3 +86,146 @@ def verify_llama_runtime():
     if parameters.vocab_only or parameters.no_alloc:
         raise RuntimeError("Custom llama.cpp native parameter ABI is incompatible")
     return manifest
+
+
+# ggml_backend_dev_type, in header order.
+_DEVICE_TYPES = ("cpu", "gpu", "igpu", "accel", "meta")
+
+
+def load_backends(ggml=None, library_dir=None, base=None):
+    """Register the wheel's own ggml backends and return the devices found.
+
+    Portable builds ship every backend (CPU variants, Vulkan) as a loadable
+    module, and ggml picks the best CPU variant and any usable GPU on this
+    machine. llama.cpp's implicit loader searches the executable's folder and
+    the current directory, so the package's ``lib`` folder is registered
+    explicitly first; that implicit scan then never runs. Static builds
+    already register their backends, and nothing is loaded for them.
+
+    The registry lives in ``ggml``; device queries live in ``ggml-base``,
+    which Windows does not re-export through ``ggml``.
+    """
+    import ctypes
+
+    if ggml is None:
+        from llama_cpp import _ggml
+        from llama_cpp._ctypes_extensions import load_shared_library
+        ggml, library_dir = _ggml.libggml, _ggml.libggml_base_path
+        base = load_shared_library("ggml-base", Path(library_dir))
+    base = ggml if base is None else base
+    count = ggml.ggml_backend_dev_count
+    count.argtypes, count.restype = [], ctypes.c_size_t
+    if not count():
+        load = ggml.ggml_backend_load_all_from_path
+        load.argtypes, load.restype = [ctypes.c_char_p], None
+        load(os.fsencode(library_dir))
+        if not count():
+            raise RuntimeError("The llama.cpp runtime found no compute backend in its library folder")
+    get = ggml.ggml_backend_dev_get
+    get.argtypes, get.restype = [ctypes.c_size_t], ctypes.c_void_p
+    for name in ("ggml_backend_dev_name", "ggml_backend_dev_description"):
+        getattr(base, name).argtypes = [ctypes.c_void_p]
+        getattr(base, name).restype = ctypes.c_char_p
+    kind = base.ggml_backend_dev_type
+    kind.argtypes, kind.restype = [ctypes.c_void_p], ctypes.c_int
+    memory = base.ggml_backend_dev_memory
+    memory.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+    memory.restype = None
+    devices = []
+    for index in range(count()):
+        device = get(index)
+        free, total = ctypes.c_size_t(0), ctypes.c_size_t(0)
+        memory(device, ctypes.byref(free), ctypes.byref(total))
+        value = kind(device)
+        devices.append({
+            "name": (base.ggml_backend_dev_name(device) or b"").decode("utf-8", "replace"),
+            "description": (base.ggml_backend_dev_description(device) or b"").decode("utf-8", "replace"),
+            "type": _DEVICE_TYPES[value] if 0 <= value < len(_DEVICE_TYPES) else "unknown",
+            "free": free.value, "total": total.value,
+        })
+    return devices
+
+
+def offload_devices(devices):
+    """Devices llama.cpp offloads to by default: discrete GPUs, else iGPUs."""
+    discrete = [device for device in devices if device["type"] == "gpu"]
+    return discrete or [device for device in devices if device["type"] == "igpu"]
+
+
+class LazyGrammarGreedySampler:
+    """Greedy decoding that checks the grammar against one token at a time.
+
+    The wrapper applies a grammar to the whole vocabulary before choosing each
+    token, on the CPU, which made constrained reports 12-15x slower than free
+    text on a GPU. For greedy decoding the result is the same if only the
+    overall best token is checked first: when the grammar accepts it, it is
+    also the best accepted token. Only a rejection applies the grammar to the
+    full vocabulary, exactly as before, so every chosen token is unchanged.
+    """
+
+    def __init__(self, llama, grammar):
+        import llama_cpp
+
+        self._api = llama_cpp
+        self._vocabulary = llama.n_vocab()
+        self._grammar = llama_cpp.llama_sampler_init_grammar(
+            llama._model.vocab, grammar._grammar.encode("utf-8"), grammar._root.encode("utf-8"))
+        if not self._grammar:
+            raise RuntimeError("llama.cpp rejected the report grammar")
+        self._one = (llama_cpp.llama_token_data * 1)()
+        self._all = None
+
+    def _apply(self, data, size):
+        import ctypes
+        candidates = self._api.llama_token_data_array(data=data, size=size, selected=-1, sorted=False)
+        self._api.llama_sampler_apply(self._grammar, ctypes.byref(candidates))
+
+    def sample(self, ctx, idx=-1):
+        import numpy
+
+        logits = numpy.ctypeslib.as_array(self._api.llama_get_logits_ith(ctx.ctx, idx),
+                                          shape=(self._vocabulary,))
+        # argmax keeps the first of equal maxima, like llama.cpp's greedy sampler.
+        token = int(logits.argmax())
+        self._one[0].id, self._one[0].logit, self._one[0].p = token, float(logits[token]), 0.0
+        self._apply(self._one, 1)
+        if self._one[0].logit == float("-inf"):
+            if self._all is None:
+                self._all = (self._api.llama_token_data * self._vocabulary)()
+            table = numpy.frombuffer(self._all, dtype=[("id", "<i4"), ("logit", "<f4"), ("p", "<f4")])
+            table["id"] = numpy.arange(self._vocabulary)
+            table["logit"] = logits
+            table["p"] = 0.0
+            self._apply(self._all, self._vocabulary)
+            token = int(table["logit"].argmax())
+            if table["logit"][token] == float("-inf"):
+                raise RuntimeError("The report grammar accepts no next token")
+        self._api.llama_sampler_accept(self._grammar, token)
+        return token
+
+    def close(self):
+        grammar, self._grammar = self._grammar, None
+        if grammar:
+            self._api.llama_sampler_free(grammar)
+
+    def __del__(self):
+        self.close()
+
+
+def use_lazy_grammar(llama):
+    """Route this model's grammar-constrained greedy decoding through
+    LazyGrammarGreedySampler; any other sampling keeps the wrapper's chain."""
+    original = llama._init_sampler
+
+    def init_sampler(**options):
+        neutral = (options.get("temp") == 0.0 and options.get("grammar") is not None
+                   and options.get("logits_processor") is None and not options.get("mirostat_mode")
+                   and options.get("repeat_penalty", 1.0) == 1.0
+                   and options.get("frequency_penalty", 0.0) == 0.0
+                   and options.get("presence_penalty", 0.0) == 0.0)
+        if not neutral:
+            return original(**options)
+        return LazyGrammarGreedySampler(llama, options["grammar"])
+
+    llama._init_sampler = init_sampler
+    return llama
