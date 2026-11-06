@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path, PurePosixPath
 import sys
 
@@ -85,3 +86,67 @@ def verify_llama_runtime():
     if parameters.vocab_only or parameters.no_alloc:
         raise RuntimeError("Custom llama.cpp native parameter ABI is incompatible")
     return manifest
+
+
+# ggml_backend_dev_type, in header order.
+_DEVICE_TYPES = ("cpu", "gpu", "igpu", "accel", "meta")
+
+
+def load_backends(ggml=None, library_dir=None, base=None):
+    """Register the wheel's own ggml backends and return the devices found.
+
+    Portable builds ship every backend (CPU variants, Vulkan) as a loadable
+    module, and ggml picks the best CPU variant and any usable GPU on this
+    machine. llama.cpp's implicit loader searches the executable's folder and
+    the current directory, so the package's ``lib`` folder is registered
+    explicitly first; that implicit scan then never runs. Static builds
+    already register their backends, and nothing is loaded for them.
+
+    The registry lives in ``ggml``; device queries live in ``ggml-base``,
+    which Windows does not re-export through ``ggml``.
+    """
+    import ctypes
+
+    if ggml is None:
+        from llama_cpp import _ggml
+        from llama_cpp._ctypes_extensions import load_shared_library
+        ggml, library_dir = _ggml.libggml, _ggml.libggml_base_path
+        base = load_shared_library("ggml-base", Path(library_dir))
+    base = ggml if base is None else base
+    count = ggml.ggml_backend_dev_count
+    count.argtypes, count.restype = [], ctypes.c_size_t
+    if not count():
+        load = ggml.ggml_backend_load_all_from_path
+        load.argtypes, load.restype = [ctypes.c_char_p], None
+        load(os.fsencode(library_dir))
+        if not count():
+            raise RuntimeError("The llama.cpp runtime found no compute backend in its library folder")
+    get = ggml.ggml_backend_dev_get
+    get.argtypes, get.restype = [ctypes.c_size_t], ctypes.c_void_p
+    for name in ("ggml_backend_dev_name", "ggml_backend_dev_description"):
+        getattr(base, name).argtypes = [ctypes.c_void_p]
+        getattr(base, name).restype = ctypes.c_char_p
+    kind = base.ggml_backend_dev_type
+    kind.argtypes, kind.restype = [ctypes.c_void_p], ctypes.c_int
+    memory = base.ggml_backend_dev_memory
+    memory.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
+    memory.restype = None
+    devices = []
+    for index in range(count()):
+        device = get(index)
+        free, total = ctypes.c_size_t(0), ctypes.c_size_t(0)
+        memory(device, ctypes.byref(free), ctypes.byref(total))
+        value = kind(device)
+        devices.append({
+            "name": (base.ggml_backend_dev_name(device) or b"").decode("utf-8", "replace"),
+            "description": (base.ggml_backend_dev_description(device) or b"").decode("utf-8", "replace"),
+            "type": _DEVICE_TYPES[value] if 0 <= value < len(_DEVICE_TYPES) else "unknown",
+            "free": free.value, "total": total.value,
+        })
+    return devices
+
+
+def offload_devices(devices):
+    """Devices llama.cpp offloads to by default: discrete GPUs, else iGPUs."""
+    discrete = [device for device in devices if device["type"] == "gpu"]
+    return discrete or [device for device in devices if device["type"] == "igpu"]

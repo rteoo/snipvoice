@@ -398,12 +398,17 @@ class WorkerTests(unittest.TestCase):
         output = io.StringIO()
         requests = [{"type": "open", "model_path": "synthetic.gguf"},
                     {"type": "embed", "texts": [query_text("Pergunta")]}, {"type": "close"}]
-        with mock.patch.dict(sys.modules, {"llama_cpp": module}):
+        module.LLAMA_SPLIT_MODE_NONE = 0
+        with mock.patch.dict(sys.modules, {"llama_cpp": module}), \
+                mock.patch("llama_runtime.load_backends") as backends:
             serve(io.StringIO("".join(json.dumps(item) + "\n" for item in requests)), output)
+        backends.assert_called_once_with()
         model = instances[0]
         self.assertEqual(model.embed_options, {"normalize": False, "truncate": False})
         self.assertEqual(model.options["pooling_type"], 1)
-        self.assertEqual(model.options["n_gpu_layers"], 0)
+        # Background indexing never offloads, even when a GPU was discovered.
+        self.assertEqual((model.options["n_gpu_layers"], model.options["main_gpu"],
+                          model.options["split_mode"]), (0, -1, 0))
         self.assertTrue(model.closed)
         self.assertEqual(len(json.loads(output.getvalue().splitlines()[1])["vectors"][0]), DIMENSION)
         module.llama_model_n_embd_out.assert_called_with("synthetic-native-handle")

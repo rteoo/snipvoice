@@ -8,7 +8,10 @@ from summary_runtime_worker import _inherited_stream, _send
 
 
 def _open_model(path):
-    from llama_cpp import Llama, LLAMA_POOLING_TYPE_MEAN, llama_model_n_embd_out
+    from llama_cpp import Llama, LLAMA_POOLING_TYPE_MEAN, LLAMA_SPLIT_MODE_NONE, llama_model_n_embd_out
+    from llama_runtime import load_backends
+
+    load_backends()
 
     class ProjectedEmbeddings(Llama):
         def n_embd(self):
@@ -22,7 +25,10 @@ def _open_model(path):
     # authoritative transcript passages.
     return ProjectedEmbeddings(model_path=path, embedding=True, pooling_type=LLAMA_POOLING_TYPE_MEAN,
                                n_ctx=8192, n_batch=8192, n_ubatch=8192,
-                               n_threads=2, n_threads_batch=2, n_gpu_layers=0, verbose=False)
+                               n_threads=2, n_threads_batch=2, n_gpu_layers=0,
+                               # Background indexing stays on the CPU: with no
+                               # split and main_gpu=-1 llama.cpp offloads no ops.
+                               split_mode=LLAMA_SPLIT_MODE_NONE, main_gpu=-1, verbose=False)
 
 
 def serve(input_stream, output_stream):
