@@ -305,7 +305,6 @@ class PackagingExcludeTests(unittest.TestCase):
             self.assertIn("--voice-runtime-probe", text)
             self.assertIn("--collect-all llama_cpp", text)
             self.assertIn("--summary-runtime-probe", text)
-            self.assertIn("--embedding-runtime-probe", text)
 
     def test_release_bundles_the_application_license(self):
         windows = os.path.join(ROOT, "build_release.bat")

@@ -2318,6 +2318,22 @@ class VoiceController:
         self._provider.delete_profile(profile)
         return True
 
+    def delete_profile_model(self, profile):
+        """Remove one downloaded catalog profile; the dictation profile also turns voice off.
+
+        Refused (False) while a recording holds the runtime, this profile is
+        downloading, or a model switch may still have the previous one loaded.
+        """
+        if profile == self.settings.profile:
+            return self.delete_active_model()
+        with self._lock:
+            if self._meeting_token is not None or self._state == STATE_LOADING or (
+                    self._model_download_active and self._model_download_profile == profile):
+                return False
+        self._provider.delete_profile(profile)
+        self._emit_status()
+        return True
+
 
     def reserve_for_meeting(self):
         """Temporarily close admission and unload dictation without persisting disable."""

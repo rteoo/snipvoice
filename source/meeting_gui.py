@@ -66,7 +66,7 @@ MAX_ANSWER_CHARS = 4_000
 MAX_CHAT_TURNS = 24
 MAX_CHAT_SESSIONS = 8
 LONG_JOB_KEYS = frozenset({"generate_report", "ask_this_meeting", "cross_question", "summary_model",
-                           "semantic_model", "semantic_rebuild", "rebuild_index"})
+                           "rebuild_index"})
 REPORT_HISTORY_LIMIT = 500
 MAX_RETENTION_PREVIEW_ITEMS = 64
 MAX_TRASH_ITEMS = 256
@@ -88,7 +88,6 @@ INDEX_STATE_LABELS = {"ready": N_("pronto"), "stale": N_("desatualizado"), "rebu
                       "compatibility": N_("modo de compatibilidade"), "cancelled": N_("cancelado"),
                       "failed": N_("falhou")}
 PROFILE_LABELS = {"whisper-small": N_("Leve · Whisper Small"), "balanced": N_("Equilibrado · Parakeet"),
-                  "whisper-turbo": N_("Intermediário · Whisper Turbo"),
                   "whisper-large-v3": N_("Máxima precisão · Whisper Large"),
                   "streaming": N_("Transcrição contínua")}
 LANGUAGE_LABELS = {"auto": N_("Automático"), "pt-BR": N_("Português (Brasil)"),
@@ -1389,28 +1388,7 @@ class MeetingWindow:
         )
 
     def _build_search_models(self, parent):
-        from embedding_models import MODEL
         self._label(parent, tr("Busca"), font=self.ui.heading()).pack(anchor="w")
-        self.semantic_enabled = tk.BooleanVar(self.window, False)
-        self.semantic_cancel = None
-        tk.Checkbutton(parent, text=tr("Busca semântica local"), variable=self.semantic_enabled,
-                       command=self.toggle_semantic_search, font=self.ui.body(),
-                       **self.ui.checkbutton_colors(self.ui.surface)).pack(anchor="w")
-        controls = tk.Frame(parent, bg=self.ui.surface)
-        controls.pack(fill="x", pady=self.ui.space_sm)
-        table = ui_theme.model_table(parent, self.ui)
-        state, actions = ui_theme.model_table_row(table, 1,
-            (MODEL["name"], tr("Busca semântica"), format_model_size(MODEL["size_bytes"]), MODEL["license_id"]), self.ui)
-        self.semantic_model_action = self._button(actions, tr("Instalar modelo…"), self.install_embedding_model)
-        self.semantic_model_action.pack(side="left")
-        self._button(controls, tr("Reindexar"), self.rebuild_semantic_index).pack(side="left", padx=(4, 0))
-        self.semantic_cancel_button = self._button(controls, tr("Cancelar"), self.cancel_semantic_operation)
-        self._park_cancel(self.semantic_cancel_button, "pack", side="left", padx=(4, 0))
-        self.semantic_status = tk.StringVar(self.window, tr("Busca por palavras ativa."))
-        self.semantic_progress_state = [None]
-        state.configure(textvariable=self.semantic_status)
-        self._wrap_label(parent, "", textvariable=self.semantic_status,
-                         fg=self.ui.text_muted).pack(fill="x")
         repair = tk.Frame(parent, bg=self.ui.surface)
         repair.pack(fill="x", pady=self.ui.space_md)
         self.rebuild_button = self._button(repair, tr("Reparar busca"), self.rebuild_index)
@@ -2410,8 +2388,6 @@ class MeetingWindow:
     def _sync_job_cancels(self):
         """Show each Cancel while, and only while, the job it stops runs."""
         for name, running in (
-            ("semantic_cancel_button", getattr(self, "semantic_cancel", None) is not None
-             and not getattr(self, "_semantic_model_download_active", False)),
             ("rebuild_cancel_button", getattr(self, "rebuild_cancel", None) is not None),
             ("cross_cancel_button", bool(getattr(self, "cross_pending", None))),
             ("cancel_summary_button", bool(getattr(self, "summary_pending", None))),
@@ -5781,9 +5757,6 @@ class MeetingWindow:
                     candidate = searcher(query, limit=MAX_SEARCH_RESULTS, **filters, status=status)
                     if isinstance(candidate, (list, tuple)):
                         search_results = list(candidate)[:MAX_SEARCH_RESULTS]
-            info = getattr(self.controller, "semantic_info", None)
-            if callable(info):
-                page["semantic_info"] = info()
             return page, search_results, generation
         self._submit("library", read, self._library_loaded)
 
@@ -5814,13 +5787,6 @@ class MeetingWindow:
             items = list(islice(page.get("items", []) or [], PAGE_SIZE))
             self.library_next_cursor = page.get("next_cursor")
             index_state = page.get("index_state")
-            info = page.get("semantic_info")
-            if isinstance(info, dict) and hasattr(self, "semantic_enabled"):
-                self.semantic_enabled.set(info.get("enabled", False))
-                state = info.get("state", "disabled")
-                self.semantic_status.set(tr("Busca semântica: {state}",
-                    state=tr(INDEX_STATE_LABELS.get(state, state))) if info.get("enabled")
-                    else tr("Busca por palavras ativa."))
         else:
             items = list(islice(sessions or [], PAGE_SIZE))
             self.library_next_cursor = None
@@ -6484,94 +6450,6 @@ class MeetingWindow:
         self.trash_receipt = message
         self.refresh_trash()
         self.refresh_library()
-
-    def toggle_semantic_search(self):
-        enabled = self.semantic_enabled.get()
-        self.library_filter_generation += 1
-        self.semantic_status.set(tr("Salvando opção de busca…"))
-        def finished(_value, error):
-            if error:
-                self.semantic_status.set(tr("Não foi possível salvar a opção de busca semântica."))
-            self.search()
-        self._submit("semantic_settings", lambda: self.controller.set_semantic_search(enabled), finished)
-
-    def install_embedding_model(self):
-        if self.semantic_cancel is not None:
-            return
-        from embedding_models import MODEL, download_embedding_model
-        if not messagebox.askyesno(tr("Baixar modelo local"),
-                tr("Baixar {name} ({size})?\nLicença: {license}\nO arquivo será verificado por SHA-256. "
-                   "A busca semântica exige um runtime local compatível.", name=MODEL["name"],
-                   size=format_model_size(MODEL["size_bytes"]), license=MODEL["license_id"]), parent=self.window):
-            return
-        self.semantic_cancel = threading.Event()
-        event = self.semantic_cancel
-        self._semantic_model_download_active = True
-        button = getattr(self, "semantic_model_action", None)
-        if button is not None:
-            button.configure(text=tr("Cancelar"), command=self.cancel_semantic_operation)
-        self.semantic_status.set(tr("Baixando modelo com verificação SHA-256…"))
-        self._sync_job_cancels()
-        progress_state = getattr(self, "semantic_progress_state", [None])
-        self.semantic_progress_state = progress_state
-        def progress(done, total):
-            progress_state[0] = (done, total)
-        if not self._submit("semantic_model", lambda: download_embedding_model(cancel_event=event,
-                progress=progress),
-                            self._semantic_operation_finished):
-            self.semantic_cancel = None
-            self._semantic_model_download_active = False
-            if button is not None:
-                button.configure(text=tr("Instalar modelo…"), command=self.install_embedding_model)
-            self._sync_job_cancels()
-            self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
-
-    def rebuild_semantic_index(self):
-        if self.semantic_cancel is not None:
-            return
-        if not self.semantic_enabled.get():
-            self.semantic_status.set(tr("Ative a busca semântica antes de reindexar."))
-            return
-        self.semantic_cancel = threading.Event()
-        event = self.semantic_cancel
-        self.semantic_status.set(tr("Indexando transcrições localmente…"))
-        self._sync_job_cancels()
-        if not self._submit("semantic_rebuild", lambda: self.controller.rebuild_semantic_index(cancel_event=event),
-                            self._semantic_operation_finished):
-            self.semantic_cancel = None
-            self._sync_job_cancels()
-            self.semantic_status.set(tr("Aguarde a operação atual e tente novamente."))
-
-    def cancel_semantic_operation(self):
-        if self.semantic_cancel is None:
-            return
-        self.semantic_cancel.set()
-        queued_model = self.bridge.cancel_queued("semantic_model")
-        queued_rebuild = self.bridge.cancel_queued("semantic_rebuild")
-        if queued_model or queued_rebuild:
-            self._semantic_operation_finished(None, "cancelled")
-            return
-        cancel = getattr(self.controller, "cancel_semantic_index", None)
-        if callable(cancel):
-            cancel()
-        self.semantic_status.set(tr("Cancelamento solicitado; busca por palavras disponível."))
-
-    def _semantic_operation_finished(self, value, error):
-        self.semantic_cancel = None
-        self._semantic_model_download_active = False
-        if hasattr(self, "semantic_progress_state"):
-            self.semantic_progress_state[0] = None
-        button = getattr(self, "semantic_model_action", None)
-        if button is not None:
-            button.configure(text=tr("Instalar modelo…"), command=self.install_embedding_model)
-        self._sync_job_cancels()
-        if error:
-            self.semantic_status.set(tr("Operação semântica cancelada ou indisponível. Busca por palavras disponível."))
-        elif isinstance(value, dict) and value.get("state") == "rebuilding":
-            self.semantic_status.set(tr("Indexando transcrições localmente…"))
-        else:
-            self.semantic_status.set(tr("Operação semântica concluída."))
-            self.search()
 
     def rebuild_index(self):
         if self.rebuild_cancel is not None:
@@ -8041,17 +7919,6 @@ class MeetingWindow:
         try:
             had_results = not self.bridge.results.empty()
             self.bridge.drain()
-            semantic_state = getattr(self.controller, "semantic_state", None)
-            if (callable(semantic_state) and hasattr(self, "semantic_enabled")
-                    and self.semantic_enabled.get() and self.semantic_cancel is None):
-                state = semantic_state()
-                if isinstance(state, str):
-                    previous = getattr(self, "last_semantic_state", None)
-                    self.last_semantic_state = state
-                    self.semantic_status.set(tr("Busca semântica: {state}",
-                        state=tr(INDEX_STATE_LABELS.get(state, state))))
-                    if previous == "rebuilding" and state == "ready":
-                        self.refresh_library()
             with self.summary_progress_lock:
                 progress = self.summary_progress
             if progress is not None:
@@ -8064,11 +7931,6 @@ class MeetingWindow:
                 label = getattr(self, "summary_model_states", {}).get(getattr(self, "_summary_download_profile", None))
                 if label is not None:
                     label.configure(text=tr("Baixando {percent}%", percent=min(100, percent)))
-            semantic_progress = getattr(self, "semantic_progress_state", [None])[0]
-            if semantic_progress is not None and self.semantic_cancel is not None:
-                done, total = semantic_progress
-                self.semantic_status.set(tr("Baixando {percent}%", percent=min(100, int(done * 100 / total)))
-                                         if total else tr("Baixando…"))
             rebuild = self.rebuild_progress
             if getattr(self, "rebuild_cancel", None) is not None and isinstance(rebuild, dict):
                 done, total = rebuild.get("done", 0), rebuild.get("total")
@@ -8240,10 +8102,8 @@ class MeetingWindow:
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:
             self.summary_download_cancel.set()
-        for name in ("rebuild_cancel", "semantic_cancel"):
-            event = getattr(self, name, None)
-            if event is not None:
-                event.set()
+        if getattr(self, "rebuild_cancel", None) is not None:
+            self.rebuild_cancel.set()
         try:
             self.controller.stop_playback()
         except (AttributeError, RuntimeError):

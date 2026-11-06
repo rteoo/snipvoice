@@ -286,12 +286,18 @@ input.days { width: 72px; text-align: right; }
 .save-bar .caption { margin-right: auto; }
 table.models th:nth-child(2), table.models td:nth-child(2) { width: 84px; }
 table.models th:nth-child(3), table.models td:nth-child(3) { width: 100px; }
-table.models th:nth-child(4), table.models td:nth-child(4) { width: 120px; }
+table.models th:nth-child(4), table.models td:nth-child(4) { width: 136px; }
 table.models th:nth-child(5), table.models td:nth-child(5) { width: 112px; }
-table.models td.num { padding-right: 4px; }
+table.models td:last-child { padding-right: 4px; }
 table.models td.model { height: auto; padding-block: 8px; white-space: normal; overflow: visible; }
-table.models .model-name { display: block; }
+table.models .model-name { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-weight: 600; }
 table.models td.model .caption { display: block; overflow-wrap: anywhere; }
+table.models td.state { white-space: normal; }
+table.models td.state progress { display: block; margin-top: 4px; }
+.tag {
+  display: inline-flex; padding: 0 6px; border-radius: var(--native-control-radius);
+  font-size: var(--native-type-caption); font-weight: 400; color: var(--color-info-fg); background: var(--color-info-bg);
+}
 .history th:first-child { width: 120px; }
 .history th:nth-child(2) { width: 110px; }
 

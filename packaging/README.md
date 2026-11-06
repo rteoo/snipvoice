@@ -59,12 +59,12 @@ python packaging\clean_audio_runtime.py `
   --compliance-dir build\clean-audio-compliance
 ```
 
-## Local summary and embedding runtime
+## Local summary runtime
 
 `llama_runtime.py` builds the approved Python wrapper/native pair from
 SHA-256-pinned source archives. The wrapper is 0.3.36 at
 `1652066e0af45f2313b339670ef9555e8a54e545`; llama.cpp is
-`4fbc76dec51d0add466f0210855c0596589b60d4`, which includes EmbeddingGemma 2.
+`4fbc76dec51d0add466f0210855c0596589b60d4`.
 An upstream 0.3.36 installation has a different native revision and is rejected
 by the release preflight. Never replace just the DLLs in an older wrapper.
 
@@ -93,7 +93,6 @@ build toolchain, use a fresh wheel directory:
 python -m pip install -r source/requirements.txt -r source/requirements-voice.txt
 python -m pip install --require-hashes -r packaging/requirements-build.lock
 python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama-wheel --install
-python source/embedding_runtime_probe.py
 python source/summary_runtime_probe.py
 ```
 
@@ -114,8 +113,8 @@ ABI; they allow signing to change library bytes. macOS's existing final signatur
 gate remains required. Frozen macOS probes read the sealed manifest directly from
 `Contents/Resources/llama_cpp`, alongside libraries in `Contents/Frameworks/llama_cpp`,
 so PyInstaller's data cross-links do not trigger source-install symlink guards.
-Both platform packagers run `--embedding-runtime-probe`
-before promotion alongside the summary/voice/capture probes. These model-free
+Both platform packagers run `--summary-runtime-probe`
+before promotion alongside the voice/capture probes. These model-free
 checks prove packaging/import compatibility, not model quality or capture.
 
 ## Microsoft Store (MSIX)

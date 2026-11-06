@@ -1,5 +1,8 @@
 # EmbeddingGemma 2: semantic meeting retrieval
 
+> **Removed in 1.4.0.** Semantic search and its EmbeddingGemma model were taken out of
+> SnipVoice; word search and search repair remain. This page is kept as history.
+
 Date: 2026-10-06. Status: proposed implementation; documentation only.
 
 ## Outcome and existing architecture

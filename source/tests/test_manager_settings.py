@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from unittest import mock
 
@@ -24,7 +25,7 @@ from voice_catalog import available_languages, selectable_catalog
 WAIT = 5.0
 TMP_ROOT = os.path.join(os.path.dirname(__file__), "tmp")
 # No catalog model lacks language hints today; the tests stand one in.
-ONE_LANGUAGE = "whisper-turbo"
+ONE_LANGUAGE = "whisper-large-v3"
 
 
 def one_language(profile):
@@ -56,7 +57,9 @@ class FakeVoice:
         self.cache_dir = cache_dir
         self.downloads = []
         self.cancelled = []
+        self.deleted = []
         self.accept = True
+        self.settings = types.SimpleNamespace(profile="balanced")
 
     def status_snapshot(self):
         return {"download_active": False}
@@ -67,6 +70,12 @@ class FakeVoice:
 
     def cancel_profile_download(self, profile):
         self.cancelled.append(profile)
+        return True
+
+    def delete_profile_model(self, profile):
+        if not self.accept:
+            return False
+        self.deleted.append(profile)
         return True
 
 
@@ -233,12 +242,38 @@ class ModelTests(SettingsTestCase):
     def test_rows_lead_with_a_readable_name_and_a_detail_line(self):
         view = self.actions.models({})
         self.assertEqual([row["id"] for row in view["voice"]],
-                         ["whisper-small", "balanced", "whisper-turbo", "whisper-large-v3"])
+                         ["whisper-small", "balanced", "whisper-large-v3"])
         self.assertEqual(view["voice"][1]["label"], "Equilibrado · Parakeet")
         self.assertEqual(view["voice"][1]["name"], "nvidia/parakeet-tdt-0.6b-v3")
         self.assertEqual([row["id"] for row in view["summary"]],
                          ["qwen3.5-2b-q4", "gemma-4-e2b-q4", "qwen3.5-4b-q4", "gemma-4-e4b-q4"])
-        self.assertTrue(all(row["description"] for row in view["summary"]))
+        self.assertTrue(all(row["description"] for row in view["voice"] + view["summary"]))
+
+    def test_rows_mark_the_models_settings_use(self):
+        self.saved.update(voice_profile="whisper-small", meeting_profile="whisper-large-v3",
+                          meeting_summary_model="gemma-4-e2b-q4")
+        view = self.actions.models({})
+        # The live dictation profile counts too, even before settings name it.
+        self.assertEqual({row["id"] for row in view["voice"] if row["inUse"]}, {"balanced", "whisper-large-v3"})
+        self.assertEqual([row["id"] for row in view["summary"] if row["inUse"]], ["gemma-4-e2b-q4"])
+
+    def test_voice_removal_asks_first_and_warns_when_it_stops_dictation(self):
+        first = self.actions.delete_voice_model({"id": "balanced"})
+        self.assertEqual(first["status"], "confirm")
+        self.assertIn("A entrada por voz será desligada", first["message"])
+        other = self.actions.delete_voice_model({"id": "whisper-small"})
+        self.assertNotIn("A entrada por voz será desligada", other["message"])
+        self.assertEqual(self.voice.deleted, [])
+        done = self.actions.delete_voice_model({"id": "whisper-small", "confirmed": True})
+        self.assertEqual(done["status"], "removed")
+        self.assertEqual(self.voice.deleted, ["whisper-small"])
+
+    def test_voice_removal_is_refused_while_the_model_is_busy(self):
+        self.voice.accept = False
+        with self.assertRaises(RpcFailure):
+            self.actions.delete_voice_model({"id": "whisper-small", "confirmed": True})
+        with self.assertRaises(RpcFailure):
+            self.actions.delete_voice_model({"id": "streaming", "confirmed": True})
 
     def test_voice_downloads_ask_first_then_start(self):
         profile = selectable_catalog()[0]["profile"]
