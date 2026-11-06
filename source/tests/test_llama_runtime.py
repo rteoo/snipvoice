@@ -242,6 +242,17 @@ class LlamaRuntimeTests(unittest.TestCase):
                     recipe.cmake_args("portable")
         self.assertEqual(recipe.cmake_args("minimal"), recipe.CMAKE_ARGS)
 
+    def test_windows_rejects_a_work_dir_deeper_than_the_msbuild_path_budget(self):
+        work = self.root / ("w" * recipe.WINDOWS_WORK_DIR_LIMIT)
+        argv = ["llama_runtime.py", "--work-dir", str(work), "--wheel-dir", str(self.root / "out")]
+        with mock.patch.object(recipe.sys, "argv", argv), \
+             mock.patch.object(recipe.platform, "system", return_value="Windows"), \
+             mock.patch.object(recipe, "build_environment") as environment:
+            with self.assertRaisesRegex(RuntimeError, "MSBuild path limit"):
+                recipe.main()
+            environment.assert_not_called()
+        self.assertFalse(work.exists(), "The guard runs before creating any directory")
+
     def test_portable_build_requires_an_existing_vulkan_sdk(self):
         with mock.patch.dict(recipe.os.environ, {"PATH": "synthetic-path"}, clear=True), \
              mock.patch.object(recipe.platform, "system", return_value="Windows"), \

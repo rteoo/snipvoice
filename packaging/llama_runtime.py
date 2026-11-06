@@ -35,6 +35,11 @@ CMAKE_ARGS = "-DGGML_CUDA=OFF -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=O
 PORTABLE_CMAKE_ARGS = ("-DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_VULKAN=ON"
                        " -DCMAKE_INSTALL_BINDIR=llama_cpp/lib")
 BACKENDS = ("portable", "minimal")
+# ceiling: MSBuild keeps the 260-character path limit. The Vulkan shader
+# generator is a nested CMake project whose compiler probe sits about 200
+# characters below the work dir, so short names are used inside it and longer
+# work dirs are refused up front instead of failing deep in the build.
+WINDOWS_WORK_DIR_LIMIT = 48
 
 
 def acquire(url, destination, digest):
@@ -185,21 +190,28 @@ def main():
                              "minimal: the single built-in backend (CPU, or Metal on macOS)")
     arguments = parser.parse_args()
     work, output = arguments.work_dir.resolve(), arguments.wheel_dir.resolve()
+    if platform.system() == "Windows" and len(str(work)) > WINDOWS_WORK_DIR_LIMIT:
+        raise RuntimeError(f"Use a --work-dir of at most {WINDOWS_WORK_DIR_LIMIT} characters on Windows "
+                           f"(MSBuild path limit); {work} has {len(str(work))}")
     work.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
     environment = build_environment(arguments.backends)
-    with tempfile.TemporaryDirectory(prefix="llama-build-", dir=work) as temporary:
+    with tempfile.TemporaryDirectory(prefix="lb-", dir=work) as temporary:
         root = Path(temporary)
         environment["TMP"] = environment["TEMP"] = str(root)
         extracted = {}
         for name, (url, digest) in SOURCES.items():
             archive = work / (name + ".tar.gz")
             acquire(url, archive, digest)
-            extracted[name] = extract(archive, root / name)
+            # One-letter roots: the archive folders carry 40-character revisions.
+            short = root / name[0]
+            os.replace(extract(archive, root / ("x" + name[0])), short)
+            extracted[name] = short
         wrapper, native = extracted["wrapper"], extracted["native"]
         shutil.copytree(native, wrapper / "vendor/llama.cpp", dirs_exist_ok=True)
         wheels = root / "wheels"
         subprocess.run([sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
+                        "--config-settings=build-dir=" + str(root / "b"),
                         "--wheel-dir", str(wheels), str(wrapper)], env=environment, check=True)
         candidates = list(wheels.glob("llama_cpp_python-*.whl"))
         if len(candidates) != 1:
