@@ -90,9 +90,35 @@ def verify_llama_runtime():
 
 # ggml_backend_dev_type, in header order.
 _DEVICE_TYPES = ("cpu", "gpu", "igpu", "accel", "meta")
+_LIBRARY_SUFFIX = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
 
 
-def load_backends(ggml=None, library_dir=None, base=None):
+def _cpu_score(path):
+    import ctypes
+    score = getattr(ctypes.CDLL(path), "ggml_backend_score", None)
+    if score is None:
+        return 1
+    score.argtypes, score.restype = [], ctypes.c_int
+    return score()
+
+
+def _best_cpu_backend(library_dir):
+    """The CPU variant ggml's own loader would choose: the highest score.
+
+    Each variant reports 0 when this processor lacks its instruction set.
+    """
+    best, best_score = None, 0
+    for entry in sorted(os.listdir(library_dir)):
+        stem = entry[3:] if entry.startswith("lib") else entry
+        if stem.startswith("ggml-cpu") and entry.endswith(_LIBRARY_SUFFIX):
+            path = os.path.join(library_dir, entry)
+            score = _cpu_score(path)
+            if score > best_score:
+                best, best_score = path, score
+    return best
+
+
+def load_backends(ggml=None, library_dir=None, base=None, *, cpu_only=False):
     """Register the wheel's own ggml backends and return the devices found.
 
     Portable builds ship every backend (CPU variants, Vulkan) as a loadable
@@ -101,6 +127,9 @@ def load_backends(ggml=None, library_dir=None, base=None):
     the current directory, so the package's ``lib`` folder is registered
     explicitly first; that implicit scan then never runs. Static builds
     already register their backends, and nothing is loaded for them.
+
+    ``cpu_only`` loads just the best CPU variant, so a GPU driver that crashes
+    while its devices are listed cannot also take down the CPU fallback.
 
     The registry lives in ``ggml``; device queries live in ``ggml-base``,
     which Windows does not re-export through ``ggml``.
@@ -116,9 +145,16 @@ def load_backends(ggml=None, library_dir=None, base=None):
     count = ggml.ggml_backend_dev_count
     count.argtypes, count.restype = [], ctypes.c_size_t
     if not count():
-        load = ggml.ggml_backend_load_all_from_path
-        load.argtypes, load.restype = [ctypes.c_char_p], None
-        load(os.fsencode(library_dir))
+        if cpu_only:
+            best = _best_cpu_backend(library_dir)
+            if best is not None:
+                load = ggml.ggml_backend_load
+                load.argtypes, load.restype = [ctypes.c_char_p], ctypes.c_void_p
+                load(os.fsencode(best))
+        else:
+            load = ggml.ggml_backend_load_all_from_path
+            load.argtypes, load.restype = [ctypes.c_char_p], None
+            load(os.fsencode(library_dir))
         if not count():
             raise RuntimeError("The llama.cpp runtime found no compute backend in its library folder")
     get = ggml.ggml_backend_dev_get

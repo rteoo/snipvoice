@@ -189,7 +189,7 @@ class NativeSummaryRuntime:
             from llama_runtime import load_backends, offload_devices, use_lazy_grammar
             # Always register first, CPU mode included: otherwise llama.cpp's
             # implicit loader scans the working directory for ggml modules.
-            devices = load_backends()
+            devices = load_backends(cpu_only=device == "cpu")
             gpus = offload_devices(devices) if device == "auto" else []
         except (ImportError, OSError, RuntimeError) as exc:
             raise RuntimeError(
