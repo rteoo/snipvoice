@@ -718,13 +718,25 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertFalse(self.controller.snapshot()["partial"])
         self.assertFalse(any("Verifique a captura" in message for message in messages))
 
-    def test_native_discontinuity_with_position_jump_is_audio_loss(self):
+    def test_short_native_drop_is_recorded_in_words_without_a_toast(self):
         messages = self._record_with_gaps([
             {"device_position": 64233120, "expected_device_position": 64233120},
             {"device_position": 98867040, "expected_device_position": 98865120},
         ])
+        snapshot = self.controller.snapshot()
+        self.assertTrue(snapshot["partial"])
+        self.assertIn("descartou 40 ms do sistema", snapshot["error"])
+        self.assertNotIn("native_discontinuity", snapshot["error"])
+        self.assertEqual(messages, [])
+
+    def test_long_native_drop_alerts_once(self):
+        messages = self._record_with_gaps([
+            {"device_position": 200000, "expected_device_position": 100000},
+            {"device_position": 400000, "expected_device_position": 300000},
+        ])
         self.assertTrue(self.controller.snapshot()["partial"])
-        self.assertEqual(sum("Verifique a captura" in message for message in messages), 1)
+        self.assertEqual([message for message in messages if "descartou" in message],
+                         ["O driver de áudio descartou 2083 ms do sistema; a gravação continua."])
 
     def test_native_discontinuity_without_positions_stays_audio_loss(self):
         self._record_with_gaps([{"device_position": None, "expected_device_position": None}])

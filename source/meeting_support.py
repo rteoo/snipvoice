@@ -217,6 +217,19 @@ def _gap_loses_audio(event, reason):
     return True
 
 
+def _native_dropped_seconds(event, reason):
+    """Seconds a native discontinuity skipped, or None when it is unknown."""
+    if reason != "native_discontinuity":
+        return None
+    position = event.get("device_position")
+    expected = event.get("expected_device_position")
+    rate = event.get("sample_rate")
+    if (not all(isinstance(value, int) and not isinstance(value, bool) for value in (position, expected, rate))
+            or rate <= 0 or position <= expected):
+        return None
+    return (position - expected) / rate
+
+
 def _measure_audio(payload, channels):
     """Return a finite peak and bounded waveform from one native audio block."""
     values = array.array("f")
@@ -797,10 +810,19 @@ class MeetingController:
                             # A reopen keeps the recording going; its health
                             # events decide whether the user must act.
                             reopening = event["type"] == "gap" and "capture_interruption" in reason
-                            if not reopening:
+                            dropped = _native_dropped_seconds(event, reason)
+                            if not reopening and dropped is not None:
+                                source = tr("microfone") if event.get("track") == "microphone" else tr("sistema")
+                                self._error = tr(
+                                    "O driver de áudio descartou {milliseconds} ms do {source}; a gravação continua.",
+                                    milliseconds=max(1, round(dropped * 1000)), source=source)
+                            elif not reopening:
                                 detail = str(event.get("message") or reason or tr("Uma fonte foi interrompida."))[:1024]
                                 self._error = tr("Verifique a captura de áudio: {detail}", detail=detail)
-                        if first_loss and not reopening:
+                        # A sub-second driver drop is recorded and marks the
+                        # meeting partial, but the user cannot act on it, so
+                        # it does not interrupt the meeting with a toast.
+                        if first_loss and not reopening and (dropped is None or dropped >= 1.0):
                             self.notify(self._error)
         except Exception as exc:
             # Never log native buffers, transcript contents, or helper diagnostics.
