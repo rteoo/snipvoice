@@ -82,6 +82,40 @@ class MeetingTranscriptionTests(unittest.TestCase):
     def payload(frames=160, channels=1, value=0.1):
         return b"".join(struct.pack("<f", value) * channels for _ in range(frames))
 
+    def _append_blocks(self, levels, block_seconds=0.1, rate=16000):
+        frames = int(block_seconds * rate)
+        for index, value in enumerate(levels):
+            self.store.append_audio(
+                self.session, self.event(timestamp=index * block_seconds, sequence=index, frames=frames),
+                self.payload(frames=frames, value=value))
+
+    def _chunk_ranges(self):
+        revision = MeetingTranscriber(self.store, FakeProvider()).transcribe(self.session, "balanced", "pt-BR")
+        return [(round(item["start"], 1), round(item["end"], 1))
+                for item in self.store.get_transcript(self.session, revision)]
+
+    def test_chunks_end_inside_a_pause_instead_of_cutting_a_word(self):
+        # 24 s of speech-level audio, a 0.5 s pause, then 10 s more.
+        self._append_blocks([0.1] * 240 + [0.0005] * 5 + [0.1] * 100)
+        ranges = self._chunk_ranges()
+        self.assertEqual(ranges[0][0], 0.0)
+        self.assertGreater(ranges[0][1], 24.2)
+        self.assertLessEqual(ranges[0][1], 24.5)
+        self.assertEqual(ranges[-1][1], 34.5)
+
+    def test_pause_before_two_thirds_of_a_chunk_does_not_split(self):
+        self._append_blocks([0.1] * 100 + [0.0] * 5 + [0.1] * 250)
+        # The hard limit is unchanged: 300 x 0.1 s sums just past 30.0 s.
+        self.assertEqual(self._chunk_ranges()[0], (0.0, 29.9))
+
+    def test_continuous_speech_and_silence_keep_the_hard_limit(self):
+        self._append_blocks([0.1] * 350)
+        self.assertEqual(self._chunk_ranges(), [(0.0, 29.9), (29.9, 35.0)])
+        self.tearDown()
+        self.setUp()
+        self._append_blocks([0.0] * 350)
+        self.assertEqual(self._chunk_ranges(), [(0.0, 29.9), (29.9, 35.0)])
+
     def test_prepares_installed_only_and_writes_timed_source_segments(self):
         self.store.append_audio(self.session, self.event(), self.payload())
         provider = FakeProvider()

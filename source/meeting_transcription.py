@@ -1,6 +1,7 @@
 """Bounded, local transcription jobs for durable meeting recordings."""
 
 import array
+import collections
 import itertools
 import math
 import operator
@@ -17,6 +18,15 @@ from voice_resampler import StreamingResampler
 
 TARGET_RATE = 16000
 CHUNK_SECONDS = 30.0
+# Chunks end inside a pause once they hold this share of the chunk length.
+# A hard cut through a word makes ASR transcribe it on both sides.
+PAUSE_SPLIT_FRACTION = 2 / 3
+PAUSE_WINDOW_SECONDS = 0.3
+# ceiling: a pause is a 300 ms window 20 dB below the chunk's mean level,
+# and chunks quieter than -60 dBFS never split early. Tune only against
+# boundary errors on real recordings.
+PAUSE_ENERGY_RATIO = 0.01
+PAUSE_MIN_CHUNK_ENERGY = 1e-6
 MAX_CHUNK_SAMPLES = int(TARGET_RATE * CHUNK_SECONDS)
 _FLOAT = struct.Struct("<f")
 
@@ -52,6 +62,42 @@ def _pcm_to_mono(payload, channels):
     for channel in range(channels):
         total = map(operator.add, total, values[channel::channels])
     return array.array("d", map(operator.truediv, total, itertools.repeat(float(channels))))
+
+
+class _PauseFinder:
+    """Detect a quiet window relative to the chunk being accumulated."""
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self._total_energy = 0.0
+        self._total_samples = 0
+        self._recent = collections.deque()
+        self._recent_energy = 0.0
+        self._recent_samples = 0
+
+    def add(self, values, rate):
+        """Add source-rate mono samples; return whether they end a pause."""
+        count = len(values)
+        if not count:
+            return False
+        energy = math.sumprod(values, values)
+        self._total_energy += energy
+        self._total_samples += count
+        self._recent.append((energy, count))
+        self._recent_energy += energy
+        self._recent_samples += count
+        window = PAUSE_WINDOW_SECONDS * rate
+        while len(self._recent) > 1 and self._recent_samples - self._recent[0][1] >= window:
+            dropped_energy, dropped_count = self._recent.popleft()
+            self._recent_energy -= dropped_energy
+            self._recent_samples -= dropped_count
+        if self._recent_samples < window:
+            return False
+        level = self._total_energy / self._total_samples
+        return (level > PAUSE_MIN_CHUNK_ENERGY
+                and self._recent_energy / self._recent_samples < PAUSE_ENERGY_RATIO * level)
 
 
 class MeetingTranscriber:
@@ -240,9 +286,11 @@ class MeetingTranscriber:
         source_rate = None
         resampler = None
         expected_next = None
+        pauses = _PauseFinder()
 
         def flush():
             nonlocal samples, chunk_start, chunk_end, resampler
+            pauses.reset()
             if chunk_start is None:
                 return
             if resampler is not None:
@@ -290,9 +338,12 @@ class MeetingTranscriber:
             samples.extend(resampler.push(values))
             chunk_end = event_end
             expected_next = event_end
+            paused = pauses.add(values, rate)
             if len(samples) >= self._max_chunk_samples:
                 flush()
                 expected_next = None
+            elif paused and chunk_end - chunk_start >= self.chunk_seconds * PAUSE_SPLIT_FRACTION:
+                flush()
         flush()
         return wrote_audio
 
