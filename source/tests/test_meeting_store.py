@@ -58,6 +58,39 @@ class MeetingStoreTests(unittest.TestCase):
         self.assertEqual(track["segments"][0]["bytes"], len(payload) * 2)
         self.assertEqual(track["segments"][0]["events"], 2)
 
+    def test_audio_iteration_resolves_the_session_folder_once_and_closes_segments(self):
+        payload = struct.pack("<4f", 0.1, -0.2, 0.3, -0.4)
+        for sequence in range(200):
+            self.store.append_audio(self.session, self.event(timestamp=sequence * 1.0, sequence=sequence), payload)
+        self.store.finish(self.session)
+        real = os.path.realpath
+        with mock.patch("os.path.realpath", side_effect=real) as resolve:
+            values = list(self.store.iter_audio(self.session))
+        self.assertEqual(len(values), 200)
+        self.assertTrue(all(entry[1] == payload for entry in values))
+        # Long exports read tens of thousands of blocks; containment is
+        # checked per iteration, not per block.
+        self.assertLess(resolve.call_count, 20)
+        segments = self.store.get(self.session)["tracks"]["microphone"]["segments"]
+        self.assertGreater(len(segments), 1, "The fixture must cross a segment boundary")
+        for segment in segments:
+            # An open handle would block this rename on Windows.
+            path = Path(self.temp.name, self.session, segment["path"])
+            path.rename(path.with_suffix(".moved"))
+            path.with_suffix(".moved").rename(path)
+
+    def test_abandoned_audio_iteration_releases_its_segment(self):
+        payload = struct.pack("<4f", 0.1, -0.2, 0.3, -0.4)
+        self.store.append_audio(self.session, self.event(), payload)
+        self.store.append_audio(self.session, self.event(sequence=1, timestamp=1.0), payload)
+        self.store.finish(self.session)
+        reader = self.store.iter_audio(self.session)
+        next(reader)
+        reader.close()
+        segment = self.store.get(self.session)["tracks"]["microphone"]["segments"][0]
+        path = Path(self.temp.name, self.session, segment["path"])
+        path.rename(path.with_suffix(".moved"))
+
     def test_tracks_rotate_at_fixed_duration_and_format_change(self):
         payload = b"\0" * (4 * 4)
         self.store.append_audio(self.session, self.event(frames=120, rate=4), payload=b"\0" * 480)
