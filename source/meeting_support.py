@@ -196,6 +196,27 @@ def _amplitude_envelope(values, channels, points=WAVEFORM_BLOCK_POINTS):
     return peaks
 
 
+def _gap_loses_audio(event, reason):
+    """Whether a journaled gap means captured samples are actually missing.
+
+    WASAPI raises its discontinuity flag for engine timing glitches even when
+    the device position is exactly where the previous packet ended. Those
+    packets are contiguous: the event stays journaled as evidence, but it must
+    not mark the recording partial or alert the user mid-meeting.
+    """
+    if not any(word in reason for word in
+               ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption")):
+        return False
+    if reason == "native_discontinuity":
+        position = event.get("device_position")
+        expected = event.get("expected_device_position")
+        if (isinstance(position, int) and not isinstance(position, bool)
+                and isinstance(expected, int) and not isinstance(expected, bool)
+                and position == expected):
+            return False
+    return True
+
+
 def _measure_audio(payload, channels):
     """Return a finite peak and bounded waveform from one native audio block."""
     values = array.array("f")
@@ -768,8 +789,7 @@ class MeetingController:
                         if alert:
                             self.notify(self._error)
                     reason = str(event.get("reason", ""))
-                    loss = event["type"] == "gap" and any(word in reason
-                        for word in ("overflow", "invalid", "discontinuity", "timestamp_error", "capture_interruption"))
+                    loss = event["type"] == "gap" and _gap_loses_audio(event, reason)
                     if event["type"] == "source_error" or loss:
                         with self._lock:
                             first_loss = event.get("track", "unknown") not in self._source_errors
