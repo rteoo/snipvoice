@@ -76,6 +76,16 @@ installs host tooling. CMake must support the installed Visual Studio major.
 Native CPU tuning, CUDA, and OpenMP are disabled; disabling OpenMP avoids an additional
 Windows runtime DLL. macOS retains upstream's default Metal configuration.
 
+Windows releases default to `--backends portable`: every CPU microarchitecture
+variant and the vendor-neutral Vulkan backend ship as loadable ggml modules
+beside `llama.dll`. At startup the app registers them from that folder (never
+the working directory) and ggml picks the best CPU variant and any usable GPU;
+llama.cpp itself prefers discrete GPUs over integrated ones. A machine without a
+Vulkan driver, or a GPU that cannot hold the model, runs on the CPU. This build
+needs an existing Vulkan SDK (`VULKAN_SDK` and `glslc`); the release workflow
+installs a pinned, hash-verified SDK. `--backends minimal` builds the single
+built-in backend and is what the test workflow uses.
+
 After installing application/native Python requirements and the hash-locked
 build toolchain, use a fresh wheel directory:
 
@@ -86,6 +96,9 @@ python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama
 python source/embedding_runtime_probe.py
 python source/summary_runtime_probe.py
 ```
+
+`summary_runtime_probe.py` reports only the device types it registered, for
+example `devices=cpu,gpu`.
 
 The explicit `--install` action installs only the generated wheel into the
 selected interpreter, with `--no-index`, `--no-deps`, and its SHA-256 lock.
