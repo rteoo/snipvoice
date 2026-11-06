@@ -304,6 +304,10 @@ export interface Correction {
   replacement: string;
 }
 
+export interface LeftoversView {
+  items: { id: string; name: string; detail: string; size: string }[];
+}
+
 export interface SearchState {
   index: string;
   repair: { done: number; total: number | null } | null;

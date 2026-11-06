@@ -45,6 +45,11 @@ export class MockTransport implements Transport {
     { id: "old1", name: "…a1b2c3d4", moved: "02/10 09:00", expires: "Expirada", size: "18 MB", expired: true },
   ];
   private jobs = new Map<string, () => void>();
+  private leftovers = [
+    { id: "voice:whisper-large-v3-turbo-q8", name: "Whisper Large v3 Turbo", detail: "Modelo que o SnipVoice não oferece mais", size: "845 MB" },
+    { id: "embedding:embeddinggemma-2-bf16", name: "EmbeddingGemma 2", detail: "Modelo da busca semântica removida", size: "532 MB" },
+    { id: "semantic-index", name: "Índice da busca semântica", detail: "Trechos das transcrições guardados pela busca semântica removida", size: "12 MB" },
+  ];
   private readonly installedModels = new Set(["balanced", "whisper-large-v3", "qwen3.5-2b-q4"]);
   private playing: { id: string; start: number; at: number } | null = null;
   private playbackGeneration = 1;
@@ -336,6 +341,12 @@ export class MockTransport implements Transport {
         return { profileId: params.profileId, enabled: params.enabled };
       case "library.deleteProfile":
         return params.confirmed === true ? { status: "removed" } : { status: "confirm", title: "Excluir perfil", message: "Excluir este perfil personalizado?" };
+      case "settings.leftovers":
+        return { items: this.leftovers };
+      case "settings.removeLeftover":
+        if (params.confirmed !== true) return { status: "confirm", title: "Remover arquivos antigos", message: "Remover este item deste computador?\n\nO SnipVoice não usa mais estes arquivos. Esta ação não pode ser desfeita." };
+        this.leftovers = this.leftovers.filter((item) => item.id !== params.id);
+        return { status: "removed", message: "Item removido." };
       case "search.state":
         return { index: "Índice de busca: pronto", repair: null };
       case "search.cancelRepair":

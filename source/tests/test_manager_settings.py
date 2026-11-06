@@ -319,6 +319,42 @@ class ModelTests(SettingsTestCase):
         self.assertEqual(self.summary.deleted, [model_id])
 
 
+class LeftoverTests(SettingsTestCase):
+    def setUp(self):
+        super().setUp()
+        self.voice_cache = os.path.join(self.tmp, "voice-cache")
+        self.summary_cache = os.path.join(self.tmp, "summary-cache")
+        self.meetings.library = mock.Mock(home_root=self.data["path"])
+        self.summary.summary_cache_dir = lambda: self.summary_cache
+        self.models_root = mock.patch("retired_models.app_paths.configured_models_dir",
+                                      return_value=self.models_dir["path"])
+        self.models_root.start()
+        self.addCleanup(self.models_root.stop)
+        os.makedirs(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8"))
+        with open(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8", "model.gguf"), "wb") as handle:
+            handle.write(b"x" * 2048)
+
+    def test_leftovers_are_listed_with_a_readable_size(self):
+        items = self.actions.leftovers({})["items"]
+        self.assertEqual([(item["id"], item["name"]) for item in items],
+                         [("voice:whisper-large-v3-turbo-q8", "Whisper Large v3 Turbo")])
+        self.assertTrue(items[0]["size"].endswith("MB"))
+
+    def test_removal_asks_first_then_deletes(self):
+        first = self.actions.remove_leftover({"id": "voice:whisper-large-v3-turbo-q8"})
+        self.assertEqual(first["status"], "confirm")
+        self.assertIn("Whisper Large v3 Turbo", first["message"])
+        self.assertTrue(os.path.isdir(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8")))
+        done = self.actions.remove_leftover({"id": "voice:whisper-large-v3-turbo-q8", "confirmed": True})
+        self.assertEqual(done["status"], "removed")
+        self.assertFalse(os.path.exists(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8")))
+        self.assertEqual(self.actions.leftovers({})["items"], [])
+
+    def test_an_unknown_leftover_is_an_invalid_request(self):
+        with self.assertRaises(RpcFailure):
+            self.actions.remove_leftover({"id": "voice:whisper-small-q8", "confirmed": True})
+
+
 class LocationTests(SettingsTestCase):
     def test_a_cancelled_dialog_plans_nothing(self):
         self.assertEqual(self.actions.plan_move({"kind": "data"}), {"target": None})

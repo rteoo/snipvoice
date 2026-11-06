@@ -19,6 +19,7 @@ import voice_models
 from i18n import N_, tr
 from manager_bridge import INVALID_PARAMS, RpcFailure, _text, technical_detail
 from meeting_gui import LANGUAGE_LABELS, PROFILE_LABELS, SUMMARY_LABELS, destination_display, profile_display_label
+from retired_models import Leftovers
 from meeting_settings import FOLLOW_DICTATION, dictation_profile, resolve_meeting_settings, validate_hotkey_conflicts
 from summary_catalog import format_model_size, summary_catalog, summary_catalog_entry
 from voice_catalog import available_languages, format_size, selectable_catalog
@@ -94,6 +95,8 @@ class SettingsActions:
             "settings.downloadSummaryModel": self.download_summary_model,
             "settings.cancelSummaryModel": self.cancel_summary_model,
             "settings.deleteSummaryModel": self.delete_summary_model,
+            "settings.leftovers": self.leftovers,
+            "settings.removeLeftover": self.remove_leftover,
             "settings.locations": self.locations_view,
             "settings.planMove": self.plan_move,
             "settings.move": self.move,
@@ -411,6 +414,36 @@ class SettingsActions:
         except Exception as exc:
             raise RpcFailure(tr("Não foi possível remover o modelo."), detail=technical_detail(exc)) from exc
         return {"status": "removed", "message": tr("{name} removido.", name=entry["name"])}
+
+    def _leftovers(self):
+        voice_cache = self.voice.cache_dir if self.voice is not None else voice_models.voice_cache_dir()
+        return Leftovers(voice_cache=voice_cache, summary_cache=self.summary_models.summary_cache_dir(),
+                         data_root=self.meetings.library.home_root)
+
+    def leftovers(self, _params):
+        """Files of models and features SnipVoice no longer ships, with their sizes."""
+        try:
+            found = self._leftovers().find()
+        except Exception as exc:
+            raise RpcFailure(tr("Não foi possível procurar arquivos antigos."), detail=technical_detail(exc)) from exc
+        return {"items": [{"id": item["id"], "name": item["name"], "detail": item["detail"],
+                           "size": format_size(item["size_bytes"])} for item in found]}
+
+    def remove_leftover(self, params):
+        key = _text(params, "id", limit=96, required=True)
+        leftovers = self._leftovers()
+        name = leftovers.name(key)
+        if name is None:
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        if params.get("confirmed") is not True:
+            return {"status": "confirm", "title": tr("Remover arquivos antigos"),
+                    "message": tr("Remover {name} deste computador?", name=name) + "\n\n"
+                    + tr("O SnipVoice não usa mais estes arquivos. Esta ação não pode ser desfeita.")}
+        try:
+            leftovers.remove(key)
+        except Exception as exc:
+            raise RpcFailure(tr("Não foi possível remover os arquivos."), detail=technical_detail(exc)) from exc
+        return {"status": "removed", "message": tr("{name} removido.", name=name)}
 
     # -- Pastas ---------------------------------------------------------
 

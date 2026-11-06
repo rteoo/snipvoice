@@ -294,6 +294,8 @@ table.models .model-name { display: flex; flex-wrap: wrap; align-items: center; 
 table.models td.model .caption { display: block; overflow-wrap: anywhere; }
 table.models td.state { white-space: normal; }
 table.models td.state progress { display: block; margin-top: 4px; }
+table.leftovers th:nth-child(2), table.leftovers td:nth-child(2) { width: 84px; }
+table.leftovers th:nth-child(3), table.leftovers td:nth-child(3) { width: 112px; }
 .tag {
   display: inline-flex; padding: 0 6px; border-radius: var(--native-control-radius);
   font-size: var(--native-type-caption); font-weight: 400; color: var(--color-info-fg); background: var(--color-info-bg);

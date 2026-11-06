@@ -549,6 +549,9 @@ Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execu�
   working. Sizes align right and progress belongs to the actual model. An explicit
   dictation download's Cancel sets only that profile's dedicated event and keeps
   resumable bytes, enabled intent and capture unchanged.
+- Arquivos antigos lists files of retired models and the removed semantic index
+  only while some remain, each with its size and a confirmed Remover. It never
+  removes on its own and never follows a link or junction.
 - Version labels use local time; technical provenance is collapsed. Cross
   citations resolve canonical title, time and a bounded excerpt off Tk, with
   at most sixteen source rows. Device labels fit their actual font and disclose
