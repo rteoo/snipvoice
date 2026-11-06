@@ -187,7 +187,10 @@ class NativeSummaryRuntime:
         try:
             from llama_cpp import Llama, LLAMA_SPLIT_MODE_NONE
             from llama_runtime import load_backends, offload_devices
-            gpus = offload_devices(load_backends()) if device == "auto" else []
+            # Always register first, CPU mode included: otherwise llama.cpp's
+            # implicit loader scans the working directory for ggml modules.
+            devices = load_backends()
+            gpus = offload_devices(devices) if device == "auto" else []
         except (ImportError, OSError, RuntimeError) as exc:
             raise RuntimeError(
                 tr("O runtime llama.cpp incluído no SnipVoice não está disponível. Reinstale o aplicativo.")

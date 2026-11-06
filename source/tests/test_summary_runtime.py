@@ -448,7 +448,8 @@ class SummaryRuntimeTests(unittest.TestCase):
         with mock.patch("llama_runtime.load_backends", return_value=WITH_GPU) as backends, \
                 mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf", 4096, device="cpu")
-        backends.assert_not_called()
+        # Registration still runs so llama.cpp never scans the working directory.
+        backends.assert_called_once_with()
         self.assertEqual((runtime._llama.init["n_gpu_layers"], runtime._llama.init["main_gpu"]), (0, -1))
 
     def test_worker_that_dies_on_the_gpu_is_reopened_on_the_cpu_for_the_session(self):
