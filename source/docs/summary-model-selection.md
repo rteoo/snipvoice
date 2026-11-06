@@ -12,8 +12,17 @@ a native 262K context, support for 201 languages and dialects, and non-thinking
 behavior by default. Qwen's own language table reports material gains over
 Qwen3 1.7B, including MMLU-Pro 55.3 versus 40.2 and multilingual MMMLU 56.9
 versus 46.7 in non-thinking mode. These are vendor benchmarks, not a Snipvoice
-meeting-summary evaluation. Snipvoice keeps the runtime context at 4K to bound
-memory use and already reduces long transcripts before inference.
+meeting-summary evaluation. Snipvoice runs every catalog model with a 16K
+context and reduces longer transcripts hierarchically. Evidence budgets are
+derived from tokens at a conservative 2 bytes per token, and the model sees
+short per-call citation aliases (`S1`, `S2`…) that are mapped back to canonical
+segment IDs before validation; canonical IDs cost about 24 tokens each.
+
+Measured on the CPU llama.cpp runtime (peak working set, 4K → 16K): Qwen3.5 2B
+2.06 → 2.21 GB, Qwen3.5 4B 4.57 → 4.97 GB, Gemma 4 E2B 2.76 → 3.07 GB, Gemma 4
+E4B 5.57 → 6.54 GB. On a real 18.6-minute pt-BR meeting, Qwen3.5 2B went from
+24 calls with 128-character grammar-truncated notes to one call in about four
+minutes with a complete summary, three decisions and five cited actions.
 
 - Upstream: [Qwen/Qwen3.5-2B](https://huggingface.co/Qwen/Qwen3.5-2B)
 - Quantization: [LM Studio Community Qwen3.5 2B GGUF](https://huggingface.co/lmstudio-community/Qwen3.5-2B-GGUF)
