@@ -42,6 +42,9 @@ class FakeLlama:
         self.closed = False
         self.call = None
 
+    def _init_sampler(self, **options):
+        return options
+
     def create_chat_completion(self, **kwargs):
         self.call = kwargs
         return iter([
@@ -79,6 +82,7 @@ class SummaryRuntimeTests(unittest.TestCase):
             "LLAMA_SPLIT_MODE_NONE = 0\n"
             "class Llama:\n"
             " def __init__(self, **kwargs): pass\n"
+            " def _init_sampler(self, **options): return options\n"
             " def create_chat_completion(self, **kwargs):\n"
             "  if 'slow' in kwargs['messages'][0]['content']: time.sleep(30)\n"
             "  return iter([{'choices':[{'delta':{'content':'{\\\"summary\\\":\\\"ok\\\"}'}}]}])\n"
@@ -532,6 +536,24 @@ class LlamaBackendTests(unittest.TestCase):
         self.assertEqual([device["name"] for device in offload_devices(devices)], ["Vulkan0"])
         self.assertEqual(offload_devices([device for device in devices if device["name"] != "Vulkan0"])[0]["type"],
                          "igpu")
+
+    def test_only_neutral_greedy_grammar_decoding_uses_the_lazy_sampler(self):
+        import llama_runtime
+
+        llama = FakeLlama()
+        grammar = object()
+        with mock.patch.object(llama_runtime, "LazyGrammarGreedySampler") as lazy:
+            llama_runtime.use_lazy_grammar(llama)
+            neutral = dict(temp=0.0, grammar=grammar, logits_processor=None, mirostat_mode=0,
+                           repeat_penalty=1.0, frequency_penalty=0.0, presence_penalty=0.0)
+            self.assertIs(llama._init_sampler(**neutral), lazy.return_value)
+            lazy.assert_called_once_with(llama, grammar)
+            for change in ({"temp": 0.8}, {"grammar": None}, {"logits_processor": [len]},
+                           {"mirostat_mode": 2}, {"repeat_penalty": 1.1},
+                           {"frequency_penalty": 0.5}, {"presence_penalty": 0.5}):
+                with self.subTest(change=change):
+                    self.assertEqual(llama._init_sampler(**dict(neutral, **change)), dict(neutral, **change))
+            self.assertEqual(lazy.call_count, 1)
 
     def test_missing_backends_fail_loudly(self):
         from llama_runtime import load_backends

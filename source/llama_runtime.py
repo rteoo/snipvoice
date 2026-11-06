@@ -150,3 +150,82 @@ def offload_devices(devices):
     """Devices llama.cpp offloads to by default: discrete GPUs, else iGPUs."""
     discrete = [device for device in devices if device["type"] == "gpu"]
     return discrete or [device for device in devices if device["type"] == "igpu"]
+
+
+class LazyGrammarGreedySampler:
+    """Greedy decoding that checks the grammar against one token at a time.
+
+    The wrapper applies a grammar to the whole vocabulary before choosing each
+    token, on the CPU, which made constrained reports 12-15x slower than free
+    text on a GPU. For greedy decoding the result is the same if only the
+    overall best token is checked first: when the grammar accepts it, it is
+    also the best accepted token. Only a rejection applies the grammar to the
+    full vocabulary, exactly as before, so every chosen token is unchanged.
+    """
+
+    def __init__(self, llama, grammar):
+        import llama_cpp
+
+        self._api = llama_cpp
+        self._vocabulary = llama.n_vocab()
+        self._grammar = llama_cpp.llama_sampler_init_grammar(
+            llama._model.vocab, grammar._grammar.encode("utf-8"), grammar._root.encode("utf-8"))
+        if not self._grammar:
+            raise RuntimeError("llama.cpp rejected the report grammar")
+        self._one = (llama_cpp.llama_token_data * 1)()
+        self._all = None
+
+    def _apply(self, data, size):
+        import ctypes
+        candidates = self._api.llama_token_data_array(data=data, size=size, selected=-1, sorted=False)
+        self._api.llama_sampler_apply(self._grammar, ctypes.byref(candidates))
+
+    def sample(self, ctx, idx=-1):
+        import numpy
+
+        logits = numpy.ctypeslib.as_array(self._api.llama_get_logits_ith(ctx.ctx, idx),
+                                          shape=(self._vocabulary,))
+        # argmax keeps the first of equal maxima, like llama.cpp's greedy sampler.
+        token = int(logits.argmax())
+        self._one[0].id, self._one[0].logit, self._one[0].p = token, float(logits[token]), 0.0
+        self._apply(self._one, 1)
+        if self._one[0].logit == float("-inf"):
+            if self._all is None:
+                self._all = (self._api.llama_token_data * self._vocabulary)()
+            table = numpy.frombuffer(self._all, dtype=[("id", "<i4"), ("logit", "<f4"), ("p", "<f4")])
+            table["id"] = numpy.arange(self._vocabulary)
+            table["logit"] = logits
+            table["p"] = 0.0
+            self._apply(self._all, self._vocabulary)
+            token = int(table["logit"].argmax())
+            if table["logit"][token] == float("-inf"):
+                raise RuntimeError("The report grammar accepts no next token")
+        self._api.llama_sampler_accept(self._grammar, token)
+        return token
+
+    def close(self):
+        grammar, self._grammar = self._grammar, None
+        if grammar:
+            self._api.llama_sampler_free(grammar)
+
+    def __del__(self):
+        self.close()
+
+
+def use_lazy_grammar(llama):
+    """Route this model's grammar-constrained greedy decoding through
+    LazyGrammarGreedySampler; any other sampling keeps the wrapper's chain."""
+    original = llama._init_sampler
+
+    def init_sampler(**options):
+        neutral = (options.get("temp") == 0.0 and options.get("grammar") is not None
+                   and options.get("logits_processor") is None and not options.get("mirostat_mode")
+                   and options.get("repeat_penalty", 1.0) == 1.0
+                   and options.get("frequency_penalty", 0.0) == 0.0
+                   and options.get("presence_penalty", 0.0) == 0.0)
+        if not neutral:
+            return original(**options)
+        return LazyGrammarGreedySampler(llama, options["grammar"])
+
+    llama._init_sampler = init_sampler
+    return llama

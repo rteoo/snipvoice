@@ -186,7 +186,7 @@ class NativeSummaryRuntime:
             raise ValueError("Unknown summary device mode")
         try:
             from llama_cpp import Llama, LLAMA_SPLIT_MODE_NONE
-            from llama_runtime import load_backends, offload_devices
+            from llama_runtime import load_backends, offload_devices, use_lazy_grammar
             # Always register first, CPU mode included: otherwise llama.cpp's
             # implicit loader scans the working directory for ggml modules.
             devices = load_backends()
@@ -213,6 +213,9 @@ class NativeSummaryRuntime:
                                     main_gpu=-1, verbose=False)
             except Exception as exc:
                 raise RuntimeError(tr("Não foi possível abrir o modelo local de resumo: {error}", error=exc)) from exc
+        # Reports are grammar-constrained greedy decoding; checking the grammar
+        # per chosen token keeps every token and avoids a full-vocabulary pass.
+        use_lazy_grammar(self._llama)
 
     def generate(self, system_prompt, evidence, cancel_event=None, disable_thinking=False):
         if cancel_event is not None and cancel_event.is_set():
