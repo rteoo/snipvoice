@@ -4,6 +4,7 @@ import { button, h, replace } from "../dom";
 import { tr } from "../i18n";
 import type { Confirmable, LocationView, ModelsView, SummaryProgress, VoiceView } from "../types";
 import { confirmDialog, type MessageSlot } from "../ui";
+import { LeftoversCard } from "./leftovers-card";
 import { LocationCard } from "./location";
 import { SearchCard } from "./search-card";
 
@@ -37,6 +38,7 @@ export class ModelsSettings {
   private voiceStatus = "";
   private summaryStatus = "";
   private readonly location: LocationCard;
+  private readonly leftovers: LeftoversCard;
   private readonly search: SearchCard;
   private token = 0;
 
@@ -47,6 +49,7 @@ export class ModelsSettings {
   ) {
     this.location = new LocationCard(bridge, messages, "models", enginePid);
     this.search = new SearchCard(bridge, messages);
+    this.leftovers = new LeftoversCard(bridge, messages);
     bridge.on<VoiceView>("voice.state", (view) => {
       const was = this.voiceProgress?.profile ?? null;
       this.voiceProgress = view.download;
@@ -68,6 +71,7 @@ export class ModelsSettings {
   async load(location?: LocationView): Promise<void> {
     if (location) this.location.show(location);
     void this.search.load();
+    void this.leftovers.load();
     const token = ++this.token;
     try {
       const view = await this.bridge.call<ModelsView>("settings.models");
@@ -82,7 +86,7 @@ export class ModelsSettings {
   private render(): void {
     const view = this.view;
     if (!view) {
-      replace(this.element, h("p", { class: "caption", text: tr("Carregando…") }), this.search.element, this.location.element);
+      replace(this.element, h("p", { class: "caption", text: tr("Carregando…") }), this.leftovers.element, this.search.element, this.location.element);
       return;
     }
     const voiceBusy = this.voiceProgress?.profile != null;
@@ -145,6 +149,7 @@ export class ModelsSettings {
         this.table(summaryRows),
         h("p", { class: "caption", attrs: { role: "status" }, text: running?.status ?? this.summaryStatus }),
       ),
+      this.leftovers.element,
       this.search.element,
       this.location.element,
     );
