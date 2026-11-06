@@ -97,6 +97,9 @@ class MeetingStore:
         self.root_dir = self.root
         self._lock = threading.RLock()
         self._active = {}
+        # Validated folders of sessions that are recording. Each 100 ms block
+        # otherwise re-resolved the folder six times on the capture thread.
+        self._active_dirs = {}
         self._sequence_cache = {}
         self._last_checkpoint = {}
         os.makedirs(self.root, exist_ok=True)
@@ -227,6 +230,7 @@ class MeetingStore:
             metadata["updated_at"] = _utc_timestamp()
             self._checkpoint_session(session_id, metadata)
             self._active.pop(session_id, None)
+            self._active_dirs.pop(session_id, None)
             self._sequence_cache.pop(session_id, None)
             self._last_checkpoint.pop(session_id, None)
             return session_id
@@ -871,11 +875,16 @@ class MeetingStore:
             self._checkpoint_session(session_id, metadata)
 
     def _session_dir(self, session_id):
+        cached = self._active_dirs.get(session_id)
+        if cached is not None and session_id in self._active:
+            return cached
         if not self._valid_id(session_id):
             raise ValueError(tr("Identificador de reunião inválido."))
         result = os.path.join(self.root, str(session_id))
         if os.path.commonpath((os.path.realpath(self.root), os.path.realpath(result))) != os.path.realpath(self.root):
             raise ValueError(tr("A pasta da reunião aponta para fora da biblioteca."))
+        if session_id in self._active:
+            self._active_dirs[session_id] = result
         return result
 
     @staticmethod

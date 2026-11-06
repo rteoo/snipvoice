@@ -79,6 +79,21 @@ class MeetingStoreTests(unittest.TestCase):
             path.rename(path.with_suffix(".moved"))
             path.with_suffix(".moved").rename(path)
 
+    def test_live_append_does_not_resolve_the_session_folder_per_block(self):
+        payload = struct.pack("<4f", 0.1, -0.2, 0.3, -0.4)
+        self.store.append_audio(self.session, self.event(), payload)
+        real = os.path.realpath
+        with mock.patch("os.path.realpath", side_effect=real) as resolve:
+            for sequence in range(1, 101):
+                self.store.append_audio(self.session, self.event(timestamp=sequence * 1.0, sequence=sequence), payload)
+        self.assertEqual(resolve.call_count, 0)
+        self.store.finish(self.session)
+        with mock.patch("os.path.realpath", side_effect=real) as resolve:
+            self.store.get(self.session)
+            list(self.store.iter_audio(self.session))
+        self.assertGreater(resolve.call_count, 0, "A finished session is validated again")
+        self.assertEqual(len(list(self.store.iter_audio(self.session))), 101)
+
     def test_abandoned_audio_iteration_releases_its_segment(self):
         payload = struct.pack("<4f", 0.1, -0.2, 0.3, -0.4)
         self.store.append_audio(self.session, self.event(), payload)
