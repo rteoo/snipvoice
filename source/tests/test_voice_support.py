@@ -103,7 +103,7 @@ class DictationProjectionTests(unittest.TestCase):
     def test_cancel_profile_download_only_sets_the_matching_explicit_event(self):
         controller = self._edit_controller()
         controller._model_download_active = True
-        controller._model_download_profile = "whisper-turbo"
+        controller._model_download_profile = "whisper-small"
         controller._model_download_cancel = threading.Event()
         controller._cancel = threading.Event()
         controller._download_done, controller._download_total = 25, 200
@@ -112,19 +112,19 @@ class DictationProjectionTests(unittest.TestCase):
         self.assertFalse(controller.cancel_profile_download("whisper-large-v3"))
         controller._emit_status.assert_not_called()
         self.assertFalse(controller._model_download_cancel.is_set())
-        self.assertTrue(controller.cancel_profile_download("whisper-turbo"))
+        self.assertTrue(controller.cancel_profile_download("whisper-small"))
         controller._emit_status.assert_called_once_with()
         self.assertTrue(controller._model_download_cancel.is_set())
         self.assertFalse(controller._cancel.is_set())
         self.assertEqual((controller._download_done, controller._download_total), (25, 200))
-        self.assertEqual(controller._model_download_profile, "whisper-turbo")
+        self.assertEqual(controller._model_download_profile, "whisper-small")
         self.assertEqual(controller._state, STATE_RECORDING)
         self.assertEqual(controller._session_generation, 0)
         self.assertTrue(controller.settings.enabled)
         controller._provider.assert_not_called()
         controller._provider.unload.assert_not_called()
         controller._model_download_active = False
-        self.assertFalse(controller.cancel_profile_download("whisper-turbo"))
+        self.assertFalse(controller.cancel_profile_download("whisper-small"))
 
     def test_only_progress_callbacks_are_throttled(self):
         controller = VoiceController.__new__(VoiceController)
@@ -1956,6 +1956,38 @@ class ControllerTests(unittest.TestCase):
             self.assertTrue(self.controller.delete_active_model())
         self.assertFalse(self.controller.enabled)
 
+    def test_deleting_another_profile_keeps_dictation_on(self):
+        self._ready()
+        with mock.patch.object(self.controller._provider, "delete_profile") as delete:
+            self.assertTrue(self.controller.delete_profile_model("whisper-small"))
+        delete.assert_called_once_with("whisper-small")
+        self.assertTrue(self.controller.enabled)
+
+    def test_deleting_the_dictation_profile_turns_voice_off(self):
+        self._ready()
+        with mock.patch.object(self.controller._provider, "delete_profile") as delete:
+            self.assertTrue(self.controller.delete_profile_model("balanced"))
+        delete.assert_called_once_with("balanced")
+        self.assertFalse(self.controller.enabled)
+
+    def test_deleting_a_profile_waits_for_a_recording_or_its_download(self):
+        self._ready()
+        with mock.patch.object(self.controller._provider, "delete_profile") as delete:
+            self.controller._meeting_token = object()
+            self.assertFalse(self.controller.delete_profile_model("whisper-small"))
+            self.controller._meeting_token = None
+            self.controller._model_download_active = True
+            self.controller._model_download_profile = "whisper-small"
+            self.assertFalse(self.controller.delete_profile_model("whisper-small"))
+            self.controller._model_download_active = False
+            self.controller._state = STATE_LOADING
+            self.assertFalse(self.controller.delete_profile_model("whisper-large-v3"))
+            self.controller._state = STATE_IDLE
+            self.controller._model_download_active = True
+            self.assertTrue(self.controller.delete_profile_model("whisper-large-v3"))
+        delete.assert_called_once_with("whisper-large-v3")
+        self.controller._model_download_active = False
+
     def test_reapplying_same_options_retries_an_unavailable_backend(self):
         self._ready()
         self.controller.disable()
@@ -2034,10 +2066,10 @@ class ControllerTests(unittest.TestCase):
 
         self.controller._download = fake_download
         with mock.patch("voice_support.model_is_installed", return_value=False):
-            started = self.controller.download_profile("whisper-turbo")
+            started = self.controller.download_profile("whisper-small")
 
         self.assertTrue(started)
-        self.assertEqual(downloaded, ["whisper-turbo"])
+        self.assertEqual(downloaded, ["whisper-small"])
         self.assertFalse(self.controller.is_enabled())
         self.assertFalse(self.backend.is_loaded())
         self.assertTrue(any("baixando" in label for label in seen))
@@ -2047,9 +2079,9 @@ class ControllerTests(unittest.TestCase):
 
     def test_duplicate_explicit_download_is_rejected_while_active(self):
         self.controller._model_download_active = True
-        self.controller._model_download_profile = "whisper-turbo"
+        self.controller._model_download_profile = "whisper-small"
 
-        self.assertFalse(self.controller.download_profile("whisper-turbo"))
+        self.assertFalse(self.controller.download_profile("whisper-small"))
 
     def test_runtime_switch_progress_is_fresh_before_idle_and_active_cached_switches(self):
         self._ready()
@@ -2105,7 +2137,7 @@ class ControllerTests(unittest.TestCase):
             self.assertTrue(self.controller.apply_options(profile="whisper-large-v3"))
             self.controller.task_runner = runner
             try:
-                self.assertTrue(self.controller.download_profile("whisper-turbo"))
+                self.assertTrue(self.controller.download_profile("whisper-small"))
                 self.assertTrue(entered.wait(1))
                 cancel_event = self.controller._model_download_cancel
                 generation = self.controller._session_generation
@@ -2115,7 +2147,7 @@ class ControllerTests(unittest.TestCase):
                 snapshot = self.controller.status_snapshot()
                 self.assertEqual(snapshot["state"], STATE_LOADING)
                 self.assertTrue(snapshot["download_active"])
-                self.assertEqual(snapshot["download_profile"], "whisper-turbo")
+                self.assertEqual(snapshot["download_profile"], "whisper-small")
                 self.assertEqual((snapshot["download_done"], snapshot["download_total"]), (25, 200))
                 self.assertIs(self.controller._model_download_cancel, cancel_event)
                 self.assertFalse(cancel_event.is_set())

@@ -80,7 +80,7 @@ jobs:
         run: |
           python -m pip install --require-hashes -r packaging/requirements-build.lock
           python packaging/llama_runtime.py --work-dir build/llama --wheel-dir build/llama-wheel --install
-          python source/embedding_runtime_probe.py
+          python source/summary_runtime_probe.py
 
       - name: Build Windows capture helper
         if: runner.os == 'Windows'

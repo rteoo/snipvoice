@@ -259,6 +259,8 @@ def complete_pending_relocation():
     return tr("Dados movidos para {path}.", path=dst)
 
 
+# embedding-models belongs to the removed semantic search; a model downloaded
+# before the removal still moves with the folder instead of being stranded.
 MODEL_FOLDERS = ("voice-models", "summary-models", "embedding-models")
 _MODEL_ENV_OVERRIDES = ("SNIPVOICE_VOICE_CACHE", "SNIPVOICE_SUMMARY_CACHE")
 

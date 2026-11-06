@@ -257,8 +257,7 @@ On navigation / page / content / selection:
   Esc clears it, and Ctrl+F opens Biblioteca and focuses the field. Typing
   invalidates an earlier read immediately. The toolbar keeps only Importar
   and Mais, whose menu holds the cross-recording question, the trash count
-  and search repair. Semantic settings, model installation, reindexing and
-  cancellation live in Configurações › Modelos › Busca. Transcript/report
+  and search repair, which also lives in Configurações › Modelos › Busca. Transcript/report
   search hits occupy the detail pane, and suppress the empty-results state.
   Each detail section has one primary: Copy transcript, Copy summary (Generate
   when empty), or Send chat. Playback and report editing stay secondary.
@@ -371,7 +370,7 @@ On navigation / page / content / selection:
   lost stays as a dismissable bar until it is dismissed or ends. At 1040×700 the
   warning, the transport and the meters stay in view; the waveform under them
   takes whatever height is left.
-- **Cancel exists only while there is something to cancel.** The semantic-index,
+- **Cancel exists only while there is something to cancel.** The
   index-repair, cross-recording, summary and model-download Cancel controls, and
   the processing one, are drawn only while their job runs, inside a reserved
   fixed-size slot in their row, so the controls beside them
@@ -543,8 +542,11 @@ Job names, as they complete "Aguardando …", "Interrompendo …" and "Em execu�
   owns visibility, focus, grab and waits. The two primary-manager constructors
   and the deliberately nonactivating HUD are explicit source-scan exemptions.
   Corrections and custom report formats use one labeled form with inline errors.
-- Model tables share Model, Quality, Size, License, State and Action columns;
-  sizes align right and progress belongs to the actual model. An explicit
+- Model tables share Model, Size, License, State and Action columns. The model
+  cell names the quality and model, adds a plain-language description and an
+  "Em uso" tag for the models settings name; State is a toned status chip.
+  Installed models offer Remover, with a confirmation that says what stops
+  working. Sizes align right and progress belongs to the actual model. An explicit
   dictation download's Cancel sets only that profile's dedicated event and keeps
   resumable bytes, enabled intent and capture unchanged.
 - Version labels use local time; technical provenance is collapsed. Cross

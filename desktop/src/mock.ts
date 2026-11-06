@@ -45,7 +45,7 @@ export class MockTransport implements Transport {
     { id: "old1", name: "…a1b2c3d4", moved: "02/10 09:00", expires: "Expirada", size: "18 MB", expired: true },
   ];
   private jobs = new Map<string, () => void>();
-  private semantic = false;
+  private readonly installedModels = new Set(["balanced", "whisper-large-v3", "qwen3.5-2b-q4"]);
   private playing: { id: string; start: number; at: number } | null = null;
   private playbackGeneration = 1;
   private playTimer: number | undefined;
@@ -244,27 +244,33 @@ export class MockTransport implements Transport {
       case "settings.savePrivacy":
         this.privacy = { ...(params as unknown as typeof this.privacy), generation: this.privacy.generation + 1 };
         return this.privacy;
-      case "settings.models":
+      case "settings.models": {
+        const state = (id: string) => ({ installed: this.installedModels.has(id), downloading: false });
         return {
           voice: [
-            { id: "whisper-small", label: "Leve · Whisper Small", name: "openai/whisper-small", purpose: "Leve · Whisper Small: download menor e pouca memória.", size: "257 MB", license: "Apache-2.0", installed: false, downloading: false },
-            { id: "balanced", label: "Equilibrado · Parakeet", name: "nvidia/parakeet-tdt-0.6b-v3", purpose: "Equilibrado · Parakeet (padrão): ditado após soltar o atalho.", size: "705 MB", license: "CC-BY-4.0", installed: true, downloading: false },
-            { id: "whisper-turbo", label: "Intermediário · Whisper Turbo", name: "openai/whisper-large-v3-turbo", purpose: "Intermediário · Whisper Turbo (opcional): multilíngue e preciso, porém bem mais lento na CPU.", size: "845 MB", license: "MIT", installed: false, downloading: false },
-            { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large", name: "openai/whisper-large-v3", purpose: "Máxima precisão · Whisper Large (opcional): o mais preciso em português, porém mais lento que o tempo real na CPU.", size: "1.55 GB", license: "Apache-2.0", installed: false, downloading: false },
+            { id: "whisper-small", label: "Leve · Whisper Small", name: "openai/whisper-small", purpose: "Leve · Whisper Small: download menor e pouca memória.", description: "Download pequeno e pouca memória · menos preciso em português", size: "257 MB", license: "Apache-2.0", inUse: false, ...state("whisper-small") },
+            { id: "balanced", label: "Equilibrado · Parakeet", name: "nvidia/parakeet-tdt-0.6b-v3", purpose: "Equilibrado · Parakeet (padrão): ditado após soltar o atalho.", description: "Recomendado · rápido e preciso para o dia a dia", size: "705 MB", license: "CC-BY-4.0", inUse: true, ...state("balanced") },
+            { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large", name: "openai/whisper-large-v3", purpose: "Máxima precisão · Whisper Large (opcional): o mais preciso em português, porém mais lento que o tempo real na CPU.", description: "O mais preciso em português · mais lento e usa mais memória", size: "1.55 GB", license: "Apache-2.0", inUse: false, ...state("whisper-large-v3") },
           ],
           summary: [
-            { id: "qwen3.5-2b-q4", name: "Qwen3.5 2B", label: "Equilibrado · Qwen3.5 2B", description: "Recomendado · melhor equilíbrio para português, inglês e uso local", size: "1.3 GB", license: "Apache-2.0", installed: true, downloading: false },
-            { id: "gemma-4-e2b-q4", name: "Gemma 4 E2B", label: "Intermediário · Gemma 4 E2B", description: "2B efetivos / 5B totais · modelo oficial do Google, download maior", size: "3.3 GB", license: "Apache-2.0", installed: false, downloading: false },
-            { id: "qwen3.5-4b-q4", name: "Qwen3.5 4B", label: "Alta qualidade · Qwen3.5 4B", description: "Mais qualidade · maior uso de memória e processamento", size: "2.7 GB", license: "Apache-2.0", installed: false, downloading: false },
-            { id: "gemma-4-e4b-q4", name: "Gemma 4 E4B", label: "Máxima qualidade · Gemma 4 E4B", description: "4,5B efetivos / 8B totais · mais qualidade e maior uso de memória", size: "5.2 GB", license: "Apache-2.0", installed: false, downloading: false },
+            { id: "qwen3.5-2b-q4", name: "Qwen3.5 2B", label: "Equilibrado · Qwen3.5 2B", description: "Recomendado · melhor equilíbrio para português, inglês e uso local", size: "1.3 GB", license: "Apache-2.0", inUse: true, ...state("qwen3.5-2b-q4") },
+            { id: "gemma-4-e2b-q4", name: "Gemma 4 E2B", label: "Intermediário · Gemma 4 E2B", description: "2B efetivos / 5B totais · modelo oficial do Google, download maior", size: "3.3 GB", license: "Apache-2.0", inUse: false, ...state("gemma-4-e2b-q4") },
+            { id: "qwen3.5-4b-q4", name: "Qwen3.5 4B", label: "Alta qualidade · Qwen3.5 4B", description: "Mais qualidade · maior uso de memória e processamento", size: "2.7 GB", license: "Apache-2.0", inUse: false, ...state("qwen3.5-4b-q4") },
+            { id: "gemma-4-e4b-q4", name: "Gemma 4 E4B", label: "Máxima qualidade · Gemma 4 E4B", description: "4,5B efetivos / 8B totais · mais qualidade e maior uso de memória", size: "5.2 GB", license: "Apache-2.0", inUse: false, ...state("gemma-4-e4b-q4") },
           ],
           summaryProgress: null,
         };
+      }
       case "settings.downloadVoiceModel":
       case "settings.downloadSummaryModel":
-      case "settings.deleteSummaryModel":
         if (params.confirmed !== true) return { status: "confirm", title: "Baixar modelo local", message: "Baixar este modelo?\nLicença: Apache-2.0" };
+        this.installedModels.add(String(params.id));
         return { status: "started" };
+      case "settings.deleteVoiceModel":
+      case "settings.deleteSummaryModel":
+        if (params.confirmed !== true) return { status: "confirm", title: "Remover modelo", message: "Remover este modelo deste computador?\n\nVocê pode baixá-lo de novo quando quiser." };
+        this.installedModels.delete(String(params.id));
+        return { status: "removed", message: "Modelo removido." };
       case "settings.cancelVoiceModel":
       case "settings.cancelSummaryModel":
         return { cancelled: true };
@@ -331,15 +337,7 @@ export class MockTransport implements Transport {
       case "library.deleteProfile":
         return params.confirmed === true ? { status: "removed" } : { status: "confirm", title: "Excluir perfil", message: "Excluir este perfil personalizado?" };
       case "search.state":
-        return { enabled: this.semantic, installed: false, model: { name: "EmbeddingGemma 2 (text, BF16)", size: "0.52 GB", license: "Apache-2.0" }, semantic: this.semantic ? "unavailable" : "disabled", status: this.semantic ? "Busca semântica: indisponível" : "Busca por palavras ativa.", index: "Índice de busca: pronto", download: null, repair: null };
-      case "search.setSemantic":
-        this.semantic = params.enabled === true;
-        return this.handle("search.state", {});
-      case "search.downloadModel":
-        return params.confirmed === true ? { status: "started" } : { status: "confirm", title: "Baixar modelo local", message: "Baixar EmbeddingGemma 2 (0.52 GB)?" };
-      case "search.reindex":
-        return this.handle("search.state", {});
-      case "search.cancel":
+        return { index: "Índice de busca: pronto", repair: null };
       case "search.cancelRepair":
         return { cancelled: true };
       case "search.repair":

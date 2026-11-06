@@ -13,7 +13,6 @@ import unittest
 from unittest import mock
 import zipfile
 
-import embedding_runtime_probe
 import llama_runtime
 
 
@@ -234,13 +233,6 @@ class LlamaRuntimeTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             recipe.seal_wheel(wheel, self.root / "not-read")
 
-    def test_probe_reports_failure_without_native_details(self):
-        output = io.StringIO()
-        with mock.patch.object(embedding_runtime_probe, "probe_embedding_runtime", side_effect=RuntimeError("synthetic-private-detail")), \
-             mock.patch("sys.stdout", output):
-            self.assertEqual(embedding_runtime_probe.main(), 1)
-        self.assertNotIn("synthetic-private-detail", output.getvalue())
-
     def test_release_and_ci_use_recipe_and_probes_before_promotion(self):
         bundles = (REPO / ".github/workflows/bundles.yml").read_text("utf-8")
         self.assertEqual(bundles.count("python packaging/llama_runtime.py --work-dir"), 2)
@@ -249,6 +241,5 @@ class LlamaRuntimeTests(unittest.TestCase):
         for name, promotion in (("build_release.bat", "call :promote_staged_release"),
                                 ("build_release_macos.sh", "# --- Promote")):
             text = (REPO / name).read_text("utf-8")
-            self.assertLess(text.index("--embedding-runtime-probe"), text.index(promotion))
-        entrypoint = (REPO / "source/snipvoice.pyw").read_text("utf-8")
-        self.assertLess(entrypoint.index('if "--embedding-runtime-probe"'), entrypoint.index("import platform_support"))
+            self.assertLess(text.index("summary_runtime_probe.py"), text.index("-m PyInstaller"))
+            self.assertLess(text.index("--summary-runtime-probe"), text.index(promotion))
