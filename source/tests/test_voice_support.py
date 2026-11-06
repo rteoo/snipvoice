@@ -1979,6 +1979,11 @@ class ControllerTests(unittest.TestCase):
             self.controller._model_download_active = True
             self.controller._model_download_profile = "whisper-small"
             self.assertFalse(self.controller.delete_profile_model("whisper-small"))
+            self.controller._model_download_active = False
+            self.controller._state = STATE_LOADING
+            self.assertFalse(self.controller.delete_profile_model("whisper-large-v3"))
+            self.controller._state = STATE_IDLE
+            self.controller._model_download_active = True
             self.assertTrue(self.controller.delete_profile_model("whisper-large-v3"))
         delete.assert_called_once_with("whisper-large-v3")
         self.controller._model_download_active = False

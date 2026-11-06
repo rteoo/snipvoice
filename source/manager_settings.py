@@ -332,7 +332,7 @@ class SettingsActions:
         except Exception as exc:
             raise RpcFailure(tr("Não foi possível remover o modelo."), detail=technical_detail(exc)) from exc
         if removed is False:
-            raise RpcFailure(tr("Aguarde a gravação ou o download terminar antes de remover o modelo."))
+            raise RpcFailure(tr("O modelo está em uso agora. Tente remover de novo em instantes."))
         return {"status": "removed", "message": tr("{name} removido.", name=name)}
 
     def download_summary_model(self, params):

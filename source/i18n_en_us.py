@@ -1982,7 +1982,7 @@ EN_US = {
     'O mais preciso em português · mais lento e usa mais memória': 'Most accurate in Portuguese · slower and uses more memory',
     'A entrada por voz será desligada; baixe-o de novo para voltar a ditar.': 'Voice input will be turned off; download it again to dictate.',
     'Você pode baixá-lo de novo quando quiser.': 'You can download it again anytime.',
-    'Aguarde a gravação ou o download terminar antes de remover o modelo.': 'Wait for the recording or download to finish before removing the model.',
+    'O modelo está em uso agora. Tente remover de novo em instantes.': 'The model is in use right now. Try removing it again in a moment.',
     'Em uso': 'In use',
     'Reparo cancelado.': 'Repair canceled.',
     'Use se a busca da biblioteca não encontrar uma gravação que você sabe que existe.': "Use this if Library search can't find a recording you know exists.",
