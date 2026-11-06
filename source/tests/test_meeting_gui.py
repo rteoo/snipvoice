@@ -155,7 +155,7 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
         view._restored_settings_drafts = {"recording": {"values": working, "baseline": original}}
         view.options, view.devices = {}, []
         view._render_devices, view.refresh_report_profiles = mock.Mock(), mock.Mock()
-        view._settings_loaded({"meeting_profile": "whisper-turbo"}, None)
+        view._settings_loaded({"meeting_profile": "whisper-small"}, None)
         self.assertEqual(view._draft_values("recording"), working)
         self.assertEqual(view._settings_drafts["recording"]["baseline"], original)
         view._settings_drafts["recording"]["save"].configure.assert_called_with(state="normal")
@@ -177,9 +177,9 @@ class SettingsPersistenceLogicTests(unittest.TestCase):
         saved = view.capture_settings_drafts()
         self.assertNotIn("recording", saved)
         view._restored_settings_drafts = saved
-        view.profile.set("whisper-turbo")
+        view.profile.set("whisper-small")
         view._section_loaded("recording")
-        self.assertEqual(view._settings_drafts["recording"]["baseline"]["profile"], "whisper-turbo")
+        self.assertEqual(view._settings_drafts["recording"]["baseline"]["profile"], "whisper-small")
         # A form that only loaded reports nothing; the receipt waits for a save.
         view._settings_drafts["recording"]["status"].configure.assert_called_with(
             text="", fg=view.ui.text_muted)
@@ -1586,7 +1586,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         # No catalog model lacks language hints today; the guard stays wired for one that does.
         with mock.patch("meeting_gui.available_languages", return_value=("auto",)):
             with self.assertRaisesRegex(ValueError, "automática"):
-                validated_settings({"meeting_profile": "whisper-turbo", "meeting_language": "pt-BR"})
+                validated_settings({"meeting_profile": "whisper-small", "meeting_language": "pt-BR"})
 
     def test_time_handles_gaps_and_invalid_values(self):
         self.assertEqual(format_time(3661.25), "01:01:01")
@@ -3008,7 +3008,7 @@ class LongJobCancellationTests(unittest.TestCase):
         view._fail = mock.Mock()
         view.summary_progress_lock = threading.Lock()
         view.summary_progress = ("synthetic", 1, 10)
-        view.summary_model_status, view.semantic_status, view.index_status = Variable(), Variable(), Variable()
+        view.summary_model_status, view.index_status = Variable(), Variable()
         view.rebuild_button = mock.Mock()
         view.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
         event, entered, received = threading.Event(), threading.Event(), threading.Event()
@@ -3022,8 +3022,6 @@ class LongJobCancellationTests(unittest.TestCase):
             return operation()
         if key == "summary_model":
             callback = lambda value, error: view._summary_model_finished({"name": "synthetic"}, error)
-        elif key in {"semantic_model", "semantic_rebuild"}:
-            callback = view._semantic_operation_finished
         else:
             callback = view._rebuild_finished
         completed = mock.Mock(wraps=callback)
@@ -3059,23 +3057,11 @@ class LongJobCancellationTests(unittest.TestCase):
     def test_cancel_queued_summary_download_prevents_file_or_network_work(self):
         self._check_event_job("summary_model", "cancel_summary_download", "summary_download_cancel")
 
-    def test_cancel_queued_semantic_download_prevents_file_or_network_work(self):
-        self._check_event_job("semantic_model", "cancel_semantic_operation", "semantic_cancel")
-
-    def test_cancel_queued_semantic_rebuild_settles_without_admission(self):
-        self._check_event_job("semantic_rebuild", "cancel_semantic_operation", "semantic_cancel")
-
     def test_cancel_queued_index_rebuild_restores_controls(self):
         self._check_event_job("rebuild_index", "cancel_rebuild_index", "rebuild_cancel")
 
     def test_running_summary_download_receives_its_event_and_keeps_completion(self):
         self._check_event_job("summary_model", "cancel_summary_download", "summary_download_cancel", running=True)
-
-    def test_running_semantic_download_receives_its_event_and_keeps_completion(self):
-        self._check_event_job("semantic_model", "cancel_semantic_operation", "semantic_cancel", running=True)
-
-    def test_running_semantic_rebuild_receives_its_event_and_keeps_completion(self):
-        self._check_event_job("semantic_rebuild", "cancel_semantic_operation", "semantic_cancel", running=True)
 
     def test_running_index_rebuild_receives_its_event_and_keeps_completion(self):
         self._check_event_job("rebuild_index", "cancel_rebuild_index", "rebuild_cancel", running=True)
@@ -3754,12 +3740,11 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertIsNone(view._library_search_after)
         self.assertEqual(view.refresh_library.call_count, 2)
 
-    def test_semantic_controls_live_only_in_settings_and_toolbar_is_small(self):
+    def test_search_controls_live_only_in_settings_and_toolbar_is_small(self):
         view, notebook = self._library_view()
         library_widgets = descendants(view.library_tab)
-        self.assertNotIn(view.semantic_cancel_button, library_widgets)
         self.assertNotIn(view.rebuild_button, library_widgets)
-        self.assertIn(view.semantic_cancel_button, descendants(view.search_models_page))
+        self.assertIn(view.rebuild_button, descendants(view.search_models_page))
         buttons = [w for w in descendants(view.library_toolbar) if isinstance(w, tk.Button)]
         self.assertEqual({w.cget("text") for w in buttons}, {"Mais", "Importar áudio…"})
         self.assertTrue(view.search_entry.winfo_ismapped())
@@ -5013,7 +4998,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
     def test_cancel_controls_exist_only_while_their_job_runs(self):
         view, _notebook = self._ready_recorder()
         for button_name, attribute, running in (
-                ("semantic_cancel_button", "semantic_cancel", threading.Event()),
                 ("rebuild_cancel_button", "rebuild_cancel", threading.Event()),
                 ("cross_cancel_button", "cross_pending", 3),
                 ("cancel_summary_button", "summary_pending", ("s1", 1)),
@@ -5053,7 +5037,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
 
     def test_every_job_cancel_reserves_its_width_and_height_while_hidden(self):
         view, _notebook = self._ready_recorder()
-        for name in ("semantic_cancel_button", "rebuild_cancel_button", "cross_cancel_button",
+        for name in ("rebuild_cancel_button", "cross_cancel_button",
                      "cancel_summary_button", "summary_download_cancel_button",
                      "cancel_processing_button"):
             with self.subTest(button=name):
@@ -5083,7 +5067,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view.window.attributes("-topmost", True)
             view.window.lift()
             for name, panel, section in (
-                    ("semantic_cancel_button", None, "search"),
                     ("cross_cancel_button", "cross", None),
                     ("rebuild_cancel_button", None, "search"),
                     ("cancel_processing_button", None, "transcript"),

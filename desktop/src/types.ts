@@ -235,10 +235,12 @@ export interface VoiceModelRow {
   label: string;
   name: string;
   purpose: string;
+  description: string;
   size: string;
   license: string;
   installed: boolean;
   downloading: boolean;
+  inUse: boolean;
 }
 
 export interface SummaryModelRow {
@@ -250,6 +252,7 @@ export interface SummaryModelRow {
   license: string;
   installed: boolean;
   downloading: boolean;
+  inUse: boolean;
 }
 
 export interface SummaryProgress {
@@ -302,13 +305,7 @@ export interface Correction {
 }
 
 export interface SearchState {
-  enabled: boolean;
-  installed: boolean;
-  model: { name: string; size: string; license: string };
-  semantic: string;
-  status: string;
   index: string;
-  download: { done: number; total: number | null } | null;
   repair: { done: number; total: number | null } | null;
 }
 

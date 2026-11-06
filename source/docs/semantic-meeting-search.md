@@ -1,5 +1,8 @@
 # Local semantic meeting retrieval
 
+> **Removed in 1.4.0.** Semantic search and its EmbeddingGemma model were taken out of
+> SnipVoice; word search and search repair remain. This page is kept as history.
+
 The implementation is opt-in through **Library → Local semantic search**.
 The boolean `semantic_search` is stored in `workspace.json`; absent means
 disabled. Keyword and metadata search remain available. Disabling semantic

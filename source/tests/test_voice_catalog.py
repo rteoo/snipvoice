@@ -19,7 +19,6 @@ from voice_catalog import (
     PROFILE_STREAMING,
     PROFILE_WHISPER_LARGE,
     PROFILE_WHISPER_SMALL,
-    PROFILE_WHISPER_TURBO,
     catalog_entry,
     available_languages,
     default_language_for_profile,
@@ -79,8 +78,7 @@ class CatalogTests(unittest.TestCase):
                 PROFILE_BALANCED,
                 PROFILE_STREAMING,
                 PROFILE_WHISPER_SMALL,
-                PROFILE_WHISPER_TURBO,
-                PROFILE_WHISPER_LARGE,
+                            PROFILE_WHISPER_LARGE,
             },
         )
         self.assertEqual(DEFAULT_PROFILE, PROFILE_BALANCED)
@@ -89,7 +87,7 @@ class CatalogTests(unittest.TestCase):
             self.assertTrue(entry["url"].startswith("https://"))
             self.assertEqual(len(entry["sha256"]), 64)
 
-    def test_retired_qwen_profiles_are_gone_and_not_selectable(self):
+    def test_retired_profiles_are_gone_and_not_selectable(self):
         from voice_catalog import RETIRED_PROFILES, is_selectable_profile
         for profile in RETIRED_PROFILES:
             self.assertIsNone(catalog_entry(profile))
@@ -107,13 +105,6 @@ class CatalogTests(unittest.TestCase):
             small["sha256"],
             "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
         )
-        turbo = catalog_entry(PROFILE_WHISPER_TURBO)
-        self.assertEqual(turbo["id"], "whisper-large-v3-turbo-q8")
-        self.assertEqual(turbo["size_bytes"], 886381760)
-        self.assertEqual(
-            turbo["sha256"],
-            "b2e30cc286bc9f3aba4db9099fc7403543497c05ce7100d0d83091ddfd25a183",
-        )
         large = catalog_entry(PROFILE_WHISPER_LARGE)
         self.assertEqual(large["id"], "whisper-large-v3-q8")
         self.assertEqual(large["size_bytes"], 1668741440)
@@ -121,7 +112,7 @@ class CatalogTests(unittest.TestCase):
             large["sha256"],
             "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
         )
-        for entry in (small, turbo, large):
+        for entry in (small, large):
             self.assertIn("/resolve/", entry["url"])
             self.assertNotIn("/resolve/main/", entry["url"])
             self.assertTrue(entry["url"].endswith("/" + entry["filename"]))
@@ -130,7 +121,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_whisper_honors_language_hints(self):
         for profile in (
-            PROFILE_WHISPER_SMALL, PROFILE_WHISPER_TURBO, PROFILE_WHISPER_LARGE
+            PROFILE_WHISPER_SMALL, PROFILE_WHISPER_LARGE
         ):
             self.assertEqual(
                 available_languages(profile),
@@ -172,7 +163,6 @@ class CatalogTests(unittest.TestCase):
             [
                 "whisper-small",
                 "balanced",
-                "whisper-turbo",
                 "whisper-large-v3",
             ],
         )

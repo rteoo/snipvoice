@@ -90,6 +90,7 @@ class SettingsActions:
             "settings.models": self.models,
             "settings.downloadVoiceModel": self.download_voice_model,
             "settings.cancelVoiceModel": self.cancel_voice_model,
+            "settings.deleteVoiceModel": self.delete_voice_model,
             "settings.downloadSummaryModel": self.download_summary_model,
             "settings.cancelSummaryModel": self.cancel_summary_model,
             "settings.deleteSummaryModel": self.delete_summary_model,
@@ -250,9 +251,21 @@ class SettingsActions:
         return {entry["id"]: bool(self.summary_models.summary_model_is_installed(entry["id"]))
                 for entry in summary_catalog()}
 
+    def _models_in_use(self):
+        """The dictation and recording models, and the summary model, that settings name."""
+        try:
+            meeting = resolve_meeting_settings(dict(self.settings_getter()))
+        except ValueError:
+            meeting = None
+        voice = {meeting.profile} if meeting is not None else set()
+        if self.voice is not None:
+            voice.add(self.voice.settings.profile)
+        return voice, meeting.summary_model if meeting is not None else None
+
     def models(self, _params):
         snapshot = self.voice.status_snapshot() if self.voice is not None else {}
         snapshot = snapshot if isinstance(snapshot, dict) else {}
+        voice_in_use, summary_in_use = self._models_in_use()
         voice = []
         for entry in selectable_catalog():
             active = bool(snapshot.get("download_active") and snapshot.get("download_profile") == entry["profile"])
@@ -261,11 +274,13 @@ class SettingsActions:
                 "label": profile_display_label(entry["profile"]),
                 "name": entry["upstream_model"],
                 "purpose": tr(entry["purpose"]),
+                "description": tr(entry["description"]),
                 "size": format_size(entry["size_bytes"]),
                 "license": entry["license_id"],
                 "installed": (self.voice is not None
                               and bool(voice_models.model_is_installed(entry, self.voice.cache_dir))),
                 "downloading": active,
+                "inUse": entry["profile"] in voice_in_use,
             })
         installed = self._summary_installed()
         with self._lock:
@@ -276,6 +291,7 @@ class SettingsActions:
             "size": format_model_size(entry["size_bytes"]), "license": entry["license_id"],
             "installed": installed.get(entry["id"], False),
             "downloading": bool(running and running["id"] == entry["id"]),
+            "inUse": entry["id"] == summary_in_use,
         } for entry in summary_catalog()]
         return {"voice": voice, "summary": summary,
                 "summaryProgress": self._progress_view(running) if running else None}
@@ -298,6 +314,26 @@ class SettingsActions:
     def cancel_voice_model(self, params):
         profile = _text(params, "id", limit=64, required=True)
         return {"cancelled": bool(self.voice is not None and self.voice.cancel_profile_download(profile))}
+
+    def delete_voice_model(self, params):
+        profile = _text(params, "id", limit=64, required=True)
+        entry = next((item for item in selectable_catalog() if item["profile"] == profile), None)
+        if entry is None or self.voice is None:
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        name = profile_display_label(profile)
+        if params.get("confirmed") is not True:
+            consequence = (tr("A entrada por voz será desligada; baixe-o de novo para voltar a ditar.")
+                           if profile == self.voice.settings.profile
+                           else tr("Você pode baixá-lo de novo quando quiser."))
+            return {"status": "confirm", "title": tr("Remover modelo"),
+                    "message": tr("Remover {name} deste computador?", name=name) + "\n\n" + consequence}
+        try:
+            removed = self.voice.delete_profile_model(profile)
+        except Exception as exc:
+            raise RpcFailure(tr("Não foi possível remover o modelo."), detail=technical_detail(exc)) from exc
+        if removed is False:
+            raise RpcFailure(tr("Aguarde a gravação ou o download terminar antes de remover o modelo."))
+        return {"status": "removed", "message": tr("{name} removido.", name=name)}
 
     def download_summary_model(self, params):
         model_id = _text(params, "id", limit=64, required=True)

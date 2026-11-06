@@ -114,7 +114,7 @@ class VoiceProviderTests(unittest.TestCase):
             is_installed=lambda entry, directory: False,
         )
 
-        path = provider.download_profile("whisper-turbo")
+        path = provider.download_profile("whisper-small")
 
         self.assertEqual(path, "downloaded.gguf")
         download.assert_called_once()

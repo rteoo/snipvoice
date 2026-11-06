@@ -20,7 +20,7 @@ from voice_catalog import available_languages, selectable_catalog
 from voice_commands import CommandConflictError
 
 # No catalog model lacks language hints today; the tests stand one in.
-ONE_LANGUAGE = "whisper-turbo"
+ONE_LANGUAGE = "whisper-large-v3"
 
 
 def one_language(profile):

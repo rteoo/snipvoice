@@ -107,14 +107,14 @@ class DictationPresentationTests(unittest.TestCase):
 
     def test_download_bytes_belong_only_to_the_explicit_or_current_runtime_profile(self):
         snapshot = {"state": "loading", "download_active": True,
-                    "download_profile": "whisper-turbo", "download_done": 25, "download_total": 200}
-        self.assertTrue(tx.voice_profile_downloading(snapshot, "whisper-turbo", "whisper-large-v3"))
+                    "download_profile": "whisper-small", "download_done": 25, "download_total": 200}
+        self.assertTrue(tx.voice_profile_downloading(snapshot, "whisper-small", "whisper-large-v3"))
         self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
         snapshot.update(download_active=False, download_profile=None, download_done=0, download_total=0)
         self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
         snapshot.update(download_done=50, download_total=100)
         self.assertTrue(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
-        self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-turbo", "whisper-large-v3"))
+        self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-small", "whisper-large-v3"))
         snapshot["state"] = "idle"
         self.assertFalse(tx.voice_profile_downloading(snapshot, "whisper-large-v3", "whisper-large-v3"))
 
@@ -1874,7 +1874,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             )
             profile_values = tuple(profile_box["values"])
             language_values = tuple(language_box["values"])
-            profile_box.set("Intermediário · Whisper Turbo")
+            profile_box.set("Leve · Whisper Small")
             profile_box.event_generate("<<ComboboxSelected>>")
             whisper_language_values = tuple(language_box["values"])
             whisper_selected = self.app._manager_voice_tk_vars[0].get()
@@ -1904,11 +1904,10 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             (
                 "Leve · Whisper Small",
                 "Equilibrado · Parakeet",
-                "Intermediário · Whisper Turbo",
                 "Máxima precisão · Whisper Large",
             ),
         )
-        self.assertEqual(whisper_selected, "whisper-turbo")
+        self.assertEqual(whisper_selected, "whisper-small")
         self.assertEqual(whisper_language_values, language_values)
         self.assertIn("Automático", language_values)
         self.assertIn("Português (Brasil)", language_values)
