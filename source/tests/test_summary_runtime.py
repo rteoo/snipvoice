@@ -13,6 +13,8 @@ from unittest import mock
 from summary_runtime import NativeSummaryRuntime, SummaryOutputLimitError, SummaryRuntime
 from summary_runtime_worker import serve
 
+TEST_TMP = os.path.join(os.path.dirname(__file__), "tmp")
+
 
 _FAKE_GGML = (
     "class _Function:\n"
@@ -452,8 +454,9 @@ class SummaryRuntimeTests(unittest.TestCase):
         with mock.patch("llama_runtime.load_backends", return_value=WITH_GPU) as backends, \
                 mock.patch.dict(sys.modules, {"llama_cpp": fake_llama_cpp(FakeLlama)}):
             runtime = NativeSummaryRuntime("local.gguf", 4096, device="cpu")
-        # Registration still runs so llama.cpp never scans the working directory.
-        backends.assert_called_once_with()
+        # Registration still runs so llama.cpp never scans the working
+        # directory, but only for the CPU, so a faulty GPU driver stays unloaded.
+        backends.assert_called_once_with(cpu_only=True)
         self.assertEqual((runtime._llama.init["n_gpu_layers"], runtime._llama.init["main_gpu"]), (0, -1))
 
     def test_worker_that_dies_on_the_gpu_is_reopened_on_the_cpu_for_the_session(self):
@@ -500,9 +503,11 @@ class LlamaBackendTests(unittest.TestCase):
     class FakeGgml:
         def __init__(self, registered, loadable):
             self.registered, self.loadable, self.loaded_from = registered, loadable, None
+            self.loaded_one = None
             fields = {
                 "ggml_backend_dev_count": lambda: len(self.registered),
                 "ggml_backend_load_all_from_path": self._load,
+                "ggml_backend_load": self._load_one,
                 "ggml_backend_dev_get": lambda index: index,
                 "ggml_backend_dev_name": lambda index: self.registered[index][0].encode(),
                 "ggml_backend_dev_description": lambda index: self.registered[index][0].encode(),
@@ -521,6 +526,45 @@ class LlamaBackendTests(unittest.TestCase):
         def _load(self, path):
             self.loaded_from = path
             self.registered = list(self.loadable)
+
+        def _load_one(self, path):
+            self.loaded_one = path
+            self.registered = [("CPU", 0)]
+            return 1
+
+    def test_cpu_only_loads_the_best_cpu_variant_and_never_the_gpu_module(self):
+        import llama_runtime
+        suffix = llama_runtime._LIBRARY_SUFFIX
+        os.makedirs(TEST_TMP, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as folder:
+            for name in ("ggml-cpu-haswell", "ggml-cpu-skylakex", "ggml-cpu-x64", "ggml-vulkan", "ggml-base"):
+                open(os.path.join(folder, name + suffix), "wb").close()
+            scores = {"ggml-cpu-haswell": 44, "ggml-cpu-skylakex": 0, "ggml-cpu-x64": 1}
+            scored = []
+
+            def score(path):
+                name = os.path.basename(path)[:-len(suffix)]
+                scored.append(name)
+                return scores[name]
+
+            ggml = self.FakeGgml([], [("CPU", 0), ("Vulkan0", 1)])
+            with mock.patch.object(llama_runtime, "_cpu_score", score):
+                devices = llama_runtime.load_backends(ggml, folder, cpu_only=True)
+        self.assertEqual(sorted(scored), sorted(scores))
+        self.assertEqual(ggml.loaded_one, os.fsencode(os.path.join(folder, "ggml-cpu-haswell" + suffix)))
+        self.assertIsNone(ggml.loaded_from)
+        self.assertEqual([device["type"] for device in devices], ["cpu"])
+
+    def test_cpu_only_without_a_usable_cpu_variant_fails_loudly(self):
+        import llama_runtime
+        os.makedirs(TEST_TMP, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=TEST_TMP) as folder:
+            open(os.path.join(folder, "ggml-cpu-skylakex" + llama_runtime._LIBRARY_SUFFIX), "wb").close()
+            ggml = self.FakeGgml([], [("CPU", 0)])
+            with mock.patch.object(llama_runtime, "_cpu_score", lambda path: 0), \
+                    self.assertRaisesRegex(RuntimeError, "no compute backend"):
+                llama_runtime.load_backends(ggml, folder, cpu_only=True)
+        self.assertIsNone(ggml.loaded_one)
 
     def test_static_build_is_used_as_is(self):
         from llama_runtime import load_backends

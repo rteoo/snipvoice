@@ -49,7 +49,7 @@ concurrency:
 env:
   SNIPVOICE_VERSION: "1.4.0"
   SNIPVOICE_CHANNEL: "beta"
-  SNIPVOICE_RELEASE_LABEL: "1.4.0-beta.1"
+  SNIPVOICE_RELEASE_LABEL: "1.4.0-beta.2"
 
 jobs:
   windows:

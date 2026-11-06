@@ -487,13 +487,13 @@ class PackagingExcludeTests(unittest.TestCase):
         self.assertEqual(workflow_version.group(1), "1.4.0")
         self.assertIn('Version: 1.4.0\nChannel: beta', texts["source"])
         self.assertIn('RELEASE_CHANNEL = "beta"', texts["source"])
-        self.assertIn('BETA_NUMBER = 1', texts["source"])
+        self.assertIn('BETA_NUMBER = 2', texts["source"])
         self.assertIn('#define MyAppChannel "beta"', texts["installer"])
         self.assertIn('SNIPVOICE_CHANNEL: "beta"', texts["workflow"])
-        self.assertIn('SNIPVOICE_RELEASE_LABEL: "1.4.0-beta.1"', texts["workflow"])
-        self.assertIn('#define MyAppDisplayVersion MyAppVersion + " beta 1"',
+        self.assertIn('SNIPVOICE_RELEASE_LABEL: "1.4.0-beta.2"', texts["workflow"])
+        self.assertIn('#define MyAppDisplayVersion MyAppVersion + " beta 2"',
                       texts["installer"])
-        self.assertIn('#define MyInstallerVersion MyAppVersion + "-beta.1"',
+        self.assertIn('#define MyInstallerVersion MyAppVersion + "-beta.2"',
                       texts["installer"])
         # The manager window carries the same version in its file properties.
         for parts in (("desktop", "package.json"), ("desktop", "src-tauri", "tauri.conf.json")):

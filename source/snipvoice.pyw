@@ -113,7 +113,7 @@ from meeting_settings import resolve_meeting_settings, validate_hotkey_conflicts
 
 APP_VERSION = "1.4.0"
 RELEASE_CHANNEL = "beta"
-BETA_NUMBER = 1
+BETA_NUMBER = 2
 APP_DISPLAY_NAME = f"SnipVoice v{APP_VERSION}"
 # ceiling: a six-hour pass is cheap for hundreds of recordings; lower it only
 # if users expect removal within hours of the deadline.

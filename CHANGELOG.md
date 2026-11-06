@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.0-beta.2 - 2026-11-06
+
+- Recording: Windows driver timing flags that lose no audio no longer mark a meeting partial, interrupt it with a notification, or fail the sound check. When audio really is dropped, the message says how much and from which source. Long recordings save and export faster (an 18-minute meeting exports in about 43 s instead of 65 s).
+- Transcription is about 4x faster on long meetings, and chunks end inside pauses instead of mid-word. If the preferred device cannot open the transcription model, it opens on the CPU instead of becoming unavailable.
+- Summaries read the whole meeting in one pass with a 16K context instead of many truncated pieces. On Windows the summary runtime picks the best device on each computer, a Vulkan GPU when one works and otherwise the fastest CPU variant, and falls back to the CPU if the GPU fails. An 18-minute meeting summarizes in seconds on a GPU. Summary models use up to 1 GB more memory.
+- Models: transcription offers Whisper Small, Parakeet v3 and Whisper Large v3; summaries offer Qwen3.5 2B/4B and Gemma 4 E2B/E4B. A setting that names a removed model switches to the default. Configurações › Modelos can remove downloaded transcription models and lists leftover files of retired models, with their size, for removal after confirmation.
+- Semantic search and its EmbeddingGemma model are removed; the feature failed when the models folder sat behind a link or junction. Word search and search repair remain.
+- Library: opening a recording is about twice as fast, and rows show their state as an icon beside the title and date.
+- The Windows package grows by about 47 MB for the GPU runtime. macOS keeps the classic window and its built-in Metal summary runtime.
+- A transcription revision interrupted on beta 1 and resumed on beta 2 may repeat a short interval; run the revision again to replace it.
+- No Microsoft Store package for this beta; the Windows installer and portable ZIP are available.
+
 ## 1.4.0-beta.1 - 2026-10-29
 
 - Open a new manager window on Windows, rebuilt in Tauri on the Teô design system, with the same pages as before: Gravação, Biblioteca, Ditado and Configurações. Set `SNIPVOICE_MANAGER=tk` to use the classic window; it also opens automatically if the new one cannot start on this computer.
