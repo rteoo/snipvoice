@@ -147,8 +147,12 @@ jobs:
           $actual = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           if ($actual -ne $env:VULKAN_SDK_SHA256) { throw "Vulkan SDK installer hash mismatch" }
           $sdk = "C:\VulkanSDK\$env:VULKAN_SDK_VERSION"
-          & $installer --root $sdk --accept-licenses --default-answer --confirm-command install
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A GUI-subsystem installer returns to the shell immediately; wait for
+          # it and prove the shader compiler landed before the build needs it.
+          $install = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            "--root", $sdk, "--accept-licenses", "--default-answer", "--confirm-command", "install")
+          if ($install.ExitCode -ne 0) { throw "Vulkan SDK installer exited with $($install.ExitCode)" }
+          if (-not (Test-Path "$sdk\Bin\glslc.exe")) { throw "Vulkan SDK installed no glslc" }
           Remove-Item $installer
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
