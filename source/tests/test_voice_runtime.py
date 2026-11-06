@@ -65,6 +65,60 @@ class RuntimeTests(unittest.TestCase):
         session.cancel.assert_called()
         self.assertTrue(errors)
 
+    def _module_with_models(self, opener):
+        opened = []
+
+        class Model:
+            def __init__(self, path, **options):
+                self.options = options
+                self.backend = options.get("backend", "vulkan")
+                self.closed = False
+                opened.append(self)
+                opener(self)
+
+            def session(self):
+                if getattr(self, "fail_session", False):
+                    raise RuntimeError("device lost")
+                return mock.Mock()
+
+            def close(self):
+                self.closed = True
+
+        return mock.Mock(Model=Model), opened
+
+    def test_voice_model_that_fails_on_its_preferred_device_opens_on_the_cpu(self):
+        for failure in ("open", "session"):
+            def opener(model, failure=failure):
+                if model.options.get("backend") != "cpu":
+                    if failure == "open":
+                        raise RuntimeError("out of device memory")
+                    model.fail_session = True
+
+            module, opened = self._module_with_models(opener)
+            backend = TranscribeCppBackend()
+            backend._module = module
+            with self.subTest(failure=failure), self.assertLogs("voice_runtime", "WARNING"):
+                backend.load("model.bin", "balanced", "pt-BR")
+            self.assertTrue(backend.is_loaded())
+            self.assertEqual(opened[-1].options, {"backend": "cpu"})
+            if failure == "session":
+                self.assertTrue(opened[0].closed, "The failed GPU model is released before the retry")
+
+    def test_voice_model_that_fails_everywhere_reports_and_releases(self):
+        def opener(model):
+            if model.options.get("backend") == "cpu":
+                model.fail_session = True
+            else:
+                raise RuntimeError("unsupported model file")
+
+        module, opened = self._module_with_models(opener)
+        backend = TranscribeCppBackend()
+        backend._module = module
+        with self.assertRaises(VoiceRuntimeError):
+            backend.load("model.bin", "balanced", "pt-BR")
+        self.assertFalse(backend.is_loaded())
+        self.assertTrue(all(model.closed for model in opened[1:]))
+
     def test_transcribe_cpp_maps_ui_locales_to_model_language_codes(self):
         backend = TranscribeCppBackend()
         backend._profile = "balanced"
