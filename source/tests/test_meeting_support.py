@@ -928,6 +928,23 @@ class MeetingControllerTests(unittest.TestCase):
         self.assertTrue(self.controller.snapshot()["waveforms"]["system"])
         self.voice.release_meeting.assert_called_once_with("lease")
 
+    def test_source_preview_flags_only_discontinuities_that_lose_audio(self):
+        for positions, expected in (((4800, 4800), ()), ((9600, 4800), ("system",))):
+            with self.subTest(positions=positions):
+                self.capture = FakeCapture()
+                self.controller.capture_factory = lambda: self.capture
+                pending = [{"type": "gap", "track": "system", "timestamp": 0.1,
+                            "reason": "native_discontinuity", "device_position": positions[0],
+                            "expected_device_position": positions[1], "sample_rate": 48000}]
+                original = self.capture.read_event
+
+                def read_event(timeout, pending=pending, original=original):
+                    return (pending.pop(0), b"") if pending else original(timeout)
+
+                self.capture.read_event = read_event
+                result = self.controller.preview_sources(MeetingSettings(), seconds=0.03)
+                self.assertEqual(result["errors"], expected)
+
     def test_source_preview_blocks_recording_until_capture_stops(self):
         errors = []
 

@@ -617,9 +617,10 @@ class MeetingController:
                         break
                     if event["type"] == "source_error" and event.get("track") in enabled:
                         errors.add(event["track"])
+                    reason = str(event.get("reason", ""))
                     if (event["type"] == "gap" and event.get("track") in enabled
-                            and any(word in str(event.get("reason", "")) for word in
-                                    ("overflow", "invalid", "discontinuity", "timestamp_error"))):
+                            and "capture_interruption" not in reason
+                            and _gap_loses_audio(event, reason)):
                         errors.add(event["track"])
                     if event["type"] != "audio" or event.get("track") not in enabled:
                         continue
