@@ -64,7 +64,7 @@ async function main(): Promise<void> {
     navStates[destination] = h("span", { class: "nav-state" });
     navItems[destination] = h(
       "button",
-      { class: destination === "settings" ? "nav-item settings" : "nav-item", attrs: { type: "button" }, on: { click: () => go(destination) } },
+      { class: destination === "settings" ? "nav-item settings" : "nav-item", attrs: { type: "button", "aria-label": labels[destination], title: labels[destination] }, on: { click: () => go(destination) } },
       icon(icons[destination]),
       h("span", { class: "nav-label", text: labels[destination] }),
       navStates[destination],

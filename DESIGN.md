@@ -1,10 +1,63 @@
 # Snipvoice interface
 
-Snipvoice adopts the **Teô Personal Design System 2.7.1, Windows family** (Ink &
+## Manager adoption — Teô 3.0.1
+
+The Tauri manager adopts the current neutral web direction from
+[Teô DS v3.0.1](https://github.com/rteoo/design-system-teo/tree/v3.0.1).
+Owned copies of foundations.css and theme.css live under
+desktop/src/styles/teo; tokens.css adapts semantic roles to existing controls.
+Orange identifies actions; blue identifies navigation, selection and focus.
+Hover is neutral, tables are banded, and controls have 44px minimum targets.
+Dark, Light and System retain the existing engine-backed preference behavior.
+
+Stack decision: retain Tauri 2 + Vite + TypeScript and the local Python engine.
+Local audio capture, inference, hotkeys and recoverable recordings require local
+execution; no measured benefit supports moving them to a remote service or Rust.
+The default-stack React/Tailwind/shadcn migration is deferred: it requires an
+explicit dependency migration and behavior parity verification. Existing DOM
+controls consume the new semantic CSS without introducing runtime dependencies.
+
+Deviations: font families resolve locally (Onest, Familjen Grotesk, Fragment
+Mono) with system fallbacks; no external font requests are made. Font binaries
+are not bundled. Product icons remain Snipvoice's own. The Python/Tk fallback
+and HUD retain the native 2.7.1 family described below; the new web direction
+does not supersede that family. Existing native verification below is historical
+and does not certify this manager refresh. Packaged Windows/macOS, keyboard,
+screen reader, zoom and visual acceptance remain required before release.
+
+## Native fallback adoption and historical verification
+
+The Python/Tk interface adopts the **Teô Personal Design System 2.7.1, Windows family** (Ink &
 Copper on the shared native neutral surfaces) for its Windows manager, and
 adapts the same hierarchy for macOS. This file is the project's adoption
 record: what was adopted, how it maps onto Tk, where Tk forces a deviation, and
 which release gates have evidence.
+
+The v3 manager refresh passed its TypeScript/Vite production build and diff
+whitespace check. Copied CSS was compared with the canonical checkout.
+Final validation used the existing project virtual environment: the full
+Python suite passed (1749 tests, 86 skipped), Ruff 0.16.3 passed, and
+`cargo check --locked --offline` passed. Thirty-six calculated contrast checks
+passed for text, primary action states, semantic statuses and focus in both
+themes. The earlier default-interpreter failures were missing dependencies;
+no project dependencies were changed.
+
+Publication review covered all seven staged text files and their metadata.
+No dedicated secret scanner was available. Manual review and supplemental
+privacy-pattern checks found no new credentials, personal data or private
+endpoints. The existing loopback development URL in Tauri configuration remains
+unchanged; generated artifacts and unrelated untracked files are excluded.
+
+Browser acceptance (2026-11-16, synthetic mock engine): checked Dark and Light
+on recording, library list/detail, dictation, general settings, privacy and
+models; checked recording defaults in Dark. Viewports included 1280x800,
+1180x760 and the manager minimum 720x520. Theme controls switched the actual
+rendered palette. At minimum width the library stacks and scrolls; navigation
+retains accessible names and 44px targets, with the footer hidden. Keyboard
+Tab produced a visible 2px blue focus outline. Disabled primary actions use
+the neutral disabled surface in both themes. Production build passed again.
+This preview does not verify engine persistence, real audio, packaged WebView,
+OS theme changes, screen readers, 320px reflow or 200% text zoom.
 
 ## Adoption record
 
