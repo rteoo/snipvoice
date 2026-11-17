@@ -756,18 +756,10 @@ class Snipvoice:
             self._meeting_startup_ready,
             tr(self._meeting_startup_status),
         )
-        settings_tab = getattr(meeting_view, "settings_tab", None)
         tab = tk.Frame(notebook, bg=ui.surface)
         self._manager_voice_tab = tab
-        notebook.add(tab, text=tr("Ditado"))
-        # The meeting view owns the Configurações page and adds it before the voice tab. Move
-        # that existing tab to the end so the user-facing order stays stable:
-        # Gravação, Biblioteca, Ditado, Configurações.
-        if settings_tab is not None:
-            try:
-                notebook.insert("end", settings_tab)
-            except tk.TclError:
-                self.logger.debug("Não foi possível reposicionar a aba Configurações")
+        # Dictation is the primary destination; Settings remains last.
+        notebook.insert(0, tab, text=tr("Ditado"))
         if self.voice is None:
             tk.Label(tab, text=tr("Entrada por voz indisponível. Verifique o runtime de transcrição."),
                      bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(padx=24, pady=24)
@@ -794,7 +786,7 @@ class Snipvoice:
                      "status": self.voice.status_label() if self.voice is not None else ""}, tab,
         )
         self._build_manager_nav(ui, nav, notebook, self._select_manager_destination)
-        notebook.select(meeting_view.recording_tab)
+        notebook.select(tab)
         saved_state = getattr(self, "_manager_view_state", None)
         if saved_state is not None:
             meeting_view.restore_view_state(saved_state)
@@ -841,7 +833,7 @@ class Snipvoice:
             row = tk.Frame(column, bg=bg)
             row.pack(fill=tk.X)
             select = lambda _event=None, target=tab_id: (on_select or notebook.select)(target)
-            icon = tk.Label(row, text=ui.icon(("record", "library", "dictation", "settings")[index]),
+            icon = tk.Label(row, text=ui.icon(("dictation", "record", "library", "settings")[index]),
                             font=ui.icon_font(), fg=ui.text_muted, bg=bg, takefocus=False)
             icon.pack(side=tk.LEFT, padx=ui.space_sm)
             icon.bind("<Button-1>", select)

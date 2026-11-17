@@ -617,6 +617,28 @@ struct Format {
     }
 };
 
+void appendCopiedPacket(AudioBatch& batch, const Format& format,
+                        const std::vector<BYTE>& packet, UINT32 frames,
+                        double timestamp, bool silent, DWORD flags) {
+    // ceiling: each converted block is <=100 ms and <=4 MiB.
+    unsigned maximum = std::min<unsigned>(format.rate / 10,
+        static_cast<unsigned>(kMaxPayload / (format.channels * sizeof(float))));
+    maximum = std::max(1u, maximum);
+    // The native buffer has been released: finish preserving this packet even
+    // when Stop arrives. The next acquisition observes the stop flag.
+    for (UINT32 offset = 0; offset < frames; offset += maximum) {
+        unsigned count = std::min<unsigned>(maximum, frames - offset);
+        std::vector<BYTE> payload(static_cast<size_t>(count) * format.channels * sizeof(float));
+        for (size_t sample = 0; sample < static_cast<size_t>(count) * format.channels; ++sample) {
+            float value = silent ? 0.0f : format.sample(packet.data()
+                + (static_cast<size_t>(offset) * format.channels + sample) * format.stride);
+            std::memcpy(payload.data() + sample * sizeof(float), &value, sizeof(float));
+        }
+        batch.append(timestamp + static_cast<double>(offset) / format.rate,
+            count, payload, offset == 0 ? flags : 0);
+    }
+}
+
 void healthSelfTest() {
     auto require = [](bool valid, const char* scenario) {
         if (!valid) throw std::runtime_error(std::string("Capture health self-test: ") + scenario);
@@ -933,6 +955,25 @@ void selfTestLogic() {
     });
     require(released && packet.size() == sizeof(source)
         && std::equal(packet.begin(), packet.end(), source));
+    Session stoppedAfterRelease;
+    uint64_t stoppedSequence = 0;
+    AudioBatch stoppedBatch{stoppedAfterRelease, 0, format.rate, format.channels, 0, stoppedSequence};
+    std::vector<BYTE> acquired(9600 * sizeof(float));
+    float acquiredSample = 0.25f;
+    for (size_t offset = 0; offset < acquired.size(); offset += sizeof(float))
+        std::memcpy(acquired.data() + offset, &acquiredSample, sizeof(float));
+    auto stoppedPacket = copyAndRelease(acquired.data(), acquired.size(), [&] {
+        stoppedAfterRelease.stop = true;
+        return S_OK;
+    });
+    appendCopiedPacket(stoppedBatch, format, stoppedPacket, 9600, 0, false, 0);
+    stoppedBatch.flush();
+    if (stoppedAfterRelease.queue.size() != 2 || stoppedSequence != 2)
+        throw std::runtime_error("Stop after buffer release discarded acquired PCM");
+    std::vector<BYTE> preserved;
+    for (const auto& message : stoppedAfterRelease.queue)
+        preserved.insert(preserved.end(), message.payload.begin(), message.payload.end());
+    require(preserved == acquired);
     unsigned releaseCalls = 0;
     bool releaseFailed = false;
     try {
@@ -1122,26 +1163,10 @@ void capture(Session& session, Selection selected) {
                             batch.flush();
                             session.gap(selected.track, packetTimestamp, "invalid_native_buffer");
                         }
-                        // ceiling: each copied block is <=100 ms and <=4 MiB.
-                        unsigned maximum = std::min<unsigned>(format.rate / 10,
-                            static_cast<unsigned>(kMaxPayload / (format.channels * sizeof(float))));
-                        maximum = std::max(1u, maximum);
                         try {
-                            for (UINT32 offset = 0; offset < frames && !invalidBuffer && (tail || !session.stop); offset += maximum) {
-                                unsigned count = std::min<unsigned>(maximum, frames - offset);
-                                Message block;
-                                block.track = selected.track;
-                                block.duration = static_cast<double>(count) / format.rate;
-                                block.payload.resize(static_cast<size_t>(count) * format.channels * sizeof(float));
-                                for (size_t sample = 0; sample < static_cast<size_t>(count) * format.channels; ++sample) {
-                                    float value = silent ? 0.0f : format.sample(packet.data()
-                                        + (static_cast<size_t>(offset) * format.channels + sample) * format.stride);
-                                    std::memcpy(block.payload.data() + sample * sizeof(float), &value, sizeof(float));
-                                }
-                                batch.append(packetTimestamp + static_cast<double>(offset) / format.rate,
-                                    count, block.payload, offset == 0 ? bufferFlags : 0);
-                            }
                             if (!invalidBuffer) {
+                                appendCopiedPacket(batch, format, packet, frames, packetTimestamp,
+                                    silent, bufferFlags);
                                 double observed = session.now();
                                 lastPacketWallTime = observed;
                                 health.packet(observed, frames);

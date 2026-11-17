@@ -95,8 +95,6 @@ class LibraryActions:
             "library.saveProfile": self.save_profile,
             "library.setProfileEnabled": self.set_profile_enabled,
             "library.deleteProfile": self.delete_profile,
-            "library.ask": self.ask,
-            "library.saveAnswer": self.save_answer,
             "library.cancelJob": self.cancel_job,
             "library.files": self.files,
             "library.exportText": self.export_text,
@@ -524,14 +522,22 @@ class LibraryActions:
         style = params.get("format")
         if style not in {"markdown", "text"}:
             raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
+        include_timestamps = params.get("includeTimestamps", False)
+        if not isinstance(include_timestamps, bool):
+            raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
         suffix = ".md" if style == "markdown" else ".txt"
         label = "Markdown" if style == "markdown" else tr("Texto")
         path = self.choose_path("save", tr("Exportar transcrição"),
                                 safe_filename_stem(self._title(session_id)) + suffix, ((label, "*" + suffix),))
         if not path:
             return {"saved": False}
-        self._engine_call(lambda: self.meetings.export(session_id, path, format=style),
-                          tr("Não foi possível exportar a transcrição"))
+        def write_transcript():
+            metadata = self.meetings.get_session(session_id, include_events=False)
+            return self.meetings.export_transcript(
+                session_id, path, style="timestamped" if include_timestamps else "full_text",
+                revision=active_transcript_revision(metadata),
+            )
+        self._engine_call(write_transcript, tr("Não foi possível exportar a transcrição"))
         return {"saved": True, "name": os.path.basename(path)}
 
     def export_audio(self, params):

@@ -168,6 +168,103 @@ class MeetingStoreTests(unittest.TestCase):
         self.assertEqual(len(item["events"]), 1)
         self.assertEqual(list(recovered.iter_audio(self.session))[0][1], payload)
 
+    def test_legacy_text_only_events_do_not_require_an_audio_journal(self):
+        self.store.finish(self.session)
+        (Path(self.temp.name) / self.session / "events.journal").unlink()
+        self.assertEqual(list(self.store.iter_events(self.session)), [])
+
+    def test_missing_journal_for_saved_audio_is_not_legacy_event_fallback(self):
+        self.store.append_audio(self.session, self.event(), b"\0" * 16)
+        self.store.finish(self.session)
+        (Path(self.temp.name) / self.session / "events.journal").unlink()
+        with self.assertRaises(FileNotFoundError):
+            list(self.store.iter_events(self.session))
+        with self.assertRaises(FileNotFoundError):
+            self.store.audio_payloads_complete(self.session)
+
+    def test_journal_read_errors_are_not_treated_as_empty_audio(self):
+        self.store.append_audio(self.session, self.event(), b"\0" * 16)
+        journal = Path(self.temp.name) / self.session / "events.journal"
+        original_open = open
+
+        def denied(path, *args, **kwargs):
+            if os.fspath(path) == str(journal):
+                raise PermissionError("synthetic journal access failure")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=denied):
+            with self.assertRaises(PermissionError):
+                list(self.store.iter_audio(self.session))
+            with self.assertRaises(PermissionError):
+                self.store.audio_payloads_complete(self.session)
+
+    def test_transient_journal_error_defers_startup_recovery_without_replacing_metadata(self):
+        payload = b"\0" * 16
+        self.store.append_audio(self.session, self.event(), payload)
+        journal = Path(self.temp.name) / self.session / "events.journal"
+        metadata = journal.with_name("metadata.json")
+        before = metadata.read_bytes()
+        original_open = open
+
+        def denied(path, *args, **kwargs):
+            if os.fspath(path) == str(journal):
+                raise PermissionError("synthetic journal access failure")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=denied):
+            MeetingStore(self.temp.name)
+        self.assertEqual(metadata.read_bytes(), before)
+        recovered = MeetingStore(self.temp.name)
+        self.assertEqual(recovered.get(self.session)["status"], "interrupted")
+        self.assertEqual(list(recovered.iter_audio(self.session))[0][1], payload)
+        self.assertGreater(recovered.get(self.session)["duration"], 0)
+
+    def test_transient_source_stat_error_also_defers_recovery(self):
+        self.store.append_audio(self.session, self.event(), b"\0" * 16)
+        metadata = Path(self.temp.name) / self.session / "metadata.json"
+        before = metadata.read_bytes()
+        with mock.patch("meeting_store.os.path.getsize", side_effect=PermissionError("synthetic source access failure")):
+            MeetingStore(self.temp.name)
+        self.assertEqual(metadata.read_bytes(), before)
+        recovered = MeetingStore(self.temp.name)
+        self.assertEqual(recovered.get(self.session)["status"], "interrupted")
+        self.assertTrue(list(recovered.iter_audio(self.session)))
+
+    def test_torn_journal_keeps_readable_prefix_but_cannot_certify_cleanup(self):
+        payload = b"\0" * 16
+        self.store.append_audio(self.session, self.event(), payload)
+        with open(Path(self.temp.name) / self.session / "events.journal", "ab") as handle:
+            handle.write(b"SVJ1\x10\x00")
+        self.assertEqual(list(self.store.iter_audio(self.session))[0][1], payload)
+        with self.assertRaises(ValueError):
+            self.store.audio_payloads_complete(self.session)
+
+    def test_cleanly_truncated_journal_cannot_certify_all_saved_audio(self):
+        self.store.append_audio(self.session, self.event(), b"\0" * 16)
+        journal = Path(self.temp.name) / self.session / "events.journal"
+        first_size = journal.stat().st_size
+        self.store.append_audio(self.session, self.event(sequence=1, timestamp=1), b"\0" * 16)
+        self.store.finish(self.session)
+        with open(journal, "r+b") as handle:
+            handle.truncate(first_size)
+        self.assertFalse(self.store.audio_payloads_complete(self.session))
+
+    def test_unjournaled_audio_bytes_are_never_certified_for_cleanup(self):
+        self.store.append_audio(self.session, self.event(), b"\0" * 16)
+        with mock.patch.object(self.store, "_append_journal", side_effect=OSError("synthetic journal write failure")):
+            with self.assertRaises(OSError):
+                self.store.append_audio(self.session, self.event(sequence=1, timestamp=1), b"\1" * 16)
+        self.store.finish(self.session, "failed", "synthetic journal write failure")
+        self.assertFalse(self.store.audio_payloads_complete(self.session))
+
+    def test_orphaned_segment_survives_recovery_cleanup_checks(self):
+        self.store.append_audio(self.session, self.event(), b"\0" * 16)
+        orphan = Path(self.temp.name) / self.session / "microphone" / "segment-000001.pcm"
+        orphan.write_bytes(b"\1" * 16)
+        recovered = MeetingStore(self.temp.name)
+        self.assertFalse(recovered.audio_payloads_complete(self.session))
+        self.assertEqual(orphan.read_bytes(), b"\1" * 16)
+
     def test_interrupted_recording_is_marked_without_truncating_audio(self):
         payload = b"\0" * 16
         self.store.append_audio(self.session, self.event(), payload)

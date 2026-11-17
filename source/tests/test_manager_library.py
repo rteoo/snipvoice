@@ -107,6 +107,10 @@ class FakeLibrary:
         self.calls.append(("export", session_id, path, format))
         return path
 
+    def export_transcript(self, session_id, path, *, style="full_text", revision=None):
+        self.calls.append(("export_transcript", session_id, path, style))
+        return path
+
     def export_final_audio(self, session_id, path):
         self.calls.append(("export_final_audio", session_id, path))
         return path
@@ -295,7 +299,24 @@ class FileTests(unittest.TestCase):
         target = os.path.join(os.sep, "exports", "notes.txt")
         actions, library, _dialogs = make_actions(path=target)
         self.assertEqual(actions.export_text({"id": "s1", "format": "text"}), {"saved": True, "name": "notes.txt"})
-        self.assertEqual(library.calls, [("export", "s1", target, "text")])
+        self.assertEqual(library.calls, [("export_transcript", "s1", target, "full_text")])
+
+    def test_transcript_timestamps_apply_to_both_export_formats(self):
+        for format, suffix in (("markdown", ".md"), ("text", ".txt")):
+            with self.subTest(format=format):
+                actions, library, _dialogs = make_actions(path="transcript" + suffix)
+                actions.export_text({"id": "s1", "format": format, "includeTimestamps": True})
+                self.assertEqual(library.calls, [
+                    ("export_transcript", "s1", "transcript" + suffix, "timestamped"),
+                ])
+
+    def test_timestamp_option_must_be_a_boolean(self):
+        for value in ("false", 0, None, [], {}):
+            actions, library, dialogs = make_actions(path="transcript.txt")
+            with self.subTest(value=value), self.assertRaises(RpcFailure):
+                actions.export_text({"id": "s1", "format": "text", "includeTimestamps": value})
+            self.assertEqual(library.calls, [])
+            self.assertEqual(dialogs, [])
 
     def test_final_audio_needs_a_saved_final(self):
         actions, library, dialogs = make_actions(path="x.mp3")
@@ -304,6 +325,11 @@ class FileTests(unittest.TestCase):
         with self.assertRaises(RpcFailure):
             actions.export_audio({"id": "s1"})
         self.assertEqual(dialogs, [])
+
+    def test_cancelled_import_does_not_enter_the_controller(self):
+        actions, library, _dialogs = make_actions(path="")
+        self.assertEqual(actions.import_audio({}), {"id": None})
+        self.assertEqual(library.calls, [])
 
     def test_import_opens_audio_and_returns_the_new_recording(self):
         actions, library, dialogs = make_actions(path="call.m4a")
@@ -428,6 +454,8 @@ class ManagerApiCompositionTests(unittest.TestCase):
         self.assertIs(methods["library.summary"].__self__, actions)
         self.assertIn("trash.list", methods)
         self.assertIn("app.hello", methods)
+        self.assertNotIn("library.ask", methods)
+        self.assertNotIn("library.saveAnswer", methods)
 
 
 if __name__ == "__main__":

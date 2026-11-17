@@ -20,7 +20,6 @@ import data_relocation
 import i18n
 from i18n import N_, tr
 from meeting_files import report_export_projection
-from meeting_chat import MeetingChat
 from meeting_support import CAPTURE_STATES, PIPELINE_JOBS, processing_job_label, start_blocker
 from meeting_text import (
     format_detailed_notes, format_expiry, format_local_timestamp, format_storage_size,
@@ -2764,12 +2763,8 @@ class MeetingWindow:
         detail_nav.pack(fill="x", padx=(12, 0), pady=(self.ui.space_sm, 0))
         self.detail_nav = detail_nav
         tk.Frame(self.detail_frame, bg=self.ui.border, height=1).pack(fill="x", padx=(12, 0))
-        def fit_chat(_width, height):
-            if hasattr(self, "meeting_chat"):
-                self.meeting_chat.set_height(max(300, height - 8))
-
         detail_body, self.detail_canvas, self.detail_content, right = self._scroll_area(
-            self.detail_frame, fill_height=True, on_resize=fit_chat,
+            self.detail_frame, fill_height=True,
         )
         detail_body.pack(fill="both", expand=True, pady=(self.ui.space_sm, 0))
         self.detail_sections = SectionSwitcher(
@@ -2779,7 +2774,6 @@ class MeetingWindow:
         )
         transcript_page = self.detail_sections.add("transcript", tr("Transcrição"))
         summary_page = self.detail_sections.add("summary", tr("Resumo"))
-        ask_page = self.detail_sections.add("ask", tr("Chat"))
         files_page = self.detail_sections.add("files", tr("Arquivos"))
 
         # The player sits above the transcript it plays, so listening and
@@ -3088,20 +3082,14 @@ class MeetingWindow:
         self._button(report_actions, tr("Ir à fonte"), self.jump_to_report_citation).pack(side="left", padx=(self.ui.space_sm, 0))
         self._set_report_profiles([])
 
-        self.meeting_chat = MeetingChat(
-            ask_page, self.ui, on_send=lambda _text: self.ask_this_meeting(),
-            on_cancel=self.cancel_chat_answer, on_new=self.new_chat,
-            on_save=self.save_answer, on_copy=self.copy_chat_answer,
-            on_source=self.jump_to_ask_citation, on_retry=self.retry_chat_answer,
-            copy_details=self._copy_issue_details,
-        )
-        self.meeting_chat.pack(fill="both", expand=True, padx=(12, 0))
-        self.ask_status = self.meeting_chat.status
-        self._render_chat()
-
         # Files: text exports and the saved final MP3.
         self._label(files_page, tr("Exportar texto"), anchor="w", fg=self.ui.text_strong,
                     font=self.ui.font(10, "bold")).pack(fill="x", padx=12, pady=(0, 4))
+        self.export_timestamps = tk.BooleanVar(self.window, False)
+        tk.Checkbutton(
+            files_page, text=tr("Incluir horários"), variable=self.export_timestamps,
+            font=self.ui.body(), **self.ui.checkbutton_colors(self.ui.surface),
+        ).pack(anchor="w", padx=12, pady=(0, self.ui.space_sm))
         exports = ttk.Frame(files_page, style="Meeting.TFrame")
         exports.pack(fill="x", padx=(12, 0), pady=(0, self.ui.space_md))
         self._button(exports, tr("Markdown…"), lambda: self.export("markdown")).pack(
@@ -3201,10 +3189,6 @@ class MeetingWindow:
             displayed_key(i18n.LANGUAGE_NAMES, self.privacy_notice_language_display.get())))
         self.privacy_field_errors = {"privacy_notice_language": hint(3, tr("Um texto para ler ou colar na chamada avisando que a reunião será gravada."))}
 
-        _line, self.qa_never_save_check = option(4, tr("Nunca salvar respostas do chat"), self.qa_never_save,
-                                                 self._qa_never_save_changed)
-        self.privacy_field_errors["qa_mode"] = hint(5, tr("As respostas somem ao fechar a gravação, e o botão Salvar fica oculto."))
-
         line, self.whole_meeting_auto_check = option(6, tr("Mover gravações para a lixeira automaticamente após"),
                               self.whole_meeting_auto, self._sync_raw_policy_controls)
         self.whole_meeting_days_entry = days_entry(line, self.whole_meeting_after_days)
@@ -3219,7 +3203,7 @@ class MeetingWindow:
         self.privacy_field_errors["trash_days"] = hint(9, tr("Depois disso, Esvaziar expirados, na lixeira da Biblioteca, apaga esses itens de vez."))
         self.privacy_validation_fields = {
             "whole_meeting_after_days": self.whole_meeting_days_entry, "trash_days": self.trash_days_entry,
-            "privacy_notice_language": self.privacy_notice_language_box, "qa_mode": self.qa_never_save_check}
+            "privacy_notice_language": self.privacy_notice_language_box}
 
         self._wrap_label(
             card,
@@ -7609,7 +7593,9 @@ class MeetingWindow:
         path = filedialog.asksaveasfilename(parent=self.window, title=tr("Exportar transcrição"),
             defaultextension=suffix, filetypes=(("Markdown" if suffix == ".md" else tr("Texto"), "*" + suffix),))
         if path:
-            self._action("export", self.selected, path, format=format,
+            self._action("export_transcript", self.selected, path,
+                         style="timestamped" if self.export_timestamps.get() else "full_text",
+                         revision=self.transcript_revision,
                          receipt=tr("Exportação iniciada."))
 
     def export_audio(self):

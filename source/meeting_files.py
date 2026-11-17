@@ -844,13 +844,16 @@ def export_transcript(store, session_id, path, *, style="full_text", revision=No
     if inside_library:
         raise ValueError(tr("Escolha uma pasta fora da biblioteca para preservar os arquivos originais."))
     paragraphs = iter_transcript_text(store.get_transcript(session_id, revision), style)
+    first_paragraph = next(paragraphs, None)
+    if first_paragraph is None:
+        raise ValueError(tr("Esta gravação ainda não tem transcrição."))
     descriptor, temporary = tempfile.mkstemp(
         prefix="." + destination.name + "-", suffix=".tmp", dir=destination.parent,
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             first = True
-            for paragraph in paragraphs:
+            for paragraph in itertools.chain((first_paragraph,), paragraphs):
                 _cancel(cancel_event)
                 if not first:
                     handle.write("\n\n")
