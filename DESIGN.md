@@ -3,6 +3,10 @@
 ## Manager adoption — Teô 3.0.1
 
 Recording details offer Transcription, Summary and Files in both managers.
+Dictation configuration lives in Settings → Dictation: model, language,
+shortcuts, activation mode and command configuration share the existing save
+controls. The main Dictation destination keeps readiness, its enable switch
+and recent history, with a direct action to open its settings.
 Recording Chat and its privacy control are removed; the manager bridge no
 longer exposes ask/save-answer actions. Legacy saved answers, export data and
 storage preferences remain readable without a migration or deletion.

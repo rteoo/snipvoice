@@ -747,6 +747,13 @@ class Snipvoice:
             models_location=self.models_location,
             relocate_models=self.request_models_relocation,
         )
+        dictation_settings = meeting_view.settings_sections.add("dictation", tr("Ditado"))
+        leave_settings = meeting_view.request_leave_settings
+        meeting_view.request_leave_settings = lambda after: (
+            self._request_leave_voice_settings(after)
+            if meeting_view.settings_sections.current == "dictation"
+            else leave_settings(after)
+        )
         self._manager_meeting_view = meeting_view
         meeting_view.preference_gate = self._before_manager_preference
         meeting_view.on_forms_settled = self._manager_forms_settled
@@ -763,6 +770,8 @@ class Snipvoice:
         if self.voice is None:
             tk.Label(tab, text=tr("Entrada por voz indisponível. Verifique o runtime de transcrição."),
                      bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(padx=24, pady=24)
+            tk.Label(dictation_settings, text=tr("Entrada por voz indisponível. Verifique o runtime de transcrição."),
+                     bg=ui.surface, fg=ui.text, font=ui.font(11), wraplength=640).pack(anchor="w")
             models_parent = getattr(meeting_view, "transcription_models_parent", None)
             if models_parent is not None:
                 tk.Label(
@@ -779,7 +788,14 @@ class Snipvoice:
                 tab,
                 window,
                 models_parent=getattr(meeting_view, "transcription_models_parent", None),
+                settings_parent=dictation_settings,
+                on_settings=lambda: (self._select_manager_destination(meeting_view.settings_tab),
+                                     meeting_view.settings_sections.select("dictation")),
             )
+            for widget in (dictation_settings, *self._voice_descendants(dictation_settings)):
+                self._bind_mousewheel(widget, meeting_view.settings_canvas)
+                widget.bind("<FocusIn>", lambda event: self._reveal_voice_field(
+                    event.widget, meeting_view.settings_content, meeting_view.settings_canvas), add="+")
         meeting_view.attach_voice_status(
             lambda: {"enabled": bool(self.voice is not None and self.voice.is_enabled()),
                      "state": self.voice.state if self.voice is not None else "disabled",
@@ -952,11 +968,28 @@ class Snipvoice:
         self._manager_meeting_view._request_preference(rebuild, cancelled)
 
     def _save_manager_voice_shortcut(self, _event=None):
-        if (str(self._manager_notebook.select()) == str(self._manager_voice_tab)
+        view = self._manager_meeting_view
+        if (str(self._manager_notebook.select()) == str(view.settings_tab)
+                and view.settings_sections.current == "dictation"
                 and getattr(self, "_manager_voice_form", None)):
             if self._manager_voice_form["dirty"]():
                 self._manager_voice_form["save"]()
             return "break"
+
+    def _request_leave_voice_settings(self, after):
+        form = getattr(self, "_manager_voice_form", None)
+        if not form or not (form["dirty"]() or form["saving"]()):
+            after()
+        elif form["saving"]():
+            form["after_save"] = after
+        else:
+            answer = ui_theme.confirm_draft(self.manager_window)
+            if answer == "save":
+                form["after_save"] = after
+                form["save"]()
+            elif answer == "discard":
+                form["discard"]()
+                after()
 
     def _select_manager_destination(self, target):
         notebook = self._manager_notebook
@@ -968,21 +1001,6 @@ class Snipvoice:
             notebook.select(target)
         if current == str(self._manager_meeting_view.settings_tab):
             self._manager_meeting_view.request_leave_settings(select)
-        elif current == str(self._manager_voice_tab):
-            form = getattr(self, "_manager_voice_form", None)
-            if form and (form["dirty"]() or form["saving"]()):
-                if form["saving"]():
-                    form["after_save"] = select
-                    return
-                answer = ui_theme.confirm_draft(self.manager_window)
-                if answer == "save":
-                    form["after_save"] = select
-                    form["save"]()
-                elif answer == "discard":
-                    form["discard"]()
-                    select()
-                return
-            select()
         else:
             select()
 
@@ -1577,18 +1595,20 @@ class Snipvoice:
 
 
     def _show_voice_settings(self, root):
-        """Open the manager on the voice tab. Tray shortcut; no extra dialog."""
+        """Open the dictation settings in the manager from the tray."""
         host = self._tauri_manager()
         if host is not None:
-            host.show("voice")
+            host.show("settings", settings_section="dictation")
             return
         self._show_manager_window(root)
         notebook = self._manager_notebook
-        tab = self._manager_voice_tab
+        view = self._manager_meeting_view
+        tab = view.settings_tab if view is not None else None
         if notebook is None or tab is None:
             return
         try:
-            notebook.select(tab)
+            self._select_manager_destination(tab)
+            view.settings_sections.user_select("dictation")
         except tk.TclError:
             pass
 
@@ -2575,7 +2595,7 @@ class Snipvoice:
         return refresh_form
 
 
-    def _create_voice_tab(self, parent, root, models_parent=None):
+    def _create_voice_tab(self, parent, root, models_parent=None, settings_parent=None, on_settings=None):
         """Build manager voice controls backed by the existing tray actions."""
         ui = ui_theme.theme()
         main = tk.Frame(parent, bg=ui.surface, padx=ui.space_lg, pady=ui.space_lg)
@@ -2634,10 +2654,11 @@ class Snipvoice:
             anchor="w",
         )
         status_label.pack(fill=tk.X, pady=(ui.space_xs, ui.space_lg))
+        if on_settings is not None:
+            ui_theme.button(main, tr("Configuração do ditado"), on_settings, "neutral",
+                            resolved=ui).pack(anchor="w", pady=(0, ui.space_md))
 
-        # One scroll region for the whole page above the save bar: recent
-        # dictations and the configuration move together, never as a scroll
-        # area nested inside the page.
+        # Keep recent dictations in the landing page's scroll region.
         config_host = tk.Frame(main, bg=ui.surface)
         config_host.pack(fill=tk.BOTH, expand=True)
         config_canvas = tk.Canvas(config_host, bg=ui.surface, bd=0, highlightthickness=0,
@@ -2657,14 +2678,15 @@ class Snipvoice:
         recent = tk.Frame(config, bg=ui.surface)
         recent.pack(fill=tk.X, pady=(0, ui.space_lg))
         self._build_voice_history_rows(recent, root, limit=5, height=5)
-        tk.Label(config, text=tr("Configuração do ditado"), bg=ui.surface,
+        form_parent = settings_parent if settings_parent is not None else config
+        tk.Label(form_parent, text=tr("Configuração do ditado"), bg=ui.surface,
                  fg=ui.text_strong, font=ui.heading()).pack(anchor="w", pady=(0, ui.space_sm))
 
         refresh_form = self._build_voice_settings_controls(
-            config,
+            form_parent,
             root,
             models_parent=models_parent,
-            actions_parent=footer,
+            actions_parent=footer if settings_parent is None else settings_parent,
         )
         for widget in (config_canvas, config, *self._voice_descendants(config)):
             self._bind_mousewheel(widget, config_canvas)
