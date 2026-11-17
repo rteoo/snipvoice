@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0-beta.3 - 2026-11-17
+
+- Refresh the manager with the Teô design system v3 in light and dark themes.
+- Make Dictation the first and default destination. Move model, language, shortcuts, activation mode and voice commands into Settings > Dictation, with direct setup actions from the main page and tray.
+- Preserve accepted audio packets when stopping, retain recoverable raw audio when recording journals are damaged or incomplete, and clear busy state after failed audio-resource release.
+- Export transcripts as text or Markdown, with an optional timestamp checkbox. Repair final-audio exports during playback and coordinate audio imports with playback; silent imports skip automatic summaries.
+- Remove Chat from recording details and its privacy setting. Existing saved data is retained.
+- Windows packages continue to use the canonical Python 3.12 CI build. No data or model-cache migration is introduced. macOS retains the classic manager.
+- Long-running physical recording, sleep/wake and device-disconnect behavior remain validation limits. This is a prerelease, with no Microsoft Store package.
+
 ## 1.4.0-beta.2 - 2026-11-06
 
 - Recording: Windows driver timing flags that lose no audio no longer mark a meeting partial, interrupt it with a notification, or fail the sound check. When audio really is dropped, the message says how much and from which source. Long recordings save and export faster (an 18-minute meeting exports in about 43 s instead of 65 s).
