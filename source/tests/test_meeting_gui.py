@@ -475,42 +475,6 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view._submit.assert_not_called()
         self.assertEqual(view.transcript_document.get(), primary)
 
-    def test_live_search_cancels_previous_timer_and_invalidates_old_reads(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.window = mock.Mock()
-        view.bridge = mock.Mock()
-        view._library_search_after = None
-        view.library_filter_generation = 0
-        view.refresh_library = mock.Mock()
-        view._queue_library_search()
-        first = view._library_search_after
-        view._queue_library_search()
-        view.window.after_cancel.assert_called_once_with(first)
-        self.assertEqual(view.library_filter_generation, 2)
-        self.assertEqual(view.bridge.invalidate.call_args_list, [mock.call("library"), mock.call("library")])
-        delay, callback = view.window.after.call_args.args
-        self.assertEqual(delay, 250)
-        callback()
-        view.refresh_library.assert_called_once_with()
-        self.assertIsNone(view._library_search_after)
-
-    def test_escape_clears_query_and_runs_one_immediate_search(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.query = Variable("query")
-        view.search = mock.Mock()
-        self.assertEqual(view._clear_library_search(), "break")
-        self.assertEqual(view.query.get(), "")
-        view.search.assert_called_once_with()
-
-    def test_search_shortcut_selects_library_and_focuses_the_labelled_field(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.notebook, view.search_entry = mock.Mock(), mock.Mock()
-        view.library_tab = object()
-        self.assertEqual(view._focus_library_search(), "break")
-        view.notebook.select.assert_called_once_with(view.library_tab)
-        view.search_entry.focus_set.assert_called_once_with()
-        view.search_entry.selection_range.assert_called_once_with(0, "end")
-
     def test_detail_cycling_is_user_navigation_and_wraps_in_both_directions(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "one"
@@ -608,7 +572,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.refresh_library.assert_not_called()
         self.assertEqual(said(view)[0], "problem")
 
-    def test_library_empty_state_offers_a_relevant_next_action(self):
+    def test_library_empty_state_offers_record_and_import_actions(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.ui = ui_theme.build_theme("windows", system="windows")
         view.library_empty_panel = mock.Mock()
@@ -616,7 +580,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.query = Variable()
         view.status_filter = Variable("Todos")
         view._library_filters = mock.Mock(return_value={"collection": None})
-        for name in ("record", "import", "clear", "retry"):
+        for name in ("record", "import", "retry"):
             setattr(view, f"library_empty_{name}_button", mock.Mock())
 
         view._render_library_empty_state([])
@@ -624,23 +588,8 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.library_empty_record_button.pack.assert_called_once()
         view.library_empty_import_button.pack.assert_called_once()
 
-        view.query.set("missing")
-        view._render_library_empty_state([])
-        self.assertIn("Nenhuma gravação encontrada", view.library_empty.get())
-        view.library_empty_clear_button.pack.assert_called_once()
-
         view._render_library_empty_state([{"id": "saved"}])
         view.library_empty_panel.place_forget.assert_called_once()
-
-    def test_clear_library_search_resets_all_scopes_once(self):
-        view = MeetingWindow.__new__(MeetingWindow)
-        view.query = Variable("meeting")
-        view.search = mock.Mock()
-
-        view._clear_library_search()
-
-        self.assertEqual(view.query.get(), "")
-        view.search.assert_called_once_with()
 
     def test_transcript_double_click_seeks_without_playing_on_selection(self):
         view = MeetingWindow.__new__(MeetingWindow)
@@ -1419,7 +1368,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         self.assertIsNone(result)
         canvas.yview_scroll.assert_not_called()
 
-    def test_library_query_has_no_manual_filter_payload(self):
+    def test_library_listing_does_not_pass_a_search_query(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.library_cursor = None
         view.library_next_cursor = None
@@ -1427,7 +1376,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         view.library_page_index = 0
         view.offset = 0
         view.library_filter_generation = 0
-        view.query = Variable("planning")
+        view.query = Variable("")
         view.controller = mock.Mock()
         view.controller.list_sessions_page.return_value = {
             "items": [], "next_cursor": None,
@@ -1439,7 +1388,7 @@ class MeetingGuiLogicTests(unittest.TestCase):
         operation()
 
         call = view.controller.list_sessions_page.call_args
-        self.assertEqual(call.kwargs["query"], "planning")
+        self.assertNotIn("query", call.kwargs)
         self.assertNotIn("collection", call.kwargs)
         self.assertNotIn("tag", call.kwargs)
         self.assertNotIn("person", call.kwargs)
@@ -3027,9 +2976,7 @@ class LongJobCancellationTests(unittest.TestCase):
         view._fail = mock.Mock()
         view.summary_progress_lock = threading.Lock()
         view.summary_progress = ("synthetic", 1, 10)
-        view.summary_model_status, view.index_status = Variable(), Variable()
-        view.rebuild_button = mock.Mock()
-        view.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
+        view.summary_model_status = Variable()
         event, entered, received = threading.Event(), threading.Event(), threading.Event()
         setattr(view, event_name, event)
         operation = mock.Mock(return_value={"state": "ready"})
@@ -3042,7 +2989,7 @@ class LongJobCancellationTests(unittest.TestCase):
         if key == "summary_model":
             callback = lambda value, error: view._summary_model_finished({"name": "synthetic"}, error)
         else:
-            callback = view._rebuild_finished
+            self.fail(f"unsupported cancellable job: {key}")
         completed = mock.Mock(wraps=callback)
         self.bridge.submit(key, work, completed, "long")
         if running:
@@ -3069,21 +3016,12 @@ class LongJobCancellationTests(unittest.TestCase):
             replacement.assert_called_once_with("fresh", None)
             if key == "summary_model":
                 view._refresh_summary_models.assert_called_once_with()
-            elif key == "rebuild_index":
-                view.rebuild_button.configure.assert_called_once_with(state="normal")
-                self.assertEqual(view.rebuild_progress["state"], "cancelled")
 
     def test_cancel_queued_summary_download_prevents_file_or_network_work(self):
         self._check_event_job("summary_model", "cancel_summary_download", "summary_download_cancel")
 
-    def test_cancel_queued_index_rebuild_restores_controls(self):
-        self._check_event_job("rebuild_index", "cancel_rebuild_index", "rebuild_cancel")
-
     def test_running_summary_download_receives_its_event_and_keeps_completion(self):
         self._check_event_job("summary_model", "cancel_summary_download", "summary_download_cancel", running=True)
-
-    def test_running_index_rebuild_receives_its_event_and_keeps_completion(self):
-        self._check_event_job("rebuild_index", "cancel_rebuild_index", "rebuild_cancel", running=True)
 
     def test_completed_result_waiting_for_gui_is_not_mistaken_for_queued_work(self):
         completed = mock.Mock()
@@ -3125,7 +3063,7 @@ class ManagerLifecycleLogicTests(unittest.TestCase):
         view.ask_conversations = {str(index): [{"status": "pending", "saving": True}]
                                   for index in range(10)}
         view._visible_destination = lambda: None
-        view.query, view.transcript_style = Variable("synthetic query"), Variable("Com horários")
+        view.query, view.transcript_style = Variable(""), Variable("Com horários")
         view.transcript_style_box = mock.Mock()
         view.transcript_style_box.current.return_value = 1
         view.selected, view.library_cursor, view.library_back_stack = "synthetic", "cursor", [None, "cursor"]
@@ -3138,7 +3076,7 @@ class ManagerLifecycleLogicTests(unittest.TestCase):
         self.assertEqual(state.title_draft, ("synthetic", "Later draft", "Original title"))
         self.assertEqual((state.destination, state.query, state.selection, state.detail_section,
                           state.transcript_style, state.list_scroll),
-                         ("voice", "synthetic query", "synthetic", "ask", "timestamped", 0.4))
+                         ("voice", "", "synthetic", "ask", "timestamped", 0.4))
         self.assertEqual(len(state.chats), 8)
         self.assertTrue(all(turns[0]["status"] == "error" and "saving" not in turns[0]
                             for turns in state.chats.values()))
@@ -3168,15 +3106,15 @@ class ManagerLifecycleLogicTests(unittest.TestCase):
     def test_rebuild_restores_context_and_continues_unique_chat_identifiers(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.query, view.transcript_style = Variable(), Variable()
-        view._cancel_library_search, view._sync_transcript_style = mock.Mock(), mock.Mock()
+        view._sync_transcript_style = mock.Mock()
         view.detail_sections, view.notebook = mock.Mock(), mock.Mock()
         view.recording_tab, view.library_tab, view.settings_tab, view.voice_tab = "record", "library", "settings", "voice"
         view.load_session, view.refresh_library = mock.Mock(), mock.Mock()
-        state = ManagerViewState(destination="library", query="synthetic", selection="one",
+        state = ManagerViewState(destination="library", query="", selection="one",
                                  detail_section="ask", transcript_style="timestamped", list_scroll=0.4,
                                  chats={"one": [{"id": 41, "status": "complete"}]})
         view.restore_view_state(state)
-        self.assertEqual(view.query.get(), "synthetic")
+        self.assertEqual(view.query.get(), "")
         self.assertEqual(view.transcript_style.get(), "Com horários")
         self.assertEqual(view.ask_request, 41)
         view.detail_sections.select.assert_called_once_with("ask")
@@ -3693,9 +3631,9 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         sections.select("models")
         self.root.update()
         models = view.model_sections
-        self.assertEqual(list(models.frames), ["transcription", "summary", "search"])
+        self.assertEqual(list(models.frames), ["transcription", "summary"])
         self.assertEqual([models.buttons[key].cget("text") for key in models.frames],
-                         ["Transcrição", "Resumos", "Busca"])
+                         ["Transcrição", "Resumos"])
         self.assertTrue(view.transcription_models_parent.winfo_ismapped())
         self.assertFalse(models.frames["summary"].winfo_ismapped())
         models.select("summary")
@@ -3707,6 +3645,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view, notebook = self._embedded_view()
         notebook.select(view.library_tab)
         self.root.update()
+        self.assertFalse(hasattr(view, "search_entry"))
+        self.assertFalse(hasattr(view, "search_results"))
         self.assertFalse(view.library_panels["cross"].winfo_ismapped())
         self.assertNotIn("tools", view.library_panels)
         view.library_menu.invoke(0)
@@ -3715,50 +3655,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         view.library_menu.invoke(0)
         self.root.update()
         self.assertFalse(view.library_panels["cross"].winfo_ismapped())
-
-    def test_library_live_search_runs_once_and_escape_clears_immediately(self):
-        view, _notebook = self._library_view()
-        view.search = mock.Mock(wraps=view.search)
-        view.refresh_library = mock.Mock()
-        for value in ("m", "me", "meeting"):
-            view.query.set(value)
-        wait_for(lambda: (self.root.update(), view.refresh_library.call_count)[1] == 1)
-        self.assertEqual(view.search.call_count, 1)
-        view.window.focus_force()
-        view.search_entry.focus_set()
-        self.root.update()
-        view.search_entry.event_generate("<Escape>")
-        self.root.update()
-        self.assertEqual(view.query.get(), "")
-        self.assertIsNone(view._library_search_after)
-        self.assertEqual(view.refresh_library.call_count, 2)
-
-    def test_search_controls_live_only_in_settings_and_toolbar_is_small(self):
-        view, notebook = self._library_view()
-        library_widgets = descendants(view.library_tab)
-        self.assertNotIn(view.rebuild_button, library_widgets)
-        self.assertIn(view.rebuild_button, descendants(view.search_models_page))
-        buttons = [w for w in descendants(view.library_toolbar) if isinstance(w, tk.Button)]
-        self.assertEqual({w.cget("text") for w in buttons}, {"Mais", "Importar áudio…"})
-        self.assertTrue(view.search_entry.winfo_ismapped())
-        notebook.select(view.settings_tab)
-        view.settings_sections.select("models")
-        view.model_sections.select("search")
-        self.root.update()
-        self.assertTrue(view.rebuild_button.winfo_ismapped())
-
-    def test_full_text_hits_replace_the_no_results_state_and_are_in_detail(self):
-        view, _notebook = self._library_view()
-        view.query.set("decision")
-        view._cancel_library_search()
-        view._library_loaded(({"items": []}, [{"session_id": "one", "title": "Planning",
-                                                "source_kind": "transcript", "snippet": "decision"}],
-                              view.library_filter_generation), None)
-        self.root.update()
-        self.assertFalse(view.library_empty_panel.winfo_ismapped())
-        self.assertTrue(view.search_results_frame.winfo_ismapped())
-        self.assertEqual(view.search_results_frame.master, view.library_detail_pane)
-        self.assertEqual(view.page_label.get(), "1 resultado")
 
     def test_library_columns_fit_at_minimum_and_date_is_required_when_wide(self):
         created = "2026-10-20T12:10:00Z"
@@ -3894,38 +3790,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertFalse(view.title_entry.winfo_ismapped())
         self.assertTrue(view.title_heading.winfo_ismapped())
         self.assertTrue(view.rename_button.winfo_ismapped())
-
-    def test_full_text_return_loads_a_trashable_detail_without_a_main_list_row(self):
-        view, _notebook = self._library_view()
-        self.root.after_cancel(view.after_id)
-        view.after_id = None
-        view.controller.retention_plan.return_value = {
-            "session_id": "two", "eligible": True, "byte_estimate": 2000,
-            "policy": {"purge_after_days": 7},
-        }
-        result = {"session_id": "two", "title": "Search-only recording", "source_kind": "session"}
-        view._library_loaded(({"items": []}, [result], view.library_filter_generation), None)
-        view.search_results.selection_set("0")
-        view.window.focus_force()
-        view.search_results.focus_set()
-        self.root.update()
-        with mock.patch.object(view, "_submit", return_value=True) as submit:
-            view.search_results.event_generate("<Return>")
-            self.root.update()
-            self.assertEqual(submit.call_args.args[0], "search_result")
-            submit.call_args.args[2](result, None)
-            self.assertEqual(submit.call_args.args[0], "detail")
-            submit.call_args.args[2](({"id": "two", "title": result["title"],
-                                      "status": "completed", "duration": 60}, []), None)
-            self.root.update()
-            self.assertEqual(view.sessions.selection(), ())
-            self.assertEqual(view.selected, "two")
-            view.detail_sections.select("files")
-            self.root.update()
-            self.assertEqual(str(view.delete_button.cget("state")), "normal")
-            view.delete_button.invoke()
-            self.assertEqual(submit.call_args.args[0], "retention_plan")
-            self.assertEqual(view._retention_pending[1], "two")
 
     def _trash_event_view(self):
         view, _notebook = self._library_view()
@@ -4967,7 +4831,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
     def test_cancel_controls_exist_only_while_their_job_runs(self):
         view, _notebook = self._ready_recorder()
         for button_name, attribute, running in (
-                ("rebuild_cancel_button", "rebuild_cancel", threading.Event()),
                 ("cross_cancel_button", "cross_pending", 3),
                 ("cancel_summary_button", "summary_pending", ("s1", 1)),
                 ("summary_download_cancel_button", "summary_download_cancel", threading.Event())):
@@ -5006,7 +4869,7 @@ class MeetingWindowSmokeTests(unittest.TestCase):
 
     def test_every_job_cancel_reserves_its_width_and_height_while_hidden(self):
         view, _notebook = self._ready_recorder()
-        for name in ("rebuild_cancel_button", "cross_cancel_button",
+        for name in ("cross_cancel_button",
                      "cancel_summary_button", "summary_download_cancel_button",
                      "cancel_processing_button"):
             with self.subTest(button=name):
@@ -5037,7 +4900,6 @@ class MeetingWindowSmokeTests(unittest.TestCase):
             view.window.lift()
             for name, panel, section in (
                     ("cross_cancel_button", "cross", None),
-                    ("rebuild_cancel_button", None, "search"),
                     ("cancel_processing_button", None, "transcript"),
                     ("cancel_summary_button", None, "summary"),
                     ("summary_download_cancel_button", None, "models")):
@@ -5045,12 +4907,12 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                     for key, widget in view.library_panels.items():
                         if widget.winfo_manager():
                             view._toggle_library_panel(key)
-                    notebook.select(view.settings_tab if section in {"models", "search"} else view.library_tab)
+                    notebook.select(view.settings_tab if section == "models" else view.library_tab)
                     if panel:
                         view._toggle_library_panel(panel)
-                    if section in {"models", "search"}:
+                    if section == "models":
                         view.settings_sections.select("models")
-                        view.model_sections.select("search" if section == "search" else "summary")
+                        view.model_sections.select("summary")
                     elif section:
                         view._show_library_detail(True)
                         view.detail_sections.select(section)
@@ -5059,8 +4921,8 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                     button = getattr(view, name)
                     view._show_cancel(button, True)
                     self.root.update()
-                    if section in {"models", "search", "summary"}:
-                        canvas = view.settings_canvas if section in {"models", "search"} else view.detail_canvas
+                    if section in {"models", "summary"}:
+                        canvas = view.settings_canvas if section == "models" else view.detail_canvas
                         canvas.yview_moveto(1)
                         self.root.update()
                     self.assertTrue(button.winfo_ismapped())

@@ -594,11 +594,10 @@ class ManagerApi:
         return key, tr(label), TONES.get(tone, "default")
 
     def library_list(self, params):
-        query = _text(params, "query", limit=500)
         cursor = params.get("cursor")
         if cursor is not None and not isinstance(cursor, (str, int, dict, list)):
             raise RpcFailure(tr("Pedido inválido."), code=INVALID_PARAMS)
-        page = self.meetings.list_sessions_page(limit=LIBRARY_PAGE_SIZE, cursor=cursor, query=query, status="")
+        page = self.meetings.list_sessions_page(limit=LIBRARY_PAGE_SIZE, cursor=cursor, status="")
         snapshot = self.meetings.snapshot()
         items = []
         for item in page.get("items", ()):

@@ -15,7 +15,7 @@ from voice_models import delete_model
 
 # Catalog directories are named after the entry id (``voice_models.model_dir``).
 RETIRED_VOICE = (
-    ("whisper-large-v3-turbo-q8", "Whisper Large v3 Turbo"),
+    ("whisper-large-v3-q8", "Whisper Large v3"),
     ("qwen3-asr-0.6b-q8", "Qwen3-ASR 0.6B"),
     ("qwen3-asr-1.7b-q8", "Qwen3-ASR 1.7B"),
 )

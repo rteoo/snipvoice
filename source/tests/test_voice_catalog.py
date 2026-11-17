@@ -106,11 +106,13 @@ class CatalogTests(unittest.TestCase):
             "9b9c8811bbcc82a7766f0fb0925614bdacb0923b2cc630daeac17108b655b860",
         )
         large = catalog_entry(PROFILE_WHISPER_LARGE)
-        self.assertEqual(large["id"], "whisper-large-v3-q8")
-        self.assertEqual(large["size_bytes"], 1668741440)
+        self.assertEqual(large["id"], "whisper-large-v3-turbo-q8")
+        self.assertEqual(large["size_bytes"], 886381728)
+        self.assertEqual(large["upstream_model"], "openai/whisper-large-v3-turbo")
+        self.assertEqual(large["license_id"], "MIT")
         self.assertEqual(
             large["sha256"],
-            "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
+            "257aa7ec9121c22c167d5e2c49e3e76b4ba0e6e27ebc13074eba0a80f8190220",
         )
         for entry in (small, large):
             self.assertIn("/resolve/", entry["url"])

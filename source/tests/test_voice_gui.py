@@ -1172,7 +1172,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         before_state, after_display, after_state = self._on_gui(build_and_refresh)
         self.assertEqual(before_state, ("balanced", "pt-BR"))
         self.assertEqual(after_state, ("whisper-large-v3", "auto"))
-        self.assertIn("Máxima precisão · Whisper Large", after_display)
+        self.assertIn("Whisper Large Turbo", after_display)
         self.assertTrue(any("Automático" in text for text in after_display), after_display)
 
     def test_voice_status_ticks_preserve_dirty_fields_and_discard_reloads_settings(self):
@@ -1966,7 +1966,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             (
                 "Leve · Whisper Small",
                 "Equilibrado · Parakeet",
-                "Máxima precisão · Whisper Large",
+                "Whisper Large Turbo",
             ),
         )
         self.assertEqual(whisper_selected, "whisper-small")

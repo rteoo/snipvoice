@@ -1,7 +1,7 @@
-// Biblioteca: search and select a recording, then read, summarize,
+// Biblioteca: browse and select a recording, then read, summarize,
 // export or delete it.
 import { allowEngineForeground, type Bridge } from "../bridge";
-import { button, h, ICONS, icon, replace, STATE_ICONS, stateIcon } from "../dom";
+import { button, h, icon, replace, STATE_ICONS, stateIcon } from "../dom";
 import { tr } from "../i18n";
 import type { LibraryItem, LibraryPage, RecordingView, SessionDetail, SummaryView, Transcript, TrashPreview } from "../types";
 import { confirmDialog, copyText, MessageSlot, pageHeader, toneText } from "../ui";
@@ -10,7 +10,6 @@ import { lineStart, Player } from "./player";
 import { SummaryPanel } from "./summary";
 import { openTrash } from "./trash";
 
-const SEARCH_DELAY_MS = 250;
 const MAX_BACK_STACK = 32;
 type Style = "full_text" | "timestamped";
 type Section = "transcript" | "summary" | "files";
@@ -34,10 +33,8 @@ export class LibraryView {
   private readonly player: Player;
   private listToken = 0;
   private detailToken = 0;
-  private searchTimer: number | undefined;
   private importing = false;
   private readonly importButton = button(tr("Importar áudio…"), () => void this.importAudio(), "quiet");
-  private readonly search = h("input", { attrs: { type: "search", id: "library-search", autocomplete: "off" } });
   private readonly tbody = h("tbody");
   private readonly count = h("p", { class: "caption" });
   private readonly pager = h("div", { class: "btn-row" });
@@ -51,22 +48,6 @@ export class LibraryView {
     this.files = new FilesPanel(bridge, this.messages, enginePid, () => void this.deleteSelected());
     this.player = new Player(bridge, this.messages);
     bridge.on<RecordingView>("recording.state", (view) => this.player.update(view.playback));
-    this.search.placeholder = tr("Buscar em títulos e transcrições");
-    this.search.addEventListener("input", () => {
-      window.clearTimeout(this.searchTimer);
-      this.listToken++; // typing invalidates an earlier read immediately
-      this.searchTimer = window.setTimeout(() => void this.refresh(true), SEARCH_DELAY_MS);
-    });
-    this.search.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        window.clearTimeout(this.searchTimer);
-        void this.refresh(true);
-      } else if (event.key === "Escape" && this.search.value) {
-        event.stopPropagation();
-        this.search.value = "";
-        void this.refresh(true);
-      }
-    });
     this.element = h(
       "section",
       { class: "page" },
@@ -74,13 +55,6 @@ export class LibraryView {
         tr("Biblioteca"),
         this.importButton,
         button(tr("Lixeira…"), () => openTrash(this.bridge, () => void this.refresh()), "quiet"),
-      ),
-      h(
-        "div",
-        { class: "library-toolbar" },
-        h("label", { class: "sr-only", text: tr("Buscar na biblioteca"), attrs: { for: "library-search" } }),
-        h("span", { class: "search-icon" }, icon(ICONS.search)),
-        this.search,
       ),
       this.messages.element,
       h(
@@ -117,11 +91,6 @@ export class LibraryView {
     void this.refresh(true);
   }
 
-  focusSearch(): void {
-    this.search.focus();
-    this.search.select();
-  }
-
   async open(id: string): Promise<void> {
     this.selected = id;
     // Rows stay in place so the focused row keeps focus while arrows move the selection.
@@ -137,7 +106,7 @@ export class LibraryView {
     }
     const token = ++this.listToken;
     try {
-      const page = await this.bridge.call<LibraryPage>("library.list", { query: this.search.value, cursor: this.cursor });
+      const page = await this.bridge.call<LibraryPage>("library.list", { cursor: this.cursor });
       if (token !== this.listToken) return;
       this.items = page.items;
       this.nextCursor = page.nextCursor ?? null;
@@ -189,7 +158,6 @@ export class LibraryView {
       });
       return row;
     });
-    const query = this.search.value.trim();
     replace(
       this.tbody,
       ...(rows.length
@@ -201,8 +169,7 @@ export class LibraryView {
               h(
                 "td",
                 { class: "empty", attrs: { colspan: 2 } },
-                h("p", { text: query ? tr("Nada encontrado para essa busca.") : tr("Nenhuma gravação ainda.") }),
-                query ? button(tr("Limpar busca"), () => ((this.search.value = ""), void this.refresh(true)), "quiet") : null,
+                h("p", { text: tr("Nenhuma gravação ainda.") }),
               ),
             ),
           ]),
@@ -401,7 +368,6 @@ export class LibraryView {
       await allowEngineForeground(this.enginePid);
       const result = await this.bridge.call<{ id: string | null }>("library.importAudio");
       if (!result.id) return;
-      this.search.value = "";
       await this.refresh(true);
       await this.open(result.id);
       this.messages.say(tr("Áudio importado. A transcrição começa sozinha quando houver um modelo instalado."));
