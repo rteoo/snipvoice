@@ -84,16 +84,12 @@ The current stable release is
 | Windows x64 | Per-user installer and portable ZIP |
 | macOS 14.4+ ARM64 | Ad-hoc-signed `.app` bundle in a ZIP |
 
-The [`v1.4.0-beta.2`](https://github.com/rteoo/snipvoice/releases/tag/v1.4.0-beta.2)
-prerelease previews the new manager window on Windows, with faster
-transcription and summaries that use the GPU when one is available. Set
-`SNIPVOICE_MANAGER=tk` to return to the classic window; macOS keeps it in this
-beta. See the [changelog](CHANGELOG.md#140-beta2---2026-11-06).
-
-The next candidate, `v1.4.0-beta.3`, adds the refreshed manager, recording and
-export repairs, and dedicated Dictation settings. It is being prepared; the
-published prerelease above remains the available download. See the
-[candidate notes](CHANGELOG.md#140-beta3---2026-11-17).
+The [`v1.4.0-beta.4`](https://github.com/rteoo/snipvoice/releases/tag/v1.4.0-beta.4)
+prerelease adds Whisper Large Turbo, removes Library search, and adds deleted
+recording cleanup under Settings > Privacy. It includes the refreshed Windows
+manager, recording/export repairs, and dedicated Dictation settings from beta 3.
+Set `SNIPVOICE_MANAGER=tk` to return to the classic window; macOS keeps it in
+this beta. See the [changelog](CHANGELOG.md#140-beta4---2026-11-17).
 
 Releases before 1.0.0 were renumbered into the 0.x series when SnipVoice
 reached its first stable release: 3.0.0–3.3.2 are now 0.3.0–0.6.2, 1.0.0 and

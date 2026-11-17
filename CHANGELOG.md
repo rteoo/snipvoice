@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0-beta.4 - 2026-11-17
+
+- Replace the optional Whisper Large model with Whisper large-v3-turbo Q8. Existing profile selections are preserved; download Turbo before using them again. Old Large weights remain available for manual cleanup.
+- Remove Library search, its shortcut, and search-repair controls from both managers. Recording browsing, pagination, and report evidence/citations remain available.
+- Add Settings > Privacy > Deleted recordings in both managers. Restore recordings, permanently delete individual items, or clear expired recordings through the existing confirmed trash controls.
+- Windows and macOS packages remain local-only. macOS keeps the classic manager. Live Turbo transcription and long-running physical capture remain validation limits; this prerelease has no Microsoft Store package.
+
 ## 1.4.0-beta.3 - 2026-11-17
 
 - Refresh the manager with the Teô design system v3 in light and dark themes.
