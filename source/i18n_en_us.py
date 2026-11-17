@@ -1,6 +1,9 @@
 """English (US) interface catalog: pt-BR source literal -> translation."""
 
 EN_US = {
+    'Gravações excluídas': 'Deleted recordings',
+    'Abrir lixeira…': 'Open trash…',
+    'Abra a lixeira para restaurar gravações, excluir itens definitivamente ou limpar os expirados. A exclusão definitiva exige confirmação.': 'Open the trash to restore recordings, permanently delete individual items, or clean up expired recordings. Permanent deletion requires confirmation.',
     'A gravação foi preservada, mas não foi possível liberar os recursos de áudio. Reinicie o aplicativo.': 'The recording was preserved, but audio resources could not be released. Restart the app.',
     'O diário da gravação está incompleto ou corrompido; os originais foram preservados.': 'The recording journal is incomplete or corrupt; the originals were preserved.',
     'Finalize a gravação antes de importar áudio.': 'Finish recording before importing audio.',

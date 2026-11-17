@@ -48,7 +48,7 @@ async function main(): Promise<void> {
     setCatalog(language, catalog);
     // Every page is rebuilt in the new language, as the Tk manager does.
     window.location.reload();
-  });
+  }, () => void library.refresh(true));
   const pages: Record<Destination, { element: HTMLElement; navState?: string }> = { recording, library, voice, settings };
   const labels: Record<Destination, string> = {
     recording: tr("Gravação"),

@@ -3,7 +3,48 @@ import type { Bridge } from "../bridge";
 import { button, h, replace } from "../dom";
 import { tr } from "../i18n";
 import type { TrashItem, TrashList } from "../types";
-import { typedConfirmDialog } from "../ui";
+import { typedConfirmDialog, type MessageSlot } from "../ui";
+
+/** Settings entry point shares the Library's confirmed restore/delete flow. */
+export class TrashCleanupCard {
+  readonly element: HTMLElement;
+  private readonly status = h("p", { class: "caption", attrs: { role: "status", "aria-live": "polite" } });
+  private token = 0;
+
+  constructor(
+    private readonly bridge: Bridge,
+    private readonly messages: MessageSlot,
+    onChanged: () => void,
+  ) {
+    this.element = h(
+      "section",
+      { class: "card stack-sm" },
+      h("h2", { text: tr("Gravações excluídas") }),
+      h("p", { class: "caption", text: tr("Abra a lixeira para restaurar gravações, excluir itens definitivamente ou limpar os expirados. A exclusão definitiva exige confirmação.") }),
+      this.status,
+      h("div", { class: "btn-row" },
+        button(tr("Abrir lixeira…"), () => openTrash(bridge, () => {
+          onChanged();
+          void this.load();
+        })),
+        button(tr("Atualizar"), () => void this.load(), "quiet"),
+      ),
+    );
+  }
+
+  async load(): Promise<void> {
+    const token = ++this.token;
+    this.status.textContent = tr("Carregando lixeira…");
+    try {
+      const list = await this.bridge.call<TrashList>("trash.list");
+      if (token === this.token) this.status.textContent = list.summary;
+    } catch (error) {
+      if (token !== this.token) return;
+      this.status.textContent = tr("Não foi possível carregar a lixeira. Tente Atualizar.");
+      this.messages.fail(tr("A lixeira não confirmou a ação"), "", { error });
+    }
+  }
+}
 
 /** Opens the trash as a modal dialog; `onChanged` refreshes the library after a restore or deletion. */
 export function openTrash(bridge: Bridge, onChanged: () => void): void {

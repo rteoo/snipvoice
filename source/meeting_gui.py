@@ -3132,6 +3132,18 @@ class MeetingWindow:
                     fg=self.ui.text_muted, anchor="w").pack(side="left")
         self._sync_raw_policy_controls()
 
+        cleanup = self._card(parent)
+        cleanup.pack(fill="x", pady=(0, self.ui.space_md))
+        self._label(cleanup, tr("Gravações excluídas"), bg=self.ui.card,
+                    fg=self.ui.text_strong, font=self.ui.font(11, "bold")).pack(anchor="w")
+        self._wrap_label(
+            cleanup,
+            tr("Abra a lixeira para restaurar gravações, excluir itens definitivamente ou limpar os expirados. A exclusão definitiva exige confirmação."),
+            bg=self.ui.card, fg=self.ui.text_muted, anchor="w", justify="left",
+        ).pack(fill="x", pady=self.ui.space_sm)
+        self.privacy_trash_button = self._button(cleanup, tr("Abrir lixeira…"), self.show_trash)
+        self.privacy_trash_button.pack(anchor="w")
+
     def _draft_variables(self, section):
         names = (("profile", "language", "hotkey", "summary_model", "destination", "voice_boost")
                  if section == "recording" else
