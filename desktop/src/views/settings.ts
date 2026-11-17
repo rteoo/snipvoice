@@ -40,11 +40,12 @@ export class SettingsPage {
     private readonly bridge: Bridge,
     private readonly hello: Hello,
     private readonly onLanguage: (language: string, catalog: Record<string, string>) => void,
+    onLibraryChanged: () => void,
   ) {
     this.dataLocation = new LocationCard(bridge, this.messages, "data", hello.enginePid);
     this.recording = new RecordingSettings(bridge, this.messages, hello.enginePid);
     this.dictation = new DictationSettings(bridge, this.messages);
-    this.privacy = new PrivacySettings(bridge, this.messages);
+    this.privacy = new PrivacySettings(bridge, this.messages, onLibraryChanged);
     this.models = new ModelsSettings(bridge, this.messages, hello.enginePid);
     const language = h("select", { attrs: { id: "language" } });
     for (const [code, name] of Object.entries(hello.languages)) {

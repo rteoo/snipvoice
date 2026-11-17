@@ -5,6 +5,7 @@ import { tr } from "../i18n";
 import type { PrivacyView } from "../types";
 import type { MessageSlot } from "../ui";
 import { saveBar } from "./settings-recording";
+import { TrashCleanupCard } from "./trash";
 
 type Draft = Omit<PrivacyView, "generation">;
 
@@ -14,11 +15,15 @@ export class PrivacySettings {
   private draft: Draft | null = null;
   private saving = false;
   private receipt = "";
+  private readonly trash: TrashCleanupCard;
 
   constructor(
     private readonly bridge: Bridge,
     private readonly messages: MessageSlot,
-  ) {}
+    onLibraryChanged: () => void,
+  ) {
+    this.trash = new TrashCleanupCard(bridge, messages, onLibraryChanged);
+  }
 
   get dirty(): boolean {
     if (!this.view || !this.draft) return false;
@@ -27,6 +32,7 @@ export class PrivacySettings {
   }
 
   async load(): Promise<void> {
+    void this.trash.load();
     if (this.dirty) return this.render();
     try {
       this.accept(await this.bridge.call<PrivacyView>("settings.privacy"));
@@ -45,7 +51,7 @@ export class PrivacySettings {
   private render(): void {
     const draft = this.draft;
     if (!draft) {
-      replace(this.element, h("p", { class: "caption", text: tr("Configurações de privacidade carregando…") }));
+      replace(this.element, h("p", { class: "caption", text: tr("Configurações de privacidade carregando…") }), this.trash.element);
       return;
     }
     const check = (id: string, value: boolean, onChange: (checked: boolean) => void) => {
@@ -106,6 +112,7 @@ export class PrivacySettings {
         h("p", { class: "caption", text: tr("Apagar não garante eliminação forense em SSDs, e cópias que você exportou para outras pastas não são afetadas.") }),
       ),
       h("div", { class: "save-slot" }),
+      this.trash.element,
     );
     if (focused) this.element.querySelector<HTMLElement>(`#${focused}`)?.focus();
     this.renderBar();

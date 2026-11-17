@@ -4000,6 +4000,19 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         options[0].invoke()
         self.assertFalse(view.export_timestamps.get())
 
+    def test_privacy_opens_trash_without_deleting_recordings(self):
+        with mock.patch.object(MeetingWindow, "show_trash") as show_trash:
+            view, notebook = self._embedded_view()
+            notebook.select(view.settings_tab)
+            view.settings_sections.select("privacy")
+            self.root.update()
+            self.assertTrue(view.privacy_trash_button.winfo_ismapped())
+            self.assertEqual(view.privacy_trash_button.cget("text"), "Abrir lixeira…")
+            view.privacy_trash_button.invoke()
+            show_trash.assert_called_once_with()
+            view.controller.purge_session.assert_not_called()
+            view.controller.empty_trash.assert_not_called()
+
     def test_privacy_has_no_recording_chat_control(self):
         view, notebook = self._embedded_view(geometry="920x700")
         notebook.select(view.settings_tab)
