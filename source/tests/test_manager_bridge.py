@@ -312,8 +312,8 @@ class ManagerApiTests(unittest.TestCase):
         meetings = FakeMeetings()
         meetings.state = {"state": "idle", "processing": True, "processing_kind": "summary",
                           "processing_session": "b"}
-        page = make_api(meetings).library_list({"query": " weekly "})
-        self.assertEqual(meetings.page_args["query"], "weekly")
+        page = make_api(meetings).library_list({})
+        self.assertNotIn("query", meetings.page_args)
         self.assertEqual(page["nextCursor"], "c2")
         first, second = page["items"]
         self.assertEqual((first["title"], first["status"], first["duration"]), ("Weekly sync", "Concluída", "00:02:05"))
@@ -321,6 +321,12 @@ class ManagerApiTests(unittest.TestCase):
         self.assertEqual(second["date"], "Sem data")
         # The window draws each row's state as an icon keyed by these.
         self.assertEqual([first["state"], second["state"]], ["completed", "processing"])
+
+    def test_search_api_is_absent_and_library_list_ignores_search_parameters(self):
+        api = make_api()
+        self.assertFalse(any(method.startswith("search.") for method in api.methods()))
+        api.library_list({"query": "weekly"})
+        self.assertNotIn("query", api.meetings.page_args)
 
     def test_library_detail_skips_the_event_log_and_keys_its_state(self):
         meetings = FakeMeetings()

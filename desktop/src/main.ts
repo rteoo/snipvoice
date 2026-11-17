@@ -125,10 +125,6 @@ async function main(): Promise<void> {
     if (event.ctrlKey && !event.shiftKey && !event.altKey && /^[1-4]$/.test(event.key)) {
       event.preventDefault();
       go(DESTINATIONS[Number(event.key) - 1] ?? "voice");
-    } else if (event.ctrlKey && event.key.toLowerCase() === "f") {
-      event.preventDefault();
-      go("library");
-      library.focusSearch();
     } else if (event.key === "F2" && current === "library" && library.hasSelection()) {
       event.preventDefault();
       library.editTitle();

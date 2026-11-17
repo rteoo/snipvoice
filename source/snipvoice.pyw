@@ -528,7 +528,6 @@ class Snipvoice:
         from manager_dictation import DictationActions
         from manager_library import LibraryActions
         from manager_readiness import ReadinessActions
-        from manager_search import SearchActions
         from manager_settings import SettingsActions
 
         if not tauri_manager_requested():
@@ -573,10 +572,6 @@ class Snipvoice:
                 persist_settings=self._persist_voice_settings, commands_getter=lambda: dict(self.snippets),
                 save_commands=self._save_commands, reload_commands=self._load_commands,
                 on_changed=self.refresh_tray_menu,
-            ),
-            SearchActions(
-                meetings=self.meetings,
-                notify=lambda method, params: self._manager_host and self._manager_host.notify(method, params),
             ),
             ReadinessActions(
                 meetings=self.meetings, voice=self.voice, summary_models=summary_models,

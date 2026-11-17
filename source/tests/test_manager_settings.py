@@ -330,24 +330,24 @@ class LeftoverTests(SettingsTestCase):
                                       return_value=self.models_dir["path"])
         self.models_root.start()
         self.addCleanup(self.models_root.stop)
-        os.makedirs(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8"))
-        with open(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8", "model.gguf"), "wb") as handle:
+        os.makedirs(os.path.join(self.voice_cache, "whisper-large-v3-q8"))
+        with open(os.path.join(self.voice_cache, "whisper-large-v3-q8", "model.gguf"), "wb") as handle:
             handle.write(b"x" * 2048)
 
     def test_leftovers_are_listed_with_a_readable_size(self):
         items = self.actions.leftovers({})["items"]
         self.assertEqual([(item["id"], item["name"]) for item in items],
-                         [("voice:whisper-large-v3-turbo-q8", "Whisper Large v3 Turbo")])
+                         [("voice:whisper-large-v3-q8", "Whisper Large v3")])
         self.assertTrue(items[0]["size"].endswith("MB"))
 
     def test_removal_asks_first_then_deletes(self):
-        first = self.actions.remove_leftover({"id": "voice:whisper-large-v3-turbo-q8"})
+        first = self.actions.remove_leftover({"id": "voice:whisper-large-v3-q8"})
         self.assertEqual(first["status"], "confirm")
-        self.assertIn("Whisper Large v3 Turbo", first["message"])
-        self.assertTrue(os.path.isdir(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8")))
-        done = self.actions.remove_leftover({"id": "voice:whisper-large-v3-turbo-q8", "confirmed": True})
+        self.assertIn("Whisper Large v3", first["message"])
+        self.assertTrue(os.path.isdir(os.path.join(self.voice_cache, "whisper-large-v3-q8")))
+        done = self.actions.remove_leftover({"id": "voice:whisper-large-v3-q8", "confirmed": True})
         self.assertEqual(done["status"], "removed")
-        self.assertFalse(os.path.exists(os.path.join(self.voice_cache, "whisper-large-v3-turbo-q8")))
+        self.assertFalse(os.path.exists(os.path.join(self.voice_cache, "whisper-large-v3-q8")))
         self.assertEqual(self.actions.leftovers({})["items"], [])
 
     def test_an_unknown_leftover_is_an_invalid_request(self):

@@ -47,7 +47,6 @@ from voice_hotkey import DEFAULT_COMMAND_HOTKEY, DEFAULT_DICTATION_HOTKEY
 
 PAGE_SIZE = 50
 MAX_PAGE_BACKSTACK = 32
-MAX_SEARCH_RESULTS = 32
 TRANSCRIPT_LIMIT = 500
 APPEARANCE_LABELS = {
     "system": N_("Sistema"),
@@ -64,8 +63,7 @@ TRANSCRIPT_STYLES = {N_("Texto completo"): "full_text", N_("Com horários"): "ti
 MAX_ANSWER_CHARS = 4_000
 MAX_CHAT_TURNS = 24
 MAX_CHAT_SESSIONS = 8
-LONG_JOB_KEYS = frozenset({"generate_report", "ask_this_meeting", "cross_question", "summary_model",
-                           "rebuild_index"})
+LONG_JOB_KEYS = frozenset({"generate_report", "ask_this_meeting", "cross_question", "summary_model"})
 REPORT_HISTORY_LIMIT = 500
 MAX_RETENTION_PREVIEW_ITEMS = 64
 MAX_TRASH_ITEMS = 256
@@ -87,7 +85,7 @@ INDEX_STATE_LABELS = {"ready": N_("pronto"), "stale": N_("desatualizado"), "rebu
                       "compatibility": N_("modo de compatibilidade"), "cancelled": N_("cancelado"),
                       "failed": N_("falhou")}
 PROFILE_LABELS = {"whisper-small": N_("Leve · Whisper Small"), "balanced": N_("Equilibrado · Parakeet"),
-                  "whisper-large-v3": N_("Máxima precisão · Whisper Large"),
+                  "whisper-large-v3": N_("Whisper Large Turbo"),
                   "streaming": N_("Transcrição contínua")}
 LANGUAGE_LABELS = {"auto": N_("Automático"), "pt-BR": N_("Português (Brasil)"),
                    "en-US": N_("Inglês (Estados Unidos)")}
@@ -941,8 +939,6 @@ class MeetingWindow:
         self.cross_request = 0
         self.cross_pending = None
         self.cross_citation_request = 0
-        self.rebuild_cancel = None
-        self.rebuild_progress = {"done": 0, "total": None, "state": "idle"}
         self.organization_generation = 0
         self.report_profiles = []
         self.report_profile_by_label = {}
@@ -995,7 +991,6 @@ class MeetingWindow:
             self.window.protocol("WM_DELETE_WINDOW", self.close)
         self.window.bind("<Destroy>", self._destroyed, add="+")
         self.window.bind("<Control-Shift-C>", self._copy_summary_shortcut, add="+")
-        self.window.bind("<Control-f>", self._focus_library_search, add="+")
         self.window.bind("<F2>", self._begin_title_edit, add="+")
         self.window.bind("<Control-Tab>", lambda event: self._cycle_detail_section(1), add="+")
         self.window.bind("<Control-Shift-Tab>", lambda event: self._cycle_detail_section(-1), add="+")
@@ -1047,8 +1042,7 @@ class MeetingWindow:
         for section in ("recording", "privacy"):
             if getattr(self, "_settings_drafts", {}).get(section, {}).get("baseline") is not None:
                 self._section_loaded(section)
-        self.query.set(state.query)
-        self._cancel_library_search()
+        self.query.set("")
         self.library_cursor = state.cursor
         self.library_back_stack = list(state.back_stack)
         self.library_page_index = len(self.library_back_stack) - 1
@@ -1125,7 +1119,7 @@ class MeetingWindow:
 
     def _shortcut_sheet(self, _event=None):
         messagebox.showinfo(tr("Atalhos de teclado"), tr(
-            "Ctrl+1…4 · destinos\nCtrl+F · buscar\nF5 · atualizar biblioteca\n"
+            "Ctrl+1…4 · destinos\nF5 · atualizar biblioteca\n"
             "F2 · editar título\nCtrl+S · salvar título\nDelete · mover para a lixeira\n"
             "Espaço · reproduzir/parar na lista ou transcrição\nCtrl+Tab · próxima seção\n"
             "Ctrl+Shift+C · copiar resumo\nCtrl+Shift+R · iniciar/parar gravação\n"
@@ -1215,19 +1209,14 @@ class MeetingWindow:
             self._set_library_detail_visible(True)
             return
         self._set_library_detail_visible(False)
-        narrowed = bool(self.query.get().strip())
         self.library_empty.set(
-            tr("Nenhuma gravação encontrada.\nTente outra busca.") if narrowed
-            else tr("Nenhuma gravação ainda.\nComece gravando ou importe um áudio.")
+            tr("Nenhuma gravação ainda.\nComece gravando ou importe um áudio.")
         )
         for button in (self.library_empty_record_button, self.library_empty_import_button,
-                       self.library_empty_clear_button, self.library_empty_retry_button):
+                       self.library_empty_retry_button):
             button.pack_forget()
-        if narrowed:
-            self.library_empty_clear_button.pack(side="left")
-        else:
-            self.library_empty_record_button.pack(side="left")
-            self.library_empty_import_button.pack(side="left", padx=(self.ui.space_sm, 0))
+        self.library_empty_record_button.pack(side="left")
+        self.library_empty_import_button.pack(side="left", padx=(self.ui.space_sm, 0))
         panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         panel.lift()
 
@@ -1269,29 +1258,9 @@ class MeetingWindow:
         elif not visible:
             pages.pack_forget()
 
-    def _clear_library_search(self):
-        self.query.set("")
-        self.search()
-        return "break"
 
-    def _queue_library_search(self, *_args):
-        self._cancel_library_search()
-        # Reject an older read immediately, including during the debounce.
-        self.library_filter_generation += 1
-        self.bridge.invalidate("library")
-        self._library_search_after = self.window.after(250, self.search)
 
-    def _cancel_library_search(self):
-        pending = getattr(self, "_library_search_after", None)
-        if pending is not None:
-            self.window.after_cancel(pending)
-            self._library_search_after = None
 
-    def _focus_library_search(self, _event=None):
-        self.notebook.select(self.library_tab)
-        self.search_entry.focus_set()
-        self.search_entry.selection_range(0, "end")
-        return "break"
 
     def _cycle_detail_section(self, step):
         if self._visible_destination() != "library" or not self.selected:
@@ -1315,11 +1284,6 @@ class MeetingWindow:
                                    self.tools_toggle.winfo_rooty() + self.tools_toggle.winfo_height())
         self.library_menu.grab_release()
 
-    def _open_search_repair(self):
-        self.notebook.select(self.settings_tab)
-        self.settings_sections.select("models")
-        self.model_sections.select("search")
-        self.rebuild_index()
 
     def _delete_shortcut(self):
         self.delete_selected()
@@ -1386,17 +1350,6 @@ class MeetingWindow:
             pady=(self.ui.space_xs, 0) if stacked else 0,
         )
 
-    def _build_search_models(self, parent):
-        self._label(parent, tr("Busca"), font=self.ui.heading()).pack(anchor="w")
-        repair = tk.Frame(parent, bg=self.ui.surface)
-        repair.pack(fill="x", pady=self.ui.space_md)
-        self.rebuild_button = self._button(repair, tr("Reparar busca"), self.rebuild_index)
-        self.rebuild_button.pack(side="left")
-        self.rebuild_cancel_button = self._button(repair, tr("Cancelar"), self.cancel_rebuild_index)
-        self._park_cancel(self.rebuild_cancel_button, "pack", side="right")
-        self.index_status = tk.StringVar(self.window, tr("Índice de busca: estado desconhecido"))
-        self._wrap_label(parent, "", textvariable=self.index_status,
-                         fg=self.ui.text_muted).pack(fill="x")
 
     def _tone_fg(self, tone):
         """Text color for a state tone; the quiet default reads as secondary text."""
@@ -2028,8 +1981,6 @@ class MeetingWindow:
         )
         transcription = self.model_sections.add("transcription", tr("Transcrição"))
         summary_section = self.model_sections.add("summary", tr("Resumos"))
-        self.search_models_page = self.model_sections.add("search", tr("Busca"))
-        self._build_search_models(self.search_models_page)
         self._build_language_card(general)
         self._build_appearance_card(general)
         self.location_cards = {}
@@ -2387,7 +2338,6 @@ class MeetingWindow:
     def _sync_job_cancels(self):
         """Show each Cancel while, and only while, the job it stops runs."""
         for name, running in (
-            ("rebuild_cancel_button", getattr(self, "rebuild_cancel", None) is not None),
             ("cross_cancel_button", bool(getattr(self, "cross_pending", None))),
             ("cancel_summary_button", bool(getattr(self, "summary_pending", None))),
             ("summary_download_cancel_button",
@@ -2604,19 +2554,7 @@ class MeetingWindow:
         toolbar = tk.Frame(left, bg=self.ui.surface)
         toolbar.pack(fill="x", pady=(0, self.ui.space_md))
         self.library_toolbar = toolbar
-        search_row = tk.Frame(toolbar, bg=self.ui.surface)
-        search_row.pack(fill="x")
         self.query = tk.StringVar(self.window)
-        self._library_search_after = None
-        self._label(toolbar, tr("Buscar na biblioteca (Ctrl+F)"), bg=self.ui.surface,
-                    anchor="w").pack(fill="x", before=search_row, pady=(0, self.ui.space_xs))
-        search = self._entry(search_row, self.query, 12)
-        self.search_entry = search
-        search.pack(side="left", fill="x", expand=True)
-        search.bind("<Return>", lambda _event: self.search())
-        search.bind("<Escape>", lambda _event: self._clear_library_search())
-        self._placeholder(search, self.query, tr("Buscar gravações e transcrições"))
-        self.query.trace_add("write", self._queue_library_search)
         action_row = tk.Frame(toolbar, bg=self.ui.surface)
         action_row.pack(fill="x", pady=(self.ui.space_sm, 0))
         self.tools_toggle = self._button(action_row, tr("Mais"), self._show_library_menu)
@@ -2627,7 +2565,6 @@ class MeetingWindow:
         self.library_menu.add_command(label=tr("Perguntar à biblioteca"),
                                       command=lambda: self._toggle_library_panel("cross"))
         self.library_menu.add_command(label=tr("Lixeira…"), command=self.show_trash)
-        self.library_menu.add_command(label=tr("Reparar busca"), command=self._open_search_repair)
 
         # Recording list with an empty state drawn over the tree.
         list_frame = tk.Frame(left, bg=self.ui.surface)
@@ -2668,10 +2605,6 @@ class MeetingWindow:
         self.library_empty_import_button = self._button(
             empty_actions, tr("Importar áudio…"), self.import_audio,
         )
-        self.library_empty_clear_button = self._button(
-            empty_actions, tr("Limpar busca"), self._clear_library_search,
-            accent=True,
-        )
         self.library_empty_retry_button = self._button(
             empty_actions, tr("Tentar novamente"), self.refresh_library, accent=True,
         )
@@ -2685,25 +2618,6 @@ class MeetingWindow:
         self.page_label = tk.StringVar(self.window, tr("Página {page}", page=1))
         self._label(pages, "", textvariable=self.page_label, fg=self.ui.text_muted).pack(
             side="left", padx=(8, 0))
-        # Full-text hits appear only after a search that found something.
-        self.search_results_frame = ttk.Frame(self.library_detail_pane, style="Meeting.TFrame")
-        self._label(self.search_results_frame, tr("Encontrado em transcrições e relatórios"),
-                    anchor="w", fg=self.ui.text_muted).pack(fill="x", pady=(8, self.ui.space_xs))
-        self.search_results = ttk.Treeview(
-            self.search_results_frame, columns=("source", "meeting", "snippet"), show="headings",
-            selectmode="browse", height=4, style="Meeting.Treeview",
-        )
-        # Modest starting widths: this tree's request sets the list pane's
-        # width, and 470px starved the detail pane's controls. The snippet
-        # column stretches into whatever the pane receives.
-        for column, label, width in (("source", tr("Fonte"), 70), ("meeting", tr("Reunião"), 90),
-                                      ("snippet", tr("Trecho"), 120)):
-            self.search_results.heading(column, text=label)
-            self.search_results.column(column, width=width, stretch=column == "snippet")
-        self.search_results.pack(fill="x")
-        self.search_results.bind("<Double-Button-1>", lambda _event: self.open_search_result())
-        self.search_results.bind("<Return>", lambda _event: self.open_search_result())
-
         # Selected recording: a placeholder until one is chosen, then a fixed
         # header over one section at a time.
         right_outer.columnconfigure(0, weight=1)
@@ -5680,7 +5594,6 @@ class MeetingWindow:
                      callback, urgent)
 
     def search(self):
-        self._cancel_library_search()
         self.offset = 0
         self.library_cursor = None
         self.library_next_cursor = None
@@ -5709,7 +5622,7 @@ class MeetingWindow:
 
 
     def refresh_library(self):
-        cursor, query = self.library_cursor, self.query.get()
+        cursor = self.library_cursor
         status = ""
         filters = {}
         page_index = self.library_page_index
@@ -5722,26 +5635,19 @@ class MeetingWindow:
                     # Keyset cursors own the position.  Keep the legacy offset
                     # explicitly at zero so page 2 cannot accidentally send
                     # both cursor and its display offset to the controller.
-                    limit=PAGE_SIZE, cursor=cursor, offset=0, query=query, status=status,
+                    limit=PAGE_SIZE, cursor=cursor, offset=0, status=status,
                     **filters,
                 )
                 if isinstance(candidate, dict):
                     page = candidate
             if page is None:
                 items = self.controller.list_sessions(
-                    offset=page_index * PAGE_SIZE, limit=PAGE_SIZE, query=query, status=status,
+                    offset=page_index * PAGE_SIZE, limit=PAGE_SIZE, status=status,
                     **filters,
                 )
                 page = {"items": list(islice(items or (), PAGE_SIZE)), "next_cursor": None,
                         "cursor_reset": False, "index_state": "compatibility"}
-            search_results = []
-            if query.strip():
-                searcher = getattr(self.controller, "search_library", None)
-                if callable(searcher):
-                    candidate = searcher(query, limit=MAX_SEARCH_RESULTS, **filters, status=status)
-                    if isinstance(candidate, (list, tuple)):
-                        search_results = list(candidate)[:MAX_SEARCH_RESULTS]
-            return page, search_results, generation
+            return page, [], generation
         self._submit("library", read, self._library_loaded)
 
     def _library_loaded(self, sessions, error):
@@ -5754,27 +5660,24 @@ class MeetingWindow:
                 self._set_library_detail_visible(False)
                 self.library_empty.set(tr("Não foi possível carregar a biblioteca."))
                 for button in (self.library_empty_record_button, self.library_empty_import_button,
-                               self.library_empty_clear_button, self.library_empty_retry_button):
+                               self.library_empty_retry_button):
                     button.pack_forget()
                 self.library_empty_retry_button.pack(side="left")
                 self.library_empty_panel.place(relx=0, rely=0, relwidth=1, relheight=1)
                 self.library_empty_panel.lift()
             return
         self.messages.clear("library", key="library_load")
-        search_results = []
         generation = self.library_filter_generation
         if isinstance(sessions, tuple) and len(sessions) == 3 and isinstance(sessions[0], dict):
-            page, search_results, generation = sessions
+            page, _search_results, generation = sessions
             if generation != self.library_filter_generation:
                 return
             self.library_cursor_reset = bool(page.get("cursor_reset"))
             items = list(islice(page.get("items", []) or [], PAGE_SIZE))
             self.library_next_cursor = page.get("next_cursor")
-            index_state = page.get("index_state")
         else:
             items = list(islice(sessions or [], PAGE_SIZE))
             self.library_next_cursor = None
-            index_state = "compatibility"
         self.sessions.delete(*self.sessions.get_children())
         self.session_items = {item["id"]: item for item in items}
         for item in items:
@@ -5785,19 +5688,10 @@ class MeetingWindow:
             self.library_back_stack = [None]
             self.library_page_index = 0
             self.offset = 0
-            self.index_status.set(tr("Índice de busca mudou; listagem reiniciada."))
-        elif index_state:
-            self.index_status.set(tr("Índice de busca: {state}",
-                                     state=tr(INDEX_STATE_LABELS.get(index_state, index_state))))
         self.previous_button.configure(state="normal" if self.library_page_index else "disabled")
         self.next_button.configure(state="normal" if self.library_next_cursor else "disabled")
         self.page_label.set(self._library_count_text(len(items)))
-        self._render_search_results(search_results)
-        self._render_library_empty_state(items or self.search_result_items)
-        if self.search_result_items:
-            self.library_empty_panel.place_forget()
-            self.page_label.set(tr("1 resultado") if len(search_results) == 1 else
-                                tr("{count} resultados", count=len(search_results)))
+        self._render_library_empty_state(items)
         if self.selected in self.sessions.get_children():
             self.sessions.selection_set(self.selected)
         restored = getattr(self, "_restoring_view_state", None)
@@ -5805,55 +5699,7 @@ class MeetingWindow:
             self.sessions.yview_moveto(restored.list_scroll)
             self._restoring_view_state = None
 
-    def _render_search_results(self, results):
-        self.search_result_items = [item for item in (results or ()) if isinstance(item, dict)][:MAX_SEARCH_RESULTS]
-        self.search_results.delete(*self.search_results.get_children())
-        labels = {
-            "transcript": tr("Transcrição"),
-            "report": tr("Relatório"),
-            "reviewed_artifact": tr("Revisão"),
-            "session": tr("Reunião"),
-        }
-        for index, item in enumerate(self.search_result_items):
-            source = labels.get(item.get("source_kind"), str(item.get("source_kind", tr("Fonte"))))
-            meeting = str(item.get("title") or item.get("session_id") or "")[:120]
-            snippet = " ".join(str(item.get("snippet", "")).split())[:480]
-            self.search_results.insert("", "end", iid=str(index), values=(source, meeting, snippet))
-        frame = getattr(self, "search_results_frame", None)
-        if frame is not None:
-            if self.search_result_items:
-                frame.grid(row=0, column=0, sticky="ew", padx=(12, 0))
-            else:
-                frame.grid_remove()
 
-    def open_search_result(self):
-        selected = self.search_results.selection()
-        if not selected:
-            return
-        try:
-            result = self.search_result_items[int(selected[0])]
-        except (AttributeError, IndexError, TypeError, ValueError):
-            return
-        session_id = result.get("session_id")
-        if not isinstance(session_id, str):
-            return
-        self.search_request += 1
-        request = self.search_request
-
-        def loaded(value, error):
-            if self.closed or request != self.search_request:
-                return
-            if error or not isinstance(value, dict):
-                self._fail("library", tr("A fonte da busca não está mais disponível"),
-                           tr("A gravação ou o relatório pode ter mudado. Busque de novo."), error=error)
-                return
-            if value.get("session_id") != self.selected:
-                self.pending_search_resolution = value
-                self.load_session(value["session_id"])
-                return
-            self._apply_search_resolution(value, request)
-
-        self._submit("search_result", lambda: self.controller.resolve_search_result(result), loaded)
 
     def _apply_search_resolution(self, value, request=None):
         if request is not None and request != self.search_request:
@@ -6435,53 +6281,9 @@ class MeetingWindow:
         self.refresh_trash()
         self.refresh_library()
 
-    def rebuild_index(self):
-        if self.rebuild_cancel is not None:
-            return
-        self.rebuild_cancel = threading.Event()
-        event = self.rebuild_cancel
-        self.rebuild_progress = {"done": 0, "total": None, "state": "rebuilding"}
-        self.rebuild_button.configure(state="disabled")
-        self._sync_job_cancels()
-        self.index_status.set(tr("Índice de busca: reconstruindo…"))
-        if not self._submit(
-            "rebuild_index",
-            lambda: self.controller.rebuild_index(
-                cancel_event=event,
-                progress=self._rebuild_progress_from_worker,
-            ),
-            self._rebuild_finished,
-        ):
-            self._rebuild_finished(None, tr("Fila de operações ocupada."))
 
-    def _rebuild_progress_from_worker(self, done, total):
-        self.rebuild_progress = {"done": done, "total": total, "state": "rebuilding"}
 
-    def cancel_rebuild_index(self):
-        if self.rebuild_cancel is not None:
-            self.rebuild_cancel.set()
-            if self.bridge.cancel_queued("rebuild_index"):
-                self._rebuild_finished({"state": "cancelled", "sessions": 0}, None)
-                return
-            self.index_status.set(tr("Índice de busca: cancelamento solicitado…"))
 
-    def _rebuild_finished(self, value, error):
-        cancelled = self.rebuild_cancel is not None and self.rebuild_cancel.is_set()
-        self.rebuild_cancel = None
-        self.rebuild_button.configure(state="normal")
-        self._sync_job_cancels()
-        if error:
-            self.rebuild_progress = dict(self.rebuild_progress, state="cancelled" if cancelled else "failed")
-            self.index_status.set(tr("Índice de busca: reconstrução cancelada ou indisponível."))
-            self._fail("library", tr("Não foi possível reconstruir o índice de busca"),
-                       tr("A busca por palavras continua disponível."), tone="warning", error=error)
-            return
-        state = value.get("state", "ready") if isinstance(value, dict) else "ready"
-        count = value.get("sessions", 0) if isinstance(value, dict) else 0
-        self.rebuild_progress = {"done": count, "total": count, "state": state}
-        self.index_status.set(tr("Índice de busca: {state} · {count} reuniões",
-                                 state=tr(INDEX_STATE_LABELS.get(state, state)), count=count))
-        self.search()
 
     def _selection_changed(self, _event=None):
         self._sync_trash_controls()
@@ -7917,16 +7719,6 @@ class MeetingWindow:
                 label = getattr(self, "summary_model_states", {}).get(getattr(self, "_summary_download_profile", None))
                 if label is not None:
                     label.configure(text=tr("Baixando {percent}%", percent=min(100, percent)))
-            rebuild = self.rebuild_progress
-            if getattr(self, "rebuild_cancel", None) is not None and isinstance(rebuild, dict):
-                done, total = rebuild.get("done", 0), rebuild.get("total")
-                suffix = f"{done}/{total}" if total else str(done)
-                self.index_status.set(tr("Índice de busca: reconstruindo · {progress} reuniões", progress=suffix))
-            elif isinstance(rebuild, dict) and rebuild.get("state") not in {None, "idle"}:
-                self.index_status.set(
-                    tr("Índice de busca: {state} · {count} reuniões",
-                       state=rebuild.get('state'), count=rebuild.get('done', 0))
-                )
             snapshot = self.controller.snapshot()
             self.snapshot = snapshot
             self._sync_readiness()
@@ -8060,7 +7852,6 @@ class MeetingWindow:
         if getattr(self, "_device_layout_after", None) is not None:
             self.window.after_cancel(self._device_layout_after)
             self._device_layout_after = None
-        self._cancel_library_search()
         self.closed = True
         # Closing never cancels a recording's work (its capture, final audio,
         # transcript or summary); it stops only answers this view would show.
@@ -8088,8 +7879,6 @@ class MeetingWindow:
         self.transcript_request = getattr(self, "transcript_request", 0) + 1
         if getattr(self, "summary_download_cancel", None) is not None:
             self.summary_download_cancel.set()
-        if getattr(self, "rebuild_cancel", None) is not None:
-            self.rebuild_cancel.set()
         try:
             self.controller.stop_playback()
         except (AttributeError, RuntimeError):

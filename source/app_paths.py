@@ -41,7 +41,7 @@ def location_file():
 
 
 def default_models_dir(system=None):
-    """Default root holding the voice, summary, and embedding model caches."""
+    """Default root holding the voice and summary model caches."""
     from platform_support import current_os
 
     os_name = system or current_os()

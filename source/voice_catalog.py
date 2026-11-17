@@ -12,6 +12,7 @@ from i18n import N_
 PROFILE_BALANCED = "balanced"
 PROFILE_STREAMING = "streaming"
 PROFILE_WHISPER_SMALL = "whisper-small"
+# Keep the persisted profile key so existing Large selections now use Turbo.
 PROFILE_WHISPER_LARGE = "whisper-large-v3"
 
 PROFILES = (
@@ -21,9 +22,8 @@ PROFILES = (
     PROFILE_WHISPER_LARGE,
 )
 
-# Profiles removed from the catalog (Qwen3-ASR 0.6B and 1.7B, Whisper Large v3
-# Turbo). Settings that still name one resolve to the defaults instead of
-# failing validation.
+# Legacy profile keys removed from the catalog. Settings naming one resolve to
+# the defaults instead of failing validation.
 RETIRED_PROFILES = frozenset({"compact", "accuracy", "whisper-turbo"})
 
 LANGUAGE_AUTO = "auto"
@@ -136,19 +136,19 @@ _WHISPER_SMALL_Q8 = {
 }
 
 _WHISPER_LARGE_Q8 = {
-    "id": "whisper-large-v3-q8",
+    "id": "whisper-large-v3-turbo-q8",
     "profile": PROFILE_WHISPER_LARGE,
-    "filename": "whisper-large-v3-Q8_0.gguf",
+    "filename": "whisper-large-v3-turbo-Q8_0.gguf",
     "url": (
-        "https://huggingface.co/handy-computer/whisper-large-v3-gguf/"
-        "resolve/b33a05f1459f33b0c876f014a57d51618b77d754/"
-        "whisper-large-v3-Q8_0.gguf"
+        "https://huggingface.co/handy-computer/whisper-large-v3-turbo-gguf/"
+        "resolve/18ada752005f5fddef499256f9a458d0b37a203a/"
+        "whisper-large-v3-turbo-Q8_0.gguf"
     ),
-    "sha256": "2fa1a5f179f8a511a53e2108db270aa4af3ce08cd976af4180e2854666bb4ba3",
-    "size_bytes": 1668741440,
-    "upstream_model": "openai/whisper-large-v3",
-    "upstream_commit": "06f233fe06e710322aca913c1bc4249a0d71fce1",
-    "quant_source": "handy-computer/whisper-large-v3-gguf",
+    "sha256": "257aa7ec9121c22c167d5e2c49e3e76b4ba0e6e27ebc13074eba0a80f8190220",
+    "size_bytes": 886381728,
+    "upstream_model": "openai/whisper-large-v3-turbo",
+    "upstream_commit": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9",
+    "quant_source": "handy-computer/whisper-large-v3-turbo-gguf",
     "runtime": RUNTIME_TRANSCRIBE_CPP,
     "quantization": "Q8_0",
     "format": "gguf",
@@ -156,24 +156,23 @@ _WHISPER_LARGE_Q8 = {
     "language_hint": "optional",
     "min_memory_bytes": 3 * 1024 * 1024 * 1024,
     "recommended_memory_bytes": 4 * 1024 * 1024 * 1024,
-    "license_id": "Apache-2.0",
-    "license_url": "https://www.apache.org/licenses/LICENSE-2.0",
+    "license_id": "MIT",
+    "license_url": "https://huggingface.co/openai/whisper-large-v3-turbo/blob/41f01f3fe87f28c78e2fbf8b568835947dd65ed9/LICENSE",
     "attribution": (
-        "Whisper large-v3 by OpenAI, quantized to Q8_0 by handy-computer "
+        "Whisper large-v3-turbo by OpenAI, quantized to Q8_0 by handy-computer "
         "for transcribe.cpp."
     ),
-    "source_url": "https://huggingface.co/openai/whisper-large-v3",
+    "source_url": "https://huggingface.co/openai/whisper-large-v3-turbo",
     "purpose": (
-        N_("Máxima precisão · Whisper Large (opcional): o mais preciso em "
-           "português, porém mais lento que o tempo real na CPU e com maior uso de "
-           "memória; nunca é selecionado automaticamente.")
+        N_("Whisper Large Turbo (opcional): transcrição multilíngue com menos "
+           "memória e decodificação mais rápida que o Large v3; nunca é "
+           "selecionado automaticamente.")
     ),
-    "description": N_("O mais preciso em português · mais lento e usa mais memória"),
+    "description": N_("Multilíngue · mais rápido e leve que o Whisper Large v3"),
     "user_selectable": True,
 }
 
-# Selectable entries run from lowest to highest transcription quality, and the
-# settings lists and selectors show them in this order.
+# Keep the lightweight model first, the default next, and optional Turbo last.
 MODEL_CATALOG = (
     _WHISPER_SMALL_Q8,
     _PARAKEET_Q8,

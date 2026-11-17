@@ -56,27 +56,28 @@ class LeftoverTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_nothing_left_behind_lists_nothing(self):
+        _write(os.path.join(self.voice, "whisper-large-v3-turbo-q8", "model.gguf"), 10)
         _write(os.path.join(self.voice, "whisper-small-q8", "whisper-small-Q8_0.gguf"), 10)
         _write(os.path.join(self.data, "library.sqlite"), 10)
         self.assertEqual(self.leftovers.find(), [])
 
     def test_retired_models_and_the_semantic_index_are_listed_with_sizes(self):
-        _write(os.path.join(self.voice, "whisper-large-v3-turbo-q8", "model.gguf"), 300)
-        _write(os.path.join(self.voice, "whisper-large-v3-turbo-q8", "manifest.json"), 20)
+        _write(os.path.join(self.voice, "whisper-large-v3-q8", "model.gguf"), 300)
+        _write(os.path.join(self.voice, "whisper-large-v3-q8", "manifest.json"), 20)
         _write(os.path.join(self.summary, "lfm2.5-2.6b-q4", "model.gguf"), 50)
         _write(os.path.join(self.models, "embedding-models", "embeddinggemma-2-bf16", "model.gguf"), 70)
         _write(os.path.join(self.data, "semantic.sqlite"), 40)
         _write(os.path.join(self.data, "semantic.sqlite.lock"), 0)
         _write(os.path.join(self.data, "semantic.sqlite.0a1b.tmp"), 5)
         found = {item["id"]: item["size_bytes"] for item in self.leftovers.find()}
-        self.assertEqual(found, {"voice:whisper-large-v3-turbo-q8": 320, "summary:lfm2.5-2.6b-q4": 50,
+        self.assertEqual(found, {"voice:whisper-large-v3-q8": 320, "summary:lfm2.5-2.6b-q4": 50,
                                  "embedding:embeddinggemma-2-bf16": 70, SEMANTIC_INDEX_ID: 45})
 
     def test_removing_a_model_deletes_only_its_folder(self):
-        _write(os.path.join(self.voice, "whisper-large-v3-turbo-q8", "model.gguf"), 10)
+        _write(os.path.join(self.voice, "whisper-large-v3-q8", "model.gguf"), 10)
         _write(os.path.join(self.voice, "whisper-small-q8", "model.gguf"), 10)
         _write(os.path.join(self.voice, "history", "entry.json"), 10)
-        self.leftovers.remove("voice:whisper-large-v3-turbo-q8")
+        self.leftovers.remove("voice:whisper-large-v3-q8")
         self.assertEqual(sorted(os.listdir(self.voice)), ["history", "whisper-small-q8"])
         self.assertEqual(self.leftovers.find(), [])
 
@@ -100,7 +101,8 @@ class LeftoverTests(unittest.TestCase):
 
     def test_unknown_or_current_ids_are_refused(self):
         _write(os.path.join(self.voice, "whisper-small-q8", "model.gguf"), 10)
-        for key in ("voice:whisper-small-q8", "voice:../data", "whatever"):
+        for key in ("voice:whisper-small-q8", "voice:whisper-large-v3-turbo-q8",
+                    "voice:../data", "whatever"):
             with self.subTest(key=key):
                 self.assertIsNone(self.leftovers.name(key))
                 with self.assertRaises(ValueError):
@@ -110,11 +112,11 @@ class LeftoverTests(unittest.TestCase):
     def test_a_linked_leftover_is_neither_listed_nor_followed(self):
         outside = os.path.join(self.tmp, "outside")
         _write(os.path.join(outside, "keep.bin"), 10)
-        if not _link_dir(outside, os.path.join(self.voice, "whisper-large-v3-turbo-q8")):
+        if not _link_dir(outside, os.path.join(self.voice, "whisper-large-v3-q8")):
             self.skipTest("this account cannot create directory links")
         self.assertEqual(self.leftovers.find(), [])
         with self.assertRaises(ValueError):
-            self.leftovers.remove("voice:whisper-large-v3-turbo-q8")
+            self.leftovers.remove("voice:whisper-large-v3-q8")
         self.assertTrue(os.path.isfile(os.path.join(outside, "keep.bin")))
 
 

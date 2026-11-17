@@ -46,7 +46,7 @@ export class MockTransport implements Transport {
   ];
   private jobs = new Map<string, () => void>();
   private leftovers = [
-    { id: "voice:whisper-large-v3-turbo-q8", name: "Whisper Large v3 Turbo", detail: "Modelo que o SnipVoice não oferece mais", size: "845 MB" },
+    { id: "voice:whisper-large-v3-q8", name: "Whisper Large v3", detail: "Modelo que o SnipVoice não oferece mais", size: "1.55 GB" },
     { id: "embedding:embeddinggemma-2-bf16", name: "EmbeddingGemma 2", detail: "Modelo da busca semântica removida", size: "532 MB" },
     { id: "semantic-index", name: "Índice da busca semântica", detail: "Trechos das transcrições guardados pela busca semântica removida", size: "12 MB" },
   ];
@@ -61,7 +61,7 @@ export class MockTransport implements Transport {
     profiles: [
       { id: "dictation", label: "Igual ao ditado" },
       { id: "balanced", label: "Equilibrado · Parakeet" },
-      { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large" },
+      { id: "whisper-large-v3", label: "Whisper Large Turbo" },
     ],
     languages: {
       dictation: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }, { id: "en-US", label: "Inglês (Estados Unidos)" }],
@@ -167,8 +167,7 @@ export class MockTransport implements Transport {
       case "voice.copy":
         return { accepted: true };
       case "library.list": {
-        const query = String(params.query ?? "").toLowerCase();
-        return { items: SESSIONS.filter((item) => item.title.toLowerCase().includes(query)), nextCursor: null };
+        return { items: SESSIONS, nextCursor: null };
       }
       case "library.get": {
         const item = SESSIONS.find((session) => session.id === params.id);
@@ -255,7 +254,7 @@ export class MockTransport implements Transport {
           voice: [
             { id: "whisper-small", label: "Leve · Whisper Small", name: "openai/whisper-small", purpose: "Leve · Whisper Small: download menor e pouca memória.", description: "Download pequeno e pouca memória · menos preciso em português", size: "257 MB", license: "Apache-2.0", inUse: false, ...state("whisper-small") },
             { id: "balanced", label: "Equilibrado · Parakeet", name: "nvidia/parakeet-tdt-0.6b-v3", purpose: "Equilibrado · Parakeet (padrão): ditado após soltar o atalho.", description: "Recomendado · rápido e preciso para o dia a dia", size: "705 MB", license: "CC-BY-4.0", inUse: true, ...state("balanced") },
-            { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large", name: "openai/whisper-large-v3", purpose: "Máxima precisão · Whisper Large (opcional): o mais preciso em português, porém mais lento que o tempo real na CPU.", description: "O mais preciso em português · mais lento e usa mais memória", size: "1.55 GB", license: "Apache-2.0", inUse: false, ...state("whisper-large-v3") },
+            { id: "whisper-large-v3", label: "Whisper Large Turbo", name: "openai/whisper-large-v3-turbo", purpose: "Whisper Large Turbo (opcional): transcrição multilíngue com menos memória e decodificação mais rápida que o Large v3; nunca é selecionado automaticamente.", description: "Multilíngue · mais rápido e leve que o Whisper Large v3", size: "845 MB", license: "MIT", inUse: false, ...state("whisper-large-v3") },
           ],
           summary: [
             { id: "qwen3.5-2b-q4", name: "Qwen3.5 2B", label: "Equilibrado · Qwen3.5 2B", description: "Recomendado · melhor equilíbrio para português, inglês e uso local", size: "1.3 GB", license: "Apache-2.0", inUse: true, ...state("qwen3.5-2b-q4") },
@@ -290,7 +289,7 @@ export class MockTransport implements Transport {
         return { moving: true };
       case "dictation.settings":
         return {
-          profiles: [{ id: "balanced", label: "Equilibrado · Parakeet", installed: true }, { id: "whisper-large-v3", label: "Máxima precisão · Whisper Large", installed: false }],
+          profiles: [{ id: "balanced", label: "Equilibrado · Parakeet", installed: true }, { id: "whisper-large-v3", label: "Whisper Large Turbo", installed: false }],
           languages: {
             balanced: [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }],
             "whisper-large-v3": [{ id: "auto", label: "Automático" }, { id: "pt-BR", label: "Português (Brasil)" }],
@@ -347,12 +346,6 @@ export class MockTransport implements Transport {
         if (params.confirmed !== true) return { status: "confirm", title: "Remover arquivos antigos", message: "Remover este item deste computador?\n\nO SnipVoice não usa mais estes arquivos. Esta ação não pode ser desfeita." };
         this.leftovers = this.leftovers.filter((item) => item.id !== params.id);
         return { status: "removed", message: "Item removido." };
-      case "search.state":
-        return { index: "Índice de busca: pronto", repair: null };
-      case "search.cancelRepair":
-        return { cancelled: true };
-      case "search.repair":
-        return { status: "started" };
       case "recording.readiness":
         return { rows: [
           { key: "summary", tone: "warning", text: "Sem modelo de resumo instalado.", action: "Ver modelos" },

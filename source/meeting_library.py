@@ -573,9 +573,6 @@ class MeetingLibrary:
         # read-only errors.
         self._validate_privacy_defaults(value.get("privacy_defaults", {}))
         self._validate_retention_defaults(value.get("retention_defaults", {}))
-        # Semantic search was removed; a workspace written before keeps the key.
-        if "semantic_search" in value and not isinstance(value["semantic_search"], bool):
-            raise SchemaError(tr("A opção de busca semântica do workspace é inválida."))
         _, size = _copy_json(value, "workspace.json")
         if size > MAX_WORKSPACE_BYTES:
             raise SchemaError(tr("O workspace excede o limite permitido; o arquivo foi preservado."))
