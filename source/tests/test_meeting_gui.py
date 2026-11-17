@@ -2194,6 +2194,25 @@ class MeetingGuiLogicTests(unittest.TestCase):
             receipt="Exportação da transcrição iniciada.",
         )
 
+    def test_files_exports_use_the_transcript_and_timestamp_checkbox(self):
+        for format, suffix in (("markdown", ".md"), ("text", ".txt")):
+            for timestamps in (False, True):
+                with self.subTest(format=format, timestamps=timestamps):
+                    view = MeetingWindow.__new__(MeetingWindow)
+                    view.selected = "meeting-1"
+                    view.transcript_revision = "revision-2"
+                    view.export_timestamps = Variable(timestamps)
+                    view.window = mock.Mock()
+                    view._action = mock.Mock()
+                    with mock.patch("meeting_gui.filedialog.asksaveasfilename",
+                                    return_value="transcript" + suffix):
+                        view.export(format)
+                    view._action.assert_called_once_with(
+                        "export_transcript", "meeting-1", "transcript" + suffix,
+                        style="timestamped" if timestamps else "full_text", revision="revision-2",
+                        receipt="Exportação iniciada.",
+                    )
+
     def test_final_audio_download_copies_the_saved_file_format(self):
         view = MeetingWindow.__new__(MeetingWindow)
         view.selected = "meeting-1"
@@ -3583,43 +3602,17 @@ class MeetingWindowSmokeTests(unittest.TestCase):
                 manager.destroy()
                 self.root.update()
 
-    def test_chat_cancel_stops_only_the_pending_answer_and_restores_the_question(self):
+    def test_recording_details_offer_only_transcript_summary_and_files(self):
         view, notebook = self._embedded_view(geometry="920x700")
         notebook.select(view.library_tab)
-        wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
-        view._show_library_detail(True)
-        view.selected = "synthetic-session"
-        view.detail_ready = True
-        view.transcript_revision = "revision-1"
-        view.summary_model.set("synthetic-model")
-        view.summary_model_installed = {"synthetic-model": True}
-        release = threading.Event()
-        self.addCleanup(release.set)
-
-        def late_answer(*_args, **_kwargs):
-            release.wait(2)
-            return {"answer": "Resposta tardia.", "citations": []}
-
-        view.controller.ask_this_meeting.side_effect = late_answer
-        view.meeting_chat.set_question("Quem decide o prazo?")
-        view.ask_this_meeting()
         self.root.update()
-        chat = view.meeting_chat
-        self.assertEqual(chat.cancel_button.winfo_manager(), "pack")
-        self.assertEqual(str(chat.cancel_button.cget("state")), "normal")
-        cancel_event = view.ask_request_cancel
-        chat.cancel_button.invoke()
-        self.assertTrue(cancel_event.is_set())
-        view.controller.cancel_processing.assert_not_called()
-        self.assertIsNone(view.ask_pending)
-        self.assertEqual(view.ask_conversations["synthetic-session"], [])
-        self.assertEqual(chat.get_question(), "Quem decide o prazo?")
-        self.assertEqual(view.ask_status.get(), "Resposta cancelada. A pergunta voltou para o campo de texto.")
-        self.root.update()
-        self.assertEqual(chat.cancel_button.winfo_manager(), "")
-        release.set()
-        wait_for(lambda: (self.root.update(), "ask_this_meeting" not in view.bridge.callbacks)[1])
-        self.assertEqual(view.ask_conversations["synthetic-session"], [])
+        self.assertEqual(list(view.detail_sections.buttons), ["transcript", "summary", "files"])
+        self.assertFalse(hasattr(view, "meeting_chat"))
+        for section in ("transcript", "summary", "files"):
+            view.detail_sections.select(section)
+            self.root.update()
+            self.assertEqual(view.detail_sections.current, section)
+        view.controller.ask_this_meeting.assert_not_called()
 
     def test_settings_show_one_section_at_a_time(self):
         view, notebook = self._embedded_view()
@@ -4132,49 +4125,25 @@ class MeetingWindowSmokeTests(unittest.TestCase):
         self.assertIn("Selected recording details", details)
         self.assertNotIn("Old recording", details)
 
-    def test_chat_send_button_keeps_conversation_and_composer_visible(self):
-        callback_errors = []
-        previous_reporter = self.root.report_callback_exception
-        self.root.report_callback_exception = lambda *args: callback_errors.append(args)
-        self.addCleanup(setattr, self.root, "report_callback_exception", previous_reporter)
-        self.addCleanup(lambda: self.assertEqual(callback_errors, []))
+    def test_files_timestamp_checkbox_is_optional_and_changes_export_style(self):
+        view, _notebook = self._embedded_view(geometry="920x700")
+        options = [widget for widget in view.detail_sections.frames["files"].winfo_children()
+                   if isinstance(widget, tk.Checkbutton)]
+        self.assertEqual(len(options), 1)
+        self.assertFalse(view.export_timestamps.get())
+        options[0].invoke()
+        self.assertTrue(view.export_timestamps.get())
+        options[0].invoke()
+        self.assertFalse(view.export_timestamps.get())
+
+    def test_privacy_has_no_recording_chat_control(self):
         view, notebook = self._embedded_view(geometry="920x700")
-        notebook.select(view.library_tab)
+        notebook.select(view.settings_tab)
         wait_for(lambda: (self.root.update(), view.settings_loaded)[1])
-        view._show_library_detail(True)
-        view.selected = "synthetic-session"
-        view.detail_ready = True
-        view.transcript_revision = "revision-1"
-        view.summary_model.set("synthetic-model")
-        view.summary_model_installed = {"synthetic-model": True}
-        view.controller.ask_this_meeting.return_value = {
-            "answer": "A revisão será na sexta-feira.", "citations": ["microphone:0:1"],
-            "uncertainty": "low", "revision": "revision-1",
-        }
-        view.detail_sections.select("ask")
-        view._sync_qa_controls()
-        self.root.update()
-        view.meeting_chat.set_question("Qual foi a decisão?")
-        view.meeting_chat.send_button.invoke()
-        cancel_event = view.ask_request_cancel
-        self.assertIsInstance(cancel_event, threading.Event)
-        self.assertFalse(cancel_event.is_set())
-        wait_for(lambda: (self.root.update(), view.ask_pending is None)[1])
-        turns = view.ask_conversations[view.selected]
-        self.assertEqual(turns[0]["status"], "complete")
-        self.assertEqual(turns[0]["answer"], "A revisão será na sexta-feira.")
-        view.controller.ask_this_meeting.assert_called_once_with(
-            "synthetic-session", "Qual foi a decisão?", "synthetic-model",
-            revision="revision-1", history=[], cancel_event=cancel_event,
-        )
-        self.assertEqual(view.detail_sections.buttons["ask"].cget("text"), "Chat")
-        composer = view.meeting_chat.composer
-        self.assertTrue(composer.winfo_ismapped())
-        self.assertLessEqual(composer.winfo_rooty() + composer.winfo_height(),
-                             view.detail_canvas.winfo_rooty() + view.detail_canvas.winfo_height())
-        self.assertLessEqual(view.meeting_chat.send_button.winfo_rootx()
-                             + view.meeting_chat.send_button.winfo_width(),
-                             view.detail_canvas.winfo_rootx() + view.detail_canvas.winfo_width())
+        self.assertFalse(hasattr(view, "qa_never_save_check"))
+        self.assertNotIn("qa_mode", view.privacy_validation_fields)
+        self.assertIn("privacy_notice_language", view.privacy_validation_fields)
+        self.assertIn("trash_days", view.privacy_validation_fields)
 
     def test_summary_templates_generate_in_primary_view_with_optional_focus(self):
         callback_errors = []

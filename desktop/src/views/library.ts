@@ -1,11 +1,10 @@
-// Biblioteca: search and select a recording, then read, summarize, ask about,
+// Biblioteca: search and select a recording, then read, summarize,
 // export or delete it.
 import { allowEngineForeground, type Bridge } from "../bridge";
 import { button, h, ICONS, icon, replace, STATE_ICONS, stateIcon } from "../dom";
 import { tr } from "../i18n";
 import type { LibraryItem, LibraryPage, RecordingView, SessionDetail, SummaryView, Transcript, TrashPreview } from "../types";
 import { confirmDialog, copyText, MessageSlot, pageHeader, toneText } from "../ui";
-import { ChatPanel } from "./chat";
 import { FilesPanel } from "./files";
 import { lineStart, Player } from "./player";
 import { SummaryPanel } from "./summary";
@@ -14,8 +13,8 @@ import { openTrash } from "./trash";
 const SEARCH_DELAY_MS = 250;
 const MAX_BACK_STACK = 32;
 type Style = "full_text" | "timestamped";
-type Section = "transcript" | "summary" | "chat" | "files";
-const SECTIONS: Section[] = ["transcript", "summary", "chat", "files"];
+type Section = "transcript" | "summary" | "files";
+const SECTIONS: Section[] = ["transcript", "summary", "files"];
 
 export class LibraryView {
   readonly element: HTMLElement;
@@ -31,12 +30,13 @@ export class LibraryView {
   private section: Section = "transcript";
   private summaryView: SummaryView | null = null;
   private readonly summary: SummaryPanel;
-  private readonly chat: ChatPanel;
   private readonly files: FilesPanel;
   private readonly player: Player;
   private listToken = 0;
   private detailToken = 0;
   private searchTimer: number | undefined;
+  private importing = false;
+  private readonly importButton = button(tr("Importar áudio…"), () => void this.importAudio(), "quiet");
   private readonly search = h("input", { attrs: { type: "search", id: "library-search", autocomplete: "off" } });
   private readonly tbody = h("tbody");
   private readonly count = h("p", { class: "caption" });
@@ -48,7 +48,6 @@ export class LibraryView {
     private readonly enginePid: number,
   ) {
     this.summary = new SummaryPanel(bridge, this.messages, enginePid);
-    this.chat = new ChatPanel(bridge, this.messages);
     this.files = new FilesPanel(bridge, this.messages, enginePid, () => void this.deleteSelected());
     this.player = new Player(bridge, this.messages);
     bridge.on<RecordingView>("recording.state", (view) => this.player.update(view.playback));
@@ -73,7 +72,7 @@ export class LibraryView {
       { class: "page" },
       pageHeader(
         tr("Biblioteca"),
-        button(tr("Importar áudio…"), () => void this.importAudio(), "quiet"),
+        this.importButton,
         button(tr("Lixeira…"), () => openTrash(this.bridge, () => void this.refresh()), "quiet"),
       ),
       h(
@@ -265,7 +264,7 @@ export class LibraryView {
       this.messages.fail(tr("Não foi possível carregar as versões do resumo"), "", { error });
     }
     // Only these sections read the summary; redrawing the others is wasted work.
-    if (this.detail?.id === id && (this.section === "summary" || this.section === "chat")) this.renderSection();
+    if (this.detail?.id === id && this.section === "summary") this.renderSection();
   }
 
   private renderDetail(): void {
@@ -277,7 +276,7 @@ export class LibraryView {
     const title = h("h2", { class: "selectable", text: detail.title, attrs: { tabindex: -1 } });
     const rename = button(tr("Renomear"), () => this.editTitle(title), "quiet");
     rename.title = "F2";
-    const labels: Record<Section, string> = { transcript: tr("Transcrição"), summary: tr("Resumo"), chat: tr("Chat"), files: tr("Arquivos") };
+    const labels: Record<Section, string> = { transcript: tr("Transcrição"), summary: tr("Resumo"), files: tr("Arquivos") };
     const tabs = h("div", { class: "tabs", attrs: { role: "tablist", "aria-label": tr("Seções da gravação") } });
     for (const section of SECTIONS) {
       const tab = h("button", {
@@ -328,9 +327,6 @@ export class LibraryView {
     if (this.section === "summary") {
       this.summary.show(detail.id, this.summaryView);
       replace(panel, this.summary.element);
-    } else if (this.section === "chat") {
-      this.chat.show(detail.id, this.summaryView?.modelReady ?? false, this.summaryView?.canSaveAnswers ?? false);
-      replace(panel, this.chat.element);
     } else if (this.section === "files") {
       void this.files.show(detail.id);
       replace(panel, this.files.element);
@@ -398,6 +394,9 @@ export class LibraryView {
   }
 
   private async importAudio(): Promise<void> {
+    if (this.importing) return;
+    this.importing = true;
+    this.importButton.disabled = true;
     try {
       await allowEngineForeground(this.enginePid);
       const result = await this.bridge.call<{ id: string | null }>("library.importAudio");
@@ -409,6 +408,9 @@ export class LibraryView {
     } catch (error) {
       void this.refresh();
       this.messages.fail(tr("Não foi possível importar o áudio"), "", { error });
+    } finally {
+      this.importing = false;
+      this.importButton.disabled = false;
     }
   }
 

@@ -2,6 +2,28 @@
 
 ## Manager adoption — Teô 3.0.1
 
+Recording details offer Transcription, Summary and Files in both managers.
+Recording Chat and its privacy control are removed; the manager bridge no
+longer exposes ask/save-answer actions. Legacy saved answers, export data and
+storage preferences remain readable without a migration or deletion.
+
+Files exports the complete transcript as Markdown or plain text, excluding
+recording notes, reports and other metadata. Include timestamps is off by
+default and applies to either extension. An empty transcript fails without
+overwriting an existing export. Saved final-audio copies may overlap playback;
+the copy lease still protects against retention, capture and concurrent copies,
+and audio writers wait before replacing the source. Export cannot overwrite
+the original final audio or a path inside the meeting library.
+
+Audio import reserves the processing lane before stopping and draining playback,
+then imports, prepares the final audio and runs installed transcription models.
+It does not interrupt capture, another processing job, a copy or retention;
+refusals name the blocker. A playback worker that cannot stop within the existing
+12-second bound prevents the import from opening a file. The manager admits
+one import request at a time and restores its button after success, cancellation
+or failure. Silent audio remains a successful import; automatic summaries are
+skipped when transcription produces no text.
+
 The Tauri manager adopts the current neutral web direction from
 [Teô DS v3.0.1](https://github.com/rteoo/design-system-teo/tree/v3.0.1).
 Owned copies of foundations.css and theme.css live under
@@ -348,9 +370,6 @@ On navigation / page / content / selection:
   elapsed time since observation and Cancel. Only real audio-export progress
   supplies a percentage. A completed summary offers Copy (Ctrl+Shift+C) and
   selects Resumo only while its original navigation/section context remains.
-  **Chat** keeps a temporary conversation for each recent recording, with a
-  bottom composer and sources, Copy, and Save on each answer. Follow-ups receive
-  bounded context; transcript segments remain the source of factual evidence.
 - **Ditado:** lead with the controller's actual readiness, model, language and
   shortcut. Enabled does not imply ready: loading, failure, a recording holding
   dictation and shortcut editing have written states. Five recent dictations
@@ -431,12 +450,6 @@ On navigation / page / content / selection:
   for in the line beside it ("Aguarde o resumo terminar.", "Transcrever de novo
   requer o áudio final. Use Preparar áudio final, em Arquivos.", "O áudio final
   está completo; não há nada a recuperar.").
-- **Chat answers fail visibly.** A failed answer is a danger InfoBar in the
-  conversation ("Não foi possível responder", **Tentar novamente**, the cause
-  behind Detalhes); retry puts the question back and sends it again. A missing
-  summary model is a warning notice above the composer with **Abrir Configurações
-  › Modelos**. The uncertainty label is always written and takes its tone from the
-  level: low is secondary text, medium warning, high danger.
 - Recording and model work stays off the GUI and keyboard callback threads.
 - Search and the selected recording preserve context while the user
   moves among detail sections.
@@ -639,7 +652,9 @@ verified platform behavior; they do not certify a packaged build.
   history scrolling apply to answers too.
 - The manager title follows starting, recording, paused and saving states.
   Sidebar identity is **SnipVoice**, with the version in a muted caption.
-  Settings stays at the bottom of navigation. Icons use semantic record, library,
+  Dictation is first and the default opening page in both managers; restored
+  windows keep their destination. Recording and Library follow, with Settings
+  at the bottom. Ctrl+1…4 follows this order. Icons use semantic record, library,
   microphone and settings mappings (see *Controls*); disclosure icons use their
   own icon face rather than appending a private-use character to body text.
 - Windows contrast themes override the resolved palette with current Win32

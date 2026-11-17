@@ -1,7 +1,12 @@
 """English (US) interface catalog: pt-BR source literal -> translation."""
 
 EN_US = {
-    'Chat': 'Chat',
+    'A gravação foi preservada, mas não foi possível liberar os recursos de áudio. Reinicie o aplicativo.': 'The recording was preserved, but audio resources could not be released. Restart the app.',
+    'O diário da gravação está incompleto ou corrompido; os originais foram preservados.': 'The recording journal is incomplete or corrupt; the originals were preserved.',
+    'Finalize a gravação antes de importar áudio.': 'Finish recording before importing audio.',
+    'Incluir horários': 'Include timestamps',
+    'Escolha um arquivo diferente do áudio final original.': 'Choose a different file from the original final audio.',
+    'Aguarde a gravação ou outra cópia terminar.': 'Wait for recording or another copy to finish.',
     'Mais opções': 'More options',
     'Markdown…': 'Markdown…',
     'Trechos para ouvir': 'Audio navigation',
@@ -1246,7 +1251,6 @@ EN_US = {
     'E-mail de acompanhamento': 'Follow-up email',
     'Notas detalhadas': 'Detailed notes',
     'Aguarde a cópia do áudio final terminar antes da retenção.': 'Wait for the final audio copy to finish before retention.',
-    'Aguarde a gravação, reprodução ou outra cópia terminar.': 'Wait for recording, playback or another copy to finish.',
     'Aguarde a preparação do áudio final terminar.': 'Wait for final audio preparation to finish.',
     'Uma cópia do áudio final ainda está encerrando.': 'A final audio copy is still finishing.',
     'As notas detalhadas excedem o limite do relatório local.': 'Detailed notes exceed the local report limit.',
@@ -1511,8 +1515,6 @@ EN_US = {
     'O SnipVoice só grava quando você inicia. Estas opções ficam neste computador.': 'SnipVoice only records when you start it. These options stay on this computer.',
     'Mostrar um aviso antes de cada gravação, em': 'Show a notice before each recording, in',
     'Um texto para ler ou colar na chamada avisando que a reunião será gravada.': 'A short text to read or paste into the call saying the meeting will be recorded.',
-    'Nunca salvar respostas do chat': 'Never save chat answers',
-    'As respostas somem ao fechar a gravação, e o botão Salvar fica oculto.': 'Answers disappear when the recording closes, and the Save button is hidden.',
     'Mover gravações para a lixeira automaticamente após': 'Automatically move recordings to the trash after',
     'A gravação inteira vai para a lixeira, de onde ainda pode ser restaurada.': 'The whole recording goes to the trash, where it can still be restored.',
     'Manter itens na lixeira por': 'Keep items in the trash for',

@@ -1694,9 +1694,9 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(
             titles,
             [
+                "Ditado",
                 "Gravação",
                 "Biblioteca",
-                "Ditado",
                 "Configurações",
             ],
         )
@@ -1713,12 +1713,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             for key in ("2", "4", "1"):
                 window.event_generate(f"<Control-Key-{key}>")
                 window.update()
-                selected.append(notebook.tab(notebook.select(), "text"))
+                selected.append(notebook.tab(notebook.select(), "text").partition("\n")[0])
             return selected
 
         self.assertEqual(
             self._on_gui(use_shortcuts),
-            ["Biblioteca", "Configurações", "Gravação"],
+            ["Gravação", "Configurações", "Ditado"],
         )
 
     def test_manager_applies_persisted_dark_appearance(self):
@@ -1961,6 +1961,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
     def test_recording_page_fits_without_scrolling_at_minimum_size(self):
         def measure(shared_root):
             self.app._show_manager_window(shared_root)
+            self.app._manager_notebook.select(self.app._manager_recording_tab)
             manager = self.app.manager_window
             _geometry, min_width, min_height = ui_theme.theme().manager_window_size
             manager.geometry(f"{min_width}x{min_height}")
@@ -1999,6 +2000,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         def measure(shared_root):
             self.app._show_manager_window(shared_root)
+            self.app._manager_notebook.select(self.app._manager_recording_tab)
             manager = self.app.manager_window
             _geometry, min_width, min_height = ui_theme.theme().manager_window_size
             manager.geometry(f"{min_width}x{min_height}")
@@ -2071,12 +2073,12 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         labels, selected, library_font, recording_font, logos, logo_size = self._on_gui(navigate)
         self.assertEqual(logos, 1, "expected the app icon beside the name")
         self.assertGreaterEqual(min(logo_size), 16)
-        self.assertEqual(labels, ["Gravação", "Biblioteca", "Ditado", "Configurações"])
+        self.assertEqual(labels, ["Ditado", "Gravação", "Biblioteca", "Configurações"])
         self.assertEqual(selected, "Biblioteca")
         self.assertIn("bold", library_font)
         self.assertNotIn("bold", recording_font)
 
-    def test_ditado_tab_is_last_and_recording_is_default_when_voice_is_unavailable(self):
+    def test_ditado_tab_is_first_and_default_when_voice_is_unavailable(self):
         self.app.voice = None
 
         def open_manager(shared_root):
@@ -2090,13 +2092,13 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertEqual(
             titles,
             [
+                "Ditado",
                 "Gravação",
                 "Biblioteca",
-                "Ditado",
                 "Configurações",
             ],
         )
-        self.assertEqual(selected, "Gravação")
+        self.assertEqual(selected, "Ditado")
         self.assertIsNone(self.app._manager_voice_refresher)
 
     def test_manager_hide_keeps_voice_refresher_query_and_selection(self):

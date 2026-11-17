@@ -129,6 +129,33 @@ class MeetingStorageTests(unittest.TestCase):
         self.assertEqual(metadata["capture_storage"]["state"], "compacted")
         self.assertFalse((root / session / "system").exists())
 
+    def test_unreadable_journal_never_removes_original_audio(self):
+        root = self.root / "unreadable-journal"
+        store = MeetingStore(root)
+        session = store.begin({}, "fixture")
+        store.append_audio(session, {"type": "audio", "track": "system", "rate": 4,
+                                     "channels": 2, "frames": 8, "timestamp": 0.0,
+                                     "sequence": 0, "generation": 0}, self.payload)
+        store.finish(session)
+        final = root / "final.tmp"
+        final.write_bytes(b"synthetic")
+        store.save_final_audio(session, final)
+        with mock.patch("meeting_storage._final_audio_chunks", return_value=iter([(4, 2, self.payload)])):
+            evidence = verify_final_audio(store, session)
+        journal = root / session / "events.journal"
+        original_open = open
+
+        def denied(path, *args, **kwargs):
+            if str(path) == str(journal):
+                raise PermissionError("synthetic journal access failure")
+            return original_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=denied):
+            with self.assertRaises(PermissionError):
+                compact_capture(store, session, evidence)
+        self.assertTrue((root / session / "system").is_dir())
+        self.assertNotIn("capture_storage", store.get(session, include_events=False))
+
     def test_truncated_segment_blocks_compaction_and_is_reported(self):
         root = self.root / "truncated"
         store = MeetingStore(root)

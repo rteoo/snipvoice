@@ -11,7 +11,7 @@ import { SettingsPage } from "./views/settings";
 import { VoicePage } from "./views/voice";
 
 const DESTINATION_KEY = "snipvoice.destination";
-const DESTINATIONS: Destination[] = ["recording", "library", "voice", "settings"];
+const DESTINATIONS: Destination[] = ["voice", "recording", "library", "settings"];
 
 async function transport(): Promise<Transport> {
   if (inTauri()) return new TauriTransport();
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   replace(root, nav, main_);
   root.removeAttribute("aria-busy");
 
-  let current: Destination = "recording";
+  let current: Destination = "voice";
   function go(destination: Destination): void {
     current = destination;
     for (const item of DESTINATIONS) {
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
   document.addEventListener("keydown", (event) => {
     if (event.ctrlKey && !event.shiftKey && !event.altKey && /^[1-4]$/.test(event.key)) {
       event.preventDefault();
-      go(DESTINATIONS[Number(event.key) - 1] ?? "recording");
+      go(DESTINATIONS[Number(event.key) - 1] ?? "voice");
     } else if (event.ctrlKey && event.key.toLowerCase() === "f") {
       event.preventDefault();
       go("library");
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
   } catch {
     initial = null;
   }
-  go(DESTINATIONS.includes(initial as Destination) ? (initial as Destination) : "recording");
+  go(DESTINATIONS.includes(initial as Destination) ? (initial as Destination) : "voice");
   syncNav();
   bridge.release();
   await showWindow();

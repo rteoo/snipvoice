@@ -8,6 +8,8 @@ from unittest import mock
 
 from meeting_files import export_transcript
 from meeting_store import MeetingStore
+from meeting_support import MeetingController
+from manager_library import LibraryActions
 
 
 class TranscriptExportTests(unittest.TestCase):
@@ -49,6 +51,39 @@ class TranscriptExportTests(unittest.TestCase):
                           revision=original, style="timestamped")
         self.assertEqual(destination.read_text(encoding="utf-8"),
                          "00:00:00 Microfone: First text\n\n00:00:05 Microfone: Second text")
+
+    def test_files_actions_export_only_the_transcript_with_optional_timestamps(self):
+        self.revision(["Transcript evidence"])
+        failed = self.revision(["A failed revision must not be exported"])
+        self.store.finish_revision(self.session, failed, status="failed")
+        self.store.update(self.session, notes="Private notes must not be exported")
+        controller = MeetingController(self.root, mock.Mock(), store=self.store)
+        self.addCleanup(controller.shutdown)
+        for format, suffix in (("markdown", ".md"), ("text", ".txt")):
+            for timestamps in (False, True):
+                with self.subTest(format=format, timestamps=timestamps):
+                    destination = self.root / ("transcript" + suffix)
+                    actions = LibraryActions(
+                        meetings=controller, meeting_settings=dict,
+                        summary_model_installed=lambda _model: False,
+                        choose_path=lambda *_args: str(destination),
+                        startup_status=lambda: (True, ""),
+                    )
+                    result = actions.export_text({
+                        "id": self.session, "format": format, "includeTimestamps": timestamps,
+                    })
+                    self.assertTrue(result["saved"])
+                    self.assertEqual(destination.read_text(encoding="utf-8"),
+                                     ("00:00:00 Microfone: " if timestamps else "") + "Transcript evidence")
+        self.assertEqual(self.store.get(self.session)["notes"], "Private notes must not be exported")
+
+    def test_empty_transcript_does_not_overwrite_an_existing_export(self):
+        destination = self.root / "existing.md"
+        destination.write_text("Previous export", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "transcri"):
+            export_transcript(self.store, self.session, destination)
+        self.assertEqual(destination.read_text(encoding="utf-8"), "Previous export")
+        self.assertEqual(list(self.root.glob(".*.tmp")), [])
 
     def test_cancel_during_export_preserves_existing_destination(self):
         cancel = threading.Event()

@@ -431,10 +431,44 @@ class MeetingStore:
         return _read()
 
     def audio_payloads_complete(self, session_id):
-        """Return whether every journaled audio range is still fully on disk."""
+        """Require a complete journal and coverage of the saved audio projection."""
         sizes = {}
-        return all(self._record_complete(session_id, record, sizes)
-                   for record in self._iter_journal_records(session_id))
+        observed = {}
+        observed_segments = {}
+        session_dir = self._session_dir(session_id)
+        for record in self._iter_journal_records(session_id, strict=True):
+            if not self._record_complete(session_id, record, sizes):
+                return False
+            event = record["event"]
+            if event.get("type") == "audio":
+                track = event["track"]
+                observed[track] = observed.get(track, 0) + int(record["length"])
+                path = os.path.normcase(os.path.join(session_dir, record["segment"]))
+                observed_segments[path] = observed_segments.get(path, 0) + int(record["length"])
+        metadata = self.get(session_id, include_events=False)
+        for name, track in metadata.get("tracks", {}).items():
+            expected = sum(int(segment.get("bytes", 0)) for segment in track.get("segments", ()))
+            if observed.get(name, 0) < expected:
+                return False
+        # An append can reach PCM before its journal frame is durable. Those
+        # extra bytes (including unreferenced crash segments) remain recoverable
+        # evidence and must not be removed with a prefix-only final mixdown.
+        for name in _TRACKS:
+            directory = os.path.join(session_dir, name)
+            if os.path.islink(directory) or getattr(os.path, "isjunction", lambda _path: False)(directory):
+                return False
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_file(follow_symlinks=False):
+                            return False
+                        path = os.path.normcase(entry.path)
+                        if entry.stat(follow_symlinks=False).st_size != observed_segments.get(path, 0):
+                            return False
+            except FileNotFoundError:
+                if observed.get(name, 0):
+                    return False
+        return True
 
     def iter_events(self, session_id):
         """Stream public event metadata without retaining the whole journal."""
@@ -442,9 +476,19 @@ class MeetingStore:
 
         def _read():
             sizes = {}
-            for record in self._iter_journal_records(session_id):
-                if self._record_complete(session_id, record, sizes):
-                    yield self._public_record(record)
+            try:
+                for record in self._iter_journal_records(session_id):
+                    if self._record_complete(session_id, record, sizes):
+                        yield self._public_record(record)
+            except FileNotFoundError:
+                metadata = self.get(session_id, include_events=False)
+                if any(segment.get("bytes", 0) or segment.get("frames", 0)
+                       for track in metadata.get("tracks", {}).values()
+                       for segment in track.get("segments", ())):
+                    raise
+                # Transcript-only legacy bundles can have no journal or capture
+                # events. Audio reads and destructive cleanup remain strict.
+                return
 
         return _read()
 
@@ -652,7 +696,12 @@ class MeetingStore:
             except (OSError, ValueError, json.JSONDecodeError):
                 continue
             if metadata.get("status") == "recording":
-                metadata = self._rebuild_unfinished(name, metadata)
+                try:
+                    metadata = self._rebuild_unfinished(name, metadata)
+                except OSError:
+                    # A read failure is not an empty recording. Keep the
+                    # original projection and recording marker for a retry.
+                    continue
                 metadata["status"] = "interrupted"
                 metadata["error"] = N_("A reunião foi interrompida antes de terminar.")
             else:
@@ -722,31 +771,33 @@ class MeetingStore:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def _iter_journal_records(self, session_id):
+    def _iter_journal_records(self, session_id, *, strict=False):
         path = os.path.join(self._session_dir(session_id), JOURNAL_NAME)
-        try:
-            with open(path, "rb") as handle:
-                while True:
-                    header = handle.read(_JOURNAL_HEADER.size)
-                    if not header:
-                        break
-                    if len(header) != _JOURNAL_HEADER.size:
-                        break
-                    magic, body_len, payload_len, checksum = _JOURNAL_HEADER.unpack(header)
-                    if magic != _JOURNAL_MAGIC or payload_len or body_len > MAX_EVENT_BYTES:
-                        break
-                    body = self._read_bounded(handle, body_len)
-                    if body is None or zlib.crc32(body) & 0xFFFFFFFF != checksum:
-                        break
-                    try:
-                        record = json.loads(body.decode("utf-8"))
-                    except (UnicodeError, ValueError, TypeError):
-                        break
-                    if not isinstance(record, dict) or not isinstance(record.get("event"), dict):
-                        break
-                    yield record
-        except OSError:
-            return
+        # Filesystem errors must reach consumers: silence or normal EOF would
+        # let a mixdown omit a source and certify its originals for deletion.
+        with open(path, "rb") as handle:
+            while True:
+                header = handle.read(_JOURNAL_HEADER.size)
+                if not header:
+                    return
+                if len(header) != _JOURNAL_HEADER.size:
+                    break
+                magic, body_len, payload_len, checksum = _JOURNAL_HEADER.unpack(header)
+                if magic != _JOURNAL_MAGIC or payload_len or body_len > MAX_EVENT_BYTES:
+                    break
+                body = self._read_bounded(handle, body_len)
+                if body is None or zlib.crc32(body) & 0xFFFFFFFF != checksum:
+                    break
+                try:
+                    record = json.loads(body.decode("utf-8"))
+                except (UnicodeError, ValueError, TypeError):
+                    break
+                if not isinstance(record, dict) or not isinstance(record.get("event"), dict):
+                    break
+                yield record
+        # Recovery can use a valid crash prefix; destructive cleanup cannot.
+        if strict:
+            raise ValueError(tr("O diário da gravação está incompleto ou corrompido; os originais foram preservados."))
 
     @staticmethod
     def _read_bounded(handle, length):
@@ -840,7 +891,7 @@ class MeetingStore:
                     sizes[relative] = os.path.getsize(path)
                 return sizes[relative] >= offset + length
             return os.path.getsize(path) >= offset + length
-        except OSError:
+        except FileNotFoundError:
             return False
 
     # -- Metadata helpers -------------------------------------------------

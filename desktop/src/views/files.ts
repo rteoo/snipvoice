@@ -10,6 +10,7 @@ export class FilesPanel {
   private sessionId: string | null = null;
   private view: FilesView | null = null;
   private busy = false;
+  private includeTimestamps = false;
   private token = 0;
 
   constructor(
@@ -37,8 +38,15 @@ export class FilesPanel {
 
   private render(): void {
     const view = this.view;
-    const markdown = button(tr("Markdown…"), () => void this.save("library.exportText", { format: "markdown" }, (name) => tr("Transcrição exportada como {name}.", { name })));
-    const text = button(tr("Texto…"), () => void this.save("library.exportText", { format: "text" }, (name) => tr("Transcrição exportada como {name}.", { name })));
+    const markdown = button(tr("Markdown…"), () => void this.save("library.exportText", { format: "markdown", includeTimestamps: this.includeTimestamps }, (name) => tr("Transcrição exportada como {name}.", { name })));
+    const text = button(tr("Texto…"), () => void this.save("library.exportText", { format: "text", includeTimestamps: this.includeTimestamps }, (name) => tr("Transcrição exportada como {name}.", { name })));
+    const timestamps = h("label", { class: "check" },
+      h("input", {
+        attrs: { type: "checkbox", checked: this.includeTimestamps, disabled: this.busy },
+        on: { change: (event) => { this.includeTimestamps = (event.currentTarget as HTMLInputElement).checked; } },
+      }),
+      h("span", { text: tr("Incluir horários") }),
+    );
     const download = button(tr("Baixar áudio final…"), () => void this.save("library.exportAudio", {}, (name) => tr("Áudio final salvo como {name}.", { name })), "primary");
     download.disabled = this.busy || !view?.final;
     const prepare = view?.canPrepare ? button(tr("Preparar áudio final"), () => void this.prepare()) : null;
@@ -53,13 +61,13 @@ export class FilesPanel {
         : tr("Esta gravação ainda não tem áudio final salvo.");
     replace(
       this.element,
-      h("section", { class: "card stack-sm" }, h("h3", { text: tr("Exportar texto") }), h("div", { class: "btn-row" }, markdown, text)),
+      h("section", { class: "card stack-sm" }, h("h3", { text: tr("Exportar texto") }), timestamps, h("div", { class: "btn-row" }, markdown, text)),
       h("section", { class: "card stack-sm" }, h("h3", { text: tr("Áudio final") }), h("p", { class: "caption", text: audioFacts }), h("div", { class: "btn-row" }, download, prepare)),
       h("section", { class: "card stack-sm danger-zone" }, h("h3", { text: tr("Zona de risco") }), h("p", { class: "caption", text: tr("Vai para a lixeira, de onde ainda pode ser restaurada.") }), h("div", { class: "btn-row" }, remove)),
     );
   }
 
-  private async save(method: string, params: Record<string, string>, receipt: (name: string) => string): Promise<void> {
+  private async save(method: string, params: Record<string, string | boolean>, receipt: (name: string) => string): Promise<void> {
     const sessionId = this.sessionId;
     if (!sessionId || this.busy) return;
     this.busy = true;

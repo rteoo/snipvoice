@@ -873,7 +873,14 @@ class MeetingController:
                     clean_stop = False
                     error = tr("A gravação foi preservada, mas {errors}", errors=str(exc))
             if token is not None and clean_stop:
-                self.voice.release_meeting(token)
+                try:
+                    self.voice.release_meeting(token)
+                except Exception:
+                    # Unknown resource ownership must block a new capture,
+                    # but cannot strand the completed recording as processing.
+                    clean_stop = False
+                    error = error or tr(
+                        "A gravação foi preservada, mas não foi possível liberar os recursos de áudio. Reinicie o aplicativo.")
             with self._lock:
                 self._error = error or self._error
                 self._elapsed = max(0.0, time.monotonic() - self._started)
@@ -1555,6 +1562,11 @@ class MeetingController:
             self.store.save_processing_state(session_id, "transcription", "completed")
             self._refine_automatic_title(session_id)
             self._queue_projection(session_id)
+            # Silence is a successful import/transcription with no summary evidence.
+            if not any(isinstance(segment.get("text"), str) and segment["text"].strip()
+                       for segment in self.library.get_transcript(session_id)):
+                self.store.save_processing_state(session_id, "summary", "skipped")
+                return True
             if preferred_summary is None:
                 metadata = self.library.get_session(session_id)
                 stored = metadata.get("settings") if isinstance(metadata, dict) else None
@@ -1655,7 +1667,7 @@ class MeetingController:
                 )
             self._queue_projection(session_id)
             return session_id
-        return self._file_work(work, kind="import")
+        return self._file_work(work, kind="import", stop_playback=True)
 
     def recover_audio(self, session_id, settings=None):
         """Resume final MP3 preparation while preserving every prior artifact."""
@@ -1834,6 +1846,8 @@ class MeetingController:
                 inside = False
             if inside:
                 raise ValueError(tr("Escolha um destino fora da biblioteca de reuniões para preservar as gravações originais."))
+            if destination.exists() and os.path.samefile(source, destination):
+                raise ValueError(tr("Escolha um arquivo diferente do áudio final original."))
             if not destination.parent.is_dir() or destination.is_dir():
                 raise ValueError(tr("A pasta destino deve existir e o destino deve ser um arquivo."))
             descriptor, temporary = tempfile.mkstemp(
@@ -1856,9 +1870,10 @@ class MeetingController:
             # waits for this lease, so copies may overlap it like manual work.
             if (self._closed or self._retention_active
                     or self._state not in {"idle", "postprocessing"}
-                    or self._playback_active or (self._play_thread and self._play_thread.is_alive())
                     or self._final_copy_active):
-                raise RuntimeError(tr("Aguarde a gravação, reprodução ou outra cópia terminar."))
+                raise RuntimeError(tr("Aguarde a gravação ou outra cópia terminar."))
+            # Playback and this copy are independent readers. The copy lease
+            # still blocks retention and makes audio writers wait before replacing.
             progress = self._audio_export_progress or {}
             if (progress.get("stage") in {"preparing", "encoding", "finalizing"}
                     and progress.get("session_id") == session_id):
@@ -1928,16 +1943,28 @@ class MeetingController:
                 return False
             return self._launch_processing(work, session_id=session_id, kind="final_audio")
 
-    def _file_work(self, operation, session_id=None, *, kind, cancel_event=None):
+    def _file_work(self, operation, session_id=None, *, kind, cancel_event=None, stop_playback=False):
         # Caller is a worker; reserve admission without another nested thread.
         # A request's cancellation intent must survive clearing the reusable
         # active-job Event below, including bridge-to-controller handoff races.
         with self._lock:
             if (self._closed or self._retention_active or self._processing
                     or self._final_copy_active or self._state != "idle"
-                    or self._playback_active or (self._play_thread and self._play_thread.is_alive())):
+                    or (not stop_playback and (
+                        self._playback_active or (self._play_thread and self._play_thread.is_alive())))):
+                if kind == "import":
+                    if self._state in CAPTURE_STATES:
+                        raise RuntimeError(tr("Finalize a gravação antes de importar áudio."))
+                    blocker = start_blocker({
+                        "state": self._state, "processing": self._processing,
+                        "processing_kind": self._processing_kind, "final_copy": self._final_copy_active,
+                        "retention_active": self._retention_active,
+                    })
+                    if blocker:
+                        raise RuntimeError(tr("Aguardando {job}.", job=blocker))
                 raise RuntimeError(tr("Aguarde a gravação, reprodução ou processamento terminar."))
             _check_request_cancelled(cancel_event)
+            playback_worker = self._play_thread if stop_playback else None
             self._processing = True
             self._processing_session = session_id
             self._processing_kind = kind
@@ -1945,6 +1972,14 @@ class MeetingController:
             self._cancel.clear()
             self._file_done.clear()
         try:
+            if stop_playback:
+                # Reserve the lane before stopping playback so a capture or
+                # another player cannot enter while the native stream drains.
+                self.stop_playback()
+                if playback_worker and playback_worker is not threading.current_thread():
+                    playback_worker.join(12)
+                    if playback_worker.is_alive():
+                        raise RuntimeError(tr("A reprodução anterior ainda está encerrando."))
             _check_request_cancelled(cancel_event)
             return operation()
         finally:

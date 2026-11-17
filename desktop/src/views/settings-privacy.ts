@@ -87,8 +87,6 @@ export class PrivacySettings {
         h("p", { class: "caption", text: tr("O SnipVoice só grava quando você inicia. Estas opções ficam neste computador.") }),
         h("div", { class: "check-row" }, h("label", { class: "check" }, check("privacy-notice", draft.noticeEnabled, (value) => (draft.noticeEnabled = value)), h("span", { text: tr("Mostrar um aviso antes de cada gravação, em") })), noticeLanguage),
         h("p", { class: "caption", text: tr("Um texto para ler ou colar na chamada avisando que a reunião será gravada.") }),
-        h("label", { class: "check" }, check("privacy-qa", draft.qaMode === "memory_only", (value) => (draft.qaMode = value ? "memory_only" : "explicit_save")), h("span", { text: tr("Nunca salvar respostas do chat") })),
-        h("p", { class: "caption", text: tr("As respostas somem ao fechar a gravação, e o botão Salvar fica oculto.") }),
         h(
           "div",
           { class: "check-row" },
