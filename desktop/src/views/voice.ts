@@ -1,10 +1,9 @@
-// Ditado: the controller's actual readiness, the last five dictations, and its settings.
+// Ditado: the controller's actual readiness and the last five dictations.
 import type { Bridge } from "../bridge";
 import { button, h, replace } from "../dom";
 import { tr } from "../i18n";
 import type { HistoryRow, VoiceToggleResult, VoiceView } from "../types";
 import { confirmDialog, MessageSlot, pageHeader, toneClass, toneText } from "../ui";
-import { DictationSettings } from "./dictation-settings";
 
 export class VoicePage {
   readonly element: HTMLElement;
@@ -20,18 +19,17 @@ export class VoicePage {
   private readonly attention = h("p", { class: "caption" });
   private readonly table = h("tbody");
   private readonly actions = h("div", { class: "btn-row" });
-  private readonly settings: DictationSettings;
 
   onChange: () => void = () => {};
+  onSettings: () => void = () => {};
 
   constructor(private readonly bridge: Bridge) {
-    this.settings = new DictationSettings(bridge, this.messages);
     this.download.hidden = true;
     this.toggle.addEventListener("change", () => void this.setEnabled(this.toggle.checked, false));
     this.element = h(
       "section",
       { class: "page" },
-      pageHeader(tr("Ditado"), h("label", { class: "switch", attrs: { for: "voice-enabled" } }, h("span", { text: tr("Ativar entrada por voz") }), this.toggle)),
+      pageHeader(tr("Ditado"), button(tr("Configurar ditado…"), () => this.onSettings(), "quiet"), h("label", { class: "switch", attrs: { for: "voice-enabled" } }, h("span", { text: tr("Ativar entrada por voz") }), this.toggle)),
       this.messages.element,
       h(
         "div",
@@ -58,12 +56,10 @@ export class VoicePage {
           ),
           this.actions,
         ),
-        this.settings.element,
       ),
     );
     bridge.on<VoiceView>("voice.state", (view) => this.render(view));
     void bridge.call<VoiceView>("voice.state").then((view) => this.render(view));
-    void this.settings.load();
   }
 
   get navState(): string {

@@ -431,6 +431,12 @@ class ManagerHostTests(unittest.TestCase):
         view = self._next(self.processes[0], "recording.state")["params"]
         self.assertTrue(view["canStart"])
 
+    def test_tray_can_open_the_dictation_settings_section(self):
+        self.assertTrue(self.host.show("settings", settings_section="dictation"))
+        self.assertEqual(self._next(self.processes[0], "window.show")["params"], {
+            "destination": "settings", "settingsSection": "dictation",
+        })
+
     def test_a_closed_window_reports_once_and_respawns_on_show(self):
         self.host.show()
         self.processes[0].exit()

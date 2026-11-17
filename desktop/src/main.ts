@@ -106,9 +106,14 @@ async function main(): Promise<void> {
     if (detail?.recordingId) void library.open(detail.recordingId);
   };
   voice.onChange = syncNav;
+  voice.onSettings = () => {
+    go("settings");
+    settings.show("dictation");
+  };
 
-  bridge.on<{ destination?: Destination }>("window.show", (params) => {
+  bridge.on<{ destination?: Destination; settingsSection?: "dictation" }>("window.show", (params) => {
     if (params.destination && DESTINATIONS.includes(params.destination)) go(params.destination);
+    if (params.destination === "settings" && params.settingsSection === "dictation") settings.show("dictation");
     void showWindow();
   });
   bridge.on<{ id: string }>("library.open", (params) => {

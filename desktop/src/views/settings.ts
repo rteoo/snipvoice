@@ -1,4 +1,4 @@
-// Configurações: Geral applies immediately; Gravação and Privacidade are saved
+// Configurações: Geral applies immediately; Ditado, Gravação and Privacidade are saved
 // drafts that survive switching sections; Modelos downloads and removes models.
 import type { Bridge } from "../bridge";
 import { button, h, replace } from "../dom";
@@ -10,6 +10,7 @@ import { LocationCard } from "./location";
 import { ModelsSettings } from "./settings-models";
 import { PrivacySettings } from "./settings-privacy";
 import { RecordingSettings } from "./settings-recording";
+import { DictationSettings } from "./dictation-settings";
 
 const APPEARANCES: [Appearance, () => string, () => string][] = [
   ["dark", () => tr("Escuro"), () => tr("Tema escuro fixo.")],
@@ -17,8 +18,8 @@ const APPEARANCES: [Appearance, () => string, () => string][] = [
   ["system", () => tr("Sistema"), () => tr("Segue o tema do sistema.")],
 ];
 
-type Section = "general" | "recording" | "privacy" | "models";
-const SECTIONS: Section[] = ["general", "recording", "privacy", "models"];
+type Section = "general" | "dictation" | "recording" | "privacy" | "models";
+const SECTIONS: Section[] = ["general", "dictation", "recording", "privacy", "models"];
 
 export class SettingsPage {
   readonly element: HTMLElement;
@@ -31,6 +32,7 @@ export class SettingsPage {
   private readonly general: HTMLElement;
   private readonly dataLocation: LocationCard;
   private readonly recording: RecordingSettings;
+  private readonly dictation: DictationSettings;
   private readonly privacy: PrivacySettings;
   private readonly models: ModelsSettings;
 
@@ -41,6 +43,7 @@ export class SettingsPage {
   ) {
     this.dataLocation = new LocationCard(bridge, this.messages, "data", hello.enginePid);
     this.recording = new RecordingSettings(bridge, this.messages, hello.enginePid);
+    this.dictation = new DictationSettings(bridge, this.messages);
     this.privacy = new PrivacySettings(bridge, this.messages);
     this.models = new ModelsSettings(bridge, this.messages, hello.enginePid);
     const language = h("select", { attrs: { id: "language" } });
@@ -62,7 +65,7 @@ export class SettingsPage {
       h("div", { class: "card stack-sm" }, h("h2", { text: tr("Aparência"), attrs: { id: "appearance-heading" } }), this.appearanceRow, this.appearanceHint),
       this.dataLocation.element,
     );
-    const labels: Record<Section, string> = { general: tr("Geral"), recording: tr("Gravação"), privacy: tr("Privacidade"), models: tr("Modelos") };
+    const labels: Record<Section, string> = { general: tr("Geral"), dictation: tr("Ditado"), recording: tr("Gravação"), privacy: tr("Privacidade"), models: tr("Modelos") };
     for (const section of SECTIONS) {
       const tab = h("button", {
         class: "tab",
@@ -98,6 +101,9 @@ export class SettingsPage {
     if (section === "general") {
       replace(this.panel, this.general);
       void this.loadLocations();
+    } else if (section === "dictation") {
+      replace(this.panel, this.dictation.element);
+      void this.dictation.load();
     } else if (section === "recording") {
       replace(this.panel, this.recording.element);
       void this.recording.load();

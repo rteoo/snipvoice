@@ -244,6 +244,39 @@ class DictationPresentationTests(unittest.TestCase):
 
 
 class ManagerLifecycleTests(unittest.TestCase):
+    def test_tray_dictation_settings_targets_tauri_section(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        host = mock.Mock()
+        app._tauri_manager = mock.Mock(return_value=host)
+        app._show_voice_settings(mock.Mock())
+        host.show.assert_called_once_with("settings", settings_section="dictation")
+
+    def test_dictation_leave_guard_handles_save_discard_and_pending_save(self):
+        app = tx.Snipvoice.__new__(tx.Snipvoice)
+        app.manager_window = mock.Mock()
+        after = mock.Mock()
+        form = app._manager_voice_form = {
+            "dirty": mock.Mock(return_value=True), "saving": mock.Mock(return_value=False),
+            "save": mock.Mock(), "discard": mock.Mock(), "after_save": None,
+        }
+        with mock.patch.object(ui_theme, "confirm_draft", return_value="save"):
+            app._request_leave_voice_settings(after)
+        self.assertIs(form["after_save"], after)
+        form["save"].assert_called_once_with()
+        after.assert_not_called()
+        form["after_save"] = None
+        with mock.patch.object(ui_theme, "confirm_draft", return_value="discard"):
+            app._request_leave_voice_settings(after)
+        form["discard"].assert_called_once_with()
+        after.assert_called_once_with()
+        after.reset_mock()
+        form["saving"].return_value = True
+        with mock.patch.object(ui_theme, "confirm_draft") as confirm:
+            app._request_leave_voice_settings(after)
+        confirm.assert_not_called()
+        self.assertIs(form["after_save"], after)
+        after.assert_not_called()
+
     def _idle_owner(self):
         """Actual tkinter scheduling/registry ownership without constructing Tk."""
         class Registry:
@@ -688,6 +721,27 @@ class ManagerLifecycleTests(unittest.TestCase):
 
 @unittest.skipUnless(TK_AVAILABLE, TK_SKIP_REASON)
 class ManagerGuiSmokeTests(unittest.TestCase):
+    def test_dictation_form_moves_to_settings_and_restores_draft(self):
+        _ensure_voice(self.app)
+
+        def build(root):
+            owner = tk.Toplevel(root)
+            landing, settings = tk.Frame(owner), tk.Frame(owner)
+            self.app._create_voice_tab(landing, owner, settings_parent=settings)
+            labels = lambda parent: [str(w.cget("text")) for w in _descendants(parent)
+                                     if isinstance(w, tk.Label)]
+            self.assertNotIn("Configuração do ditado", labels(landing))
+            self.assertIn("Configuração do ditado", labels(settings))
+            self.app._manager_voice_tk_vars[2].set("ctrl+shift+f8")
+            saved = self.app._manager_voice_form["capture"]()
+            self.assertTrue(self.app._manager_voice_form["dirty"]())
+            self.app._manager_voice_restore = saved
+            replacement = tk.Frame(owner)
+            self.app._create_voice_tab(tk.Frame(owner), owner, settings_parent=replacement)
+            self.assertEqual(self.app._manager_voice_tk_vars[2].get(), "ctrl+shift+f8")
+            self.assertTrue(self.app._manager_voice_form["dirty"]())
+        self._on_gui(build)
+
     def _blocked_history_owner_teardown(self, action):
         entered, release = threading.Event(), threading.Event()
         workers, owners = [], {}
@@ -1676,7 +1730,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             )
 
         title, titles, notebook_style, labels, manager_size = self._on_gui(open_settings)
-        self.assertEqual(title, "Ditado")
+        self.assertEqual(title, "Configurações")
         self.assertEqual(notebook_style, "Pages.TNotebook")
         self.assertGreaterEqual(manager_size[0], 900)
         self.assertGreaterEqual(manager_size[1], 700)
@@ -1843,7 +1897,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
         self.assertIn("download", error.args[1])
 
     def test_manager_separates_model_settings_from_ditado_selectors(self):
-        """Configurações owns downloads; Ditado keeps compact friendly selectors."""
+        """Settings owns both downloads and the dictation selectors."""
         _ensure_voice(self.app)
 
         def inspect_manager(shared_root):
@@ -1860,10 +1914,13 @@ class ManagerGuiSmokeTests(unittest.TestCase):
                 for widget in _descendants(settings)
                 if isinstance(widget, (tk.Label, ttk.Label))
             ]
-            combos = [
-                widget for widget in _descendants(ditado)
-                if isinstance(widget, ttk.Combobox)
-            ]
+            view = self.app._manager_meeting_view
+            combos = [widget for widget in _descendants(view.settings_sections.frames["dictation"])
+                      if isinstance(widget, ttk.Combobox)]
+            self.assertFalse(any(isinstance(widget, ttk.Combobox) for widget in _descendants(ditado)))
+            self.app._select_manager_destination(view.settings_tab)
+            view.settings_sections.user_select("dictation")
+            self.assertEqual(view.settings_sections.current, "dictation")
             profile_box = next(
                 widget for widget in combos
                 if any("Equilibrado" in value for value in widget["values"])
@@ -1882,6 +1939,11 @@ class ManagerGuiSmokeTests(unittest.TestCase):
             profile_box.event_generate("<<ComboboxSelected>>")
             language_box.set("Português (Brasil)")
             language_box.event_generate("<<ComboboxSelected>>")
+            self.app._manager_voice_tk_vars[2].set("ctrl+shift+f8")
+            with mock.patch.object(ui_theme, "confirm_draft", return_value="cancel") as confirm:
+                view.settings_sections.user_select("general")
+            confirm.assert_called_once()
+            self.assertEqual(view.settings_sections.current, "dictation")
             self.app.manager_window.update_idletasks()
             selected, language, _hotkey, _command, _activation = self.app._manager_voice_tk_vars
             return (
@@ -1933,7 +1995,7 @@ class ManagerGuiSmokeTests(unittest.TestCase):
 
         reused, title, top_levels = self._on_gui(select_recording)
         self.assertTrue(reused)
-        self.assertEqual(title, "Ditado")
+        self.assertEqual(title, "Configurações")
         self.assertEqual(top_levels, 1)
 
     def test_recording_level_meters_fit_inside_the_manager_viewport(self):

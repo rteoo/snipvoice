@@ -709,7 +709,7 @@ class ManagerHost:
         with self._lock:
             return self._endpoint is not None and not self._endpoint.closed
 
-    def show(self, destination=None):
+    def show(self, destination=None, *, settings_section=None):
         """Bring the window forward, starting it first when it is not running.
 
         A window that cannot start returns False after logging why and
@@ -730,7 +730,10 @@ class ManagerHost:
             if self.on_spawn_failed is not None:
                 self.on_spawn_failed()
             return False
-        return endpoint.notify("window.show", {"destination": destination} if destination else {})
+        params = {"destination": destination} if destination else {}
+        if destination == "settings" and settings_section is not None:
+            params["settingsSection"] = settings_section
+        return endpoint.notify("window.show", params)
 
     def notify(self, method, params=None):
         with self._lock:
